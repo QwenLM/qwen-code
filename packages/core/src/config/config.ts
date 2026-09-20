@@ -309,7 +309,10 @@ import {
 } from '../services/session-writer-lease.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
-import { ConditionalRulesRegistry } from './rulesDiscovery.js';
+import {
+  ConditionalRulesRegistry,
+  type ExtensionRuleSource,
+} from './rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,
@@ -2995,6 +2998,11 @@ export class Config {
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
   private readonly warnings: string[];
+  /**
+   * Extension rules skipped for having no `paths:`, by display path. Refreshed
+   * with the memory load that discovered them; surfaced by `getWarnings()`.
+   */
+  private ignoredExtensionRules: string[] = [];
   private readonly allowedHttpHookUrls: string[];
   private readonly allowPrivateNetworkHooks: boolean;
   private readonly onPersistPermissionRuleCallback?: (
@@ -4790,6 +4798,7 @@ export class Config {
       fileCount,
       contextFilePaths,
       conditionalRules,
+      ignoredExtensionRules,
       projectRoot,
     } = await loadServerHierarchicalMemory(
       this.getWorkingDir(),
@@ -4806,8 +4815,17 @@ export class Config {
           () => this.hookSystem,
           signal,
         ),
+        extensionRuleSources: this.getExtensionRuleSources(),
       },
     );
+    // An extension rule with no `paths:` is dropped rather than loaded. Record
+    // it for `getWarnings()`, or its author reads "extensions can contribute
+    // rules" and sees nothing happen. Replaced, not appended to, so a memory
+    // refresh does not accumulate duplicates of the same warning.
+    // `?? []` on purpose: every test that mocks `loadServerHierarchicalMemory`
+    // returns the response shape it was written against, and `getWarnings()`
+    // maps over this field on every call.
+    this.ignoredExtensionRules = ignoredExtensionRules ?? [];
     if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
@@ -5400,9 +5418,17 @@ export class Config {
         .filter(Boolean)
         .join('\n\n'),
     );
-    return memoryContextWarning
-      ? [...this.warnings, memoryContextWarning]
-      : this.warnings;
+    const ruleWarnings = this.ignoredExtensionRules.map(
+      (displayPath) =>
+        `Extension rule ${displayPath} has no \`paths:\` and was skipped. ` +
+        `An extension's rules must be conditional: a baseline one would be sent ` +
+        `with every request, which is the cost a rule exists to avoid. Add ` +
+        `\`paths:\` to it, or move the content into the extension's context file.`,
+    );
+    const extra = memoryContextWarning
+      ? [...ruleWarnings, memoryContextWarning]
+      : ruleWarnings;
+    return extra.length > 0 ? [...this.warnings, ...extra] : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -9492,6 +9518,24 @@ export class Config {
 
   getUsageStatisticsEnabled(): boolean {
     return this.usageStatisticsEnabled;
+  }
+
+  /**
+   * Active extensions' `rules/` directories, for conditional context rules.
+   *
+   * The counterpart to {@link getExtensionContextFilePaths}: a context file is
+   * resident on every request, while a rule is injected only when a tool call
+   * touches a path its `paths:` matches (#12030). Directories that do not
+   * exist are not filtered here — `loadRules` treats an unreadable directory as
+   * empty, so a stat per extension per session would buy nothing.
+   */
+  getExtensionRuleSources(): ExtensionRuleSource[] {
+    return this.getActiveExtensions()
+      .filter((extension) => Boolean(extension.path))
+      .map((extension) => ({
+        name: extension.name,
+        dir: path.join(extension.path, 'rules'),
+      }));
   }
 
   getExtensionContextFilePaths(): string[] {

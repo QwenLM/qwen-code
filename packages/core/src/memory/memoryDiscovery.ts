@@ -19,7 +19,11 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { findProjectRoot } from '../utils/projectRoot.js';
-import { loadRules, type RuleFile } from '../config/rulesDiscovery.js';
+import {
+  loadRules,
+  type ExtensionRuleSource,
+  type RuleFile,
+} from '../config/rulesDiscovery.js';
 import type {
   InstructionLoadReason,
   InstructionMemoryType,
@@ -423,6 +427,13 @@ export interface LoadServerHierarchicalMemoryResponse {
   ruleCount: number;
   /** Conditional rules (with `paths:`) for turn-level lazy injection. */
   conditionalRules: RuleFile[];
+  /**
+   * Extension rules dropped for having no `paths:`, by display path.
+   *
+   * Optional so the many tests that build this response by hand keep type
+   * checking; `loadRules` always returns it, and Config reads it with `?? []`.
+   */
+  ignoredExtensionRules?: string[];
   /** Effective project root used for glob matching. */
   projectRoot: string;
 }
@@ -430,6 +441,12 @@ export interface LoadServerHierarchicalMemoryResponse {
 export interface LoadServerHierarchicalMemoryOptions {
   explicitOnly?: boolean;
   loadReason?: Exclude<InstructionLoadReason, 'include'>;
+  /**
+   * Active extensions' `rules/` directories. Arrives in the options object
+   * rather than as a ninth positional parameter. Only conditional rules are
+   * taken from them; see `loadRules`.
+   */
+  extensionRuleSources?: readonly ExtensionRuleSource[];
   onInstructionsLoaded?: (
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>;
@@ -619,9 +636,20 @@ export async function loadServerHierarchicalMemory(
     content: rulesContent,
     ruleCount,
     conditionalRules,
+    ignoredExtensionRules,
   } = options.explicitOnly
-    ? { content: '', ruleCount: 0, conditionalRules: [] }
-    : await loadRules(effectiveRoot, folderTrust, contextRuleExcludes);
+    ? {
+        content: '',
+        ruleCount: 0,
+        conditionalRules: [],
+        ignoredExtensionRules: [],
+      }
+    : await loadRules(
+        effectiveRoot,
+        folderTrust,
+        contextRuleExcludes,
+        options.extensionRuleSources ?? [],
+      );
 
   // Baseline rules go into the system prompt
   let memoryContent = combinedInstructions;
@@ -641,6 +669,7 @@ export async function loadServerHierarchicalMemory(
     contextFilePaths,
     ruleCount,
     conditionalRules,
+    ignoredExtensionRules,
     projectRoot: effectiveRoot,
   };
 }

@@ -9685,6 +9685,89 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  // #12029: the ratio alone means a large window never warns. 15% of a 1M
+  // window is 150,000 tokens of always-on context — an absolute ceiling is what
+  // makes the warning fire where the cost is actually paid.
+  it('warns about a large always-on context on a large window, naming the token bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(48_000), // ~12,000 tokens
+      generationConfig: { contextWindowSize: 1_000_000 },
+    });
+
+    const warnings = config.getWarnings();
+
+    expect(warnings).toContainEqual(
+      expect.stringContaining('uses about 12,000 tokens'),
+    );
+    // The bound that actually fired, not a percentage that did not.
+    expect(warnings).toContainEqual(
+      expect.stringContaining(
+        'more than 10,000 tokens, which every request of this session carries',
+      ),
+    );
+    expect(warnings.join('\n')).not.toContain('more than 15%');
+  });
+
+  it('keeps naming the percentage when the ratio is the binding bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800), // 200 tokens, against 15% of 1,000
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("more than 15% of this model's 1,000 token"),
+    );
+  });
+
+  // The author of an extension rule that was dropped has to be told, or the
+  // documented mechanism silently does nothing for them (#12030).
+  it('warns for each extension rule skipped for having no paths', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining(
+        'Extension rule charts:rules/always.md has no `paths:` and was skipped',
+      ),
+    );
+  });
+
+  // A refresh replaces the list rather than appending to it, or a session that
+  // reloads memory a few times shows the same warning several times over.
+  it('does not accumulate the same extension-rule warning across refreshes', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .filter((warning) => warning.includes('charts:rules/always.md')),
+    ).toHaveLength(1);
+  });
+
   it('refreshHierarchicalMemory should expose loaded context file paths', async () => {
     const config = new Config(baseParams);
 

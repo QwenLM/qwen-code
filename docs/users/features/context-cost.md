@@ -61,7 +61,7 @@ Four things to know before you use it:
 
 A context file is concatenated into every request of every session it applies to, with no relevance gating. A [skill](skills.md) is listed by its name and description only — in one measured sample, 84 skills averaged about 55 tokens each — and loads its body when invoked, and a skill [gated on `paths:`](skills.md#optional-gate-a-skill-on-file-paths-paths) is not even listed until a matching file is touched.
 
-Keep in a context file only what is always true — identity, vocabulary, a hard constraint — and put "when doing X, do Y" in a skill. `/context detail` names each context file, and for an [extension's](../extension/getting-started-extensions.md) file it names the extension that owns it.
+Keep in a context file only what is always true — identity, vocabulary, a hard constraint — and put "when doing X, do Y" in a skill or a [`paths:`-gated rule](rules.md). `/context detail` names each context file, and for an [extension's](../extension/getting-started-extensions.md) file it names the extension that owns it.
 
 ### 4. The system prompt, last
 
@@ -87,5 +87,6 @@ The base prompt is already the smallest of the resident categories, and roughly 
 ## See also
 
 - [Token Caching](token-caching.md) — what caching does to the price of what remains.
+- [Rules](rules.md) — `paths:`-conditional context, including what an extension may contribute.
 - [Skills](skills.md) — progressive disclosure, and `paths:` gating.
 - [Settings reference](../configuration/settings.md) — the exact semantics of `tools.eager`, `tools.visible`, `tools.disabled`, `tools.toolSearch.*`, `permissions.deny`.

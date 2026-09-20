@@ -24,6 +24,7 @@ export default {
   'computer-use': 'Computer Use',
   'token-caching': 'Token Caching',
   'context-cost': 'Resident Context Cost',
+  rules: 'Rules',
   sandbox: 'Sandboxing',
   language: 'i18n',
   channels: 'Channels',
