@@ -13684,7 +13684,7 @@ describe('runQwenServe channel worker supervisor', () => {
           mode: 'http-bridge',
           serveWebShell: false,
         },
-        { bridge: makeFakeBridge() },
+        { bridge: makeFakeBridge(), bootSettings: {} },
       );
       expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQr).toBe(false);
       await started.close();
