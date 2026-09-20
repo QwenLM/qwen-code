@@ -577,8 +577,7 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
@@ -626,7 +625,7 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -1074,8 +1073,7 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
@@ -1123,7 +1121,7 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -1431,9 +1429,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1463,7 +1464,7 @@ jobs:
 
       - name: 'Install dependencies'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Install Playwright Chromium (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -1583,9 +1584,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1598,7 +1602,7 @@ jobs:
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1727,9 +1731,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
@@ -1770,7 +1777,7 @@ jobs:
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1982,8 +1989,7 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -2007,7 +2013,7 @@ jobs:
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          npm ci --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -2195,8 +2201,7 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -2221,7 +2226,7 @@ jobs:
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          npm ci --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && runner.environment == 'self-hosted' }}"
