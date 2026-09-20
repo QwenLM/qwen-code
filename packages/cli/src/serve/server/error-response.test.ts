@@ -75,24 +75,25 @@ describe('workflow parameter errors', () => {
     },
   );
 
-  it.each(['workflow_journal_unavailable', 'workflow_args_unavailable'])(
-    'answers %s with 409 and its message',
-    (errorKind) => {
-      const source = RequestError.invalidParams(
-        { errorKind },
-        'Workflow run wf_1234abcd has no journal on disk',
-      );
-      const { response, status, json } = responseMock();
+  it.each([
+    'workflow_journal_unavailable',
+    'workflow_args_unavailable',
+    'workflow_run_live_elsewhere',
+  ])('answers %s with 409 and its message', (errorKind) => {
+    const source = RequestError.invalidParams(
+      { errorKind },
+      'Workflow run wf_1234abcd has no journal on disk',
+    );
+    const { response, status, json } = responseMock();
 
-      sendBridgeError(response, source);
+    sendBridgeError(response, source);
 
-      expect(status).toHaveBeenCalledWith(409);
-      expect(json).toHaveBeenCalledWith({
-        error: source.message,
-        code: errorKind,
-      });
-    },
-  );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: errorKind,
+    });
+  });
 
   it.each([
     new Error('Unexpected workflow failure'),

@@ -31,12 +31,18 @@ const {
   cancelTaskMock: vi.fn(),
   controlWorkflowTaskMock: vi.fn(),
 }));
+let retryHistorical: boolean | undefined = true;
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => ({
     getTasks: getTasksMock,
     getWorkflowTasks: getWorkflowTasksMock,
     cancelTask: cancelTaskMock,
     controlWorkflowTask: controlWorkflowTaskMock,
+  }),
+  useConnection: () => ({
+    supportedCommands: {
+      workflowToolFeatures: { retryHistorical },
+    },
   }),
 }));
 
@@ -58,6 +64,7 @@ afterEach(() => {
   getWorkflowTasksMock.mockReset();
   cancelTaskMock.mockReset();
   controlWorkflowTaskMock.mockReset();
+  retryHistorical = true;
   vi.useRealTimers();
 });
 
@@ -915,6 +922,46 @@ describe('TasksStatusMessage workflow details', () => {
     // picked up again.
     expect(savedContainer.textContent).toContain('Retry failed path');
     expect(savedContainer.textContent).toContain('Rerun all');
+  });
+
+  // An older daemon answers `retry` / `rerun` for history with
+  // `{changed: false}`. Without reading the capability the panel would offer
+  // a button that cannot work.
+  it('offers no restart for a restored run when the daemon does not take history restarts', () => {
+    retryHistorical = undefined;
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-saved',
+        isHistorical: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
+  });
+
+  // A live run is not history: its controls never depended on the flag.
+  it('still offers a restart for a live failed run without the capability', () => {
+    retryHistorical = undefined;
+    const container = renderPanel([
+      workflowTask({ status: 'failed', endTime: 9_000 }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Retry failed path');
+    expect(container.textContent).toContain('Rerun all');
   });
 
   it('offers no restart for a restored run whose args were not kept', () => {

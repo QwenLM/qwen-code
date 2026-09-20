@@ -2326,10 +2326,11 @@ errors carry `workflow_invalid_params` and retain the rejection message.
 Two refusals come from the run's stored state rather than the request, and
 are a `409` (`-32602` over ACP, with `data.httpStatus: 409`):
 
-| `code` / `errorKind`           | When                                                                   | What to do                                                     |
-| ------------------------------ | ---------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `workflow_journal_unavailable` | a `retry` whose run has no journal on disk, or one that cannot be read | `rerun` it, which starts it from the beginning                 |
-| `workflow_args_unavailable`    | a `retry` or `rerun` of a history entry that carries `argsOmitted`     | start it again with `run-saved` or `run-script` and its `args` |
+| `code` / `errorKind`           | When                                                                                                                                                          | What to do                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `workflow_journal_unavailable` | a `retry` whose run has no journal on disk, or one that cannot be read                                                                                        | `rerun` it, which starts it from the beginning                 |
+| `workflow_args_unavailable`    | a `retry` or `rerun` of a history entry that carries `argsOmitted`                                                                                            | start it again with `run-saved` or `run-script` and its `args` |
+| `workflow_run_live_elsewhere`  | a `retry` of a run whose checkpoint records a process that has not been seen to exit — one still running, one on another machine, or one whose pid was reused | `rerun` it, which takes a new run id                           |
 
 `workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
 `runSavedArgs` and `runScript`; a daemon without them accepts neither the start
@@ -2338,7 +2339,8 @@ session's model may run named workflows only (`tools.workflowNameOnly`): the
 model's own `script` and `scriptPath` calls are refused, while every action
 above, `run-script` included, still starts runs. `retryHistorical` is true when
 `retry` and `rerun` accept a run restored from history; an older daemon answers
-them with `{"changed": false}`.
+them with `{"changed": false}`, so a client should offer those controls for a
+history entry only when it is reported.
 
 ### `GET /session/:id/lsp`
 

@@ -15,11 +15,15 @@
  *   same run.
  * - `workflow_journal_unavailable`: a retry has no journal to resume; a rerun
  *   starts the run from the beginning.
+ * - `workflow_run_live_elsewhere`: the run's checkpoint records a process that
+ *   has not been seen to exit, so a retry would be the second runner on its
+ *   journal.
  */
 const WORKFLOW_REQUEST_ERROR_STATUS: Readonly<Record<string, number>> = {
   workflow_invalid_params: 400,
   workflow_args_unavailable: 409,
   workflow_journal_unavailable: 409,
+  workflow_run_live_elsewhere: 409,
 };
 
 /** The HTTP status for a workflow `errorKind`, or `undefined` for any other. */

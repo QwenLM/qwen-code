@@ -15,6 +15,7 @@ import {
 } from './agentForest';
 import {
   useActions,
+  useConnection,
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
@@ -1457,6 +1458,12 @@ function TaskDetail({
   onCancelConfirmDismiss?: () => void;
 }) {
   const documentMode = useTranscriptRenderMode() === 'document';
+  // Restarting a run restored from history is a daemon capability: an older
+  // daemon answers those actions with `{changed: false}`, so without the flag
+  // the controls stay hidden for history the way they were before it existed.
+  const retryHistorical =
+    useConnection().supportedCommands?.workflowToolFeatures?.retryHistorical ===
+    true;
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
   const isAbandonable = task.kind === 'agent' && task.status === 'paused';
@@ -1470,10 +1477,12 @@ function TaskDetail({
     task.isBackgrounded &&
     task.status === 'running';
   const canResume = task.kind === 'workflow' && task.status === 'paused';
-  // A run restored from history restarts like a live one, unless its
-  // snapshot could not keep the args it was launched with.
+  // A run restored from history restarts like a live one, as long as the
+  // daemon takes those actions for history and its snapshot kept the args it
+  // was launched with.
   const canRestart =
-    task.kind === 'workflow' && !(task.isHistorical && task.argsOmitted);
+    task.kind === 'workflow' &&
+    (!task.isHistorical || (retryHistorical && !task.argsOmitted));
   const canRetry = canRestart && task.status === 'failed';
   const canRerun =
     canRestart &&

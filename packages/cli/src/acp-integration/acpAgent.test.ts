@@ -16947,16 +16947,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    it('does not retry a run whose checkpoint shows another process still running it', async () => {
+    // A checkpoint outlives the claim when its writer cannot be seen to
+    // exit: another machine, or a pid a live process has reused. The refusal
+    // has to say so — the run is otherwise indistinguishable from an unknown
+    // id, and the way forward is a rerun.
+    it('names the process a checkpoint records when it refuses a retry, and still allows a rerun', async () => {
+      const sdk = await actualSdk();
       const daemon = await startDaemon();
       mockReadWorkflowSnapshot.mockResolvedValue(historical());
-      // The claim found its writer alive and left the checkpoint in place.
-      mockReadWorkflowCheckpoint.mockResolvedValue({ v: 1, runId, pid: 4242 });
-
-      await expect(daemon.act('retry')).resolves.toEqual({
-        changed: false,
-        status: 'failed',
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: 4242,
+        hostname: 'builder-07',
       });
+
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_run_live_elsewhere' },
+        message: expect.stringContaining('host builder-07, pid 4242'),
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+
+      // A rerun takes a new run id, so the live run's journal is not at risk.
+      await expect(daemon.act('rerun')).resolves.toMatchObject({
+        changed: true,
+      });
+      await daemon.stop();
+    });
+
+    // Terminal entries are evicted at a cap, so an entry can be gone while
+    // the run's handle is still settling it.
+    it('does not retry a run this session still holds a handle for', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      daemon.registry.getHandle.mockReturnValue({
+        runId,
+      } as unknown as ReturnType<typeof daemon.registry.getHandle>);
+
+      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
       expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
       await daemon.stop();
     });

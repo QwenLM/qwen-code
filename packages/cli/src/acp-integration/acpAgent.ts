@@ -15294,6 +15294,10 @@ class QwenAgent implements Agent {
         if (
           action === 'retry' &&
           (registry.isStarting?.(runId) === true ||
+            // A run whose entry this registry has already evicted (terminal
+            // entries are capped) can still hold a handle while it settles;
+            // the live path gates on the handle for the same reason.
+            registry.getHandle?.(runId) !== undefined ||
             this.isWorkflowRunLiveOutsideSession(sessionId, runId))
         ) {
           return { changed: false };
@@ -15306,13 +15310,24 @@ class QwenAgent implements Agent {
         ) {
           return { changed: false, status: snapshot.status };
         }
-        // A checkpoint the claim above left in place belongs to a process
-        // that is still running this run.
-        if (
-          action === 'retry' &&
-          (await readWorkflowCheckpoint(config, runId)) !== undefined
-        ) {
-          return { changed: false, status: snapshot.status };
+        // A checkpoint the claim above left in place records a process that
+        // has not been seen to exit: one still running here, one on another
+        // machine (never claimed, because its liveness cannot be observed),
+        // or one whose pid a live process has since reused. Resuming under
+        // its run id would put a second runner on its journal, so the retry
+        // is refused — and named, because from the run's history alone a
+        // client cannot tell this from an unknown run id, and because the
+        // way forward is a rerun, which takes a new run id and leaves this
+        // journal alone.
+        const checkpoint =
+          action === 'retry'
+            ? await readWorkflowCheckpoint(config, runId)
+            : undefined;
+        if (checkpoint) {
+          throw RequestError.invalidParams(
+            { errorKind: 'workflow_run_live_elsewhere' },
+            `Workflow run ${runId} is recorded as running in another process (host ${checkpoint.hostname}, pid ${checkpoint.pid}), so retrying it here would run two copies against its journal. Rerun it instead: that starts a new run id and leaves this one alone.`,
+          );
         }
         if (snapshot.argsOmitted) {
           throw RequestError.invalidParams(
