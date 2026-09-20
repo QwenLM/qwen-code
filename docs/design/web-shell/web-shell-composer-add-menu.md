@@ -96,9 +96,13 @@ These are facts about the current system that shape the design, and each one rul
 
 ## Touch
 
-`+` shows the same items on touch and desktop. Attachment and reference insertion reuse their existing lanes; skill prepend targets CodeMirror on desktop and the native textarea on touch.
-
-**Unverified:** right-side flyouts depend on hover, and touch has none. The menu primitive is expected to fall back to click/focus for non-mouse pointers, but that needs a real-device check. If it fails, touch keeps the single item that does not need a submenu and this section is rewritten.
+The mobile layout and its additional actions are now specified by
+[Mobile composer actions](mobile-composer-actions.md). It replaces horizontal
+flyouts with a bottom drawer with Back and Close controls, and adds explicit
+photo/camera, command, history, Shell, and Live voice entries. The non-goals below
+continue to describe the desktop dropdown; the linked design supersedes them
+for touch. Attachment and reference insertion reuse their existing lanes; skill
+and command prefixes preserve the native textarea draft.
 
 ## Non-goals
 
@@ -140,7 +144,7 @@ Behavior-level, not tied to an implementation shape:
 5. Selecting a skill with an empty draft yields the invocation followed by a space. Selecting a skill with a non-empty draft yields the invocation, a space, then the previous draft — with any reference chips intact.
 6. No insert loses already-typed text or already-inserted references.
 7. When an individual capability is unavailable, its item is hidden or disabled with a reason; `+` itself remains visible whenever `addMenu` is in the host's toolbar item list. If every inner item is unavailable, `+` opens to an empty-state row and does not silently vanish.
-8. Touch and desktop show the same set, subject to the real-device submenu check.
+8. Desktop keeps the set described here. Touch uses the pages and additional editing actions defined in [Mobile composer actions](mobile-composer-actions.md); verify both surfaces against their respective designs.
 9. A long submenu scrolls instead of overflowing the viewport.
 10. Pointer interaction is covered; keyboard navigation is unsupported and has no feature-specific implementation.
 11. With `plan` listed and a toggle supplied, Plan mode is the last row, shows a check while Plan is on, toggles once per choice, returns focus to the composer, and is disabled with the reason "Switching mode" while mode controls are busy. Without `plan` or without a toggle the row is absent. It remains under the empty-state row.
