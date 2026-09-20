@@ -30,22 +30,22 @@ Kept in the description, on purpose, because a session that never loads the skil
 
 The split is the test's subject, not a comment: `SKILL.test.ts` asserts each moved anchor **is** in the skill and **is not** in the description a skill-capable session sends, and each kept anchor the other way round. Either half alone would let guidance vanish, or be pasted back, with every test green.
 
-The text moved verbatim rather than being rewritten. A general compression pass on this description was reverted under review in #12142; keeping this change to relocation keeps the two questions separable.
+The text moved verbatim rather than being rewritten, with one addition: a rule that a custom subagent's own definition outranks the dispatching prompt. #12142's review threads carry a real dispatch that asked a subagent defined as read-only over one file to search the whole repository, and the relocated "Provide clear, detailed prompts…" bullet encourages that override without ever saying whose contract wins. The rule sits in this reference rather than in the description because it is prompt-writing craft: a session that never loads the reference still cannot widen a subagent's tools, it only wastes the dispatch. A general compression pass on this description was reverted under review in #12142; keeping everything else to relocation keeps the two questions separable.
 
 ## 3. Measured effect
 
 Description rendered with the two subagent entries the budget test uses, team off, todo on:
 
-| Shape                                            | chars | ≈tokens |
-| ------------------------------------------------ | ----- | ------- |
-| Before                                           | 9,730 | 2,433   |
-| After, pointer (a session that can load skills)  | 7,386 | 1,847   |
-| After, reference withheld by `skills.disabled`   | 7,192 | 1,798   |
-| After, reference inlined (no route to any skill) | 9,912 | 2,478   |
+| Shape                                            | chars  | ≈tokens |
+| ------------------------------------------------ | ------ | ------- |
+| Before                                           | 9,730  | 2,433   |
+| After, pointer (a session that can load skills)  | 7,386  | 1,847   |
+| After, reference withheld by `skills.disabled`   | 7,192  | 1,798   |
+| After, reference inlined (no route to any skill) | 10,377 | 2,594   |
 
 So the normal case saves **2,344 characters ≈ 586 tokens per request**, against a 192-character pointer. The new skill costs one listing entry in the system prompt — its 247-character `description`, ≈62 tokens — so the net is **≈524 tokens per request**, recovered on every turn of every session including the ones that never delegate.
 
-The inline shape is 182 characters larger than today's description, because the skill body adds a title and a framing paragraph that the description did not need. That is the deliberate price for sessions that cannot load a skill: a pointer there would name something the model cannot reach.
+The inline shape is 647 characters larger than today's description: 182 because the skill body adds a title and a framing paragraph the description did not need, and 465 for the precedence rule, which is new text rather than relocated text. That is the deliberate price for sessions that cannot load a skill — a pointer there would name something the model cannot reach — and a pointer-shaped session pays none of it, because only the inline shape carries the reference body at all.
 
 ## 4. How the route is decided
 
@@ -77,9 +77,11 @@ The inline shape is 182 characters larger than today's description, because the 
 
 **A recall regression would not show up in unit tests.** Whether models actually load the reference before writing a delegation prompt is an evaluation question, not an assertion; it belongs with the routing-miss measurement #12028 already owns.
 
+**The resident "treat the agent's output as evidence" bullet stays unqualified.** The precedence rule lives in the reference, so a session that never loads it still reads that bullet with nothing saying that a subagent whose definition makes its result authoritative is a different case. Qualifying it in the description would cost every turn of every session what only a dispatching turn needs — the trade this whole change exists to undo — so that half stays with #12142's threads.
+
 ## 7. Validation
 
-- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` — the two-way split table, the pointer's wording, and the inline shape.
+- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` — the two-way split table, the pointer's wording, the precedence rule, and the inline shape.
 - `packages/core/src/tools/agent/agent-description-budget.test.ts` — the lowered budgets, the inline ceiling, and the pointer-vs-inline floor.
 - `packages/core/src/skills/workflow-authoring-skill.test.ts` and `workflow-description.test.ts` — unchanged, and they are what pins that the extraction did not change #11013's behaviour.
 - `packages/core/src/skills/bundled-skills.integration.test.ts` — the new `SKILL.md` parses with `name` matching its directory.

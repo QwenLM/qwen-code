@@ -156,11 +156,14 @@ describe('AgentTool per-turn size budgets', () => {
    * body is visible here rather than only in a session that has no skills.
    */
   it('keeps the description within its budget when the reference is inlined', async () => {
-    // Default shape, no route to any skill. Measured at 9,912 — 182 more than
-    // the description carried before the move, because the reference opens
-    // with a title and a framing paragraph the description did not need.
+    // Default shape, no route to any skill. Measured at 10,377 — 647 more
+    // than the description carried before the move: 182 for the reference's
+    // own title and framing paragraph, the rest for the
+    // definition-outranks-the-prompt rule. That rule is new text rather than
+    // relocated text, and it costs a pointer-shaped session nothing, because
+    // only this shape carries the reference body at all.
     const tool = await buildTool({ skills: false });
-    expect(tool.description.length).toBeLessThanOrEqual(10_250);
+    expect(tool.description.length).toBeLessThanOrEqual(10_750);
   });
 
   /**

@@ -147,6 +147,20 @@ describe('bundled agent-delegation skill', () => {
   });
 
   /**
+   * A dispatch must not try to override the subagent it names. #12142's review
+   * threads carry a real one that asked a read-only, single-file subagent to
+   * search the whole repository. The rule sits in this reference rather than in
+   * the description because it is prompt-writing craft: a session that never
+   * loads it still cannot widen a subagent's tools, it only wastes the call.
+   */
+  it("says a custom subagent's definition outranks the prompt", async () => {
+    const anchor = "custom subagent's own definition outranks";
+
+    expect(skillProse()).toContain(anchor);
+    expect(await agentDescription()).not.toContain(anchor);
+  });
+
+  /**
    * A session with no route to any skill gets the reference itself: a pointer
    * there would send the model at something it cannot load. The body is
    * asserted through one moved anchor, so this fails if the inline shape ever
