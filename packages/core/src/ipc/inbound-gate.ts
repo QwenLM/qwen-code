@@ -1352,24 +1352,29 @@ export class InboundGate {
   private expireOverdue(): void {
     if (this.held.length === 0) return;
     const survivors: HeldMessage[] = [];
-    const expired: HeldMessage[] = [];
+    // Carries the lifetime the sweep already resolved: asking the host a
+    // second time to word a log line would double the round-trips this
+    // sweep costs, and for a host that answers for several sessions each
+    // one is a lookup.
+    const expired: Array<{ entry: HeldMessage; expiryMs: number }> = [];
     for (const entry of this.held) {
       const expiryMs = this.getHeldExpiryMs(this.addressee(entry.frame));
-      (expiryMs !== null && this.ageOf(entry) >= expiryMs
-        ? expired
-        : survivors
-      ).push(entry);
+      if (expiryMs !== null && this.ageOf(entry) >= expiryMs) {
+        expired.push({ entry, expiryMs });
+      } else {
+        survivors.push(entry);
+      }
     }
     if (expired.length === 0) return;
 
     this.held.length = 0;
     this.held.push(...survivors);
-    for (const entry of expired) {
+    for (const { entry, expiryMs } of expired) {
       debugLogger.debug(
         `held peer message ${entry.frame.msgId} expired after ` +
           `${this.ageOf(entry)} ms (session ${
             entry.frame.toSessionId ?? 'unpinned'
-          } holds for ${this.getHeldExpiryMs(this.addressee(entry.frame))} ms)`,
+          } holds for ${expiryMs} ms)`,
       );
       this.forgetAdmittedBody(entry.frame, originOf(entry));
       this.recordSettled(entry.frame.msgId, 'expired');

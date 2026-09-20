@@ -127,6 +127,8 @@ socket。在 `disposeSessions` 中，关闭在生成 abort 之后等待——缓
   传递下去。
 - `packages/core/src/ipc/inbound-gate.ts`、
   `packages/cli/src/peerMessaging/peer-messaging.ts`——为托管多个会话
-  的进程提供 `ownsSessionId`。
+  的进程提供 `resolveSessionId`：它回答自己为该会话保留的唯一名字，
+  于是一个会话可能被寻址的两个 id（发布时用的那个，和 `/clear` 之后
+  的那个）会被当作同一个会话判定，而不是两个。
 - `packages/cli/src/acp-integration/acpAgent.ts`——绑定收件箱，注册和
   移除每个托管会话的记录。

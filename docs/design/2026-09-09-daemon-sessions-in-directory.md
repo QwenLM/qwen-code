@@ -157,7 +157,10 @@ itself. It labels a listing; nothing reads it to decide anything.
 - `packages/core/src/tools/list-agents.ts`, `send-message.ts` — passing
   the slot through.
 - `packages/core/src/ipc/inbound-gate.ts`,
-  `packages/cli/src/peerMessaging/peer-messaging.ts` — `ownsSessionId`
-  for a process hosting several sessions.
+  `packages/cli/src/peerMessaging/peer-messaging.ts` — `resolveSessionId`
+  for a process hosting several sessions: it answers with the one name it
+  keeps a session under, so the two ids a session can be addressed by
+  (the one it was published under, and the one `/clear` gave it) are
+  judged as one session rather than two.
 - `packages/cli/src/acp-integration/acpAgent.ts` — binding the inbox,
   registering and removing each hosted session's record.
