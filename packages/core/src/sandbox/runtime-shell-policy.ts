@@ -17,7 +17,7 @@ export function assertShellSandboxCwd(
 ): void {
   if (
     !path.isAbsolute(cwd) ||
-    !statSync(cwd).isDirectory() ||
+    statSync(cwd, { throwIfNoEntry: false })?.isDirectory() !== true ||
     !isSubpath(policy.workspace, realpathSync(cwd))
   ) {
     throw new Error(

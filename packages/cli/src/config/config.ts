@@ -1645,6 +1645,7 @@ export async function loadCliConfig(
     ? {
         ...requestedShellExecutionSandbox,
         maskedPaths: [
+          ...(requestedShellExecutionSandbox.maskedPaths ?? []),
           path.join(
             requestedShellExecutionSandbox.workspace,
             '.qwen',

@@ -4822,6 +4822,9 @@ describe('loadCliConfig with includeDirectories', () => {
       workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
       installation: path.resolve('/trusted-install'),
       state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
       filesystem: 'workspace-write' as const,
       network: 'closed' as const,
     };
@@ -4837,8 +4840,12 @@ describe('loadCliConfig with includeDirectories', () => {
       false,
       { shellExecutionSandbox: policy },
     );
-    expect(config.getShellExecutionSandbox()).toMatchObject(policy);
+    expect(config.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
     expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual([
+      policy.maskedPaths[0],
       path.join(policy.workspace, '.qwen', 'review-leases'),
     ]);
     expect(config.getCoreTools()).toEqual(

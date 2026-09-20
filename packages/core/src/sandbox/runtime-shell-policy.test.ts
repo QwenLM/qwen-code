@@ -176,6 +176,13 @@ describe('runtime shell policy admission', () => {
     ).toThrow('admitted workspace');
   });
 
+  it('rejects a missing cwd with the policy error', () => {
+    const policy = admit(params, root)!;
+    expect(() =>
+      assertShellSandboxCwd(policy, path.join(root, 'workspace', 'missing')),
+    ).toThrow('admitted workspace');
+  });
+
   it('rejects cwd symlinks into another workspace', () => {
     symlinkSync(
       path.join(root, 'outside'),
