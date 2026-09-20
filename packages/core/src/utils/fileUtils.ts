@@ -1643,20 +1643,45 @@ export async function processSingleFileContent(
               filePath,
               signal ?? new AbortController().signal,
             );
-            // CodeModeOnly hides tool_search and binds zoom_image into the
-            // `exec` description, so the discovery step does not exist there.
-            const zoomHint = config.getCodeModeOnly?.()
-              ? `If details are too small, call tools.zoom_image with ` +
-                `coordinates normalized from 0 to 1000.`
-              : `If details are too small, call zoom_image with coordinates normalized ` +
-                `from 0 to 1000 (if it is not in your tool list, review it with ` +
-                `tool_search first, then invoke it through tool_call).`;
+            const registry = config.getToolRegistry?.();
+            const codeModeOnly = config.getCodeModeOnly?.();
+            const declaredTools = new Set(
+              registry
+                ?.getFunctionDeclarations()
+                .map((declaration) => declaration.name),
+            );
+            const zoomDeclared = declaredTools.has('zoom_image');
+            // Reachability, not existence (#12271): advertising a tool the
+            // session cannot call costs the model a turn. Checking
+            // `tool_search` alone is enough even though invoking a deferred
+            // tool also needs `tool_call` — when either bridge tool is
+            // unavailable, deferred tools are declared eagerly, which
+            // `zoomDeclared` already covers.
+            const zoomAvailable = codeModeOnly
+              ? registry
+                  ?.getCodeModeBindingPlan()
+                  .bindings.some((binding) => binding.name === 'zoom_image')
+              : zoomDeclared ||
+                (declaredTools.has('tool_search') &&
+                  registry
+                    ?.getDeferredToolSummary()
+                    .some((tool) => tool.name === 'zoom_image'));
+            let zoomHint = '';
+            if (zoomAvailable) {
+              // CodeModeOnly binds zoom_image into `exec` and hides the bridge,
+              // so neither discovery nor `tool_call` applies there.
+              const toolName = codeModeOnly ? 'tools.zoom_image' : 'zoom_image';
+              zoomHint =
+                codeModeOnly || zoomDeclared
+                  ? ` If details are too small, call ${toolName} with coordinates normalized from 0 to 1000.`
+                  : ' If details are too small, review zoom_image with tool_search and invoke it through tool_call, with coordinates normalized from 0 to 1000.';
+            }
             return {
               llmContent: [
                 {
                   text:
                     `Image overview: ${view.outputWidth}x${view.outputHeight}; ` +
-                    `oriented source: ${view.sourceWidth}x${view.sourceHeight}. ` +
+                    `oriented source: ${view.sourceWidth}x${view.sourceHeight}.` +
                     zoomHint,
                 },
                 {
