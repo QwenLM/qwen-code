@@ -275,7 +275,7 @@ import {
   type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
-import { workspaceLabel } from './utils/workspace';
+import { workspaceLabel, workspaceLabelForCwd } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
   getLocalCommands,
@@ -3959,6 +3959,13 @@ export function App({
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
   ]);
+  // The chat header always answers "which workspace is this session in?": the
+  // workspace's name when there is one, and nothing when the session lives
+  // outside every workspace (standalone, Live), which the header shows as the
+  // no-workspace icon.
+  const headerWorkspaceName = activeWorkspaceCwd
+    ? workspaceLabelForCwd(activeWorkspaceCwd, ordinaryWorkspaces)
+    : undefined;
   const workspaceWorkflowsEnabled =
     workspaces.find(
       (entry) =>
@@ -18702,6 +18709,8 @@ export function App({
                           ? (sessionDisplayName ?? t('session.new'))
                           : null
                       }
+                      workspaceName={headerWorkspaceName}
+                      workspacePath={activeWorkspaceCwd}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={
                         mainView === 'chat' && environmentHeaderItemVisible
@@ -20316,6 +20325,13 @@ export function App({
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
                           visibleToolbarActions={visibleComposerToolbarActions}
+                          // Before the session exists the workspace and git
+                          // chips sit under the composer, next to the prompt
+                          // they describe; once it does, the header owns the
+                          // workspace and the composer keeps only git.
+                          contextChipPlacement={
+                            isChatEmptyState ? 'below' : 'header'
+                          }
                           tokenCount={
                             contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
                           }

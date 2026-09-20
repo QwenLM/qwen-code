@@ -244,6 +244,14 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  /**
+   * Where the composer's context chips (workspace selector, git branch) land.
+   * `toolbar` (default) keeps both in the composer toolbar. `below` moves both
+   * to the row directly under the composer box. `header` leaves the workspace
+   * to the chat header, which shows it as a leading icon, and keeps git in the
+   * toolbar.
+   */
+  contextChipPlacement?: 'toolbar' | 'below' | 'header';
   /** Current context-window occupancy for the `contextUsage` toolbar ring. */
   tokenCount?: number;
   contextWindow?: number;
@@ -1600,6 +1608,7 @@ export const ChatEditor = memo(
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
+      contextChipPlacement = 'toolbar',
       tokenCount = 0,
       contextWindow = 0,
       contextUsageAlwaysVisible = false,
@@ -2610,7 +2619,7 @@ export const ChatEditor = memo(
         (workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
-          standaloneTargetSupported),
+          (standaloneTargetSupported && onSelectStandaloneTarget)),
     );
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
@@ -2618,6 +2627,15 @@ export const ChatEditor = memo(
     const gitBranchVisible = Boolean(
       gitBranch && showToolbarAction('gitBranch'),
     );
+    // Both chips say where the prompt goes rather than how it runs, so a caller
+    // can move them out of the toolbar without touching their availability.
+    const workspaceChipInToolbar =
+      workspaceSelectVisible && contextChipPlacement === 'toolbar';
+    const gitChipInToolbar =
+      gitBranchVisible && contextChipPlacement !== 'below';
+    const contextRowVisible =
+      contextChipPlacement === 'below' &&
+      (workspaceSelectVisible || gitBranchVisible);
 
     useLayoutEffect(() => {
       if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
@@ -2631,6 +2649,64 @@ export const ChatEditor = memo(
     const showModeLabel = toolbarLabelVisibility.mode;
     const showPlanLabel = toolbarLabelVisibility.plan;
     const showModelLabel = toolbarLabelVisibility.model;
+    // One renderer per chip so the toolbar and the row under the composer share
+    // them: the toolbar drops the label when its width budget is tight, while
+    // the row has a budget of its own and always keeps it.
+    const renderWorkspaceSelector = (compact: boolean) =>
+      workspaces && onSelectWorkspace ? (
+        <WorkspaceSelector
+          workspaces={workspaces}
+          selectedWorkspaceCwd={selectedWorkspaceCwd}
+          disabled={workspaceSelectionDisabled}
+          busy={workspaceMutationBusy}
+          scratchSupported={scratchWorkspaceSupported}
+          existingFolderSupported={existingFolderWorkspaceSupported}
+          standaloneSupported={standaloneTargetSupported}
+          selectedStandalone={selectedStandaloneTarget}
+          className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
+            compact ? styles.workspaceSelectTriggerCompact : ''
+          }`}
+          onSelectWorkspace={onSelectWorkspace}
+          onSelectStandalone={onSelectStandaloneTarget}
+          onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
+          onOpenExistingFolder={onOpenExistingWorkspace ?? (() => {})}
+        />
+      ) : null;
+    const renderGitBranchChip = (compact: boolean) =>
+      gitBranch ? (
+        gitModeIntent && onGitModeIntentChange ? (
+          <GitModePopover
+            branch={gitBranch}
+            compact={compact}
+            intent={gitModeIntent}
+            onIntentChange={onGitModeIntentChange}
+          />
+        ) : (
+          <BranchPickerPopover
+            open={branchPickerOpen}
+            onOpenChange={setBranchPickerOpen}
+            workspaceCwd={selectedWorkspace?.cwd ?? ''}
+            gitCwd={gitCwd}
+            status={gitStatus}
+            onOpenDiff={onOpenGitDiff}
+            onOpenCommit={onOpenCommit}
+            onOpenLog={onOpenLog}
+          >
+            <button
+              type="button"
+              className={styles.gitBranchChipButton}
+              aria-label={gitBranchAriaLabel(gitBranch, gitStatus, t)}
+            >
+              <GitBranchIndicator
+                branch={gitBranch}
+                status={gitStatus}
+                compact={compact}
+                worktree={gitWorktree}
+              />
+            </button>
+          </BranchPickerPopover>
+        )
+      ) : null;
     const mobileVoiceActive = showQuickActions && voiceActive;
 
     useEffect(() => {
@@ -2662,7 +2738,7 @@ export const ChatEditor = memo(
           );
         };
         const items = [
-          ...(workspaceSelectVisible
+          ...(workspaceChipInToolbar
             ? [
                 {
                   id: 'workspaceSelect',
@@ -2678,7 +2754,7 @@ export const ChatEditor = memo(
                 },
               ]
             : []),
-          ...(gitBranchVisible
+          ...(gitChipInToolbar
             ? [
                 {
                   id: 'gitBranch',
@@ -2796,7 +2872,7 @@ export const ChatEditor = memo(
       ToolbarStart,
       disabled,
       gitBranch,
-      gitBranchVisible,
+      gitChipInToolbar,
       isRunning,
       modelLabelReady,
       modeLabel,
@@ -2807,9 +2883,9 @@ export const ChatEditor = memo(
       showModelAction,
       showModeAction,
       showPlanAction,
+      workspaceChipInToolbar,
       workspaceIndicatorVisible,
       workspaceName,
-      workspaceSelectVisible,
       selectedWorkspaceLabel,
     ]);
 
@@ -3381,33 +3457,8 @@ export const ChatEditor = memo(
                       skillsLoaded={skillsLoaded}
                     />
                   )}
-                  {workspaceSelectVisible &&
-                    workspaces &&
-                    onSelectWorkspace && (
-                      <WorkspaceSelector
-                        workspaces={workspaces}
-                        selectedWorkspaceCwd={selectedWorkspaceCwd}
-                        disabled={workspaceSelectionDisabled}
-                        busy={workspaceMutationBusy}
-                        scratchSupported={scratchWorkspaceSupported}
-                        existingFolderSupported={
-                          existingFolderWorkspaceSupported
-                        }
-                        standaloneSupported={standaloneTargetSupported}
-                        selectedStandalone={selectedStandaloneTarget}
-                        className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
-                          showWorkspaceSelectLabel
-                            ? ''
-                            : styles.workspaceSelectTriggerCompact
-                        }`}
-                        onSelectWorkspace={onSelectWorkspace}
-                        onSelectStandalone={onSelectStandaloneTarget}
-                        onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
-                        onOpenExistingFolder={
-                          onOpenExistingWorkspace ?? (() => {})
-                        }
-                      />
-                    )}
+                  {workspaceChipInToolbar &&
+                    renderWorkspaceSelector(!showWorkspaceSelectLabel)}
                   {workspaceIndicatorVisible && workspaceName && (
                     <WorkspaceIndicator
                       name={workspaceName}
@@ -3419,44 +3470,7 @@ export const ChatEditor = memo(
                       })}
                     />
                   )}
-                  {gitBranchVisible &&
-                    gitBranch &&
-                    (gitModeIntent && onGitModeIntentChange ? (
-                      <GitModePopover
-                        branch={gitBranch}
-                        compact={!showGitBranchLabel}
-                        intent={gitModeIntent}
-                        onIntentChange={onGitModeIntentChange}
-                      />
-                    ) : (
-                      <BranchPickerPopover
-                        open={branchPickerOpen}
-                        onOpenChange={setBranchPickerOpen}
-                        workspaceCwd={selectedWorkspace?.cwd ?? ''}
-                        gitCwd={gitCwd}
-                        status={gitStatus}
-                        onOpenDiff={onOpenGitDiff}
-                        onOpenCommit={onOpenCommit}
-                        onOpenLog={onOpenLog}
-                      >
-                        <button
-                          type="button"
-                          className={styles.gitBranchChipButton}
-                          aria-label={gitBranchAriaLabel(
-                            gitBranch,
-                            gitStatus,
-                            t,
-                          )}
-                        >
-                          <GitBranchIndicator
-                            branch={gitBranch}
-                            status={gitStatus}
-                            compact={!showGitBranchLabel}
-                            worktree={gitWorktree}
-                          />
-                        </button>
-                      </BranchPickerPopover>
-                    ))}
+                  {gitChipInToolbar && renderGitBranchChip(!showGitBranchLabel)}
                   {showModeAction && (
                     <div
                       className={`${styles.dropdownWrapper} ${
@@ -3867,7 +3881,7 @@ export const ChatEditor = memo(
               className={styles.toolbarMeasurements}
               aria-hidden="true"
             >
-              {workspaceSelectVisible && selectedWorkspace && (
+              {workspaceChipInToolbar && selectedWorkspace && (
                 <>
                   <span
                     data-toolbar-measure="workspaceSelect:collapsed"
@@ -3917,7 +3931,7 @@ export const ChatEditor = memo(
                   </span>
                 </>
               )}
-              {gitBranchVisible && gitBranch && (
+              {gitChipInToolbar && gitBranch && (
                 <>
                   <span
                     data-toolbar-measure="gitBranch:collapsed"
@@ -4018,6 +4032,17 @@ export const ChatEditor = memo(
             </div>
           </div>
         </div>
+        {/* Mobile voice mode strips the toolbar down to the microphone and
+            send, so the row follows it out of the way. */}
+        {contextRowVisible && !mobileVoiceActive && (
+          <div
+            className={styles.contextRow}
+            data-web-shell-composer-context-row
+          >
+            {workspaceSelectVisible && renderWorkspaceSelector(false)}
+            {gitBranchVisible && renderGitBranchChip(false)}
+          </div>
+        )}
         {showQuickActions && quickActionsOpen && quickActions.length > 0 && (
           <QuickActionsPanel
             actions={quickActions}
