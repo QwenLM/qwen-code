@@ -236,9 +236,15 @@ describe('AgentTool per-turn size budgets', () => {
     expect(off).not.toContain('Named teammates');
     expect(on).toContain('Named teammates');
     expect(on.length - off.length).toBe(341);
-    // What must survive the gating: the rules that hold either way.
+    // What must survive the gating: the rules that hold either way. Between
+    // this list and the `Set to false` / `interactive fork` assertions in
+    // agent.test.ts, every sentence of RUN_IN_BACKGROUND_DESCRIPTION is now
+    // pinned. The headless-fork clause was the one no test named: deleting
+    // it from the constant left every suite green and this 341 delta
+    // unchanged, because both arms shrink together.
     for (const clause of [
       'Defaults to true for top-level regular subagents',
+      'headless forks always run in the background',
       'Nested agents run in the foreground',
       'Unnamed caller-owned working_dir launches run in the foreground',
       'A configured default comes from a subagent definition',

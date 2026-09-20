@@ -8920,8 +8920,10 @@ describe('ShellTool', () => {
      * deliberate one.
      *
      * Measured when written: bash/linux 4,946 · Git Bash on win32 4,771 ·
-     * powershell.exe 4,456 · pwsh.exe 4,350 · cmd.exe 4,207. Each budget
-     * leaves 443–479 characters of headroom — a paragraph, not a sentence.
+     * powershell.exe 4,456 · pwsh.exe 4,350 · cmd.exe 4,207. Each budget is
+     * its measured length plus ~350 — a sentence of headroom, not a
+     * paragraph, so that adding a paragraph to the shared prompt reddens
+     * all five rows instead of fitting inside them.
      */
     function buildForShape(
       platform: 'linux' | 'win32',
@@ -8951,11 +8953,11 @@ describe('ShellTool', () => {
         number,
       ]
     > = [
-      ['bash on linux', 'linux', undefined, undefined, 5_400],
-      ['Git Bash on win32', 'win32', CMD, 'MINGW64', 5_250],
-      ['powershell.exe', 'win32', WIN_PS, undefined, 4_900],
-      ['pwsh.exe', 'win32', PWSH, undefined, 4_800],
-      ['cmd.exe', 'win32', CMD, undefined, 4_650],
+      ['bash on linux', 'linux', undefined, undefined, 5_300],
+      ['Git Bash on win32', 'win32', CMD, 'MINGW64', 5_120],
+      ['powershell.exe', 'win32', WIN_PS, undefined, 4_810],
+      ['pwsh.exe', 'win32', PWSH, undefined, 4_700],
+      ['cmd.exe', 'win32', CMD, undefined, 4_560],
     ];
 
     it.each(SHAPES)(
