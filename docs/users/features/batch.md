@@ -223,8 +223,10 @@ first one is still going.
 
 ## Verifying locally without an API key
 
-`docs/verification/batch-api/` carries a fake DashScope server and a
-regression script that drives the real CLI against it:
+A fake DashScope server and a regression script that drives the real CLI
+against it live in
+[`docs/verification/batch-api/`](https://github.com/QwenLM/qwen-code/pull/12297),
+which is landing as its own change:
 
 ```bash
 bash docs/verification/batch-api/regression.sh

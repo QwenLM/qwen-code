@@ -288,7 +288,7 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 | 物件                            | 位置                                                                                                                                                                                                        | 状态                                                                                                    |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | 本评估                          | `docs/plans/2026-09-14-batch-api-feasibility.md`                                                                                                                                                            | §1-§8 完成，§9 已按实测结果更新                                                                         |
-| 探测脚本 + README               | `docs/verification/batch-api/`                                                                                                                                                                              | **已对线上运行**（00/01/02/03/04），结果见上方两条 PR 评论                                              |
+| 探测脚本 + README               | [#12297](https://github.com/QwenLM/qwen-code/pull/12297)（按 scope ruling 从本 PR 拆出）                                                                                                                    | **已对线上运行**（00/01/02/03/04），结果见上方两条 PR 评论                                              |
 | 草稿 PR                         | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`）                                                                                          | 等评审                                                                                                  |
 | `qwen batch` 命令（形态 A）     | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`）                                                                                                                               | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖；`submit/status/cancel` 已对线上验证 |
 | headless `--batch` 置换（§6）v1 | `core/openaiContentGenerator/batch.ts`（运行器）、`pipeline.ts` 两处分支、`contentGenerator.ts` 的 `executionMode`、`llm-chat.ts` 主循环设置、`Config.getBatchMode()`、CLI `--batch` flag + `.check()` 门禁 | 已实现 v1；01 探测（验收标准）**已通过**，但 `--batch` 本身尚未对线上端到端跑过                         |
@@ -299,6 +299,9 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 命令保留在这里，是为了让别人能用自己的 key 复现同一组测量。
 
 前提：北京 region 的 `DASHSCOPE_API_KEY`，只放 env，不落盘。在仓库根目录：
+
+> 脚本本身不在本 PR 里：`docs/verification/batch-api/` 按 scope ruling 拆到了
+> [#12297](https://github.com/QwenLM/qwen-code/pull/12297)。下面的路径以那个分支为准。
 
 ```sh
 export DASHSCOPE_API_KEY=sk-...
