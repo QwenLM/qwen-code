@@ -1,0 +1,85 @@
+# 把 Agent 工具的提示词写法指南移入内置参考 skill
+
+[English](2026-09-20-agent-delegation-reference.md) | [简体中文](2026-09-20-agent-delegation-reference.zh-CN.md)
+
+**状态：** [#12054](https://github.com/QwenLM/qwen-code/issues/12054) 的实现，属于 [#12028](https://github.com/QwenLM/qwen-code/issues/12028)。叠在 [#12142](https://github.com/QwenLM/qwen-code/issues/12142) 的 Agent/Shell 体积预算之上，并把那些预算下调。
+
+下文所有数字都来自对描述模板的静态渲染（代入 `ToolNames`、两个 subagent 条目、team 关、todo 开），不是运行 CLI 得到的。本地没有构建、没有跑测试；新增的仓库测试交由 CI 执行。token 数按字符数 ÷ 4 折算，与 issue 中的口径一致。
+
+## 1. 问题
+
+Agent 工具的描述是请求里最长的内置工具描述，而它在**每个**会话的**每一次**请求中都会发送，无论这一轮是否真的要委派任务。其中约四分之一是"怎么写委派提示词"的手艺建议：给多少上下文、什么不该委派、fork 提示词长什么样，以及一个 `test-runner` 的完整示例。一个只读文件然后回答问题的轮次，也要为这些内容付费。
+
+Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/QwenLM/qwen-code/issues/11013) 中解决：编写参考变成内置 skill `workflow-authoring`，描述里只留一个指针。本次复用这套机制，而不是另造一套。
+
+## 2. 搬走了什么，以及刻意留下了什么
+
+搬入 `packages/core/src/skills/bundled/agent-delegation/SKILL.md`：
+
+- `## Writing the prompt` 整节（"像对聪明同事交代"那段、五条要点、"Terse command-style prompts…"、**Never delegate understanding**，以及"结果没回来之前不要编造"那句）；
+- `**Writing a fork prompt.**` 那一段；
+- `Usage notes:` 里的两条手艺条目——"Provide clear, detailed prompts…" 与 "Clearly tell the agent whether you expect it to write code or just to do research…"；
+- `<example_agent_descriptions>` / `isPrime` / `test-runner` 的完整示例。
+
+刻意留在描述里的部分，因为一个从不加载该 skill 的会话也必须把它们做对：
+
+- 什么时候**不该**用这个工具，以及"复用已有后台 agent"的规则；
+- `## Working with background agents` 整节——**Don't peek**、**Don't race**、**Don't relaunch**；
+- `## When to fork` 里决定调用形状的事实：fork 默认继承完整对话、`fork_turns` 限定范围、必须显式给 `subagent_type`、fork 上不要设 `model`、要传一个简短的 `name`；
+- 并发与写入范围规则、`isolation`/`working_dir` 语义，以及"把 agent 的输出当证据看"。
+
+这条分界线本身就是测试对象，而不是一句注释：`SKILL.test.ts` 对每个搬走的锚点同时断言"**在** skill 里"和"**不在**可加载 skill 的会话所发送的描述里"，对每个保留的锚点则反向断言。只做一半，都会让指南悄悄消失或被粘回来，而测试全绿。
+
+文本是原样搬移，没有重写。#12142 中一次针对该描述的整体压缩在评审后被回退；把本次改动限定为"搬移"，可以让这两个问题彼此独立。
+
+## 3. 实测效果
+
+以预算测试所用的两个 subagent 条目、team 关、todo 开渲染描述：
+
+| 形态                                | 字符   | ≈token |
+| ----------------------------------- | ------ | ------ |
+| 改动前                              | 9,730  | 2,433  |
+| 改动后，指针（可加载 skill 的会话） | 7,386  | 1,847  |
+| 改动后，被 `skills.disabled` 关掉   | 7,192  | 1,798  |
+| 改动后，内联（完全没有 skill 通路） | 10,109 | 2,527  |
+
+即常见情形下每次请求省下 **2,344 字符 ≈ 586 token**，代价是 192 字符的指针。新 skill 会在系统提示词里增加一条清单项——它 247 字符的 `description`，≈62 token——因此净收益是**每次请求 ≈524 token**，且在每个会话的每一轮都成立，包括那些从不委派的轮次。
+
+内联形态比今天的描述多 379 字符，因为 skill 正文多了一个标题和一段说明，而描述本来不需要它们。这是为"无法加载 skill 的会话"刻意付的价：在那里放指针，等于指向模型拿不到的东西。
+
+## 4. 路由如何决定
+
+`skills/bundled-reference.ts` 是把 `workflow-authoring` 的判断抽出来，让两份参考不会各自漂移，同时带上两者都需要的 ToolSearch 辅助函数。它在工具构造时一次性回答四种情况：
+
+| 路由                    | 条件                                                                 | 描述里携带                     |
+| ----------------------- | -------------------------------------------------------------------- | ------------------------------ |
+| `skill`                 | 存在 skill manager 且 Skill 工具已注册                               | 指针                           |
+| `skill-via-tool-search` | Skill 工具的 schema 可能被 `tools.eager` 白名单扣住                  | 指针 +"先用 ToolSearch 取出它" |
+| `inline`                | 没有任何 skill 通路（skill 关闭、Skill 被拒、或延迟且无 ToolSearch） | 参考全文                       |
+| `withheld`              | 用户按名字关掉了这份参考，或禁用了整个 bundled 层级                  | 什么都不带                     |
+
+`AgentTool` 在构造函数里解析并记住它，这样会话中途的 `/skills` 开关不会让两次 `refreshSubagents()` 重建对"参考在哪里"给出不同答案。注册顺序保证了这是安全的：所有核心工具都先以惰性工厂注册、之后才被构造，所以构造 Agent 工具时 Skill 已经在 `getAllToolNames()` 里了。
+
+`workflow-authoring-skill.ts` 保留全部导出名，改为委托给共享模块，因此 #11013 的调用方与测试都不受影响。
+
+## 5. 影响面
+
+- **每次请求**携带的 Agent 声明都变短了。嵌套的 agent 启动与 fork 继承同一份描述。
+- **#12142 的预算测试**按新测量值下调，每条都取"实测长度 + ~350"，与该 PR 自己那次收紧的口径一致（默认形态 10,200 → 7,750；无 subagent 9,900 → 7,450；所有可选块打开 11,200 → 8,750；模型可见总面 14,200 → 11,750），并新增两条：内联形态的上限，以及"指针 vs 内联"的下限差值，防止这个差距被悄悄抹平。
+- **`agent.test.ts`** 有五处断言锚在搬走的文本上。其中三处本来会"碰巧"继续通过，因为该文件的 stub `Config` 没有 skill manager、从而拿到内联形态——它们已改锚到描述在任何形态下都保留的事实（fork 上不要设 `model`、fork 默认继承完整对话、传一个简短的 `name`）。
+- **skills 清单**多出一条内置项，会出现在 `/skills` 中，并与其他 skill 一样受 `skills.disabled` / `skills.enabled` 控制。
+- **打包**无需额外改动：`scripts/copy_bundle_assets.js` 与 `scripts/copy_files.js` 都递归拷贝 `skills/bundled/**`，而 `bundled-skills.integration.test.ts` 会解析每一份随包发布的 `SKILL.md`，新目录因此同时被两者覆盖。
+- **没有任何提示词、快照或 ACP 面**引用被搬走的文本：全仓库只有 `agent.ts` 和 `agent.test.ts` 提到它。
+
+## 6. 风险
+
+**从不加载该 skill 的模型会写出更差的提示词。** 这是本次接受的权衡，其边界由"留下来的常驻内容"决定：启动规则、安全规则，以及决定调用形状的 fork 事实都还在描述里，所以跳过这份参考的会话仍然能正确调用工具，只是对 agent 的交代不够好。skill 自己的 description 会说明它装了什么，这正是模型判断"本轮是否需要它"的依据。
+
+**召回率回退不会被单测发现。** 模型是否真的会在写委派提示词前加载这份参考，是评测问题而不是断言问题，它属于 #12028 已经承担的"路由未命中率"测量。
+
+## 7. 验证
+
+- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` —— 双向分界表、指针措辞、内联形态。
+- `packages/core/src/tools/agent/agent-description-budget.test.ts` —— 下调后的预算、内联上限、指针与内联的差值下限。
+- `packages/core/src/skills/workflow-authoring-skill.test.ts` 与 `workflow-description.test.ts` —— 未改动，它们正是"抽取没有改变 #11013 行为"的钉子。
+- `packages/core/src/skills/bundled-skills.integration.test.ts` —— 新 `SKILL.md` 能被解析，且 `name` 与目录名一致。

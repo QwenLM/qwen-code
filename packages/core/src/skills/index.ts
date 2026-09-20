@@ -52,9 +52,26 @@ export {
 // Project auto-skill lifecycle maintenance
 export * from './skill-curator.js';
 
-// The bundled authoring reference for the Workflow tool, and the decision of
-// how it reaches the model: pointed at, inlined in the tool description, or
-// withheld because the user turned it off.
+// How a bundled reference skill reaches the model — pointed at, pointed at
+// through ToolSearch, inlined in the tool description, or withheld because the
+// user turned it off — and the two references that use it.
+export {
+  isToolDeferredBehindToolSearch,
+  readBundledReference,
+  resolveBundledReferenceRoute,
+  resolveBundledReferenceSurface,
+} from './bundled-reference.js';
+export type {
+  BundledReference,
+  BundledReferenceRoute,
+  BundledReferenceSurface,
+} from './bundled-reference.js';
+export {
+  AGENT_DELEGATION_SKILL_NAME,
+  buildAgentDelegationSection,
+  readAgentDelegationReference,
+  resolveAgentDelegationSurface,
+} from './agent-delegation-skill.js';
 export {
   isToolHiddenBehindToolSearch,
   readWorkflowAuthoringReference,

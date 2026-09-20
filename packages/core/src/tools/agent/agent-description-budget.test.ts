@@ -9,6 +9,7 @@ import { AgentTool } from './agent.js';
 import type { Config } from '../../config/config.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { ToolNames } from '../tool-names.js';
 
 /**
  * Per-turn size budgets for the Agent tool's model-visible surface.
@@ -52,6 +53,12 @@ interface Shape {
   subagents?: SubagentConfig[];
   team?: boolean;
   todo?: boolean;
+  /**
+   * Whether the session can load a skill. A session that can gets a pointer
+   * at the `agent-delegation` reference; one that cannot has the reference
+   * inlined, which is the largest shape this description ever takes (#12054).
+   */
+  skills?: boolean;
 }
 
 /**
@@ -63,6 +70,7 @@ async function buildTool({
   subagents = [SUBAGENT_A, SUBAGENT_B],
   team = false,
   todo = true,
+  skills = true,
 }: Shape = {}): Promise<AgentTool> {
   const subagentManager = {
     listSubagents: vi.fn().mockResolvedValue(subagents),
@@ -75,6 +83,17 @@ async function buildTool({
     getLlmClient: () => undefined,
     isAgentTeamEnabled: () => team,
     isTodoWriteEnabled: () => todo,
+    // The delegation reference's route, as `bundled-reference.ts` reads it: a
+    // skill manager plus a registered Skill tool means the description
+    // carries a pointer, and their absence means it carries the reference.
+    ...(skills
+      ? {
+          getSkillManager: () => ({}),
+          getToolRegistry: () => ({
+            getAllToolNames: () => [ToolNames.AGENT, ToolNames.SKILL],
+          }),
+        }
+      : {}),
   } as unknown as Config;
 
   const tool = new AgentTool(config);
@@ -107,24 +126,57 @@ function surfaceLength(tool: AgentTool): number {
 
 describe('AgentTool per-turn size budgets', () => {
   it('keeps the description within its budget in the default shape', async () => {
-    // Two subagents, team off, todo on. The catalogue itself is covered by
-    // the proportional-growth test below. Measured at ~9,730 characters.
+    // Two subagents, team off, todo on, a pointer at the delegation
+    // reference. The catalogue itself is covered by the proportional-growth
+    // test below. Measured at 7,386 characters, down from 9,730 before the
+    // prompt-writing guidance moved into the bundled skill (#12054).
     const tool = await buildTool();
-    expect(tool.description.length).toBeLessThanOrEqual(10_200);
+    expect(tool.description.length).toBeLessThanOrEqual(7_750);
   });
 
   it('keeps the description within its budget with no subagents configured', async () => {
     // The skeleton on its own — the catalogue collapses to a one-line
-    // "no subagents are configured" placeholder. Measured at ~9,470.
+    // "no subagents are configured" placeholder. Measured at 7,083.
     const tool = await buildTool({ subagents: [], todo: false });
-    expect(tool.description.length).toBeLessThanOrEqual(9_900);
+    expect(tool.description.length).toBeLessThanOrEqual(7_450);
   });
 
   it('keeps the description within its budget with every optional block on', async () => {
     // Team coordination guidance and the todo clause both present.
-    // Measured at ~10,710.
+    // Measured at 8,370.
     const tool = await buildTool({ team: true, todo: true });
-    expect(tool.description.length).toBeLessThanOrEqual(11_200);
+    expect(tool.description.length).toBeLessThanOrEqual(8_750);
+  });
+
+  /**
+   * The worst case, and the one no setting can shrink: a session that cannot
+   * load a skill has the delegation reference inlined, because a pointer
+   * would send the model at something it cannot reach. It is budgeted
+   * separately — and above the pointer shape — so that growth in the skill
+   * body is visible here rather than only in a session that has no skills.
+   */
+  it('keeps the description within its budget when the reference is inlined', async () => {
+    // Default shape, no route to any skill. Measured at 10,109 — 379 more
+    // than the description carried before the move, because the reference
+    // opens with a title and a framing paragraph the description did not need.
+    const tool = await buildTool({ skills: false });
+    expect(tool.description.length).toBeLessThanOrEqual(10_500);
+  });
+
+  /**
+   * The point of the move: a session that can load the skill pays a pointer
+   * instead of the reference, on every request. Asserted as a floor on the
+   * difference rather than an exact figure — editing the reference is normal,
+   * collapsing the gap means the guidance came back into the description.
+   */
+  it('charges far less for the pointer than for the inlined reference', async () => {
+    const [pointer, inlined] = await Promise.all([
+      buildTool(),
+      buildTool({ skills: false }),
+    ]);
+    expect(
+      inlined.description.length - pointer.description.length,
+    ).toBeGreaterThan(2_000);
   });
 
   // The two optional blocks are the part a reader can lose track of,
@@ -267,9 +319,11 @@ describe('AgentTool per-turn size budgets', () => {
    * noticing. Optional blocks have their own bounds above.
    */
   it('keeps the whole model-visible surface within its budget', async () => {
-    // Description plus serialized schema, default shape. Measured at ~13,720
-    // characters after the teammate-only guidance moved behind the team flag.
+    // Description plus serialized schema, default shape. Measured at ~11,380
+    // characters: ~13,720 before the prompt-writing guidance moved into the
+    // bundled `agent-delegation` skill (#12054), and before that higher still,
+    // with the teammate-only guidance sent to sessions without teams.
     const tool = await buildTool();
-    expect(surfaceLength(tool)).toBeLessThanOrEqual(14_200);
+    expect(surfaceLength(tool)).toBeLessThanOrEqual(11_750);
   });
 });
