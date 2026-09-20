@@ -12,10 +12,13 @@
 # a second on both lock-opening steps after the heal warned and gave up.
 # One shape heals in place below: unlink permission lives on the containing
 # directory, so a root-owned lock FILE inside a still runner-writable dir is
-# unlinked and re-probed without sudo. When the shared dir stays unusable
-# (the dir itself unwritable, a name that cannot be unlinked), print a
-# job-private fallback instead: the leg still runs, which beats dying in
-# under a second, but the cost is real — RUNNER_TEMP is per-job, so
+# unlinked and re-probed without sudo — but never while a live process
+# provably flocks it: the lock rides the inode, so unlinking strands the
+# holder on a deleted name while this job flocks a fresh one, voiding the
+# exclusion without a trace. When the shared dir stays unusable (the dir
+# itself unwritable, a name that cannot be unlinked, a lock still held),
+# print a job-private fallback instead: the leg still runs, which beats
+# dying in under a second, but the cost is real — RUNNER_TEMP is per-job, so
 # coordination with sibling jobs, the root qwen-docker-cleanup timer, and
 # the release lane's build mutex is LOST, not merely degraded: a prune can
 # run against a daemon with docker work in flight, and the prunes'
@@ -30,6 +33,33 @@ primary="${HOME}/.cache/qwen-code-ci"
 # which path — so the diagnostics below name the offender instead of
 # asserting a cause the probe never verified.
 problem=''
+
+# lock_held proves whether a live process flocks the inode behind $1, which
+# the mode-bit probe cannot see. Two probes, because each sees a shape the
+# other cannot: a read-only open plus a non-blocking exclusive flock is
+# refused exactly when a holder sits on the inode (and `<` can never
+# truncate a held one); when the file cannot even be opened — the
+# root-owned 0400 daemon lock the qwen-docker-cleanup timer holds across
+# its prune — /proc/locks is the only witness that needs no access to the
+# file. Where neither probe exists (macOS has neither flock(1) nor
+# /proc/locks) report not-held, leaving those lanes on the previous
+# behaviour.
+lock_held() {
+  local path="$1"
+  if command -v flock >/dev/null 2>&1; then
+    local probe_rc=0
+    bash -c 'exec 8<"$1" || exit 66; flock --nonblock --exclusive 8 || exit 77' _ "${path}" 2>/dev/null || probe_rc=$?
+    case "${probe_rc}" in
+      0) return 1 ;; # the probe took the exclusive lock: provably unheld
+      77) return 0 ;; # opened, but the flock was refused: a live holder
+    esac
+    # 66 (cannot open) or anything else: fall through to /proc/locks.
+  fi
+  [[ -r /proc/locks ]] || return 1
+  local ino
+  ino="$(stat -c %i -- "${path}" 2>/dev/null)" || return 1
+  awk -v ino="${ino}" '{ split($5, a, ":"); if (a[3] == ino) found = 1 } END { exit !found }' /proc/locks
+}
 
 ci_lock_dir_writable() {
   local dir="$1"
@@ -48,14 +78,22 @@ ci_lock_dir_writable() {
       # Unlink permission comes from the directory, so a runner-owned dir
       # holding a foreign-owned lock is repairable without sudo. Narrow on
       # purpose: only files this probe found unwritable — never a glob,
-      # never a writable file a live sibling holds. Re-test after the
-      # unlink: a root process can hold the old inode open, so a failed
-      # repair must still fall back.
+      # never a writable file a live sibling holds, and never a file a live
+      # process flocks. The re-test still covers a failed unlink (EROFS, a
+      # sticky dir, a name a directory squats on).
+      if lock_held "${dir}/${name}"; then
+        problem="lock file ${dir}/${name} is not writable and is locked by a live process"
+        return 1
+      fi
       rm -f -- "${dir}/${name}" 2>/dev/null || true
       if [[ -e "${dir}/${name}" && ! -w "${dir}/${name}" ]]; then
         problem="lock file ${dir}/${name} is not writable"
         return 1
       fi
+      # A healed host must not heal silently: name what was unlinked so
+      # the next poisoned run has a trail. stderr only — stdout stays the
+      # single-path payload both callers capture with $(...).
+      echo "::warning::unlinked stale unwritable lock file ${dir}/${name}; a fresh one opens in its place" >&2
     fi
   done
   return 0

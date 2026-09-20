@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -32,6 +32,12 @@ import { parse } from 'yaml';
 // bite for a non-root user (root bypasses file mode bits), so those cases
 // skip under uid 0.
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+// flock(1) is util-linux, absent on macOS; the live-holder case needs it
+// for both the fixture (holding the exclusive lock) and the assertion that
+// a contender cannot take it.
+const hasFlock =
+  spawnSync('flock', ['--version'], { encoding: 'utf8' }).status === 0;
 
 describe('CI docker lock dir resolution', () => {
   const runnerScript = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
@@ -98,12 +104,82 @@ describe('CI docker lock dir resolution', () => {
         chmodSync(daemonLock, 0o400);
         const result = runResolver(world, ['docker-sandbox-daemon.lock']);
         expect(result.stdout.trim()).toBe(shared);
-        expect(result.stderr).toBe('');
+        // The heal must not be silent: a poisoned host that repairs
+        // without a trace is invisible until it fails again. stdout stays
+        // the single-path payload the callers capture with $(...).
+        expect(result.stderr).toContain('::warning::');
+        expect(result.stderr).toContain('docker-sandbox-daemon.lock');
         // The poison is unlinked, not worked around, and a fresh lock
         // opens in its place.
         expect(existsSync(daemonLock)).toBe(false);
         writeFileSync(daemonLock, '');
       } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The fix-induced half of the repair (R7-1): the mode bit cannot see a
+  // live flock, so unlinking a lock a process is holding strands the
+  // holder on a deleted inode while this job flocks a fresh one — the
+  // exclusion silently voided. The root qwen-docker-cleanup timer holds
+  // docker-sandbox-daemon.lock exactly this way across its prune, so the
+  // resolver must never unlink a lock it cannot prove unheld. The holder
+  // here mirrors the timer: open with >> (never truncate a held inode),
+  // take the exclusive flock, and only then drop the mode to 0400 —
+  // opening a 0400 file for append would fail EACCES for a non-root
+  // holder, while chmod by the owner needs no mode bits.
+  it.skipIf(isRoot || !hasFlock)(
+    'refuses to unlink a lock a live process holds',
+    () => {
+      const world = makeWorld();
+      const shared = join(world.home, '.cache', 'qwen-code-ci');
+      mkdirSync(shared, { recursive: true });
+      const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+      writeFileSync(daemonLock, '');
+      const ready = join(world.dir, 'holder-ready');
+      const holder = spawn(
+        'bash',
+        [
+          '-c',
+          'exec 8>>"$1"; flock --exclusive 8; touch "$2"; sleep 60',
+          '_',
+          daemonLock,
+          ready,
+        ],
+        // Own process group, so the finally kills the sleep with it.
+        { detached: true, stdio: 'ignore' },
+      );
+      try {
+        const deadline = Date.now() + 15000;
+        while (!existsSync(ready) && Date.now() < deadline) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+        }
+        expect(existsSync(ready)).toBe(true);
+        chmodSync(daemonLock, 0o400);
+        const inoBefore = statSync(daemonLock).ino;
+        const result = runResolver(world, ['docker-sandbox-daemon.lock']);
+        expect(result.stdout.trim()).toBe(
+          join(world.runnerTemp, 'qwen-code-ci-locks'),
+        );
+        expect(result.stderr).toContain('::warning::');
+        expect(result.stderr).toContain('docker-sandbox-daemon.lock');
+        // The held inode is never unlinked, so the holder's lock keeps
+        // covering the name every sibling opens.
+        expect(statSync(daemonLock).ino).toBe(inoBefore);
+        const contender = spawnSync('bash', [
+          '-c',
+          'exec 8<"$1"; flock --nonblock --exclusive 8',
+          '_',
+          daemonLock,
+        ]);
+        expect(contender.status).not.toBe(0);
+      } finally {
+        try {
+          process.kill(-holder.pid, 'SIGTERM');
+        } catch {
+          // The holder already exited.
+        }
         rmSync(world.dir, { recursive: true, force: true });
       }
     },
