@@ -1078,10 +1078,11 @@ export class PermissionManager {
    * quotes, backticks and substitutions, so a fragment can still contain one —
    * `splitCommands("git status # don't\nrm -rf /tmp/x")` returns a single
    * fragment. `checkCommandPermissions` additionally normalizes with
-   * `trim().replace(/\s+/g, ' ')`, which folds a lone `\r`, `\v`, `\f`, NBSP or
-   * U+2028 into a space — so on that path the `\r` disjunct is not what keeps
-   * the result sound; its pre-split and `detectCommandSubstitution`'s hard
-   * denial are (see #12089). A future caller that passes a reconstruction
+   * `trimBashEdgeSeparators(cmd).replace(/[ \t\n]+/g, ' ')`: only Bash word
+   * separators (space, tab and newline) are collapsed, while a lone `\r`,
+   * `\v`, `\f`, NBSP or U+2028 remains meaningful. The `\r` disjunct is
+   * therefore load-bearing on that path and must not be removed (see #12089).
+   * A future caller that passes a reconstruction
    * which was NOT split that way — the `monitor` failure mode documented on
    * `splitCommandForRules` — would inherit the comment fast path with no
    * guard. Gate such a caller on the invocation instead of routing another
