@@ -665,6 +665,7 @@ describe('package asset scripts', () => {
     );
     expect(distPackageJson.files).toContain('export-transcript-document.js');
     expect(distPackageJson.files).toContain('export-transcript-document.css');
+    expect(distPackageJson.files).toContain('execution-worker.js');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -703,32 +704,35 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  it('fails packaging when the published stylesheet is missing', () => {
-    const rootDir = createFixtureRoot();
-    createBundleArtifacts(rootDir);
-    rmSync(path.join(rootDir, 'dist', 'export-transcript-document.css'));
-    stubConsole();
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    // verifyBundleArtifacts reports with console.error + process.exit(1), not a
-    // throw, so the exit has to become one to keep the rest of the suite alive.
-    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('process.exit(1)');
-    });
+  it.each(['execution-worker.js', 'export-transcript-document.css'])(
+    'fails packaging when the published %s is missing',
+    (missingArtifact) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      rmSync(path.join(rootDir, 'dist', missingArtifact));
+      stubConsole();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+      // throw, so the exit has to become one to keep the rest of the suite alive.
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit(1)');
+      });
 
-    expect(() =>
-      preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow('process.exit(1)');
-    expect(exit).toHaveBeenCalledWith(1);
-    expect(
-      console.error.mock.calls
-        .map(([message]) => String(message))
-        .some(
-          (message) =>
-            message.includes('Required package artifact not found') &&
-            message.includes('export-transcript-document.css'),
-        ),
-    ).toBe(true);
-  });
+      expect(() =>
+        preparePackage({ rootDir, requireNativeAudioCapture: false }),
+      ).toThrow('process.exit(1)');
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(
+        console.error.mock.calls
+          .map(([message]) => String(message))
+          .some(
+            (message) =>
+              message.includes('Required package artifact not found') &&
+              message.includes(missingArtifact),
+          ),
+      ).toBe(true);
+    },
+  );
 
   it.each(['manifest.webmanifest', 'sw.js'])(
     'rejects a published shell missing %s',
@@ -1026,19 +1030,12 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+  it('falls back to the hoisted sharp when core has no nested copy', () => {
     const rootDir = createFixtureRoot();
-    writeFile(
-      rootDir,
-      'package-lock.json',
-      JSON.stringify({
-        packages: {
-          'node_modules/sharp': {
-            version: '0.35.3',
-          },
-        },
-      }),
-    );
+    rmSync(path.join(rootDir, 'packages/core/node_modules'), {
+      recursive: true,
+      force: true,
+    });
     writeFile(
       rootDir,
       'packages/core/package.json',
@@ -1116,7 +1113,7 @@ describe('package asset scripts', () => {
 
     expect(() =>
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
+    ).toThrow(/installed 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1457,21 +1454,13 @@ describe('package asset scripts', () => {
 
     writeFile(
       rootDir,
-      'package-lock.json',
-      JSON.stringify(
-        {
-          packages: {
-            'node_modules/sharp': {
-              version: '0.35.3',
-            },
-            'packages/core/node_modules/sharp': {
-              version: '0.35.4',
-            },
-          },
-        },
-        null,
-        2,
-      ),
+      'node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.3' }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.4' }),
     );
 
     writeFile(
@@ -1568,6 +1557,7 @@ describe('package asset scripts', () => {
 
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/cli.js', '');
+    writeFile(rootDir, 'dist/execution-worker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,

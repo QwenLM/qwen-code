@@ -57,6 +57,8 @@ import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
 import { AddMenu } from './composer/AddMenu';
 import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
+import { getShadowAwareActiveElement } from '../utils/dom';
+import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
   getComposerTagIconUrl,
   isBuiltinComposerTagIconUrl,
@@ -229,6 +231,8 @@ interface ChatEditorProps {
   onOpenGitDiff?: () => void;
   /** Opens the commit dialog. */
   onOpenCommit?: () => void;
+  /** Opens the commit history graph. */
+  onOpenLog?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1590,6 +1594,7 @@ export const ChatEditor = memo(
       gitStatus,
       onOpenGitDiff,
       onOpenCommit,
+      onOpenLog,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -2263,6 +2268,46 @@ export const ChatEditor = memo(
     const showPlanAction = Boolean(
       onTogglePlan && visibleActionSet?.has('plan'),
     );
+    // Plan is chosen rarely, so its entry lives in the add menu and the toolbar
+    // carries only a dismissible chip while Plan is on. A composer whose host
+    // lists `plan` without `addMenu` has no menu to hold the entry and keeps
+    // the toolbar switch.
+    const showPlanInAddMenu = showPlanAction && Boolean(showAddMenuAction);
+    const showPlanChip = showPlanInAddMenu && planMode;
+    const showPlanSwitch = showPlanAction && !showPlanInAddMenu;
+    const showPlanToolbarControl = showPlanChip || showPlanSwitch;
+    // The chip is the one Plan control that unmounts when Plan turns off, and
+    // it can do so while it holds keyboard focus: its own click cannot move
+    // focus into an input that is disabled, and Plan can also end with no
+    // click at all, when the host reports the mode changed. Focus would then
+    // fall to the body and the next Tab would restart at the top of the page,
+    // so it is handed on: to the input, or past a disabled one to a toolbar
+    // control beside where the chip was.
+    const planChipHadFocusRef = useRef(false);
+    useLayoutEffect(() => {
+      if (showPlanChip || !planChipHadFocusRef.current) return;
+      planChipHadFocusRef.current = false;
+      const toolbar = toolbarLeadingRef.current;
+      // Focus that is anywhere but lost is somewhere the user put it.
+      const doc = toolbar?.ownerDocument;
+      const active = getShadowAwareActiveElement(toolbar);
+      if (active && active !== doc?.body) return;
+      // Not the input on a coarse pointer: a focus outside a gesture claims
+      // the active element there without opening the keyboard, and later taps
+      // may then raise no keyboard at all, which is why the Composer gates its
+      // own focus restoration the same way. A button has neither problem.
+      if (!disabled && !isCoarsePointerDevice()) {
+        focusComposer();
+        return;
+      }
+      // The permission control is disabled for as long as a mode change is in
+      // flight, which can outlast the chip; the model control never is.
+      toolbar
+        ?.querySelector<HTMLElement>(
+          '[data-web-shell-mode-button]:not(:disabled), [data-web-shell-model-button]',
+        )
+        ?.focus();
+    }, [showPlanChip, disabled, focusComposer]);
     const showModelAction = showToolbarAction('model');
     const showCommandAction = showToolbarAction('commands');
     const commandNames = useMemo(
@@ -2405,6 +2450,14 @@ export const ChatEditor = memo(
       },
       [onSelectMode, core, modeControlsDisabled],
     );
+
+    // The add menu closes before this runs and leaves focus to the caller. The
+    // entry is not selectable while mode controls are busy, and the host
+    // rejects a toggle that races a mode transition.
+    const handlePlanMenuToggle = useCallback(() => {
+      onTogglePlan?.();
+      core.focus();
+    }, [onTogglePlan, core]);
 
     const handleModelSelect = useCallback(
       (modelId: string) => {
@@ -2691,7 +2744,7 @@ export const ChatEditor = memo(
                 },
               ]
             : []),
-          ...(showPlanAction
+          ...(showPlanToolbarControl
             ? [{ id: 'plan', expansionWidth: expansionWidth('plan') }]
             : []),
           ...(showModelAction
@@ -2803,7 +2856,7 @@ export const ChatEditor = memo(
       showAddMenuAction,
       showModelAction,
       showModeAction,
-      showPlanAction,
+      showPlanToolbarControl,
       workspaceIndicatorVisible,
       workspaceName,
       workspaceSelectVisible,
@@ -3376,6 +3429,15 @@ export const ChatEditor = memo(
                       skillsLoading={skillsLoading}
                       skillsLoadError={skillsLoadError}
                       skillsLoaded={skillsLoaded}
+                      plan={
+                        showPlanInAddMenu
+                          ? {
+                              checked: planMode,
+                              disabled: modeControlsDisabled,
+                              onToggle: handlePlanMenuToggle,
+                            }
+                          : undefined
+                      }
                     />
                   )}
                   {workspaceSelectVisible &&
@@ -3434,6 +3496,7 @@ export const ChatEditor = memo(
                         status={gitStatus}
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
+                        onOpenLog={onOpenLog}
                       >
                         <button
                           type="button"
@@ -3502,7 +3565,84 @@ export const ChatEditor = memo(
                       />
                     </div>
                   )}
-                  {showPlanAction && (
+                  {showPlanChip && (
+                    <TooltipProvider delayDuration={300}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className={`${styles.toolBtn} ${styles.planChip}`}
+                            data-web-shell-plan-control
+                            data-web-shell-plan-button
+                            data-web-shell-plan-chip
+                            data-labelled={showPlanLabel ? '' : undefined}
+                            // Always true, since the chip renders only while
+                            // Plan is on; it is what tells a host reading
+                            // these hooks that the control is pressed.
+                            aria-pressed={planMode}
+                            aria-label={planLabel}
+                            aria-describedby={planDescriptionId}
+                            // Not the native attribute: both hosts go busy
+                            // inside the chip's own click, and a focused button
+                            // that becomes disabled loses focus to the body
+                            // there and then.
+                            aria-disabled={modeControlsDisabled || undefined}
+                            onFocus={() => {
+                              planChipHadFocusRef.current = true;
+                            }}
+                            onBlur={() => {
+                              planChipHadFocusRef.current = false;
+                            }}
+                            onClick={() => {
+                              // Inert while busy; the click still reaches the
+                              // composer surface, as one on a bare part of the
+                              // toolbar would.
+                              if (modeControlsDisabled) return;
+                              onTogglePlan?.();
+                              // The chip unmounts once Plan is off, so it
+                              // hands focus on rather than dropping it to the
+                              // body. The composer surface this click also
+                              // reaches would focus too; asking here does not
+                              // leave the handoff to that. Propagation is left
+                              // alone so the surface still closes the
+                              // permission and model menus and the touch
+                              // quick actions, as it did for the switch this
+                              // replaces.
+                              core.focus();
+                            }}
+                          >
+                            {/* The close mark shares the icon slot and takes
+                                it over on hover or keyboard focus, so a
+                                mouse user sees no × at rest and the chip
+                                keeps its width when the mark appears. */}
+                            <span
+                              className={`${styles.toolBtnModeIcon} ${styles.planChipIcon}`}
+                            >
+                              <ModeIcon mode="plan" />
+                              <span
+                                className={styles.planChipClose}
+                                aria-hidden="true"
+                              >
+                                <XIcon size={12} strokeWidth={2} />
+                              </span>
+                            </span>
+                            {showPlanLabel && (
+                              <span className={styles.toolBtnText}>
+                                {planLabel}
+                              </span>
+                            )}
+                          </button>
+                        </TooltipTrigger>
+                        <span id={planDescriptionId} className="sr-only">
+                          {planTooltip}
+                        </span>
+                        <TooltipContent side="top">
+                          {planTooltip}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
+                  {showPlanSwitch && (
                     <TooltipProvider delayDuration={300}>
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -3963,7 +4103,28 @@ export const ChatEditor = memo(
                   <ChevronDownIcon />
                 </span>
               </span>
-              {showPlanAction && (
+              {showPlanChip && (
+                <>
+                  <span
+                    data-toolbar-measure="plan:collapsed"
+                    className={`${styles.toolBtn} ${styles.planChip}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <ModeIcon mode="plan" />
+                    </span>
+                  </span>
+                  <span
+                    data-toolbar-measure="plan:expanded"
+                    className={`${styles.toolBtn} ${styles.planChip}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <ModeIcon mode="plan" />
+                    </span>
+                    <span className={styles.toolBtnText}>{planLabel}</span>
+                  </span>
+                </>
+              )}
+              {showPlanSwitch && (
                 <>
                   <span
                     data-toolbar-measure="plan:collapsed"

@@ -136,6 +136,7 @@ const {
         | undefined,
     },
     workspace: {
+      baseUrl: '',
       capabilities: undefined as
         | {
             qwenCodeVersion: string;
@@ -782,6 +783,7 @@ beforeEach(() => {
   connection.supportedCommands = undefined;
   connection.capabilities = capabilities;
   workspace.capabilities = capabilities;
+  workspace.baseUrl = '';
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
   workspace.client.workspaceByCwd.mockReset();
@@ -882,6 +884,30 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
+  it('marks each remote workspace folder', () => {
+    workspace.baseUrl = 'https://remote.example.com';
+
+    renderSidebar();
+
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(capabilities.workspaces.length);
+  });
+
+  it('leaves local workspace folders unmarked', () => {
+    workspace.baseUrl = window.location.origin;
+
+    renderSidebar();
+
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(0);
+  });
+
   it('delegates Add workspace to the App-owned dialog', () => {
     const onOpenAddWorkspace = vi.fn();
     renderSidebar({ onOpenAddWorkspace });

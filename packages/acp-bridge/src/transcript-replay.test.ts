@@ -81,6 +81,34 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('replays exported artifact descriptors with the slash command result', () => {
+    const sessionArtifacts = [
+      {
+        kind: 'html',
+        storage: 'workspace',
+        title: 'export.html',
+        workspacePath: 'export.html',
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('export-result', {
+        type: 'assistant',
+        text: 'Session exported to HTML: export.html',
+        sessionArtifacts,
+      }),
+    );
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'agent_message_chunk',
+        _meta: expect.objectContaining({
+          source: 'slash_command',
+          sessionArtifacts,
+        }),
+      }),
+    ]);
+  });
+
   it('projects the daemon identity on every user block before a turn result', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -396,7 +424,7 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
-  it('emits legacy goalTerminal metadata for a terminal goal_state', () => {
+  it('emits one achieved card for a terminal goal_state, with no terminal twin', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       goalStateRecord('goal-complete', 'complete', {
@@ -406,14 +434,104 @@ describe('createTranscriptReplayMachine', () => {
     );
 
     expect(projected[0]?._meta).toMatchObject({
-      goalStatus: { kind: 'achieved', condition: GOAL.objective },
-      goalTerminal: {
+      goalStatus: {
         kind: 'achieved',
         condition: GOAL.objective,
         iterations: GOAL.turnCount,
         durationMs: GOAL.activeTimeMs,
       },
     });
+    expect(projected[0]?._meta).not.toHaveProperty('goalTerminal');
+  });
+
+  it('carries a recorded compression payload back through replay', () => {
+    const contextCompression = {
+      phase: 'done',
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('compress-1', {
+        type: 'assistant',
+        text: 'Compressing context...\nContext compressed (200 -> ~100).',
+        contextCompression,
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: {
+        type: 'text',
+        text: 'Compressing context...  \nContext compressed (200 -> ~100).',
+      },
+    });
+    expect(projected[0]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompression,
+    });
+  });
+
+  it('replays a recorded notice on its own key', () => {
+    const notice = { phase: 'notice', instructionsLimit: 2000 };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord(
+        'compress-notice-1',
+        {
+          type: 'assistant',
+          text: 'Compression instructions were truncated to 2000 characters.\n',
+          contextCompressionNotice: notice,
+        },
+        {
+          type: 'assistant',
+          text: 'Context compressed (200 -> 100).',
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 200,
+            newTokenCount: 100,
+          },
+        },
+      ),
+    );
+
+    // Both keys replay exactly as recorded, so the folded block keeps the note
+    // beside the result without borrowing a marker other clients interpret.
+    expect(projected).toHaveLength(2);
+    expect(projected[0]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompressionNotice: notice,
+    });
+    expect(projected[0]?._meta).not.toHaveProperty('qwenDiscreteMessage');
+    expect(projected[0]?._meta).not.toHaveProperty('contextCompression');
+    expect(
+      projected
+        .map((update) =>
+          update.sessionUpdate === 'agent_message_chunk' &&
+          update.content.type === 'text'
+            ? update.content.text
+            : '',
+        )
+        .join(''),
+    ).toBe(
+      'Compression instructions were truncated to 2000 characters.  \nContext compressed (200 -> 100).',
+    );
+    expect(projected[1]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompression: { phase: 'done' },
+    });
+  });
+
+  it('keeps a slash-command record without a compression payload unchanged', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('command-1', { type: 'assistant', text: 'Plain output.' }),
+    );
+
+    expect(projected[0]?._meta).not.toHaveProperty('contextCompression');
   });
 
   it('skips checkpoint bookkeeping goal_state records during replay', () => {
