@@ -178,10 +178,14 @@ Body.
   describe('loadRules', () => {
     it('returns empty when no rules directory exists', async () => {
       const result = await loadRules(projectRoot, true);
+      // The whole response shape on purpose: this is the one test that pins
+      // what `loadRules` returns, so a field added to the contract belongs
+      // here rather than being hidden from it (#12030).
       expect(result).toEqual({
         content: '',
         ruleCount: 0,
         conditionalRules: [],
+        ignoredExtensionRules: [],
       });
     });
 
