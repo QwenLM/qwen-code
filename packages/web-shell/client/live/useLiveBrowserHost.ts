@@ -357,21 +357,25 @@ export function useLiveBrowserHost({
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
           if (!isCurrent() || ws.readyState !== WebSocket.OPEN) return;
           const status = statusRef.current;
-          if (
-            !status ||
-            status.inputMuted === true ||
-            !STREAMING_STATES.has(status.state) ||
-            ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES
-          ) {
-            // Nothing is reaching the daemon, so the meter reads zero rather
-            // than freezing at the last level before the mute.
+          if (!status || status.inputMuted === true) {
+            // Muted: the meter reads zero rather than freezing at the last
+            // level before the mute.
             inputLevelRef.current = 0;
             return;
           }
           const { pcm, level } = floatToPcm16(
             event.inputBuffer.getChannelData(0),
           );
+          // Measured whenever the microphone is open, including before the
+          // call starts: "will it hear me?" is the question to answer while
+          // there is still a button to press.
           inputLevelRef.current = level;
+          if (
+            !STREAMING_STATES.has(status.state) ||
+            ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES
+          ) {
+            return;
+          }
           const frame = new Uint8Array(INPUT_EPOCH_BYTES + pcm.byteLength);
           new DataView(frame.buffer).setBigUint64(0, BigInt(epochRef.current));
           frame.set(new Uint8Array(pcm), INPUT_EPOCH_BYTES);

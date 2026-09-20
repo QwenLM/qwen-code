@@ -322,21 +322,32 @@ describe('useLiveBrowserHost', () => {
     expect(ws.audio()).toHaveLength(1);
   });
 
-  it('reports the microphone level, and zero whenever nothing is sent', async () => {
+  it('measures the microphone before the call starts, so it can be checked', async () => {
     await render();
     const ws = await connected();
 
-    // Before the call can take audio there is nothing to show.
+    // Idle: nothing is sent yet, but the meter answers "will it hear me?".
     speak([0.5, -0.5]);
-    expect(host!.inputLevel.current).toBe(0);
+    expect(host!.inputLevel.current).toBeCloseTo(0.5, 3);
+    expect(ws.audio()).toHaveLength(0);
 
     await act(async () => {
       ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
     });
     speak([0.5, -0.5]);
     expect(host!.inputLevel.current).toBeCloseTo(0.5, 3);
+    expect(ws.audio()).toHaveLength(1);
+  });
 
-    // Muting must drop the meter, not freeze it at the last level.
+  it('drops the meter to zero when input is muted', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current).toBeGreaterThan(0);
+
     await act(async () => {
       ws.receive({
         type: 'host.state',
@@ -344,6 +355,7 @@ describe('useLiveBrowserHost', () => {
         status: status('listening', { inputMuted: true }),
       });
     });
+    // Not frozen at the last level before the mute.
     speak([0.5, -0.5]);
     expect(host!.inputLevel.current).toBe(0);
   });
