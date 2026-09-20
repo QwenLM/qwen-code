@@ -79,6 +79,33 @@ describe('toRequestLine', () => {
       ),
     ).toThrow('GET /v1/other');
   });
+
+  it('hoists a custom_id written on a bare body into the envelope', () => {
+    // Otherwise the caller's own handle is both lost as the batch id (the
+    // results can no longer be mapped back) and sent to the provider as an
+    // unrecognised field inside the chat body.
+    expect(
+      toRequestLine({ custom_id: 'mine', messages: [] }, 3, 'qwen-plus'),
+    ).toEqual({
+      custom_id: 'mine',
+      method: 'POST',
+      url: '/v1/chat/completions',
+      body: { model: 'qwen-plus', messages: [] },
+    });
+  });
+
+  it('rejects a full request line with no body instead of nesting the envelope', () => {
+    // Read as a bare body, this line's declared method/url would be dropped
+    // and silently rewritten to the defaults — the failure the check above
+    // exists to prevent, reached from the other side.
+    expect(() =>
+      toRequestLine(
+        { custom_id: 'doc-9', method: 'PUT', url: '/v1/embeddings' },
+        0,
+        'qwen-plus',
+      ),
+    ).toThrow(/custom_id doc-9: a full request line must carry a "body"/);
+  });
 });
 
 describe('resolveEndpoint', () => {
@@ -93,7 +120,12 @@ describe('resolveEndpoint', () => {
     mockLoadSettings.mockReturnValue({
       merged: { security: { auth: { selectedType: AuthType.USE_OPENAI } } },
     });
-    mockResolve.mockReturnValue({ apiKey: 'k', baseUrl: '', model: 'm' });
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: '',
+      model: 'm',
+      authType: AuthType.USE_OPENAI,
+    });
     expect(resolveEndpoint({}).baseUrl).toBe(
       'https://dashscope.aliyuncs.com/compatible-mode/v1',
     );
@@ -101,8 +133,28 @@ describe('resolveEndpoint', () => {
       apiKey: 'k',
       baseUrl: 'https://h/v1/',
       model: 'm',
+      authType: AuthType.USE_OPENAI,
     });
     expect(resolveEndpoint({}).baseUrl).toBe('https://h/v1');
+  });
+
+  it('rejects a model that resolves onto the Responses wire', () => {
+    // The resolver can flip the protocol: a model pinned to
+    // `wireApi: "responses"` turns an `openai` startup into
+    // `openai-responses`, which has no Batch API. Refusing the selected type
+    // alone would upload a body the provider rejects per line, hours later.
+    mockLoadSettings.mockReturnValue({
+      merged: { security: { auth: { selectedType: AuthType.USE_OPENAI } } },
+    });
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: '',
+      model: 'qwen-plus',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+    });
+    expect(() => resolveEndpoint({})).toThrow(
+      /"qwen-plus" resolves to auth type "openai-responses"/,
+    );
   });
 
   it('surfaces resolver warnings on stderr, not stdout', () => {
@@ -113,6 +165,7 @@ describe('resolveEndpoint', () => {
       apiKey: 'k',
       baseUrl: '',
       model: 'm',
+      authType: AuthType.USE_OPENAI,
       warnings: ['model m is not served by the resolved provider'],
     });
     resolveEndpoint({});
@@ -132,13 +185,42 @@ describe('prepareEndpoint', () => {
         proxy: 'http://proxy.internal:8080',
       },
     });
-    mockResolve.mockReturnValue({ apiKey: 'k', baseUrl: '', model: 'm' });
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: '',
+      model: 'm',
+      authType: AuthType.USE_OPENAI,
+    });
     const resolved = await prepareEndpoint({});
     expect(mockResolveProxy).toHaveBeenCalledWith(
       undefined,
       'http://proxy.internal:8080',
     );
     expect(resolved.apiKey).toBe('k');
+  });
+
+  it('ranks the --proxy flag above settings, as the rest of the CLI does', async () => {
+    // `--proxy` is a top-level global option and the highest-priority proxy
+    // source everywhere else; dropping it here would send every upload,
+    // create, poll and download of a paid job around the proxy the operator
+    // explicitly named.
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        proxy: 'http://proxy.internal:8080',
+      },
+    });
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: '',
+      model: 'm',
+      authType: AuthType.USE_OPENAI,
+    });
+    await prepareEndpoint({}, { proxy: 'http://jump-host:1080' });
+    expect(mockResolveProxy).toHaveBeenCalledWith(
+      'http://jump-host:1080',
+      'http://proxy.internal:8080',
+    );
   });
 });
 
@@ -283,21 +365,104 @@ describe('submitBatch / fetchBatch', () => {
     expect(lines.map((l) => l.custom_id)).toEqual(['0', '2']);
   });
 
-  it('deletes the uploaded file and names its id when the create fails', async () => {
-    // The upload is already a billed object by the time create runs; a
-    // failed create must not orphan it, and the id is the only handle.
+  it('deletes the uploaded file and names its id when the create is refused', async () => {
+    // The upload is already a billed object by the time create runs; a 4xx is
+    // the provider definitely refusing the job, so the input is an orphan.
     const file = path.join(dir, 'in.jsonl');
     fs.writeFileSync(file, '{"messages":[]}\n');
     fetchMock
       .mockResolvedValueOnce(jsonRes({ id: 'file-9' }))
-      .mockResolvedValueOnce(new Response('quota', { status: 500 }));
-    await expect(submitBatch(ep, file, '24h')).rejects.toThrow('HTTP 500');
+      .mockResolvedValueOnce(new Response('bad window', { status: 400 }));
+    await expect(submitBatch(ep, file, '24h')).rejects.toThrow('HTTP 400');
     const deletes = fetchMock.mock.calls
       .filter(([, init]) => init?.method === 'DELETE')
       .map(([url]) => url);
     expect(deletes).toEqual(['https://x/v1/files/file-9']);
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('file-9'),
+    );
+  });
+
+  it('keeps the uploaded file when the create fails ambiguously', async () => {
+    // A 5xx (or a dropped socket) can arrive *after* the provider accepted
+    // the job. Deleting the input then breaks a live, billing job whose id
+    // was never reported, so the file is kept and the ambiguity is named.
+    const file = path.join(dir, 'in.jsonl');
+    fs.writeFileSync(file, '{"messages":[]}\n');
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ id: 'file-9' }))
+      .mockResolvedValueOnce(new Response('quota', { status: 500 }));
+    await expect(submitBatch(ep, file, '24h')).rejects.toThrow('HTTP 500');
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE'),
+    ).toEqual([]);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('may exist and be billing'),
+    );
+  });
+
+  it('keeps the uploaded file when the create response body is unreadable', async () => {
+    // A gateway that answers an accepted create with an HTML page: the job
+    // exists, its id never reached us, and the input is its only local trace.
+    const file = path.join(dir, 'in.jsonl');
+    fs.writeFileSync(file, '{"messages":[]}\n');
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ id: 'file-9' }))
+      .mockResolvedValueOnce(
+        new Response('<html><body>502</body></html>', { status: 200 }),
+      );
+    await expect(submitBatch(ep, file, '24h')).rejects.toThrow();
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE'),
+    ).toEqual([]);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('unreadable body'),
+    );
+  });
+
+  it('rejects a file whose custom_id values collide', async () => {
+    // Duplicate ids make the provider's output rows unmappable back to the
+    // input, which is the one thing the docs tell users to do themselves.
+    const file = path.join(dir, 'dupes.jsonl');
+    fs.writeFileSync(
+      file,
+      '{"custom_id":"a","messages":[]}\n{"custom_id":"a","messages":[]}\n',
+    );
+    await expect(submitBatch(ep, file, '24h')).rejects.toThrow(
+      `${file}:2: custom_id "a" is already used by line 1`,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reads a UTF-16LE input file (the PowerShell 5.1 `>` default)', async () => {
+    // The BOM strip alone cannot help here: every character is NUL-padded, so
+    // JSON.parse fails on line 1 with a message that does not name the cause.
+    const file = path.join(dir, 'utf16.jsonl');
+    fs.writeFileSync(file, '\uFEFF{"messages":[]}\n', 'utf16le');
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ id: 'file-1' }))
+      .mockResolvedValueOnce(jsonRes({ id: 'batch-1', status: 'validating' }));
+    const job = await submitBatch(ep, file, '24h');
+    expect(job.id).toBe('batch-1');
+    const form = fetchMock.mock.calls[0][1].body as FormData;
+    expect(
+      JSON.parse((await (form.get('file') as Blob).text()).trim()),
+    ).toEqual({
+      custom_id: '0',
+      method: 'POST',
+      url: '/v1/chat/completions',
+      body: { model: 'qwen-plus', messages: [] },
+    });
+  });
+
+  it('names the remedy for a UTF-16BE input file it cannot decode', async () => {
+    const file = path.join(dir, 'utf16be.jsonl');
+    fs.writeFileSync(
+      file,
+      Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('{}')]),
+    );
+    await expect(submitBatch(ep, file, '24h')).rejects.toThrow(
+      /UTF-16BE \(big-endian\) input is not supported/,
     );
   });
 
@@ -342,6 +507,38 @@ describe('submitBatch / fetchBatch', () => {
       'https://x/v1/files/out',
       'https://x/v1/files/err',
     ]);
+  });
+
+  it('leaves nothing under the final name when a download is cut short', async () => {
+    // A truncated body written straight to `<id>.output.jsonl` looks complete:
+    // its last line is still valid JSON, so the next fetch — and anything
+    // consuming that directory — reads a short paid result as a finished one.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonRes({
+          id: 'b',
+          status: 'completed',
+          created_at: 0,
+          output_file_id: 'out',
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode('{"custom_id":"0"}\n'),
+              );
+              controller.error(new Error('terminated'));
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+    await expect(fetchBatch(ep, 'b', dir, false)).rejects.toThrow('terminated');
+    expect(fs.existsSync(path.join(dir, 'b.output.jsonl'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'b.output.jsonl.part'))).toBe(false);
   });
 
   it('still reports a successful fetch when a remote delete fails', async () => {

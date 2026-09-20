@@ -45,6 +45,10 @@ import {
   withStreamGuards,
 } from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import {
+  expandDynamicHeaders,
+  hasDynamicPlaceholder,
+} from '../outbound-dynamic-headers.js';
 import { AuthType } from '../contentGenerator.js';
 import {
   completionAsChunk,
@@ -435,6 +439,30 @@ export class ContentGenerationPipeline {
   }
 
   /**
+   * `customHeaders` for the batch upload, resolved the way every other
+   * request path resolves them. The upload goes through the global fetch
+   * (see batch.ts's `uploadInputFile`), so it never reaches the
+   * session-aware wrapper that expands `${...}` placeholders per request and
+   * *drops* an entry whose value cannot be resolved. Handing it the raw
+   * settings map would put literal placeholder text on the wire and bypass
+   * that fail-closed rule.
+   */
+  private resolveBatchHeaders(): Record<string, string> | undefined {
+    const customHeaders = this.contentGeneratorConfig.customHeaders;
+    if (!customHeaders) return customHeaders;
+    const expanded = expandDynamicHeaders(customHeaders, this.config.cliConfig);
+    const resolved: Record<string, string> = {};
+    for (const [key, value] of Object.entries(customHeaders)) {
+      if (!hasDynamicPlaceholder(value)) {
+        resolved[key] = value;
+      } else if (key in expanded) {
+        resolved[key] = expanded[key];
+      }
+    }
+    return resolved;
+  }
+
+  /**
    * `--batch`: the same wire request, sent through the provider's Batch API
    * (files → batches → poll → output file) instead of the realtime route.
    * Only the main turn sets `executionMode`; see contentGenerator.ts.
@@ -453,7 +481,7 @@ export class ContentGenerationPipeline {
       openaiRequest,
       signal,
       undefined,
-      this.contentGeneratorConfig.customHeaders,
+      this.resolveBatchHeaders(),
     );
   }
 

@@ -908,6 +908,100 @@ describe('parseArguments', () => {
     expect(argv.batch).toBe(true);
   });
 
+  it('rejects --batch with an empty or whitespace-only positional on a TTY', async () => {
+    // The positional is variadic, and the normalizer below joins it and drops
+    // an empty result. Testing the raw array let `qwen --batch ''` through:
+    // the run went interactive with batch mode still on, so the first turn
+    // the user typed in the TUI became a >=24h batch job.
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    try {
+      for (const positional of ['', ' ']) {
+        process.argv = ['node', 'script.js', '--batch', positional];
+        mockWriteStderrLine.mockClear();
+        await expect(parseArguments()).rejects.toThrow('process.exit called');
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '--batch is only available in non-interactive runs',
+          ),
+        );
+      }
+    } finally {
+      mockExit.mockRestore();
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it('rejects --batch when the selected model resolves onto the Responses wire', async () => {
+    // `selectedType: "openai"` plus a model pinned to `wireApi: "responses"`
+    // resolves to `openai-responses`, whose generator ignores executionMode.
+    // Gating on the *selected* type let that combination through as the exact
+    // silent full-price no-op this gate exists to prevent.
+    try {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+      process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+      const argv = await parseArguments();
+      await expect(
+        loadCliConfig(
+          {
+            security: { auth: { selectedType: 'openai' } },
+            model: {
+              name: 'qwen-plus',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            },
+            modelProviders: {
+              openai: [
+                {
+                  id: 'qwen-plus',
+                  wireApi: 'responses',
+                  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                },
+              ],
+            },
+          } as unknown as Settings,
+          argv,
+        ),
+      ).rejects.toThrow(/resolved auth type is "openai-responses"/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('accepts --batch when a responses selection resolves back onto chat-completions', async () => {
+    // The mirror case: the gate follows the resolved wire in both directions,
+    // so it is not simply "reject anything that started as responses".
+    try {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+      process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        {
+          security: { auth: { selectedType: 'openai-responses' } },
+          model: {
+            name: 'qwen-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
+          modelProviders: {
+            'openai-responses': [
+              {
+                id: 'qwen-plus',
+                wireApi: 'chat-completions',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              },
+            ],
+          },
+        } as unknown as Settings,
+        argv,
+      );
+      expect(config.getBatchMode()).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('rejects --batch on a provider without a Batch API instead of silently running realtime', async () => {
     // executionMode is read by the OpenAI pipeline alone; every other
     // generator ignores it, so an ungated --batch would run at full price

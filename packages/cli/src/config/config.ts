@@ -788,12 +788,24 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return '--include-partial-messages requires --output-format stream-json';
           }
-          if (
-            argv['batch'] &&
-            (argv['promptInteractive'] ||
-              (!argv['prompt'] && !argv['query'] && process.stdin.isTTY))
-          ) {
-            return '--batch is only available in non-interactive runs: pass a prompt (-p or positional) or pipe stdin';
+          if (argv['batch']) {
+            // The positional is variadic and gets joined further down, where
+            // an empty result is dropped. Testing the raw array here would
+            // let `qwen --batch ''` through: the normalizer unsets the prompt,
+            // the run goes interactive, and the first turn the user types in
+            // the TUI becomes a >=24h batch job.
+            const rawQuery = argv['query'];
+            const positional = (
+              Array.isArray(rawQuery)
+                ? rawQuery.join(' ')
+                : String(rawQuery ?? '')
+            ).trim();
+            if (
+              argv['promptInteractive'] ||
+              (!argv['prompt'] && !positional && process.stdin.isTTY)
+            ) {
+              return '--batch is only available in non-interactive runs: pass a prompt (-p or positional) or pipe stdin';
+            }
           }
           if (argv['batch'] && (argv['acp'] || argv['experimentalAcp'])) {
             // ACP runs an editor-driven turn loop on piped stdin, so the TTY
@@ -2162,19 +2174,27 @@ export async function loadCliConfig(
     // runtime resolves that same empty value to a non-DashScope default —
     // so the gate must require an explicitly configured DashScope host, with
     // only the loopback allowance beside it.
+    //
+    // Test the *resolved* auth type — the one `Config` is built with below
+    // and the one `createContentGenerator` dispatches on — not the selected
+    // one. A model pinned to `wireApi: "responses"` resolves a
+    // `selectedType: "openai"` startup to `openai-responses`, and gating on
+    // the selected value would wave that combination straight through into
+    // the exact silent full-price no-op this gate exists to prevent.
     const baseUrl = resolvedCliConfig.baseUrl;
+    const effectiveAuthType = resolvedCliConfig.authType;
     const isDashScopeKeyAuth =
-      selectedAuthType === AuthTypeValues.USE_OPENAI &&
+      effectiveAuthType === AuthTypeValues.USE_OPENAI &&
       ((!!baseUrl &&
         DashScopeOpenAICompatibleProvider.isDashScopeProvider({
-          authType: selectedAuthType,
+          authType: effectiveAuthType,
           baseUrl,
         } as ContentGeneratorConfig)) ||
         isLoopbackEndpoint(baseUrl));
     if (!isDashScopeKeyAuth) {
       throw new FatalConfigError(
         '--batch needs an OpenAI-compatible API key on a DashScope endpoint ' +
-          `(auth type "openai"); resolved auth type is "${selectedAuthType ?? 'none'}"` +
+          `(auth type "openai"); resolved auth type is "${effectiveAuthType ?? 'none'}"` +
           `${baseUrl ? ` at ${baseUrl}` : ''}. ` +
           'No other provider has a Batch API, so the run would silently go realtime at full price.',
       );

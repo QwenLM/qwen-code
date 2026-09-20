@@ -17,6 +17,9 @@ const MAX_POLL_FAILURES = 5;
 // A settled status normally appears at `expires_at`; this grace covers clock
 // skew and a slow final status flip before the wait is abandoned.
 const EXPIRY_GRACE_S = 600;
+// The provider's completion window is documented as *at least* 24h, so that
+// is the bound used when a job reports no `expires_at` of its own.
+const MIN_WINDOW_S = 24 * 60 * 60;
 
 interface BatchOutputLine {
   custom_id: string;
@@ -235,20 +238,24 @@ export async function runBatchCompletion(
       `[batch] submitted ${batch.id}; results due by ${dueBy}\n`,
     );
     let pollFailures = 0;
+    const waitStartedAt = Date.now();
     while (!SETTLED.has(batch.status)) {
       await sleep(pollMs, signal);
       // A job is supposed to settle by its own deadline; if the provider
       // never flips the status the loop would otherwise wait forever, so
       // give up shortly after expiry and leave the job recoverable.
-      if (
-        batch.expires_at &&
-        Date.now() > (batch.expires_at + EXPIRY_GRACE_S) * 1000
-      ) {
+      // `expires_at` is not always populated (observed null on a token-plan
+      // endpoint), so fall back to the documented minimum window measured
+      // from the start of this wait — the job was created moments ago.
+      const deadlineMs = batch.expires_at
+        ? (batch.expires_at + EXPIRY_GRACE_S) * 1000
+        : waitStartedAt + (MIN_WINDOW_S + EXPIRY_GRACE_S) * 1000;
+      if (Date.now() > deadlineMs) {
         abandoned = true;
         throw new BatchNotRetryableError(
           `Batch ${batch.id} passed its completion window ` +
-            `(${new Date(batch.expires_at * 1000).toISOString()}) without ` +
-            `settling. It may still finish — recover the result with ` +
+            `${batch.expires_at ? `(${new Date(batch.expires_at * 1000).toISOString()}) ` : ''}` +
+            `without settling. It may still finish — recover the result with ` +
             `\`qwen batch fetch ${batch.id}\`.`,
         );
       }
@@ -296,6 +303,19 @@ export async function runBatchCompletion(
       // batch carries its reason only there, and a bare "failed" leaves
       // nothing to debug with once the remote file is gone.
       const detail = await failureDetail(client, batch.error_file_id);
+      // A job that settles without completing can still hold lines it already
+      // finished and was paid for (`expired`, or `failed` after partial
+      // progress). Deleting that output would destroy a purchased result, so
+      // keep every file and name the recovery command on stderr — the
+      // pipeline's error handler rewrites the message, so the hint cannot
+      // ride on the throw alone.
+      if (batch.output_file_id) {
+        abandoned = true;
+        process.stderr.write(
+          `[batch] ${batch.id} settled as ${batch.status}; keeping its files. ` +
+            `Recover what it produced with \`qwen batch fetch ${batch.id}\`.\n`,
+        );
+      }
       throw new BatchNotRetryableError(
         `Batch ${batch.id} ${batch.status}${detail ? `: ${detail}` : ''}`,
       );

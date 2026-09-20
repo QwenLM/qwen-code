@@ -237,6 +237,78 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('resolves customHeaders placeholders on the batch upload', async () => {
+      // The upload goes through the global fetch, so it never reaches the
+      // session-aware wrapper that expands `${session_id}` per request. Left
+      // raw, the literal placeholder text would go on the wire.
+      mockBatchBackend();
+      mockContentGeneratorConfig.customHeaders = {
+        'x-opencode-session': '${session_id}',
+        'x-static': 'kept',
+      };
+      mockCliConfig = {
+        getOutboundAllowDynamicHeaderValues: () => true,
+        getSessionId: () => 'sess-42',
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      mockReportOpenAiRequest.mockReturnValueOnce({});
+
+      await pipeline.execute(
+        {
+          model: 'test-model',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          executionMode: 'batch',
+        } as unknown as GenerateContentParameters,
+        'prompt-batch-headers',
+      );
+
+      const uploadInit = (fetch as unknown as Mock).mock.calls[0][1];
+      expect(uploadInit.headers).toMatchObject({
+        'x-opencode-session': 'sess-42',
+        'x-static': 'kept',
+      });
+    });
+
+    it('drops a placeholder header the consent gate refuses on the batch upload', async () => {
+      // `applyDynamicHeaderValues` deletes an entry it cannot resolve; the
+      // batch path must not become the one route that sends it anyway.
+      mockBatchBackend();
+      mockContentGeneratorConfig.customHeaders = {
+        'x-opencode-session': '${session_id}',
+        'x-static': 'kept',
+      };
+      mockCliConfig = {
+        getOutboundAllowDynamicHeaderValues: () => false,
+        getSessionId: () => 'sess-42',
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      mockReportOpenAiRequest.mockReturnValueOnce({});
+
+      await pipeline.execute(
+        {
+          model: 'test-model',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          executionMode: 'batch',
+        } as unknown as GenerateContentParameters,
+        'prompt-batch-headers-gate-off',
+      );
+
+      const uploadInit = (fetch as unknown as Mock).mock.calls[0][1];
+      expect(uploadInit.headers['x-opencode-session']).toBeUndefined();
+      expect(JSON.stringify(uploadInit.headers)).not.toContain('session_id');
+      expect(uploadInit.headers['x-static']).toBe('kept');
+    });
+
     it('rejects batch mode on Qwen OAuth before any request', async () => {
       mockContentGeneratorConfig.authType = AuthType.QWEN_OAUTH;
       pipeline = new ContentGenerationPipeline(mockConfig);

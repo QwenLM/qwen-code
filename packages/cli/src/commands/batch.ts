@@ -55,19 +55,30 @@ export function resolveEndpoint(
   env: Record<string, string | undefined> = process.env,
 ): BatchEndpoint {
   const settings = loadSettings().merged;
-  const authType =
+  const selectedAuthType =
     settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
-  if (authType !== AuthType.USE_OPENAI) {
+  if (selectedAuthType !== AuthType.USE_OPENAI) {
     throw new Error(
-      `qwen batch needs an API key (auth type "openai") for a DashScope endpoint; current auth type is "${authType ?? 'none'}".`,
+      `qwen batch needs an API key (auth type "openai") for a DashScope endpoint; current auth type is "${selectedAuthType ?? 'none'}".`,
     );
   }
-  const { apiKey, baseUrl, model, warnings } = resolveCliGenerationConfig({
-    argv: {},
-    settings,
-    selectedAuthType: authType,
-    env,
-  });
+  const { apiKey, baseUrl, model, warnings, authType } =
+    resolveCliGenerationConfig({
+      argv: {},
+      settings,
+      selectedAuthType,
+      env,
+    });
+  // The resolver can change the wire: a model pinned to `wireApi: "responses"`
+  // resolves an `openai` startup to `openai-responses`, which has no Batch
+  // API. Refuse the effective protocol rather than the selected one, or the
+  // upload succeeds and every line is rejected by the provider hours later.
+  if (authType !== AuthType.USE_OPENAI) {
+    throw new Error(
+      `qwen batch needs a model on the OpenAI-compatible chat-completions wire; ` +
+        `"${model || 'the configured model'}" resolves to auth type "${authType ?? 'none'}".`,
+    );
+  }
   if (!apiKey) {
     throw new Error(
       'No API key found: set OPENAI_API_KEY or security.auth.apiKey.',
@@ -86,23 +97,48 @@ export function resolveEndpoint(
   };
 }
 
+/** What the parsed `qwen batch …` invocation asked for, minus the subcommand. */
+export interface BatchCliOptions {
+  proxy?: string;
+  insecure?: boolean;
+}
+
 /**
  * Install the process-wide proxy dispatcher and resolve the endpoint. This
  * command path never builds a `Config` (parseArguments exits right after the
- * subcommand handler), so the `Config.initialize` install never runs and the
- * global `fetch` used below would dial out directly even when HTTPS_PROXY or
- * settings.proxy is set. One process runs a single subcommand, so this runs
- * exactly once per invocation.
+ * subcommand handler), so neither the `Config.initialize` proxy install nor
+ * loadCliConfig's `--insecure` env surfacing ever runs, and the global
+ * `fetch` used below would dial out directly — ignoring a `--proxy` the
+ * operator named explicitly — even when HTTPS_PROXY or settings.proxy is set.
+ * One process runs a single subcommand, so this runs exactly once per
+ * invocation.
  */
 export async function prepareEndpoint(
   env: Record<string, string | undefined> = process.env,
+  cliOptions: BatchCliOptions = {},
 ): Promise<BatchEndpoint> {
+  if (cliOptions.insecure) {
+    // Same route loadCliConfig uses: the dispatcher layer ORs this with
+    // NODE_TLS_REJECT_UNAUTHORIZED, which is what the global fetch obeys.
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    writeStderrLine(
+      'WARNING: TLS certificate verification is disabled (--insecure); ' +
+        'connections made by this command are vulnerable to man-in-the-middle attacks.',
+    );
+  }
   await resolveProxy(
-    undefined,
+    cliOptions.proxy,
     loadSettings().merged.proxy as string | undefined,
   );
   return resolveEndpoint(env);
 }
+
+/** Read the CLI-level options every subcommand handler forwards. */
+const cliOptionsOf = (argv: Record<string, unknown>): BatchCliOptions => ({
+  proxy: argv['proxy'] as string | undefined,
+  insecure: argv['insecure'] as boolean | undefined,
+});
 
 async function api(
   ep: BatchEndpoint,
@@ -115,8 +151,13 @@ async function api(
   });
   if (!res.ok) {
     const detail = (await res.text()).slice(0, 500);
-    throw new Error(
-      `${init.method ?? 'GET'} ${route} -> HTTP ${res.status}: ${detail}`,
+    // The status rides along so callers can tell a definite provider
+    // rejection (4xx) from an ambiguous one (5xx after the work was accepted).
+    throw Object.assign(
+      new Error(
+        `${init.method ?? 'GET'} ${route} -> HTTP ${res.status}: ${detail}`,
+      ),
+      { status: res.status },
     );
   }
   return res;
@@ -142,21 +183,74 @@ export function toRequestLine(
   index: number,
   model: string,
 ): Record<string, unknown> {
-  const req = 'body' in line ? line : { body: line };
-  const method = (req['method'] as string | undefined) ?? 'POST';
-  const url = (req['url'] as string | undefined) ?? '/v1/chat/completions';
+  // Any envelope key makes it a full request line. Testing only `body` would
+  // read `{custom_id, method, url}` — an envelope whose body is missing — as
+  // a bare chat body, nest the envelope into `body`, and rewrite its declared
+  // method/url to the defaults instead of failing here.
+  const isEnvelope = 'body' in line || 'method' in line || 'url' in line;
+  const suppliedId = line['custom_id'];
+  const label = suppliedId === undefined ? String(index) : String(suppliedId);
+  if (isEnvelope && !('body' in line)) {
+    throw new Error(
+      `custom_id ${label}: a full request line must carry a "body" — ` +
+        `or write the bare chat-completions body on its own`,
+    );
+  }
+  const method = isEnvelope
+    ? ((line['method'] as string | undefined) ?? 'POST')
+    : 'POST';
+  const url = isEnvelope
+    ? ((line['url'] as string | undefined) ?? '/v1/chat/completions')
+    : '/v1/chat/completions';
   if (method !== 'POST' || url !== '/v1/chat/completions') {
     throw new Error(
-      `custom_id ${String(req['custom_id'] ?? index)}: only ` +
+      `custom_id ${label}: only ` +
         `POST /v1/chat/completions is supported, got ${method} ${url}`,
     );
   }
+  const body = {
+    ...((isEnvelope ? line['body'] : line) as Record<string, unknown>),
+  };
+  if (!isEnvelope) {
+    // A bare body's own `custom_id` is the caller's handle for that request:
+    // hoist it into the envelope rather than both losing it as an identifier
+    // and sending it to the provider as an unrecognised request field.
+    delete body['custom_id'];
+  }
   return {
-    custom_id: req['custom_id'] ?? String(index),
+    custom_id: suppliedId === undefined ? String(index) : String(suppliedId),
     method,
     url,
-    body: { model, ...(req['body'] as Record<string, unknown>) },
+    body: { model, ...body },
   };
+}
+
+/**
+ * Pick the input file's encoding from its BOM. Windows PowerShell 5.1's `>`
+ * and `Out-File` default to UTF-16LE (`FF FE`), Notepad and
+ * `Out-File -Encoding utf8` to a UTF-8 BOM (`EF BB BF`); reading either as
+ * plain UTF-8 makes `JSON.parse` fail on line 1 with a `\uFFFD` message that
+ * does not name the actual problem. Node decodes UTF-16LE (leaving the BOM as
+ * a `\uFEFF` the caller strips) but has no UTF-16BE, so that one is refused
+ * with the remedy instead.
+ */
+function detectJsonlEncoding(file: string): BufferEncoding {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const head = Buffer.alloc(2);
+    const bytesRead = fs.readSync(fd, head, 0, 2, 0);
+    if (bytesRead < 2) return 'utf8';
+    if (head[0] === 0xff && head[1] === 0xfe) return 'utf16le';
+    if (head[0] === 0xfe && head[1] === 0xff) {
+      throw new Error(
+        `${file}: UTF-16BE (big-endian) input is not supported; re-save it as ` +
+          `UTF-8 (PowerShell: Out-File -Encoding utf8).`,
+      );
+    }
+    return 'utf8';
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 export async function submitBatch(
@@ -169,15 +263,16 @@ export async function submitBatch(
   // never reaches the CLI's larger-heap relaunch, so four live copies of the
   // file would OOM the default heap. Only the joined output is held.
   const rl = readline.createInterface({
-    input: fs.createReadStream(file, 'utf8'),
+    input: fs.createReadStream(file, detectJsonlEncoding(file)),
     crlfDelay: Infinity,
   });
   let jsonl = '';
   let lineNo = 0;
+  const lineOfId = new Map<string, number>();
   try {
     for await (const raw of rl) {
       lineNo += 1;
-      // A UTF-8 BOM is what PowerShell 5.1 and Notepad write by default;
+      // A BOM is what PowerShell 5.1 and Notepad write by default;
       // JSON.parse does not strip it.
       const text = lineNo === 1 ? raw.replace(/^\uFEFF/, '') : raw;
       if (!text.trim()) continue;
@@ -198,22 +293,33 @@ export async function submitBatch(
           `${file}:${lineNo}: each line must be a JSON object (a chat body or a full batch request line)`,
         );
       }
+      let requestLine: Record<string, unknown>;
       try {
-        // custom_id is the 0-based file line index, so results map back to
-        // the input file's own numbering even when blank lines were skipped.
-        jsonl +=
-          JSON.stringify(
-            toRequestLine(
-              parsed as Record<string, unknown>,
-              lineNo - 1,
-              ep.model,
-            ),
-          ) + '\n';
+        // custom_id defaults to the 0-based file line index, so results map
+        // back to the input file's own numbering even when blank lines were
+        // skipped.
+        requestLine = toRequestLine(
+          parsed as Record<string, unknown>,
+          lineNo - 1,
+          ep.model,
+        );
       } catch (error) {
         throw new Error(
           `${file}:${lineNo}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+      // Duplicate ids make the output rows unmappable back to the input —
+      // the one thing the docs tell users to do themselves — so refuse the
+      // file here rather than let the provider return ambiguous results.
+      const id = String(requestLine['custom_id']);
+      const firstLine = lineOfId.get(id);
+      if (firstLine !== undefined) {
+        throw new Error(
+          `${file}:${lineNo}: custom_id "${id}" is already used by line ${firstLine}; ids must be unique`,
+        );
+      }
+      lineOfId.set(id, lineNo);
+      jsonl += JSON.stringify(requestLine) + '\n';
     }
   } finally {
     rl.close();
@@ -234,17 +340,42 @@ export async function submitBatch(
   // the only handle the user has. stderr, to keep stdout to the batch id.
   writeStderrLine(`[batch] uploaded input file ${uploaded.id}`);
 
+  let res: Response;
   try {
-    return (await (
-      await postJson(ep, '/batches', {
-        input_file_id: uploaded.id,
-        endpoint: '/v1/chat/completions',
-        completion_window: window,
-      })
-    ).json()) as BatchJob;
+    res = await postJson(ep, '/batches', {
+      input_file_id: uploaded.id,
+      endpoint: '/v1/chat/completions',
+      completion_window: window,
+    });
   } catch (error) {
-    await api(ep, `/files/${uploaded.id}`, { method: 'DELETE' }).catch(
-      () => undefined,
+    // Only a 4xx is the provider definitely refusing the job, which makes the
+    // uploaded input an orphan worth deleting. A 5xx or a dropped socket is
+    // ambiguous — the job may exist and be billing — and deleting its input
+    // file would break it, so keep the file and name it instead.
+    const status = (error as { status?: number } | undefined)?.status;
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      await api(ep, `/files/${uploaded.id}`, { method: 'DELETE' }).catch(
+        () => undefined,
+      );
+    } else {
+      writeStderrLine(
+        `[batch] warning: POST /batches did not complete cleanly, so the job ` +
+          `may exist and be billing. Input file ${uploaded.id} was kept; ` +
+          `check the provider's batch list before submitting again.`,
+      );
+    }
+    throw error;
+  }
+  try {
+    return (await res.json()) as BatchJob;
+  } catch (error) {
+    // The create was accepted but its body is unreadable (a gateway HTML
+    // error page, say), so the job exists and its id never reached us.
+    // Deleting the input would destroy a live job's only local trace.
+    writeStderrLine(
+      `[batch] warning: POST /batches returned an unreadable body; the job ` +
+        `may have been created and its id was not reported. Input file ` +
+        `${uploaded.id} was kept; check the provider's batch list.`,
     );
     throw error;
   }
@@ -293,13 +424,24 @@ export async function fetchBatch(
     if (!fileId) continue;
     const res = await api(ep, `/files/${fileId}/content`);
     const target = path.join(outDir, `${id}.${suffix}.jsonl`);
+    const partial = `${target}.part`;
     // Stream to disk: the output file can approach the provider's 500 MB
     // ceiling and materialising it as one JS string risks the default heap.
     if (!res.body) throw new Error(`empty response for ${fileId}`);
-    await pipeline(
-      Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]),
-      fs.createWriteStream(target),
-    );
+    // Stage under `.part` and rename only once the body is fully consumed: a
+    // download cut short would otherwise leave a truncated file under the
+    // exact name a complete one has — and its last line can still be valid
+    // JSON, so nothing about it announces that the paid result is short.
+    try {
+      await pipeline(
+        Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]),
+        fs.createWriteStream(partial),
+      );
+    } catch (error) {
+      fs.rmSync(partial, { force: true });
+      throw error;
+    }
+    fs.renameSync(partial, target);
     written.push(target);
   }
   if (remove) {
@@ -355,7 +497,7 @@ const submitCommand: CommandModule = {
   handler: (argv) =>
     run(async () => {
       const job = await submitBatch(
-        await prepareEndpoint(),
+        await prepareEndpoint(process.env, cliOptionsOf(argv)),
         argv['file'] as string,
         argv['window'] as string,
       );
@@ -380,7 +522,10 @@ const statusCommand: CommandModule = {
       }),
   handler: (argv) =>
     run(async () => {
-      const job = await getBatch(await prepareEndpoint(), argv['id'] as string);
+      const job = await getBatch(
+        await prepareEndpoint(process.env, cliOptionsOf(argv)),
+        argv['id'] as string,
+      );
       writeStdoutLine(
         argv['json'] ? JSON.stringify(job, null, 2) : describeBatch(job),
       );
@@ -410,7 +555,7 @@ const fetchCommand: CommandModule = {
   handler: (argv) =>
     run(async () => {
       const { job, written } = await fetchBatch(
-        await prepareEndpoint(),
+        await prepareEndpoint(process.env, cliOptionsOf(argv)),
         argv['id'] as string,
         argv['out'] as string,
         argv['delete'] as boolean,
@@ -431,7 +576,7 @@ const cancelCommand: CommandModule = {
     }),
   handler: (argv) =>
     run(async () => {
-      const ep = await prepareEndpoint();
+      const ep = await prepareEndpoint(process.env, cliOptionsOf(argv));
       const job = (await (
         await postJson(ep, `/batches/${argv['id'] as string}/cancel`, {})
       ).json()) as BatchJob;

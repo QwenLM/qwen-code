@@ -211,6 +211,33 @@ describe('runBatchCompletion', () => {
     ).rejects.toThrow('Batch b3b expired');
   });
 
+  it('keeps a settled-but-failed job’s paid output instead of deleting it', async () => {
+    // `expired` (or `failed` after partial progress) can still hold lines the
+    // user already paid for. Deleting them destroys a purchased result and
+    // leaves no recovery path, so the files stay and stderr names one.
+    client.batches.create.mockResolvedValue({
+      id: 'b3c',
+      status: 'expired',
+      output_file_id: 'file-out',
+      error_file_id: 'file-err',
+    });
+    client.files.content.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          custom_id: 'turn',
+          error: { message: 'window closed' },
+        }) + '\n',
+      ),
+    );
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow('Batch b3c expired: window closed');
+    expect(client.files.delete).not.toHaveBeenCalled();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('qwen batch fetch b3c'),
+    );
+  });
+
   it('surfaces an upload failure with the server response', async () => {
     uploadFetch.mockResolvedValue(
       new Response('{"error":{"message":"bad purpose"}}', { status: 400 }),
@@ -287,6 +314,28 @@ describe('runBatchCompletion', () => {
     ).rejects.toThrow('qwen batch fetch b7e');
     // Abandoned, not cleaned up: the job may still settle server-side.
     expect(client.files.delete).not.toHaveBeenCalled();
+  });
+
+  it('bounds the wait when the job reports no expires_at', async () => {
+    // `expires_at` is optional in practice (observed null on a token-plan
+    // endpoint). Without a fallback bound a job whose status never flips
+    // holds the turn open forever, so the documented minimum window applies.
+    const startedAt = Date.now();
+    const dateNow = vi.spyOn(Date, 'now');
+    client.batches.create.mockResolvedValue({
+      id: 'b7n',
+      status: 'validating',
+    });
+    client.batches.retrieve.mockImplementation(async () => {
+      // Past 24h + the grace, measured from the start of the wait.
+      dateNow.mockReturnValue(startedAt + (24 * 60 * 60 + 601) * 1000);
+      return { id: 'b7n', status: 'validating' };
+    });
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow('qwen batch fetch b7n');
+    expect(client.files.delete).not.toHaveBeenCalled();
+    dateNow.mockRestore();
   });
 
   it('stamps the HTTP status on an upload failure for the caller classifier', async () => {
