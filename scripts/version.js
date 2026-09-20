@@ -40,7 +40,13 @@ if (!versionType) {
 }
 
 // 2. Bump the version in the root and all workspace package.json files.
-run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
+// --no-workspaces-update stops npm from reifying node_modules after each bump:
+// the tree is pnpm's, and an npm reify would silently rewrite it into npm's own
+// layout. pnpm-lock.yaml needs no refresh either: .pnpmfile.mjs rewrites every
+// internal dependency to workspace:*, so a version bump leaves it unchanged.
+run(
+  `npm version ${versionType} --no-git-tag-version --allow-same-version --no-workspaces-update`,
+);
 
 // 3. Get all workspaces and filter out the one we don't want to version.
 // We intend to maintain sdk, mobile-mcp, node-repl, and qwen-live versions
@@ -61,7 +67,7 @@ const workspacesToVersion = allWorkspaces.filter(
 
 for (const workspaceName of workspacesToVersion) {
   run(
-    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
+    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version --no-workspaces-update`,
   );
 }
 
@@ -122,17 +128,10 @@ for (const entry of readdirSync(channelsDir)) {
   }
 }
 
-// 9. Refresh node_modules and package-lock.json against the pinned exact
-// versions so the adapters resolve channel-base to the workspace link again.
-// --ignore-scripts prevents the root `prepare` lifecycle from triggering a
-// redundant full build that fails with TS5055 when dist/ already exists from
-// the initial `npm ci` install.
-run('npm install --ignore-scripts');
-
-// 10. The per-workspace `npm version` reifies above nested a stale registry
-// copy of channel-base under each adapter while ranges briefly mismatched.
-// The install above cleans both lockfiles but can leave that directory on
-// disk, where it shadows the workspace link during tsc. Remove it.
+// 9. An npm reify can nest a stale registry copy of channel-base under an
+// adapter while ranges briefly mismatch, where it shadows the workspace link
+// during tsc. Nothing above reifies any more, but a tree an earlier npm install
+// left behind can still carry that directory, so remove it.
 for (const entry of readdirSync(channelsDir)) {
   rmSync(join(channelsDir, entry, 'node_modules', '@qwen-code'), {
     recursive: true,
