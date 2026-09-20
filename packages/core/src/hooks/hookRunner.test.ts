@@ -2308,6 +2308,16 @@ describe('HookRunner', () => {
         }
         expect(killSpy).not.toHaveBeenCalled();
         expect(process.listeners('exit')).toEqual(before);
+        // A rejected pid leaves the group running, so the skip must not vanish
+        // without a trace. 0 and NaN are already short-circuited by the `!pid`
+        // branch in terminatePosixHookProcessTree and never reach this guard.
+        if (pid) {
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `hook process group ${pid}: not a safe integer greater than 1`,
+            ),
+          );
+        }
       },
     );
 
