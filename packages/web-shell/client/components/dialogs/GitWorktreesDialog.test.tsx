@@ -1188,6 +1188,35 @@ describe('GitWorktreesContent', () => {
     expect(text).not.toContain('Remove anyway');
   });
 
+  it('says something useful when the daemon named no workspace', async () => {
+    // An older daemon sends the code without the path; the sentence still
+    // has to tell the user what is in the way and that forcing will not fix
+    // it, rather than rendering a gap where the name would be.
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValue(
+      rejection({ code: 'worktree_is_workspace', error: 'refused' }),
+    );
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    const text = document.body.textContent ?? '';
+    expect(text).toContain(
+      'A registered workspace lives in this worktree, so removing it would take the workspace too.',
+    );
+    expect(text).not.toContain('The workspace  lives');
+    expect(text).not.toContain('Remove anyway');
+  });
+
   it('keeps a refusal in its own row while that row is on screen', async () => {
     workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
     listWorkspaceSessions.mockResolvedValue([]);

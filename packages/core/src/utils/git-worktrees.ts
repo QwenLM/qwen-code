@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
-import { runGit, runGitCapture } from './git-branches.js';
+import { runGit, runGitCapture, streamGitRecords } from './git-branches.js';
 import { NO_EXEC_CONFIG } from './gitUtils.js';
 
 export interface GitWorktreeEntry {
@@ -52,6 +52,23 @@ export function realpathOrSelf(target: string): string {
     return fs.realpathSync(target);
   } catch {
     return path.resolve(target);
+  }
+}
+
+/**
+ * `target` as the platform spells it, or `target` if it cannot be resolved.
+ *
+ * Unlike {@link realpathOrSelf} this asks the filesystem for the name it
+ * actually holds, which differs from the caller's on a case-insensitive
+ * volume and under Unicode normalisation. Use it to decide whether two paths
+ * are the same place; use {@link realpathOrSelf} to compare against a path
+ * git recorded, where git's own spelling is the one that has to match.
+ */
+export function realpathOnDiskOrSelf(target: string): string {
+  try {
+    return fs.realpathSync.native(target);
+  } catch {
+    return realpathOrSelf(target);
   }
 }
 
@@ -238,26 +255,28 @@ export async function commitIsReachable(
  * one, which would take every properly mapped submodule beside it down with
  * the error.
  */
-export async function worktreeHoldsSubmodules(
+export function worktreeHoldsSubmodules(
   worktreePath: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
-  const out = await runGit(
+  // Streamed, not buffered: the index is as large as the repository, and a
+  // buffered read of a monorepo's index fails — which on this gate would
+  // read as "no nested repository here" and let the next click delete one.
+  return streamGitRecords(
     worktreePath,
     [...NO_EXEC_CONFIG, 'ls-files', '--stage', '-z'],
+    (entry) => {
+      // `<mode> <sha> <stage>\t<path>`; gitlinks are mode 160000.
+      if (!entry.startsWith('160000 ')) return false;
+      const tab = entry.indexOf('\t');
+      if (tab === -1) return false;
+      const at = path.resolve(worktreePath, entry.slice(tab + 1));
+      // A gitlink with nothing at its path — never checked out, or
+      // deinitialised — has no repository here to lose.
+      return pathHoldsRepository(at);
+    },
     env,
   );
-  for (const entry of out.split('\0')) {
-    // `<mode> <sha> <stage>\t<path>`; gitlinks are mode 160000.
-    if (!entry.startsWith('160000 ')) continue;
-    const tab = entry.indexOf('\t');
-    if (tab === -1) continue;
-    const at = path.resolve(worktreePath, entry.slice(tab + 1));
-    // A gitlink with nothing at its path — never checked out, or
-    // deinitialised — has no repository here to lose.
-    if (fs.existsSync(path.join(at, '.git'))) return true;
-  }
-  return false;
 }
 
 /**
@@ -337,18 +356,48 @@ export async function dryRunGitWorktreePrune(
   return entries;
 }
 
+/** Whether the error says nothing is there, rather than that we cannot look. */
+function saysNothingIsThere(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
 /** Whether `<admin>/<id>/modules` holds a repository, not merely exists. */
 function adminEntryHoldsModules(adminEntryDir: string): boolean {
+  const modules = path.join(adminEntryDir, 'modules');
+  let entry;
   try {
-    const modules = path.join(adminEntryDir, 'modules');
-    if (!fs.statSync(modules).isDirectory()) return false;
+    entry = fs.statSync(modules);
+  } catch (err) {
+    // Not there is an answer; not being allowed to look is not. git refuses
+    // the removal on this directory either way, and the one thing that must
+    // not happen is a forced second click that deletes it unmentioned.
+    return !saysNothingIsThere(err);
+  }
+  if (!entry.isDirectory()) return false;
+  try {
     // git refuses a removal on the directory's mere existence, but an empty
     // one holds nothing to lose, and warning about it would name a loss that
     // cannot happen.
     return fs.readdirSync(modules).length > 0;
   } catch {
-    return false;
+    return true;
   }
+}
+
+/** Whether `<at>` holds a repository of its own, rather than any `.git`. */
+function pathHoldsRepository(at: string): boolean {
+  try {
+    if (fs.statSync(path.join(at, '.git')).isDirectory()) {
+      // An empty `.git` directory, or a directory of unrelated files, is not
+      // a repository — and calling it one puts a sentence about a loss in
+      // front of git's own, more exact, refusal.
+      return fs.existsSync(path.join(at, '.git', 'HEAD'));
+    }
+  } catch (err) {
+    return !saysNothingIsThere(err);
+  }
+  return readGitfileTarget(at) !== null;
 }
 
 /**
@@ -363,10 +412,14 @@ function adminEntryHoldsModules(adminEntryDir: string): boolean {
  * checkout is still there, and deletes the admin directory without a word
  * once it is gone.
  *
- * The worktree's own gitfile names its admin directory, so where there is
- * one this is a single stat. Only where there is none does it fall back to
- * reading the back-pointer of every registration, which is what ties an
- * admin entry to a worktree when the worktree can no longer say.
+ * Which admin entry belongs to this worktree is decided by the back-pointer
+ * and nothing else. The worktree's own gitfile names an entry too, and
+ * reading it would be one stat rather than one read per registration — but
+ * it names whatever it was last written with, and a directory renamed by
+ * hand rather than with `git worktree move` leaves one worktree's gitfile
+ * naming another's entry. The scan costs a read per registration on a
+ * repository with many; the answer decides whether a repository is deleted
+ * without being mentioned, so it is the back-pointer that answers.
  */
 export async function worktreeAdminHoldsModules(
   cwd: string,
@@ -377,10 +430,6 @@ export async function worktreeAdminHoldsModules(
     await runGit(cwd, [...NO_EXEC_CONFIG, 'rev-parse', '--git-common-dir'], env)
   ).trim();
   const admin = realpathOrSelf(path.resolve(cwd, commonDir, 'worktrees'));
-  const named = readGitfileTarget(worktreePath);
-  if (named !== null && path.dirname(named) === admin) {
-    return adminEntryHoldsModules(named);
-  }
   const wanted = realpathOrSelf(worktreePath);
   let ids: string[];
   try {
@@ -401,15 +450,20 @@ export async function worktreeAdminHoldsModules(
 /**
  * Where `<worktree>/.git` points, or `null` when it is not a gitfile.
  *
- * Bounded and symlink-free for the same reason the back-pointer is: the
- * worktree is somewhere a repository can write.
+ * Bounded, symlink-free and non-blocking for the same reason the
+ * back-pointer is: the worktree is somewhere a repository can write, and
+ * this runs on the daemon's own thread. A FIFO left here would otherwise
+ * hold that thread — and so every workspace and every session — until
+ * somebody wrote to it.
  */
 function readGitfileTarget(worktreePath: string): string | null {
   let fd: number | undefined;
   try {
     fd = fs.openSync(
       path.join(worktreePath, '.git'),
-      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+      fs.constants.O_RDONLY |
+        (fs.constants.O_NOFOLLOW ?? 0) |
+        (fs.constants.O_NONBLOCK ?? 0),
     );
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > GITDIR_POINTER_MAX_BYTES) return null;

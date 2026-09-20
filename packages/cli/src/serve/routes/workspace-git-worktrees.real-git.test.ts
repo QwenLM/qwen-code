@@ -47,8 +47,34 @@ interface ListedWorktree {
 
 const tmpRoots: string[] = [];
 
+/**
+ * git with the host's own configuration out of the way.
+ *
+ * Every repository these tests build configures what it needs. Leaving the
+ * machine's `~/.gitconfig` readable would let a test pass here because the
+ * author has an identity or a hook path set, and fail on a runner that does
+ * not — which is exactly how a commit made in a submodule clone got through.
+ */
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+    },
+  });
+}
+
+/** Give a repository the identity and the quiet the fixtures need. */
+function configure(dir: string): void {
+  git(dir, 'config', 'user.email', 'test@example.com');
+  git(dir, 'config', 'user.name', 'Test');
+  git(dir, 'config', 'commit.gpgsign', 'false');
+  // Neutralize an inherited global core.hooksPath (hook managers installed
+  // machine-wide), which would otherwise run somebody else's hooks here.
+  git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
 }
 
 /** A repository with `.qwen/worktrees/<slug>` checkouts, as the daemon makes. */
@@ -58,12 +84,7 @@ function makeRepo(slugs: string[] = []): { repo: string; worktrees: string[] } {
   const repo = path.join(root, 'repo');
   fs.mkdirSync(repo);
   git(repo, 'init', '-q', '-b', 'main');
-  git(repo, 'config', 'user.email', 'test@example.com');
-  git(repo, 'config', 'user.name', 'Test');
-  git(repo, 'config', 'commit.gpgsign', 'false');
-  // Neutralize an inherited global core.hooksPath (hook managers installed
-  // machine-wide), which would otherwise run somebody else's hooks here.
-  git(repo, 'config', 'core.hooksPath', path.join(repo, '.git', 'hooks'));
+  configure(repo);
   fs.writeFileSync(path.join(repo, 'a.txt'), 'one\n');
   git(repo, 'add', '.');
   git(repo, 'commit', '-q', '-m', 'init');
@@ -791,6 +812,9 @@ describe('workspace git worktree routes against real git', () => {
       '--init',
       '-q',
     );
+    // The submodule's clone is a third repository: it inherits neither the
+    // superproject's configuration nor the origin's, so it needs its own.
+    configure(path.join(target, 'sub'));
     // A commit that exists only inside the submodule's own repository, which
     // is what a removal would take with it.
     fs.writeFileSync(path.join(target, 'sub', 'only-here.txt'), 'x\n');

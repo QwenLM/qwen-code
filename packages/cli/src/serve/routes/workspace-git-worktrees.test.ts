@@ -31,6 +31,7 @@ import {
 } from '../workspace-registry.js';
 import {
   PRUNE_GUARD_REASON,
+  pruneTurnsHeld,
   registerWorkspaceQualifiedGitWorktreeRoutes,
 } from './workspace-git-worktrees.js';
 
@@ -1694,6 +1695,91 @@ describe('workspace git worktree routes', () => {
     expect(answers.map((answer) => answer.status)).toEqual([200, 200, 200]);
     expect(pruneMock).toHaveBeenCalledTimes(3);
     expect(peak).toBe(1);
+  });
+
+  it('refuses a prune that would take something it cannot name', async () => {
+    // git announces one registration per line and writes the admin
+    // directory's name into it verbatim; a name it cannot read leaves a
+    // stand-in that names no worktree. Authorising on the entry that *was*
+    // named would prune the other one with it.
+    const stale = { ...LINKED, prunable: 'gitdir file does not exist' };
+    removeMock.mockRejectedValue(new Error('fatal: validation failed'));
+    const app = mount([runtime('primary', ROOT, true)]);
+    for (const wouldDrop of [
+      [
+        { id: 'swift-fox', worktreePath: LINKED_PATH },
+        { id: null, worktreePath: null },
+      ],
+      // And the stand-in on its own names nothing, so it is not this one
+      // either — however many of them there are.
+      [{ id: null, worktreePath: null }],
+    ]) {
+      vi.clearAllMocks();
+      listMock.mockResolvedValue([MAIN, stale]);
+      removeMock.mockRejectedValue(new Error('fatal: validation failed'));
+      dryRunMock.mockResolvedValue(wouldDrop);
+      const refused = await request(app)
+        .post('/workspaces/primary/git/worktrees/remove')
+        .send({ path: LINKED.path });
+
+      expect([wouldDrop.length, refused.status]).toEqual([
+        wouldDrop.length,
+        500,
+      ]);
+      expect(pruneMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it('keeps no row for a repository once it is done with it', async () => {
+    // The map is process-global and the daemon outlives many repositories,
+    // so a row left behind for each one it ever pruned is a row per
+    // repository forever.
+    const before = pruneTurnsHeld();
+    const stale = { ...LINKED, prunable: 'gitdir file does not exist' };
+    listMock
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValue([MAIN]);
+    removeMock.mockRejectedValue(new Error('fatal: validation failed'));
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    expect(response.status).toBe(200);
+    expect(pruneMock).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pruneTurnsHeld()).toBe(before);
+  });
+
+  it('refuses a workspace registered under another spelling of the path', async () => {
+    // A daemon that canonicalises an added workspace through the platform
+    // records the spelling the disk has; git records the one it was given.
+    // On a volume that folds case those are one directory, and a gate that
+    // compares the bytes lets the removal through.
+    const folded = path.join(path.dirname(LINKED_PATH), 'SWIFT-FOX');
+    const foldsCase = fs.existsSync(folded);
+    const app = mount([
+      runtime('primary', ROOT, true),
+      runtime('folded', folded, true),
+    ]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH, force: true });
+
+    // Where the volume does not fold, `SWIFT-FOX` really is somewhere else.
+    expect([foldsCase, response.status]).toEqual([
+      foldsCase,
+      foldsCase ? 409 : 200,
+    ]);
+    if (foldsCase) {
+      expect(response.body.code).toBe('worktree_is_workspace');
+      expect(removeMock).not.toHaveBeenCalled();
+    }
   });
 
   it('keeps the turn that is waiting, not the one that finished', async () => {

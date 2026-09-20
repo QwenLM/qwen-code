@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -140,6 +140,87 @@ export function gitEnv(
  * `git worktree prune -v` is one: everything it says it would remove goes to
  * stderr, so a caller reading only stdout is told nothing at all.
  */
+/**
+ * Run git and hand each NUL-separated record to `onRecord` as it arrives.
+ *
+ * For output whose size follows the repository rather than the question —
+ * the index is the one that matters here. `execFile` buffers the whole of it
+ * and fails past `maxBuffer`, which on a safety check reads as "nothing
+ * found"; this holds only the record being read, and stops the moment
+ * `onRecord` says it has seen enough.
+ */
+export function streamGitRecords(
+  cwd: string,
+  args: string[],
+  onRecord: (record: string) => boolean,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, env: gitEnv(env) });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`git ${args[0]} timed out`));
+    }, GIT_TIMEOUT_MS);
+    let pending = '';
+    let answered = false;
+    const finish = (value: boolean) => {
+      if (answered) return;
+      answered = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      resolve(value);
+    };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      pending += chunk;
+      let at = pending.indexOf('\0');
+      while (at !== -1) {
+        const record = pending.slice(0, at);
+        pending = pending.slice(at + 1);
+        let seen;
+        try {
+          seen = onRecord(record);
+        } catch (err) {
+          // Thrown from a reader, not from git: it would otherwise leave the
+          // event emitter with nowhere to put it.
+          clearTimeout(timer);
+          answered = true;
+          child.kill('SIGKILL');
+          reject(err);
+          return;
+        }
+        if (seen) {
+          finish(true);
+          return;
+        }
+        at = pending.indexOf('\0');
+      }
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      // Bounded: a failure's first words are what a caller reports.
+      if (stderr.length < 8192) stderr += chunk;
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      if (!answered) reject(err);
+    });
+    child.on('close', (code) => {
+      if (answered) return;
+      clearTimeout(timer);
+      answered = true;
+      // A final record with no separator after it still counts.
+      if (code === 0 && pending.length > 0 && onRecord(pending)) {
+        resolve(true);
+        return;
+      }
+      if (code === 0) resolve(false);
+      else reject(new Error(stderr.trim() || `git ${args[0]} failed`));
+    });
+  });
+}
+
 export function runGitCapture(
   cwd: string,
   args: string[],

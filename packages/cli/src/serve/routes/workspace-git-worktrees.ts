@@ -15,6 +15,7 @@ import {
   listGitWorktrees,
   lockGitWorktree,
   pruneGitWorktrees,
+  realpathOnDiskOrSelf,
   realpathOrSelf,
   removeGitWorktree,
   unlockGitWorktree,
@@ -69,6 +70,11 @@ function isOwnGuardLock(entry: GitWorktreeEntry): boolean {
  */
 const pruneTurns = new Map<string, Promise<unknown>>();
 
+/** How many repositories have a prune turn outstanding. For tests. */
+export function pruneTurnsHeld(): number {
+  return pruneTurns.size;
+}
+
 function takePruneTurn<T>(repo: string, work: () => Promise<T>): Promise<T> {
   // Chained onto `settled`, never onto `queued`: a turn that threw — a prune
   // the dry run refused to authorise is the ordinary way one does — must not
@@ -84,6 +90,20 @@ function takePruneTurn<T>(repo: string, work: () => Promise<T>): Promise<T> {
   return queued;
 }
 
+/** Whether two spellings name the same directory, as the filesystem has it. */
+function samePlace(a: string, b: string): boolean {
+  return realpathOnDiskOrSelf(a) === realpathOnDiskOrSelf(b);
+}
+
+/**
+ * Whether two paths agree as git recorded them.
+ *
+ * For comparing one git-recorded path against another, where git's own
+ * spelling is what has to match on both sides. Deciding whether a path the
+ * daemon holds is the same place as one git listed is {@link samePlace}:
+ * those two can be different spellings of one directory, and every gate
+ * that exists to stop a removal has to see through that.
+ */
 function samePath(a: string, b: string): boolean {
   return realpathOrSelf(a) === realpathOrSelf(b);
 }
@@ -181,7 +201,10 @@ function managedSlug(
   entry: GitWorktreeEntry,
   managedDir: string,
 ): string | undefined {
-  const relative = path.relative(realpathOrSelf(managedDir), entry.path);
+  const relative = path.relative(
+    realpathOnDiskOrSelf(managedDir),
+    realpathOnDiskOrSelf(entry.path),
+  );
   return relative && !relative.startsWith('..') && !path.isAbsolute(relative)
     ? relative.split(path.sep)[0]
     : undefined;
@@ -207,9 +230,19 @@ function toWire(
     detached: entry.detached,
     bare: entry.bare,
     ...(locked !== undefined ? { locked } : {}),
-    ...(entry.prunable !== undefined ? { prunable: entry.prunable } : {}),
+    ...(entry.prunable !== undefined
+      ? // git's own sentence, so bounded and redacted like the lock reason
+        // beside it rather than passed through because today's wordings
+        // happen to be short and path-free.
+        {
+          prunable: redactGitMessage(
+            entry.prunable,
+            runtime.workspaceCwd,
+          ).slice(0, 512),
+        }
+      : {}),
     isMain: entry.isMain,
-    isWorkspace: samePath(entry.path, runtime.workspaceCwd),
+    isWorkspace: samePlace(entry.path, runtime.workspaceCwd),
     ...(slug ? { slug } : {}),
   };
 }
@@ -244,7 +277,7 @@ function countLiveSessionsIn(
   registry: WorkspaceRegistry,
   worktreePath: string,
 ): number {
-  const target = realpathOrSelf(worktreePath);
+  const target = realpathOnDiskOrSelf(worktreePath);
   const sessionIds = new Set<string>();
   for (const runtime of registry.listManaged()) {
     for (const session of runtime.bridge.listWorkspaceSessions(
@@ -255,7 +288,7 @@ function countLiveSessionsIn(
       if (
         session.worktree !== undefined &&
         (session.worktree.path === worktreePath ||
-          realpathOrSelf(session.worktree.path) === target)
+          realpathOnDiskOrSelf(session.worktree.path) === target)
       ) {
         sessionIds.add(session.sessionId);
       }
@@ -510,8 +543,8 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
       // gate that exists to stop that.
       const containsWorkspace = (root: string): boolean => {
         const relative = path.relative(
-          realpathOrSelf(entry.path),
-          realpathOrSelf(root),
+          realpathOnDiskOrSelf(entry.path),
+          realpathOnDiskOrSelf(root),
         );
         return (
           relative === '' ||
@@ -855,10 +888,10 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
                   runtime.env.effectiveEnv,
                 );
               } finally {
-                for (const path of held) {
+                for (const shielded of held) {
                   await unlockGitWorktree(
                     runtime.workspaceCwd,
-                    path,
+                    shielded,
                     runtime.env.effectiveEnv,
                   ).catch(() => {
                     // Left locked with a reason that names this route, which

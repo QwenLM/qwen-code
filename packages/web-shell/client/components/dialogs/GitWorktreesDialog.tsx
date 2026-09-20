@@ -717,7 +717,7 @@ export function GitWorktreesContent({
     removal &&
     (removal.blocked || removal.error) &&
     !visible.some((w) => w.path === removal.path)
-      ? removal.path
+      ? removal
       : null;
 
   let body: ReactNode;
@@ -785,8 +785,8 @@ export function GitWorktreesContent({
       {strandedRemoval !== null && (
         <div className={styles.notice} role="status">
           {t('gitWorktrees.refusedElsewhere', {
-            name: baseName(strandedRemoval),
-            reason: removal === null ? '' : (refusalSentence(t, removal) ?? ''),
+            name: baseName(strandedRemoval.path),
+            reason: refusalSentence(t, strandedRemoval) ?? '',
           })}
         </div>
       )}

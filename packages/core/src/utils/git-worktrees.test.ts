@@ -11,6 +11,8 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   dryRunGitWorktreePrune,
+  realpathOnDiskOrSelf,
+  realpathOrSelf,
   listGitWorktrees,
   parseGitWorktreeList,
   pruneGitWorktrees,
@@ -21,8 +23,20 @@ import {
 
 const tmpRoots: string[] = [];
 
+/**
+ * git with the host's own configuration out of the way, so that nothing here
+ * passes because of something the author's machine happens to have set.
+ */
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+    },
+  });
 }
 
 function makeRepo(): string {
@@ -270,6 +284,106 @@ describe('worktreeHoldsSubmodules', () => {
   }, 30_000);
 });
 
+describe('worktreeHoldsSubmodules, on what a gitlink path holds', () => {
+  it('does not call an empty or junk .git a repository', async () => {
+    const outer = makeRepo();
+    const inner = makeRepo();
+    git(
+      outer,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      inner,
+      'sub',
+    );
+    git(outer, 'commit', '-q', '-m', 'add submodule');
+    const wt = path.join(path.dirname(outer), 'wt');
+    git(outer, 'worktree', 'add', '-q', wt, '-b', 'side');
+    const dot = path.join(wt, 'sub', '.git');
+
+    // git refuses these shapes too, but with a far more exact sentence than
+    // "a nested repository would be deleted" — so do not say that first.
+    fs.mkdirSync(dot, { recursive: true });
+    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+    fs.writeFileSync(path.join(dot, 'not-a-head'), 'x\n');
+    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+    fs.rmSync(dot, { recursive: true });
+    fs.writeFileSync(dot, 'nonsense\n');
+    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+
+    fs.rmSync(dot);
+    fs.mkdirSync(dot);
+    fs.writeFileSync(path.join(dot, 'HEAD'), 'ref: refs/heads/main\n');
+    expect(await worktreeHoldsSubmodules(wt)).toBe(true);
+  }, 30_000);
+});
+
+describe('worktreeHoldsSubmodules, on an index it cannot hold', () => {
+  /** Add a gitlink to the index without checking anything out. */
+  function gitlink(repo: string, at: string, sha: string): void {
+    git(repo, 'update-index', '--add', '--cacheinfo', `160000,${sha},${at}`);
+  }
+
+  it('reads a monorepo-sized index without giving up on it', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    const head = git(repo, 'rev-parse', 'HEAD').trim();
+    const blob = git(repo, 'rev-parse', 'HEAD:a.txt').trim();
+
+    // Sorted last, so the whole index has to stream past before the answer.
+    gitlink(wt, 'zz-sub', head);
+    fs.mkdirSync(path.join(wt, 'zz-sub', '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(wt, 'zz-sub', '.git', 'HEAD'),
+      'ref: refs/heads/main\n',
+    );
+
+    // Entries only, no files: enough of them that a buffered read of
+    // `ls-files --stage` would fail, which on this gate would read as
+    // "nothing here to lose" and let the next click delete the repository.
+    const rows: string[] = [];
+    for (let i = 0; i < 160_000; i += 1) {
+      rows.push(`100644 ${blob} 0\tfiller/${String(i).padStart(9, '0')}.txt`);
+    }
+    execFileSync('git', ['update-index', '--index-info'], {
+      cwd: wt,
+      input: `${rows.join('\n')}\n`,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+      },
+    });
+    const listed = execFileSync('git', ['ls-files', '--stage', '-z'], {
+      cwd: wt,
+      encoding: 'utf8',
+      maxBuffer: 256 * 1024 * 1024,
+    });
+    expect(listed.length).toBeGreaterThan(10 * 1024 * 1024);
+
+    expect(await worktreeHoldsSubmodules(wt)).toBe(true);
+  }, 60_000);
+
+  it('will not wait on a gitlink whose .git never answers', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    gitlink(wt, 'sub', git(repo, 'rev-parse', 'HEAD').trim());
+    fs.mkdirSync(path.join(wt, 'sub'), { recursive: true });
+    // A FIFO blocks a reader until somebody writes, and nobody will. This
+    // runs on the daemon's own thread, so waiting is every workspace and
+    // every session waiting with it.
+    execFileSync('mkfifo', [path.join(wt, 'sub', '.git')]);
+
+    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+  }, 20_000);
+});
+
 describe('worktreeAdminHoldsModules', () => {
   it('sees the repository the admin side keeps, initialised or not', async () => {
     const outer = makeRepo();
@@ -337,33 +451,77 @@ describe('worktreeAdminHoldsModules', () => {
     expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
   }, 20_000);
 
-  it('asks the worktree where its own admin entry is', async () => {
+  it('answers about this worktree, not the entry its gitfile happens to name', async () => {
+    const repo = makeRepo();
+    const alpha = path.join(path.dirname(repo), 'alpha');
+    const beta = path.join(path.dirname(repo), 'beta');
+    git(repo, 'worktree', 'add', '-q', alpha, '-b', 'a');
+    git(repo, 'worktree', 'add', '-q', beta, '-b', 'b');
+    const adminOf = (id: string) => path.join(repo, '.git', 'worktrees', id);
+
+    // Renamed by hand rather than with `git worktree move`, which is an
+    // ordinary mistake: beta's gitfile now names alpha's admin entry, while
+    // the back-pointers still say which directory each entry was built for.
+    fs.rmSync(beta, { recursive: true, force: true });
+    fs.renameSync(alpha, beta);
+
+    // Neither direction may be answered from the entry the gitfile names.
+    fs.mkdirSync(path.join(adminOf('alpha'), 'modules', 'sub'), {
+      recursive: true,
+    });
+    expect(await worktreeAdminHoldsModules(repo, beta)).toBe(false);
+
+    fs.rmSync(path.join(adminOf('alpha'), 'modules'), { recursive: true });
+    fs.mkdirSync(path.join(adminOf('beta'), 'modules', 'sub'), {
+      recursive: true,
+    });
+    // beta's own entry still points at beta, so this one is attributed.
+    fs.writeFileSync(
+      path.join(adminOf('beta'), 'gitdir'),
+      `${path.join(beta, '.git')}\n`,
+    );
+    expect(await worktreeAdminHoldsModules(repo, beta)).toBe(true);
+  }, 20_000);
+
+  it('never lets "cannot look" pass for "nothing is there"', async () => {
     const repo = makeRepo();
     const wt = path.join(path.dirname(repo), 'wt');
     git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
-    const admin = path.join(repo, '.git', 'worktrees', 'wt');
-    fs.mkdirSync(path.join(admin, 'modules', 'sub'), { recursive: true });
+    const modules = path.join(repo, '.git', 'worktrees', 'wt', 'modules');
+    fs.mkdirSync(path.join(modules, 'sub'), { recursive: true });
 
-    // The gitfile names the admin entry directly, which is one stat rather
-    // than a back-pointer read per registration — a repository here has
-    // hundreds. It is also the only thing left that can answer once the
-    // back-pointer is unreadable.
-    const elsewhere = path.join(path.dirname(repo), 'pointer');
-    fs.writeFileSync(elsewhere, `${path.join(wt, '.git')}\n`);
-    fs.rmSync(path.join(admin, 'gitdir'));
-    fs.symlinkSync(elsewhere, path.join(admin, 'gitdir'));
+    fs.chmodSync(modules, 0o000);
+    try {
+      // git refuses the removal over this directory whether or not anyone
+      // can list it, and the one thing that must not happen is a second
+      // click that deletes it with nothing said.
+      expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
+    } finally {
+      fs.chmodSync(modules, 0o755);
+    }
+
+    // Nor can it even be looked at: a loop is not "nothing is there".
+    fs.rmSync(modules, { recursive: true });
+    fs.symlinkSync('modules', modules);
+    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
+  }, 20_000);
+
+  it('answers for any admin entry that points here, not just the first', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    const admin = path.join(repo, '.git', 'worktrees');
+    // A stale duplicate sorting first, claiming the same worktree and
+    // holding nothing: answering from it would miss the one behind it.
+    fs.mkdirSync(path.join(admin, 'a-ghost'), { recursive: true });
+    fs.writeFileSync(
+      path.join(admin, 'a-ghost', 'gitdir'),
+      `${path.join(wt, '.git')}\n`,
+    );
+    fs.mkdirSync(path.join(admin, 'wt', 'modules', 'sub'), { recursive: true });
+    fs.rmSync(path.join(wt, '.git'));
 
     expect(await worktreeAdminHoldsModules(repo, wt)).toBe(true);
-
-    // And bounded like the back-pointer is. Padded past the bound the gitfile
-    // is not a pointer this should read a prefix of, and with the
-    // back-pointer unreadable there is nothing else to fall back to — so the
-    // answer is "cannot tell", not a guess made from the first 8 KiB.
-    fs.writeFileSync(
-      path.join(wt, '.git'),
-      `gitdir: ${admin}${' '.repeat(9000)}\n`,
-    );
-    expect(await worktreeAdminHoldsModules(repo, wt)).toBe(false);
   }, 20_000);
 
   it('falls back to the back-pointer, and will not follow a link to one', async () => {
@@ -396,6 +554,34 @@ describe('worktreeAdminHoldsModules', () => {
     execFileSync('mkfifo', [path.join(admin, 'gitdir')]);
     expect(await worktreeAdminHoldsModules(repo, wt)).toBe(false);
   }, 20_000);
+});
+
+describe('realpathOrSelf / realpathOnDiskOrSelf', () => {
+  it('keeps the caller\u2019s spelling, and can ask the disk for its own', () => {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-rp-')),
+    );
+    tmpRoots.push(root);
+    fs.mkdirSync(path.join(root, 'MiXeD'));
+    const asked = path.join(root, 'mixed');
+    // One directory under two spellings only where the volume folds case;
+    // where it does not, `mixed` is simply not there and both answer alike.
+    const folds = fs.existsSync(asked);
+
+    // git records the spelling it was given, so a comparison against git's
+    // own listing has to keep the caller's.
+    expect(realpathOrSelf(asked)).toBe(asked);
+    // Deciding whether two paths are the same place is the other question.
+    expect(realpathOnDiskOrSelf(asked)).toBe(
+      folds ? path.join(root, 'MiXeD') : asked,
+    );
+  });
+
+  it('answers for a path that is not there at all', () => {
+    const gone = path.join(os.tmpdir(), 'qwen-rp-missing', 'x');
+    expect(realpathOrSelf(gone)).toBe(path.resolve(gone));
+    expect(realpathOnDiskOrSelf(gone)).toBe(path.resolve(gone));
+  });
 });
 
 describe('dryRunGitWorktreePrune', () => {
@@ -503,6 +689,21 @@ describe('dryRunGitWorktreePrune', () => {
         worktreePath:
           fs.realpathSync(path.join(repo, 'nested')) + path.sep + 'wt',
       },
+    ]);
+  }, 20_000);
+
+  it('will not read a pointer that says nothing', async () => {
+    const repo = makeRepo();
+    const wt = path.join(path.dirname(repo), 'wt');
+    git(repo, 'worktree', 'add', '-q', wt, '-b', 'side');
+    fs.rmSync(wt, { recursive: true, force: true });
+    // Trailing whitespace is git's line ending, not part of the path; a
+    // pointer that is nothing but whitespace would otherwise resolve to the
+    // admin directory holding it.
+    fs.writeFileSync(path.join(adminDir(repo), 'wt', 'gitdir'), '  \n');
+
+    expect(await dryRunGitWorktreePrune(repo)).toEqual([
+      { id: 'wt', worktreePath: null },
     ]);
   }, 20_000);
 
