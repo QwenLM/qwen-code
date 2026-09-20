@@ -45,6 +45,10 @@
       "types": "./dist/src/tools/sub-session-constants.d.ts",
       "import": "./dist/src/tools/sub-session-constants.js"
     },
+    "./telemetryConstants": {
+      "types": "./dist/src/telemetry/constants.d.ts",
+      "import": "./dist/src/telemetry/constants.js"
+    },
     "./toolWriteOrigin": {
       "types": "./dist/src/services/tool-write-origin.d.ts",
       "import": "./dist/src/services/tool-write-origin.js"
