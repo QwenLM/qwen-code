@@ -886,7 +886,7 @@ describe('receipts', () => {
     expect(gate.getHeld()).toHaveLength(1);
 
     // Once the host can answer again, the release goes through.
-    owns = () => true;
+    owns = (id) => id;
     expect(gate.decide(parked.msgId, 'approve')).toBe('done');
     expect(delivered).toEqual([parked]);
   });
@@ -2637,6 +2637,23 @@ describe('a gate for a process hosting several sessions', () => {
     expect(host.delivered).toHaveLength(1);
   });
 
+  it('leaves a session its baseline when a replay of its message is rolled back', () => {
+    // A rollback has to unwind exactly what admission recorded. Admission
+    // records per addressee now, so a rollback that matched on the body
+    // and the id alone would take the addressee's own baseline with it,
+    // and the line would land in that session a second time.
+    const host = metered();
+
+    // Accepted by session a, which is now its baseline for that line.
+    expect(host.gate.admit(host.line('session-a', 'm1'))).toBe('accept');
+    // The same frame re-pinned to session b. Its id is already settled,
+    // so the gate repeats that verdict and rolls the admission back.
+    expect(host.gate.admit(host.line('session-b', 'm1'))).toBe('refused');
+    // Session a has still heard that line.
+    expect(host.gate.admit(host.line('session-a', 'm2'))).toBe('dropped');
+    expect(host.delivered).toHaveLength(1);
+  });
+
   it('keeps a session as its own repeat baseline across an interleaving', () => {
     // The baseline is per addressee, not "the last message overall", so
     // a sender alternating between two sessions cannot launder a repeat
@@ -2727,10 +2744,48 @@ describe('a host with no way to show a parked message', () => {
     expect(
       host.gate.admit(granted, {
         selfSent: false,
-        controller: { id: 'grant-1' },
+        controller: { id: 'grant-1', label: 'a program' },
       }),
     ).toBe('accept');
     expect(host.delivered).toEqual([granted]);
+  });
+
+  it('lets a message refused for want of a reviewer be sent again', () => {
+    // Some reasons a message is held are momentary — a settings reader
+    // that threw while a session tore down reads as `policy-unreadable`.
+    // Settling the id would refuse that exact message for good.
+    let throwing = true;
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      presentsHolds: false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => {
+        if (throwing) throw new Error('the settings are being reloaded');
+        return undefined;
+      },
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const f = frame({ fromMode: 'bypass', toSessionId: 'session-a' });
+
+    expect(gate.admit(f)).toBe('refused');
+    throwing = false;
+    // The same message, once the reader can answer again.
+    expect(gate.admit(f)).toBe('accept');
+    expect(delivered).toEqual([f]);
+    expect(statuses).toEqual(['refused', 'delivered']);
+  });
+
+  it('keeps refusing a message its session has a standing refusal for', () => {
+    const host = refusingHost('refuse', ApprovalMode.YOLO);
+    const f = frame({ fromMode: 'bypass', toSessionId: 'session-a' });
+
+    expect(host.gate.admit(f)).toBe('refused');
+    // The id is settled: the policy itself said no, so the answer stands.
+    expect(host.gate.admit(f)).toBe('refused');
+    expect(host.delivered).toEqual([]);
   });
 
   it('parks what it would park when the host says nothing', () => {

@@ -382,7 +382,12 @@ export class PeerAdmission {
    * The token stays spent. It is the only bound on how often a peer can
    * make the receiver attempt, and fail, a delivery.
    */
-  forgetBody(senderKey: string, body: string, messageId?: string): void {
+  forgetBody(
+    senderKey: string,
+    body: string,
+    messageId?: string,
+    dedupScope?: string,
+  ): void {
     const meter = this.senders.get(senderKey);
     if (meter === undefined) return;
     const bodyHash = hashBody(body);
@@ -390,6 +395,12 @@ export class PeerAdmission {
       const record = meter.bodies[index];
       if (
         record?.hash === bodyHash &&
+        // Keyed as `admit` keyed it, addressee included. A caller rolling
+        // back a message to one session must not take the record another
+        // session's message left: a re-sent id can carry the same body to
+        // a second session and leave a record under that one, and matching
+        // on the body and the id alone would unwind both.
+        record.scope === dedupScope &&
         (messageId === undefined || record.messageId === messageId)
       ) {
         meter.bodies.splice(index, 1);

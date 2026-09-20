@@ -301,9 +301,18 @@ export interface HeldMessage {
  * workspaces, each with its own review policy, hold lifetime and
  * approval mode, and a message is judged by the rules of the session it
  * is for. Such a host only ever sees pinned frames here: an unpinned one
- * is answered as misaddressed before it reaches the gate. The name it is
- * asked about is the one its own `resolveSessionId` returned, so the two
- * spellings a session can answer to arrive here as one name.
+ * is answered as misaddressed before it reaches the gate.
+ *
+ * The name a reader is asked about is normally the one that host's own
+ * `resolveSessionId` returned, so the two spellings a session can answer
+ * to arrive as one name. It is not always: a message parked for a session
+ * that has since left is re-judged with the id it carries, because the
+ * resolver no longer knows that name — and so is one whose resolver
+ * threw. **Every reader must tolerate a name it does not know**, and
+ * answer rather than throw where it can. A reader that does throw is
+ * caught here: the policy reads as unreadable, the mode as unknown, the
+ * scope as absent and the lifetime as the default, all of which park the
+ * message rather than deliver it.
  */
 export interface InboundGateOptions {
   /**
@@ -716,9 +725,7 @@ export class InboundGate {
       messageId: frame.msgId,
       // "The same thing again" is a question about one conversation. A
       // gate answering for one session has one, and passes nothing here.
-      ...(this.answersForSeveralSessions
-        ? { dedupScope: this.addressee(frame) ?? '' }
-        : {}),
+      dedupScope: this.dedupScope(frame),
       // A hook reporting the same line twice, or a user repeating
       // themselves to a controller, is not the model-driven repetition
       // the duplicate check exists to stop. Both are still rate limited.
@@ -789,7 +796,15 @@ export class InboundGate {
       // turning the next verbatim attempt into a `duplicate`, which would
       // replace "stop" with "fold it into a later message".
       this.forgetAdmittedBody(frame, origin);
-      this.recordSettled(frame.msgId, 'refused');
+      // Tombstoned only when the policy itself refused. A hold this host
+      // could not present is refused for want of a reviewer, and some of
+      // the reasons a message is held are momentary — a settings reader
+      // that threw while a session tore down reads as `policy-unreadable`.
+      // Settling the id would refuse that exact message for good, which is
+      // the same trade the queue-full path already declines to make.
+      if (decision.policy === 'refuse') {
+        this.recordSettled(frame.msgId, 'refused');
+      }
       void this.report(frame, 'refused');
       return 'refused';
     }
@@ -1118,6 +1133,19 @@ export class InboundGate {
   }
 
   /**
+   * Which conversation the repeat check measures a frame against.
+   *
+   * Undefined for a gate answering for one session: it has one
+   * conversation, and scoping would be a distinction without a
+   * difference. Read by `admit` and by every rollback, so the two cannot
+   * key the same record differently.
+   */
+  private dedupScope(frame: PeerUserFrame): string | undefined {
+    if (!this.answersForSeveralSessions) return undefined;
+    return this.addressee(frame) ?? '';
+  }
+
+  /**
    * The session a held message counts against for the hold cap.
    *
    * One bucket unless this gate answers for several sessions: a session
@@ -1230,6 +1258,7 @@ export class InboundGate {
       peerSenderKey(frame, origin),
       frame.message.content,
       frame.msgId,
+      this.dedupScope(frame),
     );
   }
 
