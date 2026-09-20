@@ -3381,6 +3381,13 @@ describe('PermissionManager', () => {
         ['plan-mode ask_user_question', 'ask_user_question'],
         ['task_stop', 'task_stop'],
         ['tool_search', 'tool_search'],
+        // The bridge's other half. `tool_search` reviews a withheld schema and
+        // `tool_call` invokes it, so withholding `tool_call` under a narrow
+        // allowlist would leave every demoted tool readable and uncallable —
+        // the inverse of what the allowlist is for. Exempted when the bridge
+        // landed (#10410) and untested until now: deleting that arm of
+        // isExemptFromEagerAllowList left this whole suite green.
+        ['tool_call', 'tool_call'],
       ];
 
       it.each(exempt)('%s', async (_label, toolName) => {

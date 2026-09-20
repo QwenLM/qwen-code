@@ -30,7 +30,9 @@ Each feature that registers a tool pays for that tool's schema on every request.
 
 ### 2. Keep the eager tool surface to what you actually use
 
-`tools.eager` is an allowlist of built-in tools whose schemas stay in the initial request. Everything else becomes **deferred**: still registered, still listed in `/tools`, still callable — the model loads it with `tool_search` when it turns out to need it.
+`tools.eager` is an allowlist of built-in tools whose schemas stay in the initial request. Everything else becomes **deferred**: still registered, still listed in `/tools`, still callable — the model reaches it through the `tool_search` → `tool_call` bridge when it turns out to need it.
+
+Measure the allowlist against the right baseline. Tools that are on demand by _their own_ default are already absent from the first request, and since `tools.toolSearch.threshold` began defaulting to `0` nothing preloads them back, so an allowlist's saving is only the schemas of the eager-by-default tools it withholds — not the whole built-in surface. Take a fresh `/context` reading on the version you actually run before attributing a number to your list.
 
 ```jsonc
 {
@@ -51,9 +53,9 @@ Each feature that registers a tool pays for that tool's schema on every request.
 Four things to know before you use it:
 
 - **It is not a disable.** A demoted tool stays reachable. If you meant to remove a tool, use a whole-tool `permissions.deny` rule or `tools.disabled`.
-- **Some tools are exempt** and keep their normal loading behaviour whatever the list says: `tool_search`, `structured_output`, the plan-mode lifecycle tools (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`), `task_stop`, MCP tools (`mcp__*`), and Computer Use tools (`computer_use__*`). `task_stop` and the Computer Use family are on demand by default anyway, so gating them would save nothing; MCP tools are governed by `tools.toolSearch.*` and the per-server `includeTools` / `excludeTools` filters, and the only way to drop one of the first three is `permissions.deny`.
+- **Some tools are exempt** and keep their normal loading behaviour whatever the list says: `tool_search` and `tool_call` (the two halves of the bridge that reaches a withheld tool), `structured_output`, the plan-mode lifecycle tools (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`), `task_stop`, MCP tools (`mcp__*`), and Computer Use tools (`computer_use__*`). `task_stop` and the Computer Use family are on demand by default anyway, so gating them would save nothing; MCP tools are governed by `tools.toolSearch.*` and the per-server `includeTools` / `excludeTools` filters; and the only way to drop one of the rest is `permissions.deny` — which for the bridge tools is the same as giving up the allowlist, since a withheld tool then has no route at all.
 - **`permissions.allow` saves nothing.** It is pure auto-approval: it never demotes, hides, or removes a tool. Neither do approval modes.
-- **It needs `tool_search` to stay on.** If ToolSearch is not registered — `tools.toolSearch.enabled: false`, a `tool_search` deny rule, or the automatic opt-out for DeepSeek models — the allowlist still withholds the schemas but nothing can load them back, and the demoted tools are out of reach for that session.
+- **It needs both halves of the bridge.** A withheld tool is reviewed with `tool_search` and invoked through `tool_call`; `tool_search` alone can read a schema it cannot call. If either is unregistered — `tools.toolSearch.enabled: false` denies both, a deny rule on either removes one, or the automatic opt-out for prefix-caching models such as DeepSeek applies — the allowlist still withholds the schemas, nothing can load them back, and the demoted tools are out of reach for that session (a warning is logged). Ordinary deferred tools fall back to being declared eagerly in that case; tools you demoted with `tools.eager` do not.
 
 `tools.visible` is the escape hatch for one tool you want declared up front even though it is deferred by default.
 
@@ -73,7 +75,7 @@ The base prompt is already the smallest of the resident categories, and roughly 
 - **The background memory agent needs six tools** (`read_file`, `grep_search`, `glob`, `run_shell_command`, `write_file`, `edit`). Denying one degrades it silently rather than erroring.
 - **Tokens can move rather than disappear.** Take away `grep_search` and `glob` and the model may reach for `grep` and `find` through the shell, whose output lands in the conversation. New output adds input tokens when first sent; unchanged history containing it may hit the provider's prefix cache on later requests. Judge a change by total input tokens per task, provider-reported cached and uncached input, and the actual bill, not by the prefix alone.
 - **Resumed sessions re-send what they need.** A demoted tool that appears in a resumed session's history gets its schema back automatically; a denied tool does not.
-- **A deferred tool that is revealed mid-session invalidates the prefix cache.** Function declarations sit at the very front of the prefix, so one reveal rewrites it and the whole prompt is recomputed for that turn. Preloading the deferred set (`tools.toolSearch.threshold`) avoids that at the cost of carrying those schemas every turn; `threshold: 0` wins only if the session genuinely never needs them.
+- **Reaching a withheld tool no longer rewrites the prefix — but it used to, and old advice assumes it does.** Discovery goes through the `tool_search` → `tool_call` bridge, which leaves the declared tool list byte-stable, so the prompt-cache prefix survives a mid-session discovery; the cost is one extra round trip before a withheld tool's first use. That is why `tools.toolSearch.threshold` now defaults to `0`: carrying the deferred set every turn is no longer the cheaper side of the trade. Raise the threshold only to buy back that round trip for a session that will certainly need those tools.
 - **Prefix-caching models invert the trade.** For models whose discount depends on a stable prefix, keeping the prefix identical is worth more than making it small; DeepSeek models opt out of ToolSearch automatically for this reason.
 - **Scope leaks.** Settings apply to every client that reads them (CLI, Web Shell, serve), so a per-deployment tool surface needs its own settings scope.
 
