@@ -2920,6 +2920,7 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
+            default: undefined as boolean | undefined,
             description:
               'Use node-pty for an interactive shell experience. Explicit one-shot prompts default to child_process when this setting is unset; interactive and input-driven modes default to PTY.',
             showInDialog: true,
