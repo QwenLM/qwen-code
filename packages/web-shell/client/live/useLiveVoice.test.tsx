@@ -42,6 +42,8 @@ vi.mock('./useLiveBrowserHost', () => ({
       phase: 'idle',
       closeReason: undefined,
       errorMessage: undefined,
+      captureMode: undefined,
+      inputLevel: { current: { level: 0, at: 0, dropping: false } },
       connect: vi.fn(),
       disconnect: vi.fn(),
     };
