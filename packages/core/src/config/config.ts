@@ -4954,12 +4954,14 @@ export class Config {
       return undefined;
     }
 
-    // Name whichever bound actually fired, so the number in the message is one
-    // the reader can act on rather than a percentage that did not apply.
+    // Lead with whichever bound actually fired, so the number the reader is
+    // asked to act on is the one that applies — but keep naming the window
+    // either way, since that is what tells them how the budget was derived.
+    const windowClause = `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this model's ${contextWindowSize.toLocaleString()} token context window`;
     const bound =
       thresholdTokens === ratioTokens
-        ? `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this model's ${contextWindowSize.toLocaleString()} token context window`
-        : `${MEMORY_CONTEXT_WARNING_MAX_TOKENS.toLocaleString()} tokens, which every request of this session carries`;
+        ? windowClause
+        : `${MEMORY_CONTEXT_WARNING_MAX_TOKENS.toLocaleString()} tokens — the smaller of that and ${windowClause}`;
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ${bound}. ` +

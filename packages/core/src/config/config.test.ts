@@ -9530,10 +9530,11 @@ describe('Server Config (config.ts)', () => {
     expect(warnings).toContainEqual(
       expect.stringContaining('uses about 12,000 tokens'),
     );
-    // The bound that actually fired, not a percentage that did not.
+    // The bound that actually fired leads, and the window is still named so a
+    // reader can see how the budget was derived.
     expect(warnings).toContainEqual(
       expect.stringContaining(
-        'more than 10,000 tokens, which every request of this session carries',
+        "more than 10,000 tokens — the smaller of that and 15% of this model's 1,000,000 token context window",
       ),
     );
     expect(warnings.join('\n')).not.toContain('more than 15%');
