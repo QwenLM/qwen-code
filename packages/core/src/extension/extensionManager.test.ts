@@ -3629,14 +3629,22 @@ describe('extension tests', () => {
         // orphaned permit holders until the module-wide pool was exhausted
         // and every subsequent load in the process hung forever.
         // ceil(64 / (8 - 1)) + 1 failing scans is past the old wedge point.
+        // The wedge needs at least 2 concurrent extensions (one failing, one
+        // holding permits), so bail out loudly if the constants ever change
+        // to make that impossible.
+        const WEDGE_EXTENSIONS = EXTENSION_SCAN_CONCURRENCY - 1;
+        if (WEDGE_EXTENSIONS < 1) {
+          throw new Error(
+            `EXTENSION_SCAN_CONCURRENCY=${EXTENSION_SCAN_CONCURRENCY} leaves no surviving sibling for the wedge scenario; rewrite this test against the new constants`,
+          );
+        }
         const FAILING_SCANS =
-          Math.ceil(SKILL_LOAD_CONCURRENCY / (EXTENSION_SCAN_CONCURRENCY - 1)) +
-          1;
+          Math.ceil(SKILL_LOAD_CONCURRENCY / WEDGE_EXTENSIONS) + 1;
         await fsp.symlink(
           path.join(tempHomeDir, 'missing'),
           path.join(userExtensionsDir, 'aaa-dangling'),
         );
-        for (let i = 0; i < EXTENSION_SCAN_CONCURRENCY - 1; i += 1) {
+        for (let i = 0; i < WEDGE_EXTENSIONS; i += 1) {
           const extDir = createExtension({
             extensionsDir: userExtensionsDir,
             name: `wedge-ext-${i}`,
@@ -3666,9 +3674,7 @@ describe('extension tests', () => {
         const recovered = createExtensionManager();
         fs.unlinkSync(path.join(userExtensionsDir, 'aaa-dangling'));
         await recovered.refreshCache();
-        expect(recovered.getLoadedExtensions()).toHaveLength(
-          EXTENSION_SCAN_CONCURRENCY - 1,
-        );
+        expect(recovered.getLoadedExtensions()).toHaveLength(WEDGE_EXTENSIONS);
       },
     );
   });

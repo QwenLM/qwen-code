@@ -7,8 +7,38 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadAgentPluginSkills, parseAgentPluginSkill } from './skills.js';
+
+// R3 pin: an EMFILE mid-scan must reject the whole load instead of resolving
+// with the surviving skills. The failing path is toggled per-test; the real
+// implementation is re-attached whenever the toggle is off. skills.ts reads
+// through `fs.promises.readFile` (the `node:fs` namespace), so mock there.
+const emfileProbe = vi.hoisted(() => ({
+  failReadOf: undefined as string | undefined,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    promises: {
+      ...actual.promises,
+      readFile: async (
+        ...args: Parameters<typeof actual.promises.readFile>
+      ) => {
+        if (
+          emfileProbe.failReadOf !== undefined &&
+          String(args[0]).includes(emfileProbe.failReadOf)
+        ) {
+          throw Object.assign(new Error('EMFILE: too many open files'), {
+            code: 'EMFILE',
+          });
+        }
+        return actual.promises.readFile(...args);
+      },
+    },
+  };
+});
 
 describe('Agent Plugins v1 skills', () => {
   let pluginRoot: string;
@@ -86,4 +116,20 @@ describe('Agent Plugins v1 skills', () => {
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content);
   }
+
+  it('rejects the whole load when a skill read hits resource exhaustion', async () => {
+    // An EMFILE mid-scan must fail the refresh closed (rethrown), not resolve
+    // with the surviving skills — a truncated set committed as successful
+    // would stick until restart.
+    writeSkill(
+      'direct',
+      '---\nname: direct\ndescription: Direct skill\n---\nDo work.',
+    );
+    emfileProbe.failReadOf = 'direct';
+    try {
+      await expect(loadAgentPluginSkills(pluginRoot)).rejects.toThrow('EMFILE');
+    } finally {
+      emfileProbe.failReadOf = undefined;
+    }
+  });
 });

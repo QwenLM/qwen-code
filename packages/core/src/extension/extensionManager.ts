@@ -1390,6 +1390,10 @@ export class ExtensionManager {
     // Captured before the load, not after: an install landing mid-refresh must
     // leave the committed fingerprint stale so the next check still sees it.
     // Stamping post-load would mask that change until something else moved.
+    // The residual "truncated load sticks" concern is closed at the loader
+    // entrances instead: resource-exhaustion errors (EMFILE/ENFILE/…, see
+    // `isResourceExhaustion` in skill-load.ts) are rethrown, so a load that
+    // died mid-scan never reaches this stamp.
     const dirFingerprintBeforeLoad =
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
     const { value: extensions, snapshot } =

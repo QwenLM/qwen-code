@@ -19,20 +19,45 @@ const debugLogger = createDebugLogger('SKILL_LOAD');
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 /**
+ * Resource-exhaustion errnos that must never be swallowed by the per-entry
+ * skips in the extension/skill/agent loaders. Every queued
+ * `fs.promises.readFile` opens its descriptor as soon as the libuv pool
+ * dequeues it, so under a low `RLIMIT_NOFILE` (long-running daemons holding
+ * pipes/sockets, containers with a low LimitNOFILE, system-wide ENFILE) these
+ * reads fail mid-scan. Treating them like parse failures would silently commit
+ * a truncated extension set — and, because the cache fingerprint is captured
+ * from pre-load disk state, that truncation would stick until restart. They
+ * must instead fail the whole refresh closed so a later refresh retries.
+ */
+const RESOURCE_EXHAUSTION_CODES = new Set([
+  'EMFILE',
+  'ENFILE',
+  'EAGAIN',
+  'ENOMEM',
+]);
+
+/**
+ * Rethrow when `error` is resource exhaustion (see RESOURCE_EXHAUSTION_CODES);
+ * everything else — parse/validation failures, ENOENT-class skips — is the
+ * caller's business and stays swallowed.
+ */
+export function isResourceExhaustion(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === 'string' && RESOURCE_EXHAUSTION_CODES.has(code);
+}
+
+/**
  * Upper bound on the **total** number of manifest reads in flight across all
  * loading levels at once. Loading nests (extensions fan out to per-extension
  * command/skill/agent scans, which fan out to per-file reads), so a per-level
- * cap cannot express a global descriptor budget — with outer 64 × 3 loaders ×
- * inner 64 the peak in-flight reads multiply far past any single level's
- * limit. Every queued `fs.promises.readFile` opens its descriptor as soon as
- * the libuv pool dequeues it, so an unbounded fan-out over a large extensions
- * tree can exhaust the process file-descriptor limit under a low
- * `RLIMIT_NOFILE`, and the per-entry skips would then silently commit a
- * truncated load that the (pre-load-stamped) fingerprint never retries. All
- * loaders share one semaphore so the guarantee is on total open descriptors.
- * 64 still saturates the default 4-thread libuv pool.
+ * cap cannot express a global descriptor budget. All loaders share one
+ * semaphore so the guarantee is on total open descriptors. 8 measured no
+ * wall-clock loss versus 64 (the default 4-thread libuv pool is the real
+ * bottleneck either way) while keeping peak descriptors far below even a
+ * container's low LimitNOFILE — see the EMFILE rethrow below for why headroom
+ * here matters.
  */
-export const SKILL_LOAD_CONCURRENCY = 64;
+export const SKILL_LOAD_CONCURRENCY = 8;
 
 /**
  * How many extensions the top-level directory scan allows into their
@@ -81,11 +106,6 @@ class CountdownGate {
   peak(): number {
     return this.peakActive;
   }
-
-  /** Debug-only snapshot for deadlock forensics. */
-  snapshot(): { active: number; queued: number } {
-    return { active: this.active, queued: this.queue.length };
-  }
 }
 
 const descriptorGate = new CountdownGate(SKILL_LOAD_CONCURRENCY);
@@ -101,13 +121,16 @@ export function peakDescriptorGateInFlight(): number {
 
 /**
  * Order-preserving map whose per-item work is admitted through the shared
- * descriptor gate, so nesting `mapWithConcurrency` at multiple levels still
- * keeps the total in-flight reads ≤ SKILL_LOAD_CONCURRENCY. The batch always
- * settles before rejecting (allSettled, then rethrow the first original
- * rejection reason): a failing item must not abandon its siblings while they
- * still hold gate permits — an abandoned permit holder that is itself waiting
- * on the gate can never be admitted, and repeated failed scans would
- * permanently drain the module-wide pool. The `limit` parameter only bounds
+ * descriptor gate. Every gated item must complete (or fail) while holding its
+ * permit without making further gated acquisitions: a level that holds a
+ * permit across nested gated work stacks orphans when a sibling fails and can
+ * deadlock the module-wide pool — schedule such levels with
+ * `scheduleWithConcurrency` instead (the loaders below do exactly that). The
+ * batch always settles before rejecting (allSettled, then rethrow the first
+ * original rejection reason) so a failing item never abandons siblings
+ * mid-flight. The rethrow carries the original error object because the
+ * loader entrances classify resource exhaustion by `error.code` (see
+ * `isResourceExhaustion`), not by message. The `limit` parameter only bounds
  * batch scheduling, not descriptors.
  */
 export async function mapWithConcurrency<T, R>(
@@ -134,8 +157,9 @@ export async function mapWithConcurrency<T, R>(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
     if (firstRejection) {
-      // Preserve the original reason — callers match on messages like
-      // "ENOENT" to convert a failed load into a fail-closed status.
+      // Preserve the original error object: the refresh boundary surfaces it
+      // verbatim to fail-closed consumers, and the per-entry errno
+      // classification above keys off `error.code`.
       throw firstRejection.reason;
     }
   }
@@ -245,6 +269,11 @@ export async function loadSkillsFromDir(
           const content = await fs.readFile(skillManifest, 'utf8');
           return parseSkillContent(content, skillManifest);
         } catch (error) {
+          if (isResourceExhaustion(error)) {
+            // Fail the whole refresh closed so a later refresh retries,
+            // instead of committing a truncated set as a successful load.
+            throw error;
+          }
           const errorMessage =
             error instanceof Error ? error.message : 'Unknown error';
           debugLogger.error(
@@ -257,6 +286,11 @@ export async function loadSkillsFromDir(
 
     return loaded.filter((skill) => skill != null);
   } catch (error) {
+    // Resource exhaustion at the directory level (e.g. readdir EMFILE) fails
+    // the whole refresh; a missing or unreadable directory stays an empty set.
+    if (isResourceExhaustion(error)) {
+      throw error;
+    }
     // Directory doesn't exist or can't be read
     const errorMessage =
       error instanceof Error ? error.message : 'Unknown error';

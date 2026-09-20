@@ -502,6 +502,25 @@ You are a helpful assistant.
       expect(refusals.get('*missing')?.subagentName).toBe('*missing');
     });
 
+    it('rejects the whole load when an agent read hits resource exhaustion', async () => {
+      // An EMFILE mid-scan must fail the refresh closed (rethrown), not
+      // resolve with the surviving agents — a truncated set committed as
+      // successful would stick until restart.
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      vi.mocked(fs.readdir).mockResolvedValue(['reviewer.md'] as never);
+      vi.mocked(fs.readFile).mockRejectedValue(
+        Object.assign(new Error('EMFILE: too many open files'), {
+          code: 'EMFILE',
+        }),
+      );
+
+      await expect(loadSubagentFromDir(projectDir)).rejects.toThrow('EMFILE');
+    });
+
     it.each([
       { yamlName: '123', name: '123' },
       { yamlName: 'true', name: 'true' },

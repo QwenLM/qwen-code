@@ -353,6 +353,28 @@ Valid skill.
       expect(skills[0]?.name).toBe('test-skill');
     });
 
+    it('rejects the whole load when a skill read hits resource exhaustion', async () => {
+      // An EMFILE mid-scan must fail the refresh closed (rethrown), not
+      // resolve with the surviving skills — a truncated set committed as
+      // successful would stick until restart.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'skill1',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockRejectedValue(
+        Object.assign(new Error('EMFILE: too many open files'), {
+          code: 'EMFILE',
+        }),
+      );
+
+      await expect(loadSkillsFromDir(testBaseDir)).rejects.toThrow('EMFILE');
+    });
+
     it('should load skills from symlinked directories', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
         {

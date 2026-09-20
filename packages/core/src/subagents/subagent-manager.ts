@@ -36,6 +36,7 @@ import {
 import { SubagentValidator } from './validation.js';
 import {
   SKILL_LOAD_CONCURRENCY,
+  isResourceExhaustion,
   mapWithConcurrency,
 } from '../skills/skill-load.js';
 import {
@@ -1936,6 +1937,11 @@ export async function loadSubagentFromDir(
             new SubagentValidator(),
           );
         } catch (error) {
+          if (isResourceExhaustion(error)) {
+            // Fail the whole refresh closed so a later refresh retries,
+            // instead of committing a truncated agent set as successful.
+            throw error;
+          }
           warnInvalidSubagentFile(filePath, error);
           if (refusals) recordExecutionRefusal(refusals, error);
           return null;
@@ -1944,7 +1950,12 @@ export async function loadSubagentFromDir(
     );
 
     return loaded.filter((subagent) => subagent != null);
-  } catch (_error) {
+  } catch (error) {
+    // Resource exhaustion at the directory level (e.g. readdir EMFILE) fails
+    // the whole refresh; a missing or unreadable directory stays an empty set.
+    if (isResourceExhaustion(error)) {
+      throw error;
+    }
     // Directory doesn't exist or can't be read
     return [];
   }

@@ -12,6 +12,7 @@ import { normalizeContent } from '../../utils/textUtils.js';
 import { parse as parseYaml } from '../../utils/yaml-parser.js';
 import {
   SKILL_LOAD_CONCURRENCY,
+  isResourceExhaustion,
   mapWithConcurrency,
 } from '../../skills/skill-load.js';
 import { resolveContainedExistingPath } from './paths.js';
@@ -31,6 +32,9 @@ export async function loadAgentPluginSkills(
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    // Resource exhaustion fails the whole refresh closed so a later refresh
+    // retries, instead of silently disabling the plugin's skills.
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(
       `Disabling Agent Plugins skills: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -43,6 +47,7 @@ export async function loadAgentPluginSkills(
       withFileTypes: true,
     });
   } catch (error) {
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(
       `Disabling Agent Plugins skills: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -68,6 +73,7 @@ export async function loadAgentPluginSkills(
         const content = await fs.promises.readFile(resolvedManifest, 'utf8');
         return parseAgentPluginSkill(content, resolvedManifest, entry.name);
       } catch (error) {
+        if (isResourceExhaustion(error)) throw error;
         debugLogger.warn(
           `Skipping Agent Plugins skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`,
         );
