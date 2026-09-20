@@ -5462,6 +5462,229 @@ describe('Session', () => {
       });
       expect(promptSpy).not.toHaveBeenCalled();
     });
+
+    it('reports clean for a restored session whose tail is an unanswered notification', async () => {
+      // The daemon persists every background notification before its automatic
+      // turn runs. When such a notification's turn never ran, a cold load
+      // projects it as a plain `role: 'user'` tail (the record's subtype and
+      // provenance do not survive into `Content`) that nothing will ever
+      // answer — so the session used to come back as `interrupted_prompt`, with
+      // the recovery banner pinned on a turn that had ended with `end_turn`.
+      // Drive the same projection `GeminiClient` seeds the live chat with on
+      // restore (`buildSessionHistoryFromConversation`).
+      const notificationRecord = (index: number, summary: string) => ({
+        uuid: `m-${index}`,
+        parentUuid: index === 0 ? null : `m-${index - 1}`,
+        sessionId: 'test-session-id',
+        timestamp: '2026-09-16T00:00:00.000Z',
+        type: 'user' as const,
+        subtype: 'notification' as const,
+        provenance: 'system' as const,
+        cwd: '/tmp/project',
+        version: 'test',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text:
+                `<task-notification><task-id>agent-1</task-id>` +
+                `<status>completed</status><summary>${summary}</summary>` +
+                `</task-notification>`,
+            },
+          ],
+        },
+        systemPayload: { displayText: 'Background task completed.' },
+      });
+      const restored = core.buildSessionHistoryFromConversation({
+        messages: [
+          {
+            uuid: 'm-0',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: '2026-09-16T00:00:00.000Z',
+            type: 'user' as const,
+            cwd: '/tmp/project',
+            version: 'test',
+            message: {
+              role: 'user',
+              parts: [{ text: 'run it in the background' }],
+            },
+          },
+          {
+            uuid: 'm-1',
+            parentUuid: 'm-0',
+            sessionId: 'test-session-id',
+            timestamp: '2026-09-16T00:00:01.000Z',
+            type: 'assistant' as const,
+            cwd: '/tmp/project',
+            version: 'test',
+            message: { role: 'model', parts: [{ text: 'all done' }] },
+          },
+          notificationRecord(2, 'Agent "explore" completed.'),
+          notificationRecord(3, 'Agent "build" completed.'),
+        ],
+      });
+      // Sanity: the projection really does end in unanswered user entries, so
+      // this exercises the classifier instead of an already-clean tail.
+      expect(restored.apiHistory.at(-1)?.role).toBe('user');
+      vi.mocked(mockChat.getHistory).mockReturnValue(restored.apiHistory);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects when an automatic notification turn is in flight', async () => {
+      // The harmful half: a notification turn runs under
+      // `notificationAbortController` and never installs `pendingPrompt`, so the
+      // re-entrancy guard used to miss it and report `canContinue: true`. The
+      // bridge then drives the continuation through the normal prompt-admission
+      // path, which aborts `notificationAbortController` — the recovery button
+      // killed a healthy turn.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as {
+        notificationAbortController: AbortController | null;
+        notificationProcessing: boolean;
+      };
+      const liveTurn = new AbortController();
+      internals.notificationAbortController = liveTurn;
+      internals.notificationProcessing = true;
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(promptSpy).not.toHaveBeenCalled();
+        expect(liveTurn.signal.aborted).toBe(false);
+      } finally {
+        internals.notificationAbortController = null;
+        internals.notificationProcessing = false;
+      }
+    });
+
+    it('rejects when an automatic cron turn is in flight', async () => {
+      // Same guard gap as the notification turn: cron runs under
+      // `cronAbortController`, which prompt admission aborts as well.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as {
+        cronAbortController: AbortController | null;
+        cronProcessing: boolean;
+      };
+      const liveTurn = new AbortController();
+      internals.cronAbortController = liveTurn;
+      internals.cronProcessing = true;
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(liveTurn.signal.aborted).toBe(false);
+      } finally {
+        internals.cronAbortController = null;
+        internals.cronProcessing = false;
+      }
+    });
+
+    it('rejects while a close gate is held even though no turn is in flight', async () => {
+      // `#hasActiveTurn()` has no member for `closing`, yet
+      // `assertCanStartTurn()` rejects on it as its FIRST statement. A close
+      // gate held while every turn has already settled (`beginClose()` across
+      // `waitForActiveTurnsToSettle()`, or a disposed session) therefore used
+      // to report `canContinue: true`: the banner offered Continue,
+      // `continueLastTurn()` accepted, and the bridge drove the continuation
+      // into `'Session is closing'` — the accept-then-fail round trip this
+      // guard exists to prevent. Set the private flag the way the sibling
+      // tests set `notificationProcessing`.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as { closing: boolean };
+      internals.closing = true;
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(promptSpy).not.toHaveBeenCalled();
+      } finally {
+        internals.closing = false;
+      }
+    });
+
+    it('recovers a FAILED automatic notification turn that carries reminders', async () => {
+      // Sibling of the in-flight case above, for the state where the turn is
+      // already over. A notification turn pushes its
+      // `[...systemReminders, ...notificationParts]` user entry into live
+      // history before any attempt; if the stream then fails mid-turn with no
+      // `functionCall` delivered, no model entry is pushed, so that entry IS
+      // the tail — and the `catch` does not re-queue while the `finally`
+      // clears `notificationAbortController`, so `#hasActiveTurn()` is false.
+      // Trimming that entry as structural certifies `clean` and leaves the
+      // turn with no re-drive at all (`persistedBackgroundNotificationTaskIds`
+      // already holds the taskId). Nothing is in flight here, on purpose.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier answer' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nplan mode is active\n</system-reminder>',
+            },
+            {
+              text:
+                `<task-notification><task-id>agent-1</task-id>` +
+                `<status>failed</status>` +
+                `<summary>Agent "explore" failed.</summary>` +
+                `</task-notification>`,
+            },
+          ],
+        },
+      ]);
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+    });
   });
 
   describe('restoreAskUserQuestion prompt', () => {
@@ -26547,6 +26770,54 @@ describe('Session', () => {
         );
       });
 
+      it('forwards export artifacts to live output and persisted command history', async () => {
+        const artifacts = [
+          {
+            kind: 'file' as const,
+            storage: 'workspace' as const,
+            title: 'export.md',
+            workspacePath: 'export.md',
+            mimeType: 'text/markdown; charset=utf-8',
+            sizeBytes: 42,
+          },
+        ];
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Exported.',
+          artifacts,
+        });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/export md' }],
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Exported.' },
+            _meta: { source: 'slash_command', sessionArtifacts: artifacts },
+          },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            phase: 'result',
+            rawCommand: '/export md',
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Exported.',
+                sessionArtifacts: artifacts,
+              },
+            ],
+          }),
+        );
+      });
+
       it('returns a structured standalone-policy error for a blocked slash command', async () => {
         session.dispose();
         vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
@@ -26946,6 +27217,184 @@ describe('Session', () => {
         });
       });
 
+      it('forwards the structured compression result and records it for replay', async () => {
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: true,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> ~100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The English sentence still reaches text-only ACP hosts; the payload
+        // rides alongside it for hosts that render the result themselves.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(2, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Context compressed (200 -> ~100).',
+            },
+            _meta: { source: 'slash_command', contextCompression: compression },
+          },
+        });
+        // Replay rebuilds the structured line from the record, so it travels
+        // with the joined text rather than replacing it.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> ~100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('carries a compression notice on its own meta key and record item', async () => {
+        const notice = { phase: 'notice' as const, instructionsLimit: 2000 };
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: false,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compression instructions were truncated to 2000 chars.',
+              contextCompressionNotice: notice,
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> 100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The notice rides its own `_meta` key: the reducer folds this turn into
+        // one block and spreads `_meta` key by key, so a shared key would hide
+        // the note behind the compression payload that follows.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Compression instructions were truncated to 2000 chars.',
+            },
+            _meta: {
+              source: 'slash_command',
+              contextCompressionNotice: notice,
+            },
+          },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                // Newline kept so the folded block still reads as two lines.
+                text: 'Compression instructions were truncated to 2000 chars.\n',
+                contextCompressionNotice: notice,
+              },
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> 100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('records a terminal no-op result for replay', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context (fast)...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'No compression needed.',
+              contextCompression: { phase: 'noop' as const },
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress-fast' }],
+        });
+
+        // The no-op is terminal, so it is recorded like the result: replay
+        // rebuilds the row in the client's language instead of leaving the
+        // joined English sentences.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context (fast)...\nNo compression needed.',
+                contextCompression: { phase: 'noop' },
+              },
+            ],
+          }),
+        );
+      });
+
       it('emits canonical Goal state for an ACP /goal status query', async () => {
         const snapshot: core.GoalSnapshotV2 = {
           v: 2,
@@ -27095,6 +27544,121 @@ describe('Session', () => {
         mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
         await session.publishRecoveredGoalState([]);
         expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      });
+
+      // A transcript from before Goal state was journaled restores with no
+      // Goal and no cause, and nothing corrects the legacy `set` card the
+      // replay ended on. The trailing `cleared` card says nothing drives it.
+      it('supersedes a replayed legacy goal card when the runtime recovered no Goal', async () => {
+        mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
+
+        await session.publishRecoveredGoalState([
+          {
+            uuid: 'legacy-goal',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: new Date(0).toISOString(),
+            type: 'system',
+            subtype: 'slash_command',
+            cwd: '/tmp',
+            version: 'test',
+            systemPayload: {
+              phase: 'result',
+              outputHistoryItems: [
+                {
+                  type: 'goal_status',
+                  kind: 'set',
+                  condition: 'ship the thing',
+                  iterations: 2,
+                  setAt: 1234,
+                },
+              ],
+            },
+          } as unknown as core.ChatRecord,
+        ]);
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                lastReason: expect.stringContaining(
+                  'recorded by an earlier version of Qwen Code',
+                ),
+              }),
+            },
+          },
+        });
+      });
+
+      // The live-restore path appends the same card from the runtime as it
+      // stands, without waiting for readiness, and only while the session
+      // drives no Goal.
+      it('renders the legacy supersession for a live replay only while no Goal is live', () => {
+        const legacyCard = {
+          uuid: 'legacy-goal',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: new Date(0).toISOString(),
+          type: 'system',
+          subtype: 'slash_command',
+          cwd: '/tmp',
+          version: 'test',
+          systemPayload: {
+            phase: 'result',
+            outputHistoryItems: [
+              {
+                type: 'goal_status',
+                kind: 'checking',
+                condition: 'ship the thing',
+                iterations: 3,
+              },
+            ],
+          },
+        } as unknown as core.ChatRecord;
+
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                iterations: 3,
+              }),
+            },
+          },
+        ]);
+        expect(
+          (
+            mockConfig as unknown as {
+              getGoalRuntimeReady: ReturnType<typeof vi.fn>;
+            }
+          ).getGoalRuntimeReady,
+        ).not.toHaveBeenCalled();
+
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'live-goal',
+            revision: 1,
+            objective: 'set after the resume',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        });
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([]);
       });
 
       // R3-6's second trigger: `recoverGoalFromRecords` returns

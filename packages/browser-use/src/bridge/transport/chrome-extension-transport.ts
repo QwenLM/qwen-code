@@ -4,20 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  unlink,
-  type FileHandle,
-} from 'node:fs/promises';
-import { connect, createServer, type Server, type Socket } from 'node:net';
-import { dirname } from 'node:path';
+import { connect, type Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { clearTimeout, setTimeout } from 'node:timers';
-
 import {
   CDP_REQUEST_TIMEOUT_MS,
   CHROME_BRIDGE_PROTOCOL_VERSION,
@@ -27,13 +16,21 @@ import {
   type BridgeHello,
   type BridgeResponse,
 } from '../protocol.js';
+import {
+  discoverChromeProfiles,
+  type ChromeProfileDescriber,
+  type ChromeProfileEndpoint,
+} from '../discovery.js';
 import { BrowserRuntimeError, type RuntimeErrorCode } from '../errors.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
+import { verifySocketPeerPath } from '../socket-path.js';
 
 export type BridgeEventListener = (event: BridgeEvent) => void;
 export type BridgeConnectionListener = (connected: boolean) => void;
 
 export interface ChromeBridge {
+  profiles?(): Promise<ChromeProfileEndpoint[]>;
+  selectProfile?(id: string): void;
   start(): Promise<void>;
   isConnected(): boolean;
   request(
@@ -52,6 +49,8 @@ export interface ChromeExtensionTransportOptions {
   socketPath?: string;
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
+  /** Names profiles and identifies Chrome's last-used one; best effort. */
+  describeProfiles?: ChromeProfileDescriber;
 }
 
 interface PendingRequest {
@@ -61,61 +60,36 @@ interface PendingRequest {
   inputTarget?: { tabId: number; sessionId?: string };
 }
 
-interface SocketIdentity {
-  dev: number;
-  ino: number;
-}
-
-interface RecoveryLock {
-  handle: FileHandle;
-  path: string;
-  contents: string;
-}
-
-// A recovery lock is held only for the milliseconds recovery takes; an
-// unidentifiable owner older than this is a crash remnant, not a live peer.
-const RECOVERY_LOCK_STALE_MS = 60_000;
-
 export class ChromeExtensionTransport implements ChromeBridge {
-  readonly socketPath: string;
-
-  private readonly derivedSocketDirectory: string | undefined;
+  socketPath: string;
+  private readonly explicitSocketPath: boolean;
 
   private readonly connectTimeoutMs: number;
   private readonly requestTimeoutMs: number;
-  private server: Server | undefined;
+  private readonly describeProfiles: ChromeProfileDescriber | undefined;
   private socket: Socket | undefined;
   private hello: BridgeHello | undefined;
-  private socketIdentity: SocketIdentity | undefined;
+  private selectedExtensionInstanceId: string | undefined;
+  // Requested by selectProfile; becomes the binding only once a Host answers.
+  private requestedExtensionInstanceId: string | undefined;
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
   private readonly pending = new Map<string, PendingRequest>();
-  private readonly acceptedSockets = new Set<Socket>();
   private readonly eventListeners = new Set<BridgeEventListener>();
   private readonly connectionListeners = new Set<BridgeConnectionListener>();
-  private readonly connectionWaiters = new Set<{
-    resolve(): void;
-    reject(error: Error): void;
-    timer: NodeJS.Timeout;
-  }>();
-
   constructor(options: ChromeExtensionTransportOptions = {}) {
     this.socketPath = options.socketPath ?? defaultChromeBridgeSocketPath();
-    // Only the derived default path gets its private parent directory
-    // created and verified; a configured path's parent stays the caller's.
-    this.derivedSocketDirectory =
-      options.socketPath === undefined &&
-      !process.env.QWEN_BROWSER_USE_SOCKET_PATH?.trim() &&
-      process.platform !== 'win32'
-        ? dirname(this.socketPath)
-        : undefined;
-    this.connectTimeoutMs = options.connectTimeoutMs ?? 5_000;
+    this.explicitSocketPath = Boolean(
+      options.socketPath ?? process.env['QWEN_BROWSER_USE_SOCKET_PATH']?.trim(),
+    );
+    this.connectTimeoutMs = options.connectTimeoutMs ?? 35_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.describeProfiles = options.describeProfiles;
   }
 
   async start(): Promise<void> {
     if (this.stopPromise !== undefined) await this.stopPromise;
-    if (this.server?.listening === true) return;
+    if (this.isConnected()) return;
     const attempt = (this.startPromise ??= this.startInternal());
     try {
       return await attempt;
@@ -149,13 +123,23 @@ export class ChromeExtensionTransport implements ChromeBridge {
   async request(
     method: string,
     params: Record<string, unknown> = {},
-    timeoutMs = method === 'cdp.send'
-      ? CDP_REQUEST_TIMEOUT_MS
-      : this.requestTimeoutMs,
+    timeoutMs?: number,
   ): Promise<unknown> {
-    if (this.stopPromise !== undefined || !this.server?.listening)
-      throw disconnectedError();
-    await this.waitForConnection(Math.min(this.connectTimeoutMs, timeoutMs));
+    if (this.stopPromise !== undefined) throw disconnectedError();
+    return await this.sendRequest(method, params, timeoutMs);
+  }
+
+  private async sendRequest(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<unknown> {
+    // A CDP command carries an operation deadline up to the 120s schema
+    // ceiling, so its default response budget must outlive that and let the
+    // caller's own deadline report first.
+    const budget =
+      timeoutMs ??
+      (method === 'cdp.send' ? CDP_REQUEST_TIMEOUT_MS : this.requestTimeoutMs);
     const socket = this.socket;
     if (socket === undefined || socket.destroyed) {
       throw disconnectedError();
@@ -164,6 +148,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     const id = randomUUID();
     const frame = encodeFrame({
       type: 'request',
+      browserSessionId: this.hello?.browserSessionId,
       id,
       method,
       params,
@@ -177,7 +162,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
             `Chrome bridge request timed out: ${method}`,
           ),
         );
-      }, timeoutMs);
+      }, budget);
       this.pending.set(id, {
         resolve,
         reject,
@@ -220,108 +205,286 @@ export class ChromeExtensionTransport implements ChromeBridge {
     }
   }
 
-  private async startInternal(): Promise<void> {
-    const server = createServer((socket) => this.accept(socket));
-    this.server = server;
+  async profiles(): Promise<ChromeProfileEndpoint[]> {
+    if (!this.explicitSocketPath) {
+      // The extension reconnects its Host on a 30s alarm, so an empty
+      // snapshot does not mean that no browser exists.
+      const deadline = Date.now() + this.connectTimeoutMs;
+      for (;;) {
+        const profiles = await discoverChromeProfiles();
+        const compatible = profiles.filter(isCompatible);
+        if (compatible.length > 0) return await this.describe(compatible);
+        if (Date.now() >= deadline) {
+          if (profiles.length > 0) throw versionMismatch();
+          return [];
+        }
+        await delay(Math.min(POLL_INTERVAL_MS, deadline - Date.now()));
+      }
+    }
     try {
-      if (this.derivedSocketDirectory !== undefined)
-        await ensureSocketDirectory(this.derivedSocketDirectory);
-      try {
-        await listen(server, this.socketPath);
-      } catch (error) {
-        if (
-          !isAddressInUse(error) ||
-          !(await recoverStaleSocketAndListen(server, this.socketPath))
-        )
-          throw error;
-      }
-      if (process.platform !== 'win32') {
-        this.socketIdentity = await currentSocketIdentity(this.socketPath);
-        if (this.socketIdentity === undefined)
-          throw new Error('Chrome bridge did not create an owned Unix socket');
-        await chmod(this.socketPath, 0o600);
-      }
+      await this.start();
     } catch (error) {
-      if (this.server === server) this.server = undefined;
-      // A peer validated between listen and a failing post-listen check
-      // would otherwise keep server.close() waiting on it indefinitely.
-      for (const socket of this.acceptedSockets) socket.destroy();
-      this.acceptedSockets.clear();
-      await closeServer(server);
-      await unlinkOwnedSocket(this.socketPath, this.socketIdentity);
-      this.socketIdentity = undefined;
-      const addressInUse = isAddressInUse(error);
-      const busy =
-        addressInUse &&
-        (await pathIsSocket(this.socketPath)) &&
-        (await socketAcceptsConnections(this.socketPath));
-      const message = addressInUse
-        ? `Chrome bridge socket is already in use: ${this.socketPath}`
-        : 'Could not start the local Chrome bridge';
-      const runtimeError = new BrowserRuntimeError(
-        busy ? 'BROWSER_USE_BUSY' : 'TRANSPORT_UNAVAILABLE',
-        message,
+      if (
+        error instanceof BrowserRuntimeError &&
+        error.code === 'BROWSER_DISCONNECTED'
+      )
+        return [];
+      throw error;
+    }
+    return [
+      {
+        extensionInstanceId: this.hello!.extensionInstanceId,
+        hostInstanceId: this.hello!.hostInstanceId!,
+        protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+        extensionProtocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+        socketPath: this.socketPath,
+        pid: 0,
+      },
+    ];
+  }
+
+  selectProfile(id: string): void {
+    if (id === 'chrome' || id === 'extension') return;
+    if (!id.startsWith('chrome:') || id.length <= 7)
+      throw new BrowserRuntimeError('NOT_FOUND', 'Unknown Chrome profile');
+    const profile = id.slice(7);
+    if (
+      this.selectedExtensionInstanceId !== undefined &&
+      this.selectedExtensionInstanceId !== profile
+    )
+      throw new BrowserRuntimeError(
+        'INVALID_ARGUMENT',
+        'This Browser Use runtime is already bound to another Chrome profile. To select a different profile, reset the Node REPL kernel and run the Browser Use setup again.',
       );
-      runtimeError.cause = error;
-      throw runtimeError;
+    if (this.selectedExtensionInstanceId === undefined)
+      this.requestedExtensionInstanceId = profile;
+  }
+
+  private async startInternal(): Promise<void> {
+    try {
+      await this.connectWithinDeadline(
+        this.selectedExtensionInstanceId ?? this.requestedExtensionInstanceId,
+      );
+    } finally {
+      // A profile that never answered must not pin later selections.
+      this.requestedExtensionInstanceId = undefined;
     }
   }
 
-  private accept(socket: Socket): void {
-    this.acceptedSockets.add(socket);
-    const decoder = new FrameDecoder();
-    let validated = false;
-    const handshakeTimer = setTimeout(() => {
-      if (!validated)
-        socket.destroy(new Error('Chrome bridge hello timed out'));
-    }, this.connectTimeoutMs);
-    handshakeTimer.unref();
-    socket.on('data', (chunk) => {
+  private async connectWithinDeadline(
+    wanted: string | undefined,
+  ): Promise<void> {
+    const deadline = Date.now() + this.connectTimeoutMs;
+    let lastError: unknown;
+    let mismatch: BrowserRuntimeError | undefined;
+    do {
       try {
-        for (const message of decoder.push(chunk)) {
+        let endpoint: ChromeProfileEndpoint | undefined;
+        if (!this.explicitSocketPath) {
+          const profiles = await discoverChromeProfiles();
+          endpoint =
+            wanted === undefined
+              ? await this.defaultProfile(profiles)
+              : profiles.find(
+                  (profile) => profile.extensionInstanceId === wanted,
+                );
+          if (endpoint === undefined) throw disconnectedError();
+          if (!isCompatible(endpoint)) throw versionMismatch();
+          this.socketPath = endpoint.socketPath;
+        }
+        await verifySocketPeerPath(this.socketPath);
+        await this.connectHost(
+          endpoint,
+          wanted,
+          Math.max(1, deadline - Date.now()),
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        // A compatible Host may still appear, for example right after an
+        // upgrade while another profile runs the previous extension, so a
+        // mismatch is reported only once the wait is over.
+        if (
+          error instanceof BrowserRuntimeError &&
+          error.code === 'EXTENSION_VERSION_MISMATCH'
+        )
+          mismatch = error;
+        const code = (error as NodeJS.ErrnoException).code;
+        // ECONNRESET and EPIPE come from a Host that is shutting down; its
+        // replacement publishes a new record.
+        if (
+          code !== 'ENOENT' &&
+          code !== 'ECONNREFUSED' &&
+          code !== 'ECONNRESET' &&
+          code !== 'EPIPE' &&
+          !(error instanceof BrowserRuntimeError)
+        )
+          throw new BrowserRuntimeError(
+            'TRANSPORT_UNAVAILABLE',
+            `Could not connect to the local Chrome Host: ${errorMessage(error)}`,
+          );
+      }
+      if (Date.now() < deadline)
+        await delay(Math.min(POLL_INTERVAL_MS, deadline - Date.now()));
+    } while (Date.now() < deadline);
+    if (mismatch !== undefined) throw mismatch;
+    throw disconnectedError(
+      `Qwen Chrome extension is not connected. Open Chrome and install or enable the Qwen extension in the profile you want to use (chrome://extensions), then retry. ${errorMessage(lastError)}`,
+    );
+  }
+
+  /**
+   * Newest compatible Host by default; with several compatible profiles,
+   * prefer the one Chrome last used, as a user would expect.
+   */
+  private async defaultProfile(
+    profiles: ChromeProfileEndpoint[],
+  ): Promise<ChromeProfileEndpoint | undefined> {
+    const compatible = profiles.filter(isCompatible);
+    if (compatible.length > 1)
+      return (
+        (await this.describe(compatible)).find((profile) => profile.lastUsed) ??
+        compatible[0]
+      );
+    return compatible[0] ?? profiles[0];
+  }
+
+  private async describe(
+    profiles: ChromeProfileEndpoint[],
+  ): Promise<ChromeProfileEndpoint[]> {
+    if (this.describeProfiles === undefined || profiles.length === 0)
+      return profiles;
+    const described = await this.describeProfiles(
+      profiles.map((profile) => profile.extensionInstanceId),
+    ).catch(() => new Map<string, { name: string; lastUsed: boolean }>());
+    return profiles.map((profile) => {
+      const description = described.get(profile.extensionInstanceId);
+      return description === undefined
+        ? profile
+        : {
+            ...profile,
+            profileName: description.name,
+            lastUsed: description.lastUsed,
+          };
+    });
+  }
+
+  private async connectHost(
+    endpoint: ChromeProfileEndpoint | undefined,
+    wanted: string | undefined,
+    timeoutMs: number,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect(this.socketPath);
+      const decoder = new FrameDecoder();
+      const inbound: unknown[] = [];
+      let validated = false;
+      let draining = false;
+      const timer = setTimeout(
+        () => fail(disconnectedError('Chrome Host hello timed out')),
+        timeoutMs,
+      );
+      const fail = (error: Error) => {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(error);
+      };
+      socket.once('connect', () =>
+        socket.write(
+          encodeFrame({
+            type: 'client.hello',
+            protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+            extensionInstanceId: wanted ?? endpoint?.extensionInstanceId,
+            hostInstanceId: endpoint?.hostInstanceId,
+          }),
+        ),
+      );
+      const drain = (): void => {
+        while (inbound.length > 0 && !socket.destroyed) {
+          const message = inbound.shift();
+          if (!isObject(message)) {
+            fail(disconnectedError('Invalid Chrome Host message'));
+            break;
+          }
           if (!validated) {
-            if (!isObject(message) || message.type !== 'hello') continue;
             if (
-              message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
-              message.extensionId !== CHROME_EXTENSION_ID
+              message.type === 'error' &&
+              message.code === 'EXTENSION_VERSION_MISMATCH'
             ) {
-              socket.destroy(
-                new Error(
-                  'Chrome extension identity or protocol version did not match',
+              fail(versionMismatch());
+              break;
+            }
+            if (
+              message.type !== 'hello' ||
+              message.extensionId !== CHROME_EXTENSION_ID ||
+              message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
+              typeof message.extensionInstanceId !== 'string' ||
+              !message.extensionInstanceId ||
+              typeof message.hostInstanceId !== 'string' ||
+              !message.hostInstanceId ||
+              typeof message.browserSessionId !== 'string' ||
+              !message.browserSessionId ||
+              (wanted !== undefined &&
+                wanted !== message.extensionInstanceId) ||
+              (endpoint !== undefined &&
+                (message.extensionInstanceId !== endpoint.extensionInstanceId ||
+                  message.hostInstanceId !== endpoint.hostInstanceId))
+            ) {
+              fail(
+                disconnectedError(
+                  'Chrome Host profile or protocol did not match',
                 ),
               );
-              return;
+              break;
             }
             validated = true;
-            clearTimeout(handshakeTimer);
-            this.promote(socket, message as unknown as BridgeHello);
+            clearTimeout(timer);
+            this.selectedExtensionInstanceId ??= message.extensionInstanceId;
+            this.socket = socket;
+            this.hello = message as unknown as BridgeHello;
+            this.notifyConnectionChange(true);
+            resolve();
             continue;
           }
-          if (this.socket !== socket) return;
+          if (this.socket !== socket) break;
+          if (message.browserSessionId !== this.hello?.browserSessionId)
+            continue;
+          const settles =
+            message.type === 'response' &&
+            typeof message.id === 'string' &&
+            this.pending.has(message.id);
           this.handleMessage(message);
+          // Playwright installs page listeners in promise continuations. Let
+          // those run before delivering an event in the same socket chunk.
+          if (settles && inbound.length > 0) {
+            setImmediate(drain);
+            return;
+          }
         }
-      } catch {
-        socket.destroy(new Error('Invalid Chrome bridge frame'));
-      }
+        draining = false;
+      };
+      socket.on('data', (chunk) => {
+        try {
+          inbound.push(...decoder.push(chunk));
+        } catch {
+          fail(disconnectedError('Invalid Chrome Host frame'));
+          return;
+        }
+        if (!draining) {
+          draining = true;
+          drain();
+        }
+      });
+      socket.on('error', (error) => {
+        if (!validated) fail(error);
+      });
+      socket.on('close', () => {
+        inbound.length = 0;
+        clearTimeout(timer);
+        if (!validated) reject(disconnectedError());
+        if (this.socket === socket) this.disconnect(disconnectedError());
+      });
     });
-    socket.on('error', () => undefined);
-    socket.on('close', () => {
-      clearTimeout(handshakeTimer);
-      this.acceptedSockets.delete(socket);
-      if (this.socket === socket) this.disconnect(disconnectedError());
-    });
-  }
-
-  private promote(socket: Socket, hello: BridgeHello): void {
-    this.disconnect(disconnectedError('Chrome extension reconnected'));
-    this.socket = socket;
-    this.hello = hello;
-    this.notifyConnectionChange(true);
-    for (const waiter of this.connectionWaiters) {
-      clearTimeout(waiter.timer);
-      waiter.resolve();
-    }
-    this.connectionWaiters.clear();
   }
 
   private handleMessage(message: unknown): void {
@@ -391,25 +554,6 @@ export class ChromeExtensionTransport implements ChromeBridge {
     }
   }
 
-  private async waitForConnection(timeoutMs: number): Promise<void> {
-    if (this.isConnected()) return;
-    await new Promise<void>((resolve, reject) => {
-      const waiter = {
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          this.connectionWaiters.delete(waiter);
-          reject(
-            disconnectedError(
-              'Chrome extension is not connected. Load the extension and verify the Native Messaging host installation.',
-            ),
-          );
-        }, timeoutMs),
-      };
-      this.connectionWaiters.add(waiter);
-    });
-  }
-
   private disconnect(error: BrowserRuntimeError): void {
     const wasConnected = this.hello !== undefined;
     const socket = this.socket;
@@ -438,300 +582,32 @@ export class ChromeExtensionTransport implements ChromeBridge {
     starting: Promise<void> | undefined,
   ): Promise<void> {
     await starting?.catch(() => undefined);
+    if (this.isConnected())
+      await this.sendRequest('session.close', {}, 2_000).catch(() => undefined);
     this.disconnect(disconnectedError('Chrome bridge stopped'));
-    for (const waiter of this.connectionWaiters) {
-      clearTimeout(waiter.timer);
-      waiter.reject(disconnectedError('Chrome bridge stopped'));
-    }
-    this.connectionWaiters.clear();
-    for (const socket of this.acceptedSockets) socket.destroy();
-    this.acceptedSockets.clear();
-    const server = this.server;
-    this.server = undefined;
-    if (server !== undefined) await closeServer(server);
-    await unlinkOwnedSocket(this.socketPath, this.socketIdentity);
-    this.socketIdentity = undefined;
+    this.selectedExtensionInstanceId = undefined;
+    this.requestedExtensionInstanceId = undefined;
   }
 }
 
-// The derived socket directory lives under a world-writable temp root, so
-// bind only into a directory this user owns alone: a foreign-owned or
-// symlinked entry means a co-tenant is squatting the rendezvous.
-export async function ensureSocketDirectory(directory: string): Promise<void> {
-  const owner =
-    typeof process.getuid === 'function' ? process.getuid() : undefined;
-  const info = await lstat(directory).catch(() => undefined);
-  if (info !== undefined) {
-    await assertOwnedSocketDirectory(directory, info, owner, true);
-    await assertUsableAncestors(directory, owner);
-    return;
-  }
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  // mkdir(recursive) neither fails on an entry that already exists nor
-  // tightens its mode, so a co-tenant who won the lstat/mkdir window must
-  // not silently inherit the socket directory: re-verify what the create
-  // actually landed on. A strict check (no tightening) keeps the create
-  // branch fail-closed — a fresh mkdir(0o700) never needs a chmod.
-  const created = await lstat(directory).catch(() => undefined);
-  if (created === undefined)
-    throw new Error(
-      `Chrome bridge socket directory is not usable: ${directory}`,
-    );
-  await assertOwnedSocketDirectory(directory, created, owner, false);
-  await assertUsableAncestors(directory, owner);
+const POLL_INTERVAL_MS = 100;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function assertOwnedSocketDirectory(
-  directory: string,
-  info: {
-    isDirectory(): boolean;
-    isSymbolicLink(): boolean;
-    uid: number;
-    mode: number;
-  },
-  owner: number | undefined,
-  tighten: boolean,
-): Promise<void> {
-  if (
-    !info.isDirectory() ||
-    info.isSymbolicLink() ||
-    (owner !== undefined && info.uid !== owner)
-  )
-    throw new Error(
-      `Chrome bridge socket directory is not usable: ${directory}`,
-    );
-  if ((info.mode & 0o077) !== 0) {
-    if (!tighten)
-      throw new Error(
-        `Chrome bridge socket directory is not usable: ${directory}`,
-      );
-    await chmod(directory, 0o700);
-  }
+function isCompatible(profile: ChromeProfileEndpoint): boolean {
+  return (
+    profile.protocolVersion === CHROME_BRIDGE_PROTOCOL_VERSION &&
+    profile.extensionProtocolVersion === CHROME_BRIDGE_PROTOCOL_VERSION
+  );
 }
 
-// Every ancestor up to the sticky world-writable temp root must be owned by
-// this user or root and not writable by anyone else; a writable or symlinked
-// ancestor lets a co-tenant swap the socket directory out from under us.
-async function assertUsableAncestors(
-  directory: string,
-  owner: number | undefined,
-): Promise<void> {
-  if (owner === undefined) return;
-  let current = dirname(directory);
-  for (;;) {
-    const info = await lstat(current).catch(() => undefined);
-    if (info === undefined || !info.isDirectory() || info.isSymbolicLink())
-      throw new Error(
-        `Chrome bridge socket directory is not usable: ${directory}`,
-      );
-    const mode = info.mode & 0o1777;
-    // A sticky world-writable root (/tmp, /private/tmp) is the trust
-    // boundary: every tenant may create entries there, but the sticky bit
-    // keeps anyone from renaming another tenant's entries.
-    if ((mode & 0o002) !== 0 && (mode & 0o1000) !== 0) return;
-    if ((info.uid !== owner && info.uid !== 0) || (mode & 0o022) !== 0)
-      throw new Error(
-        `Chrome bridge socket directory is not usable: ${directory}`,
-      );
-    const parent = dirname(current);
-    if (parent === current) return;
-    current = parent;
-  }
-}
-
-async function listen(server: Server, socketPath: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error): void => reject(error);
-    server.once('error', onError);
-    server.listen(socketPath, () => {
-      server.off('error', onError);
-      resolve();
-    });
-  });
-}
-
-export function isAddressInUse(error: unknown): boolean {
-  return hasErrorCode(error, 'EADDRINUSE');
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return isObject(error) && error.code === code;
-}
-
-async function recoverStaleSocketAndListen(
-  server: Server,
-  socketPath: string,
-): Promise<boolean> {
-  const lock = await acquireRecoveryLock(socketPath);
-  if (lock === undefined) return false;
-  try {
-    if (!(await removeStaleSocket(socketPath))) return false;
-    await listen(server, socketPath);
-    return true;
-  } finally {
-    await releaseRecoveryLock(lock);
-  }
-}
-
-/** Remove only an owned Unix socket that no process is accepting connections on. */
-async function removeStaleSocket(socketPath: string): Promise<boolean> {
-  if (process.platform === 'win32') return false;
-  const info = await lstat(socketPath).catch((error: unknown) => {
-    if (hasErrorCode(error, 'ENOENT')) return undefined;
-    throw error;
-  });
-  if (info === undefined) return true;
-  if (!info.isSocket()) return false;
-  if (typeof process.getuid === 'function' && info.uid !== process.getuid())
-    return false;
-  if (await socketAcceptsConnections(socketPath)) return false;
-  const current = await lstat(socketPath).catch((error: unknown) => {
-    if (hasErrorCode(error, 'ENOENT')) return undefined;
-    throw error;
-  });
-  if (current === undefined) return true;
-  if (
-    !current.isSocket() ||
-    current.dev !== info.dev ||
-    current.ino !== info.ino
-  )
-    return false;
-  await unlink(socketPath).catch((error: unknown) => {
-    if (!hasErrorCode(error, 'ENOENT')) throw error;
-  });
-  return true;
-}
-
-async function acquireRecoveryLock(
-  socketPath: string,
-): Promise<RecoveryLock | undefined> {
-  if (process.platform === 'win32') return undefined;
-  const path = `${socketPath}.recovery-lock`;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const contents = JSON.stringify({ pid: process.pid, token: randomUUID() });
-    try {
-      const handle = await open(path, 'wx', 0o600);
-      try {
-        await handle.writeFile(contents, 'utf8');
-        return { handle, path, contents };
-      } catch (error) {
-        await handle.close().catch(() => undefined);
-        await unlink(path).catch(() => undefined);
-        throw error;
-      }
-    } catch (error) {
-      if (!hasErrorCode(error, 'EEXIST')) throw error;
-      const owner = await readRecoveryLockOwner(path);
-      if (owner !== undefined) {
-        if (processIsAlive(owner)) return undefined;
-      } else if (!(await recoveryLockAbandoned(path))) {
-        // An empty, malformed, or unreadable lock is not proof of life; only
-        // a foreign-owned or fresh one still refuses recovery.
-        return undefined;
-      }
-      await unlink(path).catch((unlinkError: unknown) => {
-        if (!hasErrorCode(unlinkError, 'ENOENT')) throw unlinkError;
-      });
-    }
-  }
-  return undefined;
-}
-
-async function recoveryLockAbandoned(path: string): Promise<boolean> {
-  const info = await lstat(path).catch((error: unknown) => {
-    if (hasErrorCode(error, 'ENOENT')) return undefined;
-    throw error;
-  });
-  if (info === undefined) return true;
-  // Never weaker than removeStaleSocket: another user's lock is never ours
-  // to delete.
-  if (typeof process.getuid === 'function' && info.uid !== process.getuid())
-    return false;
-  return Date.now() - info.mtimeMs > RECOVERY_LOCK_STALE_MS;
-}
-
-async function readRecoveryLockOwner(
-  path: string,
-): Promise<number | undefined> {
-  const contents = await readFile(path, 'utf8').catch(() => '');
-  try {
-    const parsed = JSON.parse(contents) as unknown;
-    return isObject(parsed) &&
-      typeof parsed.pid === 'number' &&
-      Number.isInteger(parsed.pid)
-      ? parsed.pid
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function processIsAlive(pid: number): boolean {
-  if (pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !hasErrorCode(error, 'ESRCH');
-  }
-}
-
-async function releaseRecoveryLock(lock: RecoveryLock): Promise<void> {
-  await lock.handle.close().catch(() => undefined);
-  const contents = await readFile(lock.path, 'utf8').catch(() => undefined);
-  if (contents !== lock.contents) return;
-  await unlink(lock.path).catch(() => undefined);
-}
-
-async function currentSocketIdentity(
-  socketPath: string,
-): Promise<SocketIdentity | undefined> {
-  if (process.platform === 'win32') return undefined;
-  const info = await lstat(socketPath).catch(() => undefined);
-  if (info === undefined || !info.isSocket()) return undefined;
-  return { dev: info.dev, ino: info.ino };
-}
-
-async function unlinkOwnedSocket(
-  socketPath: string,
-  identity: SocketIdentity | undefined,
-): Promise<void> {
-  if (process.platform === 'win32' || identity === undefined) return;
-  const current = await currentSocketIdentity(socketPath);
-  if (
-    current === undefined ||
-    current.dev !== identity.dev ||
-    current.ino !== identity.ino
-  )
-    return;
-  await unlink(socketPath).catch((error: unknown) => {
-    if (!hasErrorCode(error, 'ENOENT')) throw error;
-  });
-}
-
-async function socketAcceptsConnections(socketPath: string): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const candidate = connect(socketPath);
-    let settled = false;
-    const finish = (active: boolean): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      candidate.destroy();
-      resolve(active);
-    };
-    const timer = setTimeout(() => finish(true), 500);
-    candidate.once('connect', () => finish(true));
-    candidate.once('error', (error: Error) => {
-      finish(
-        !hasErrorCode(error, 'ECONNREFUSED') && !hasErrorCode(error, 'ENOENT'),
-      );
-    });
-  });
-}
-
-async function pathIsSocket(socketPath: string): Promise<boolean> {
-  return (await lstat(socketPath).catch(() => undefined))?.isSocket() === true;
+function versionMismatch(): BrowserRuntimeError {
+  return new BrowserRuntimeError(
+    'EXTENSION_VERSION_MISMATCH',
+    'Browser Use CLI, Native Host and Chrome extension versions must match. Update Qwen Code, run native-host-setup.js install, and reload the extension at chrome://extensions.',
+  );
 }
 
 function bridgeRuntimeErrorCode(code: string | undefined): RuntimeErrorCode {
@@ -744,6 +620,10 @@ function bridgeRuntimeErrorCode(code: string | undefined): RuntimeErrorCode {
       return 'UNSUPPORTED_TAB';
     case 'PERMISSION_REQUIRED':
       return 'PERMISSION_REQUIRED';
+    case 'TAB_OWNERSHIP_CONFLICT':
+      return 'TAB_OWNERSHIP_CONFLICT';
+    case 'TAB_DEBUGGER_CONFLICT':
+      return 'TAB_DEBUGGER_CONFLICT';
     default:
       return 'OPERATION_FAILED';
   }
@@ -759,7 +639,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-async function closeServer(server: Server): Promise<void> {
-  if (!server.listening) return;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+function errorMessage(error: unknown): string {
+  return isObject(error) &&
+    typeof error.message === 'string' &&
+    error.message !== ''
+    ? error.message
+    : String(error);
 }

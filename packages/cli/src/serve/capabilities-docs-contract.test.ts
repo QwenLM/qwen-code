@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CONDITIONAL_SERVE_FEATURES,
+  getAdvertisedServeFeatures,
   SERVE_PROTOCOL_VERSION,
 } from './capabilities.js';
 
@@ -48,4 +49,16 @@ describe('conditional serve capability documentation', () => {
     );
     expect(index).not.toMatch(/\d+ (?:registered|conditional) tags/);
   });
+});
+
+it('advertises runtime stop only with its complete management predicate', () => {
+  expect(getAdvertisedServeFeatures()).not.toContain('workspace_runtime_stop');
+  expect(
+    getAdvertisedServeFeatures(undefined, { workspaceRuntimeAvailable: true }),
+  ).not.toContain('workspace_runtime_stop');
+  expect(
+    getAdvertisedServeFeatures(undefined, {
+      workspaceRuntimeStopAvailable: true,
+    }),
+  ).toContain('workspace_runtime_stop');
 });
