@@ -968,14 +968,21 @@ describe('Server Config (config.ts)', () => {
       expect(config.getProjectHooks()).toBeUndefined();
     });
 
-    it('keeps the folder trust gate for project hooks after replacing hooks', () => {
-      const config = new Config({ ...baseParams, trustedFolder: false });
+    it.each([false, undefined])(
+      'keeps the project hook gate when folder trust is %s',
+      (trustedFolder) => {
+        const config = new Config({
+          ...baseParams,
+          folderTrust: true,
+          trustedFolder,
+        });
 
-      config.setHooksFromSettings({ userHooks, projectHooks });
+        config.setHooksFromSettings({ userHooks, projectHooks });
 
-      expect(config.getProjectHooks()).toBeUndefined();
-      expect(config.getUserHooks()).toBe(userHooks);
-    });
+        expect(config.getProjectHooks()).toBeUndefined();
+        expect(config.getUserHooks()).toBe(userHooks);
+      },
+    );
 
     it('replaces system hooks together with the other fields', () => {
       const config = new Config({ ...baseParams, systemHooks });
@@ -9508,6 +9515,90 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  // #12029: the ratio alone means a large window never warns. 15% of a 1M
+  // window is 150,000 tokens of always-on context — an absolute ceiling is what
+  // makes the warning fire where the cost is actually paid.
+  it('warns about a large always-on context on a large window, naming the token bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(48_000), // ~12,000 tokens
+      generationConfig: { contextWindowSize: 1_000_000 },
+    });
+
+    const warnings = config.getWarnings();
+
+    expect(warnings).toContainEqual(
+      expect.stringContaining('uses about 12,000 tokens'),
+    );
+    // The bound that actually fired leads, and the window is still named so a
+    // reader can see how the budget was derived.
+    expect(warnings).toContainEqual(
+      expect.stringContaining(
+        "more than 10,000 tokens — the smaller of that and 15% of this model's 1,000,000 token context window",
+      ),
+    );
+    expect(warnings.join('\n')).not.toContain('more than 15%');
+  });
+
+  it('keeps naming the percentage when the ratio is the binding bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800), // 200 tokens, against 15% of 1,000
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("more than 15% of this model's 1,000 token"),
+    );
+  });
+
+  // The author of an extension rule that was dropped has to be told, or the
+  // documented mechanism silently does nothing for them (#12030).
+  it('warns for each extension rule skipped for having no paths', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining(
+        'Extension rule charts:rules/always.md has no `paths:` and was skipped',
+      ),
+    );
+  });
+
+  // A refresh replaces the list rather than appending to it, or a session that
+  // reloads memory a few times shows the same warning several times over.
+  it('does not accumulate the same extension-rule warning across refreshes', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .filter((warning) => warning.includes('charts:rules/always.md')),
+    ).toHaveLength(1);
+  });
+
   it('refreshHierarchicalMemory should expose loaded context file paths', async () => {
     const config = new Config(baseParams);
 
@@ -12227,8 +12318,8 @@ describe('Server Config (config.ts)', () => {
       // Unlisted built-ins are NOT registered eagerly — their schemas are
       // never sent in the eager model request (#9827). But since #10075 they
       // are demoted to deferred rather than dropped: still registered, so
-      // they stay listed in /tools and loadable via ToolSearch instead of
-      // silently disappearing.
+      // they stay listed in /tools and reachable via ToolSearch + ToolCall
+      // instead of silently disappearing.
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
       expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
       expect(registered).not.toContain(ToolNames.GET_GOAL);
@@ -13020,13 +13111,19 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
-  it('should NOT throw an error when setting any mode if trustedFolder is undefined', () => {
+  it('allows privileged modes when folder trust is disabled and no decision is supplied', () => {
     const config = new Config(baseParams);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true); // isTrustedFolder defaults to true
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
+  it('rejects privileged modes before an enabled folder trust decision', () => {
+    const config = new Config({ ...baseParams, folderTrust: true });
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
   });
 
   describe('DAC plan workflow', () => {

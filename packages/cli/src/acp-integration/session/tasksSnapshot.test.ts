@@ -809,6 +809,28 @@ describe('buildSessionTasksStatus workflow graph', () => {
     ]);
   });
 
+  // A host decides before asking whether a history entry can be restarted;
+  // the args themselves stay on disk, since they can be large.
+  it('says when a history entry could not keep its args, and never carries the args', () => {
+    const { tasks } = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [
+        workflowSnapshot({ runId: 'wf_kept', args: { prompt: 'secret' } }),
+        workflowSnapshot({ runId: 'wf_omitted', argsOmitted: true }),
+      ],
+      { includeWorkflows: true },
+    );
+    const kept = tasks.find((task) => task.id === 'wf_kept');
+    const omitted = tasks.find((task) => task.id === 'wf_omitted');
+
+    expect(kept).not.toHaveProperty('args');
+    expect(kept).not.toHaveProperty('argsOmitted');
+    expect(omitted).toMatchObject({ id: 'wf_omitted', argsOmitted: true });
+    expect(omitted).not.toHaveProperty('args');
+  });
+
   it('prefers the in-memory workflow task over a persisted duplicate', () => {
     const workflow = {
       kind: 'workflow',

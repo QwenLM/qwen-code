@@ -216,6 +216,7 @@ export default {
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
   'toolDisplayName.ToolSearch': '工具搜尋',
+  'toolDisplayName.ToolCall': '工具呼叫',
   'toolDisplayName.EnterWorktree': '進入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流程',
@@ -1991,6 +1992,9 @@ export default {
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '啟動上下文',
+  Unattributed: '未歸因',
+  'Cached prefix': '快取前綴',
   'Run /context detail for per-item breakdown.':
     '運行 /context detail 查看詳細分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
