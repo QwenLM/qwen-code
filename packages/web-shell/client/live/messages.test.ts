@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../i18n';
@@ -19,18 +19,6 @@ const LIVE_PREFIXES = [
   'settings.liveShortcut.',
 ];
 const LIVE_KEY = /['"`](live\.|settings\.live(Setup|Shortcut)\.)/;
-
-function sourceFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) {
-      return name === 'e2e' || name === 'node_modules' ? [] : sourceFiles(path);
-    }
-    return /\.(ts|tsx)$/.test(name) && !/\.test\.(ts|tsx)$/.test(name)
-      ? [path]
-      : [];
-  });
-}
 
 describe('Live Voice messages', () => {
   it('still reach the app through the main dictionary, in both languages', () => {
@@ -63,20 +51,15 @@ describe('Live Voice messages', () => {
     expect(transcriptStub.LIVE_MESSAGES_ZH).toEqual({});
   });
 
-  // The transcript build drops this module, and the transcript renderer is
-  // inlined into every exported document under a byte budget. Both only hold
-  // while Live strings live here and nothing else asks for them.
-  it('are defined and used nowhere outside client/live', () => {
-    const offenders = sourceFiles(CLIENT_DIR)
-      .map((path) => ({
-        path,
-        segments: relative(CLIENT_DIR, path).split(sep),
-      }))
-      // By path segment, not by a '/'-prefixed string: `relative` returns
-      // `live\messages.ts` on Windows and every Live file would be flagged.
-      .filter(({ segments }) => segments[0] !== 'live')
-      .filter(({ path }) => LIVE_KEY.test(readFileSync(path, 'utf8')))
-      .map(({ segments }) => segments.join('/'));
-    expect(offenders).toEqual([]);
+  // The transcript build drops this module. Whether anything the transcript
+  // renders asks for a Live string is a property of the built bundle, not of
+  // the source tree — the composer's add menu opens Live Voice, and the
+  // static import graph reaches the composer from the transcript entry even
+  // though tree shaking removes it — so that half of the guard lives in
+  // build-artifact.test.ts. This half keeps the strings from drifting back
+  // into the dictionary the transcript does embed.
+  it('are defined only here, not back in the main dictionary', () => {
+    const dictionary = readFileSync(join(CLIENT_DIR, 'i18n.tsx'), 'utf8');
+    expect(LIVE_KEY.test(dictionary)).toBe(false);
   });
 });
