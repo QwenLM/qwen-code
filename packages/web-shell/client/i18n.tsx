@@ -17,6 +17,13 @@ type MessageValue =
 
 type Messages = Record<string, MessageValue>;
 
+/** English count plus its noun, pluralised the regular way. */
+function plural(count: string | number | undefined, noun: string): string {
+  const value = typeof count === 'number' ? count : Number(count ?? 0);
+  const safe = Number.isFinite(value) ? value : 0;
+  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
+}
+
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
@@ -2983,16 +2990,16 @@ const EN: Messages = {
   'trajectory.collapseAll': 'Collapse all',
   'trajectory.expandAll': 'Expand all',
   'trajectory.totals': (v) =>
-    `${v?.turns ?? 0} turns · ${v?.requests ?? 0} requests · ${v?.tools ?? 0} tools · ${v?.duration ?? ''}`,
+    `${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
   'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
   'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
   'trajectory.turnSummary': (v) =>
-    `${v?.requests ?? 0} requests · ${v?.tools ?? 0} tools · ${v?.duration ?? ''}`,
+    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
   'trajectory.request': 'Model request',
   'trajectory.requestFailed': 'Request failed',
   'trajectory.ttft': (v) => `TTFT ${v?.duration ?? ''}`,
   'trajectory.subagentRollup': (v) =>
-    `subagent ${v?.requests ?? 0} requests · ${v?.tools ?? 0} tools · ${v?.duration ?? ''}`,
+    `subagent ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
   'trajectory.badge.user': 'you',
   'trajectory.badge.message': 'say',
   'trajectory.badge.thought': 'think',

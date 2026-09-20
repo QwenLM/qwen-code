@@ -72,9 +72,20 @@ function usageSummary(usage: DaemonTurnUsage): string {
 }
 
 /**
- * A subagent id is `<agentType>-<parentCallId>`. With the parent known the
- * type is the rest; without it the whole id is shown rather than guessed at,
- * since an agent type may itself contain a dash.
+ * Tool call ids the model layer mints, used only to recognise the trailing
+ * segment of a subagent id when the spawning call is outside the window.
+ */
+const TOOL_CALL_ID_SUFFIX = /-call_[A-Za-z0-9]+$/;
+
+/**
+ * A subagent id is `<agentType>-<parentCallId>`, and an agent type may itself
+ * contain a dash, so the split point cannot be guessed from the id alone.
+ *
+ * With the spawning call known the type is whatever precedes it. Without it —
+ * the call is outside the loaded window, or was never a top-level tool call —
+ * a trailing `-call_…` segment is still recognisably an id rather than part of
+ * a name, and dropping it beats showing forty characters of hex. Anything else
+ * is shown whole.
  */
 function subagentLabel(row: TrajectoryRequestRow): string | undefined {
   const { subagentId, parentToolCallId } = row;
@@ -85,7 +96,7 @@ function subagentLabel(row: TrajectoryRequestRow): string | undefined {
   ) {
     return subagentId.slice(0, -(parentToolCallId.length + 1));
   }
-  return subagentId;
+  return subagentId.replace(TOOL_CALL_ID_SUFFIX, '');
 }
 
 function firstLine(text: string): string {

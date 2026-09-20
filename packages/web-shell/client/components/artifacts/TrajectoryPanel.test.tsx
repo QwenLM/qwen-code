@@ -171,7 +171,7 @@ describe('TrajectoryPanel', () => {
 
     expect(
       text(container.querySelector('[data-testid="trajectory-totals"]')),
-    ).toContain('1 turns');
+    ).toContain('1 turn ·');
     expect(
       container.querySelectorAll('[data-testid="trajectory-turn"]'),
     ).toHaveLength(1);
@@ -400,6 +400,49 @@ describe('TrajectoryPanel', () => {
     });
 
     expect(rowsOf(container).length).toBeLessThan(before);
+  });
+
+  it('names a subagent whose spawning call is outside the window', async () => {
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        timingFrame(
+          {
+            kind: 'request',
+            durationMs: 5600,
+            status: 'ok',
+            subagentId: 'general-purpose-call_09f25abe46e242ad951ba028',
+            promptId: 's#general-purpose-call_09f25abe46e242ad951ba028#0',
+          },
+          'rec-2',
+        ),
+      ]),
+    );
+
+    // Forty characters of hex in the name column tells a reader nothing; the
+    // trailing call id is recognisable as an id, so only the type is shown.
+    expect(container.textContent).toContain('general-purpose');
+    expect(container.textContent).not.toContain('call_09f25abe');
+  });
+
+  it('shows a subagent id whole when its tail is not a call id', async () => {
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        timingFrame(
+          {
+            kind: 'request',
+            durationMs: 900,
+            status: 'ok',
+            subagentId: 'memory-extractor',
+            promptId: 's#memory-extractor#0',
+          },
+          'rec-2',
+        ),
+      ]),
+    );
+
+    expect(container.textContent).toContain('memory-extractor');
   });
 
   it('numbers every rendered row for assistive technology', async () => {
