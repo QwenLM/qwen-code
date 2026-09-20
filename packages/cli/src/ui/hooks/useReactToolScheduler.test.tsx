@@ -8,7 +8,11 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import type { Part } from '@google/genai';
-import type { Config, ToolResult } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolResult,
+  CompletedToolCall,
+} from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   CoreToolScheduler,
@@ -260,12 +264,12 @@ describe('useReactToolScheduler', () => {
     } as unknown as Config;
 
     type SchedulerProps = {
-      onComplete: (tools: unknown[]) => Promise<void>;
+      onComplete: (tools: CompletedToolCall[]) => Promise<void>;
       onEditorClose: () => void;
       onToolResultFullTurnModel?: (model: string) => boolean;
     };
 
-    const firstOnComplete = vi.fn(async () => {});
+    const firstOnComplete = vi.fn(async (_tools: CompletedToolCall[]) => {});
     const { result, rerender } = renderHook<
       ReturnType<typeof useReactToolScheduler>,
       SchedulerProps
@@ -305,7 +309,7 @@ describe('useReactToolScheduler', () => {
     });
     expect(resolveFirst).toBeDefined();
 
-    const latestOnComplete = vi.fn(async () => {});
+    const latestOnComplete = vi.fn(async (_tools: CompletedToolCall[]) => {});
     rerender({
       onComplete: latestOnComplete,
       onEditorClose: vi.fn(),
@@ -346,7 +350,7 @@ describe('useReactToolScheduler', () => {
     });
     const reportedCallIds = latestOnComplete.mock.calls
       .flat(2)
-      .map((call) => (call as { request: { callId: string } }).request.callId);
+      .map((call) => call.request.callId);
     expect(reportedCallIds).toEqual(
       expect.arrayContaining(['call-1', 'call-2']),
     );
@@ -407,7 +411,7 @@ describe('useReactToolScheduler', () => {
       }),
     } as unknown as Config;
 
-    const onComplete = vi.fn(async () => {});
+    const onComplete = vi.fn(async (_tools: CompletedToolCall[]) => {});
     const { result, rerender } = renderHook(() =>
       useReactToolScheduler(onComplete, mockConfig, () => undefined, vi.fn()),
     );
@@ -434,9 +438,7 @@ describe('useReactToolScheduler', () => {
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalled();
     });
-    const completedCalls = onComplete.mock.calls[0]![0] as Array<{
-      status: string;
-    }>;
-    expect(completedCalls[0]?.status).toBe('success');
+    const completedCalls = onComplete.mock.calls[0]?.[0];
+    expect(completedCalls?.[0]?.status).toBe('success');
   });
 });
