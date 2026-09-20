@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from './tools.js';
@@ -16,6 +17,7 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
+  FULL_OUTPUT_DIGEST_LABEL,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
@@ -207,6 +209,37 @@ function sliceEndWithoutBrokenSurrogate(text: string, length: number): string {
   return text.slice(start);
 }
 
+/**
+ * Reads a line-anchored FULL_OUTPUT_DIGEST_LABEL digest embedded in `text`
+ * (the shape truncation.ts buildStub and shell.ts failure blocks produce):
+ * the label must START a line and be followed by exactly 64 hex chars
+ * ending the line. Re-truncating an already-stubbed result under
+ * batch-budget pressure must reuse that inner producer digest — recomputing
+ * the sha256 over the envelope would hash the per-call unique artifact path
+ * and fingerprint identical repeated errors uniquely per call, silently
+ * disabling the error-repetition guard for exactly the largest errors
+ * (issue #10887).
+ */
+function extractAnchoredFullDigest(text: string): string | null {
+  let searchFrom = 0;
+  for (;;) {
+    const index = text.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
+    if (index === -1) return null;
+    if (index === 0 || text[index - 1] === '\n') {
+      const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
+      const digest = text.slice(digestStart, digestStart + 64);
+      const terminator = text[digestStart + 64];
+      if (
+        /^[0-9a-f]{64}$/.test(digest) &&
+        (terminator === undefined || terminator === '\n' || terminator === '\r')
+      ) {
+        return digest;
+      }
+    }
+    searchFrom = index + FULL_OUTPUT_DIGEST_LABEL.length;
+  }
+}
+
 function fitText(
   text: string,
   maxChars: number,
@@ -215,7 +248,7 @@ function fitText(
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
 
-  const header =
+  const artifactHeader =
     persistedOutputFiles && persistedOutputFiles.length > 0
       ? persistedOutputFiles.length === 1
         ? `Tool output truncated. Persisted tool-output artifact: ${persistedOutputFiles[0]}`
@@ -223,6 +256,21 @@ function fitText(
             .map((file) => `- ${file}`)
             .join('\n')}`
       : 'Tool output truncated.';
+  // sha256 of the FULL pre-truncation text, labeled exactly like the
+  // single-result stub's digest line (FULL_OUTPUT_DIGEST_LABEL,
+  // truncation.ts): the header embeds a per-call unique artifact path and
+  // the head/tail preview below depends on this slot's allocated budget, so
+  // consumers that fingerprint results (services/loopDetectionService.ts)
+  // read this digest instead of hashing the envelope — identical underlying
+  // output fingerprints identically no matter which call it was persisted
+  // for (issue #10887). When the input already carries a producer digest
+  // (an oversized error pre-stubbed by the scheduler gate, a shell failure
+  // block), reuse it: hashing the envelope here would fold the per-call
+  // unique path into the fingerprint (see extractAnchoredFullDigest).
+  const digest =
+    extractAnchoredFullDigest(text) ??
+    createHash('sha256').update(text).digest('hex');
+  const header = `${artifactHeader}\n${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
   if (header.length >= maxChars) {
     return sliceStartWithoutBrokenSurrogate(header, maxChars);
   }

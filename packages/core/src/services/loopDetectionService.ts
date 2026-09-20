@@ -19,6 +19,8 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
+import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
+import { CANCELLED_TOOL_ERROR_PREFIX } from '../core/coreToolScheduler.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
@@ -39,6 +41,36 @@ export { getToolCallRepeatKey };
 // so the client breaks the loop before the server rejects the whole
 // conversation with a 400 (issue #5019).
 const TOOL_CALL_LOOP_THRESHOLD = 5;
+// Consecutive rounds carrying the same error signature tolerated before the
+// always-on error-repetition guard halts the turn (issue #10887). Dead-end
+// sessions kept re-running failing operations with varied arguments — every
+// (tool, args) pair unique, so no argument-based repetition signal ever
+// accumulated — while the same error kept returning (e.g. exit 128 /
+// permission denied on every call). The streak is keyed by a fingerprint of
+// the error payload and counts model ROUNDS, not individual calls: sibling
+// calls of one parallel batch collapse into a single piece of evidence (a
+// denied batch is one event the model has not yet seen, not N retries),
+// successful results in between neither advance nor reset it (interleaved
+// reads are exactly what let the reported loops slip past the stagnation
+// detectors), and a different error signature restarts it. Deliberately low:
+// a byte-identical error repeating across rounds is never a productive
+// signal — a corrected approach that still fails identically is exactly the
+// dead end to surface to the user instead of burning tokens on.
+const REPEATED_TOOL_ERROR_THRESHOLD = 3;
+
+// Producer prefix of user-cancellation error payloads: the producer-owned
+// constant CANCELLED_TOOL_ERROR_PREFIX (coreToolScheduler.ts) anchors the
+// `[Operation Cancelled] Reason: <reason>` shape.
+
+// Producer shape of MCP tool errors (mcp-tool.ts buildMcpToolError):
+// `MCP tool '<name>' reported tool error for function call:
+// <safeJsonStringify(functionCall)> with response: <server payload>`.
+// The function-call JSON embeds the args a dead-end loop varies on every
+// retry; only the server payload after the last ` with response: `
+// separator is the stable failure evidence.
+const MCP_TOOL_ERROR_PREFIX = "MCP tool '";
+const MCP_TOOL_ERROR_CALL_MARKER = "' reported tool error for function call: ";
+const MCP_TOOL_ERROR_RESPONSE_MARKER = ' with response: ';
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 // Cap for the debug-log excerpt of a fired chanting region (~one period,
@@ -191,20 +223,31 @@ export function shouldHaltOnTurnToolCallCap(
   return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
-// Producer shapes of the oversized-result stubs (see tools/truncation.ts).
-// Recognition is anchored on these LEADING prefixes: results like task_list
-// embed peer-authored text verbatim, and that text can quote stub markers —
-// honoring a marker found mid-string would let quoted content collapse or
-// vary the fingerprint, so only shapes that START with a producer prefix are
-// treated as stubs (issue #9450).
+// Producer shapes of the oversized-result stubs (see tools/truncation.ts)
+// and of the batch-budget finalizer's truncation envelope (see
+// tools/tool-response-finalizer.ts fitText). Recognition is anchored on
+// these LEADING prefixes: results like task_list embed peer-authored text
+// verbatim, and that text can quote stub markers — honoring a marker found
+// mid-string would let quoted content collapse or vary the fingerprint, so
+// only shapes that START with a producer prefix are treated as stubs
+// (issue #9450).
 const STUB_PRODUCER_PREFIXES: readonly string[] = [
   '<persisted-output>',
   'Output too large (',
   TOOL_OUTPUT_TRUNCATED_PREFIX,
+  'Tool output truncated.',
 ];
 
 const STUB_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} chars):`;
 const STUB_TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
+
+/**
+ * Prefix of the reduction every digest-carrying stub shape maps to. Shared
+ * literal between stripPersistenceEnvelope and normalizeToolErrorText so
+ * the raw/enveloped shapes of one shell failure cannot drift into two
+ * signature namespaces again (issue #10887).
+ */
+const PERSISTED_STUB_DIGEST_PREFIX = '<persisted-stub>sha256:';
 
 /**
  * Reads the sha256 digest a stub producer embedded for the FULL
@@ -254,14 +297,22 @@ function stripPersistenceEnvelope(value: string): string {
   }
   const digest = extractAnchoredStubDigest(value);
   if (digest !== null) {
-    return `<persisted-stub>sha256:${digest}`;
+    return `${PERSISTED_STUB_DIGEST_PREFIX}${digest}`;
   }
   for (const marker of [STUB_PREVIEW_MARKER, STUB_TRUNCATED_PART_MARKER]) {
     const payloadStart = value.indexOf(marker);
     if (payloadStart !== -1) {
       const payload = value.slice(payloadStart + marker.length);
       const closeTag = payload.indexOf('</persisted-output>');
-      return `<persisted-stub>payload:${closeTag === -1 ? payload : payload.slice(0, closeTag)}`;
+      // The newline puts the payload on its own line: the marker can
+      // consume the producer's line break (STUB_TRUNCATED_PART_MARKER
+      // carries it), and gluing the payload onto the marker line would
+      // shield the payload's first line — a shell block's `Command: `
+      // line after keep='both' truncation — from the line-anchored
+      // volatile-line filter below (issue #10887).
+      return `<persisted-stub>payload:\n${
+        closeTag === -1 ? payload : payload.slice(0, closeTag)
+      }`;
     }
   }
   return `<persisted-stub>raw:${value}`;
@@ -377,6 +428,15 @@ export class LoopDetectionService {
     { fingerprint: string; count: number }
   >();
 
+  // Consecutive identical tool-error signatures (issue #10887): fingerprint
+  // of the most recent error payload and how many consecutive rounds carried
+  // it. A round advances the streak at most once per distinct signature
+  // (sibling calls of one parallel batch collapse); successful results
+  // neither advance nor reset the streak (an interleaved read must not mask
+  // a dead end); a different error signature restarts it at one.
+  private toolErrorStreakSignature: string | null = null;
+  private toolErrorStreakCount = 0;
+
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
   // consumed by recordToolResultByCallId).
@@ -389,10 +449,11 @@ export class LoopDetectionService {
 
   // Short excerpt of the repeated region captured when the chanting
   // detector fires, for debug logging only. Deliberately NOT part of the
-  // LoopDetected event payload: the event contract stays loop_type-only and
-  // the excerpt rides the debug log instead, so a headless reasoning-channel
-  // halt (empty stdout, label-only stderr) leaves an artifact that tells a
-  // true repetition from a misfire.
+  // LoopDetected event payload — the chanting excerpt rides the debug log
+  // instead, so a headless reasoning-channel halt (empty stdout, label-only
+  // stderr) leaves an artifact that tells a true repetition from a misfire.
+  // (REPEATED_TOOL_ERROR is the exception: its guard carries the error
+  // signature + excerpt on the event itself, see checkRepeatedToolError.)
   private lastChantExcerpt = '';
 
   constructor(config: Config) {
@@ -429,6 +490,10 @@ export class LoopDetectionService {
    * loop (issue #9450). Call this once per executed call, after execution
    * and before the model is re-prompted with the result. Runtime paths that
    * only hold the response (no name/args) can use recordToolResultByCallId.
+   *
+   * The tool-agnostic error-repetition guard (issue #10887) is NOT fed
+   * here: it counts model rounds, so runtimes record it once per executed
+   * batch through recordToolErrorBatch.
    *
    * Returns true when the recorded result itself trips a detector (the
    * result-aware global-duplicate count); callers must then halt the turn
@@ -523,7 +588,10 @@ export class LoopDetectionService {
    * Variant of recordToolResult for runtimes that only have the response:
    * the request is resolved through the callId pairing populated on
    * ToolCallRequest events. Unknown callIds (e.g. client-initiated calls
-   * that never streamed through this service) are ignored.
+   * that never streamed through this service) are ignored here — the
+   * request-dependent guards need name/args — but they still feed the
+   * error-repetition guard, which works from the result alone, through the
+   * round-level recordToolErrorBatch call on the same parts (issue #10887).
    */
   recordToolResultByCallId(
     callId: string,
@@ -536,6 +604,26 @@ export class LoopDetectionService {
       { name: request.name, args: request.args },
       responseParts,
     );
+  }
+
+  /**
+   * Records one batch (one assistant round) of tool results for the
+   * error-repetition guard (issue #10887). Runtimes feed EVERY executed
+   * result of the round in a single call — client.ts once per ToolResult
+   * message, the agent runtime once per executed batch — so sibling calls
+   * of one parallel batch count as ONE round of evidence, not as
+   * sequential retries: a single denied/cancelled/timed-out batch must not
+   * trip the guard before the model has seen any of the errors. Call once
+   * per round, after the per-result recording (recordToolResult /
+   * recordToolResultByCallId).
+   *
+   * @returns true when the streak trips the threshold (loopDetected is
+   * set); callers halt the turn exactly as for an event-detected loop.
+   */
+  recordToolErrorBatch(responseParts: readonly Part[]): boolean {
+    if (this.loopDetected) return true;
+    if (this.disabledForSession) return false;
+    return this.checkRepeatedToolError(responseParts);
   }
 
   private isStatefulReadTool(toolName: string): boolean {
@@ -565,6 +653,192 @@ export class LoopDetectionService {
       );
     }
     return chunks.length > 0 ? chunks.join('\n') : null;
+  }
+
+  /**
+   * Synthetic payloads that must not feed the error-repetition guard: they
+   * are not real tool failures. Session recovery builds one byte-identical
+   * orphan-repair result per dangling call after a crash — three or more of
+   * them would otherwise trip the threshold on the resumed turn before any
+   * model round — and a cancellation records the user's action, not a
+   * failure the model can correct.
+   */
+  private static isSyntheticToolError(error: string): boolean {
+    return (
+      error === ORPHAN_TOOL_USE_REPAIR_REASON ||
+      error.startsWith(CANCELLED_TOOL_ERROR_PREFIX)
+    );
+  }
+
+  /**
+   * run_shell_command exit failures embed per-call volatile lines — the
+   * command itself (a dead-end loop varies it by definition) and the
+   * spawned process-group id (fresh on every spawn) — so hashing them would
+   * fingerprint every retry of the same failure uniquely and the streak
+   * would never accumulate; issue #10887 surfaced on exactly this shape
+   * (repeated git exit-128 failures with varied arguments). Reduce
+   * shell-shaped blocks to their stable failure core (Output/Error/Exit
+   * Code/Signal); other text passes through unchanged.
+   */
+  private static stripShellBlockVolatiles(text: string): string {
+    if (!text.includes('Process Group PGID:')) return text;
+    return text
+      .split('\n')
+      .filter((line) => !/^(Command|Directory|Process Group PGID): /.test(line))
+      .join('\n');
+  }
+
+  /**
+   * Reduces one error payload to its stable fingerprint text. Shell
+   * failure blocks carry a producer-embedded sha256 of the stable failure
+   * core (shell.ts anchors it as a FULL_OUTPUT_DIGEST_LABEL line): prefer
+   * it over hashing the rendered block, whose per-call volatile text
+   * (multi-line command continuation lines, the long-run advisory's
+   * elapsed seconds) the line-anchored volatile filter cannot fully
+   * enumerate — the producer knows the stable fields, so the producer
+   * owns the identity (issue #10887). Stub envelopes reduce through
+   * stripPersistenceEnvelope (their digest or path-free payload); other
+   * text falls back to the volatile-line filter.
+   *
+   * One signature namespace for every digest-carrying shape: the identical
+   * failure reaches this guard raw (under the scheduler persistence gate),
+   * in a buildStub envelope (the (gate, shell-threshold] size band), in a
+   * keep='both' truncation envelope, or in the batch-budget finalizer's
+   * fitText envelope — the varying Command: line and varying sibling sizes
+   * move the same failure core across those thresholds between rounds.
+   * Every shape retains the producer's line-anchored failure-core digest
+   * in its raw text (the raw block's last line, the stub envelope's digest
+   * line, keep='both' tail / fitText header retention), so the raw block
+   * must reduce to the SAME prefix the stub reduction emits — distinct
+   * prefixes per shape would reset the streak exactly on the round where
+   * the truncation form flips (issue #10887). The PGID gate keeps this
+   * scoped to shell-shaped payloads: non-shell stubs carry no PGID and
+   * keep their stripPersistenceEnvelope fingerprint unchanged (that
+   * reduction is shared with the stateful-read path, issue #9450).
+   */
+  private static normalizeToolErrorText(error: string): string {
+    const mcpNormalized = LoopDetectionService.normalizeMcpToolError(error);
+    if (mcpNormalized !== null) return mcpNormalized;
+    const enveloped = stripPersistenceEnvelope(error);
+    if (enveloped.includes('Process Group PGID:')) {
+      const digest = extractAnchoredStubDigest(enveloped);
+      if (digest !== null) {
+        return `${PERSISTED_STUB_DIGEST_PREFIX}${digest}`;
+      }
+    }
+    return LoopDetectionService.stripShellBlockVolatiles(enveloped);
+  }
+
+  /**
+   * Reduces an MCP tool error to its stable fingerprint text: the tool
+   * name plus the server payload after the last ` with response: `
+   * separator. buildMcpToolError (mcp-tool.ts) embeds the full
+   * function-call JSON — including the args a dead-end loop varies on
+   * every retry — before that separator, so hashing the message verbatim
+   * fingerprints every retry uniquely and the streak never accumulates;
+   * identical-args MCP errors are already caught by the
+   * consecutive-identical-call guard, so this is the only shape where the
+   * error-repetition guard adds anything for MCP. Only the fingerprint
+   * derivation changes — the model-facing message is untouched. Returns
+   * null for non-MCP payloads.
+   */
+  private static normalizeMcpToolError(error: string): string | null {
+    if (!error.startsWith(MCP_TOOL_ERROR_PREFIX)) return null;
+    const callMarker = error.indexOf(MCP_TOOL_ERROR_CALL_MARKER);
+    if (callMarker === -1) return null;
+    const responseMarker = error.lastIndexOf(MCP_TOOL_ERROR_RESPONSE_MARKER);
+    if (responseMarker <= callMarker) return null;
+    const serverToolName = error.slice(
+      MCP_TOOL_ERROR_PREFIX.length,
+      callMarker,
+    );
+    const serverPayload = error.slice(
+      responseMarker + MCP_TOOL_ERROR_RESPONSE_MARKER.length,
+    );
+    return `MCP tool '${serverToolName}' error response: ${serverPayload}`;
+  }
+
+  /**
+   * Extracts the per-result error payloads of failed tool results (empty
+   * when the parts carry none). Failed calls surface their failure as a
+   * `functionResponse.response.error` string across every runtime
+   * (scheduler error responses, timeouts). Synthetic non-failure payloads
+   * (orphan repairs, user cancellations) are skipped; each remaining error
+   * is reduced to its stable fingerprint text (normalizeToolErrorText) —
+   * identical underlying errors fingerprint identically no matter how they
+   * were produced (issue #10887). The raw payload is retained alongside for
+   * the telemetry excerpt: the signature identifies the failure, the raw
+   * text tells oncall what it is.
+   */
+  private static extractToolErrors(
+    responseParts: readonly Part[],
+  ): Array<{ raw: string; normalized: string }> {
+    const errors: Array<{ raw: string; normalized: string }> = [];
+    for (const part of responseParts) {
+      const response = part.functionResponse?.response;
+      if (!response) continue;
+      const error = response['error'];
+      if (typeof error !== 'string' || error.trim().length === 0) continue;
+      if (LoopDetectionService.isSyntheticToolError(error)) continue;
+      errors.push({
+        raw: error,
+        normalized: LoopDetectionService.normalizeToolErrorText(error),
+      });
+    }
+    return errors;
+  }
+
+  /**
+   * Repeated tool-error detection (issue #10887): halts the turn when the
+   * same error signature returns on REPEATED_TOOL_ERROR_THRESHOLD
+   * consecutive rounds. Result-aware and tool-agnostic: dead-end loops vary
+   * their (tool, args) on every retry, so argument-based repetition never
+   * accumulates — the repeated error payload is the evidence. Always-on
+   * like the consecutive-identical-call guard (a byte-identical error
+   * repeating across rounds is never productive, and the gated heuristics
+   * ship disabled by default in the CLI).
+   *
+   * Batch counting: responseParts carries every result of ONE round.
+   * Sibling calls collapse — the streak advances at most once per distinct
+   * signature per round, in first-occurrence order — because N
+   * simultaneous calls are emitted from one model state and are not N
+   * retries; the repeat is the same signature returning on the NEXT round.
+   * Successful results are neither evidence of the dead end nor a reset:
+   * interleaved reads between failing calls must not mask the streak.
+   *
+   * @returns true when the streak trips the threshold (loopDetected is set);
+   * callers halt the turn exactly as for an event-detected loop.
+   */
+  private checkRepeatedToolError(responseParts: readonly Part[]): boolean {
+    const errors = LoopDetectionService.extractToolErrors(responseParts);
+    const seen = new Set<string>();
+    for (const { raw, normalized } of errors) {
+      const signature = createHash('sha256').update(normalized).digest('hex');
+      // Collapse sibling calls of this round into one piece of evidence.
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      if (this.toolErrorStreakSignature === signature) {
+        this.toolErrorStreakCount++;
+      } else {
+        this.toolErrorStreakSignature = signature;
+        this.toolErrorStreakCount = 1;
+      }
+      if (this.toolErrorStreakCount >= REPEATED_TOOL_ERROR_THRESHOLD) {
+        this.lastLoopType = LoopType.REPEATED_TOOL_ERROR;
+        // Carry the failure evidence: the signature identifies the repeated
+        // payload and the (truncated) raw excerpt tells oncall what it is.
+        logLoopDetected(
+          this.config,
+          new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, this.promptId, {
+            errorSignature: signature,
+            errorExcerpt: raw,
+          }),
+        );
+        this.loopDetected = true;
+        return true;
+      }
+    }
+    return false;
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
@@ -760,8 +1034,12 @@ export class LoopDetectionService {
     const stateful = this.isStatefulReadTool(event.value.name);
 
     // Pair requests with their later results (recordToolResultByCallId).
-    // Only stateful read tools participate: recordToolResult rejects every
-    // other tool, so tracking them would just accumulate full args objects
+    // Only stateful read tools participate: they are the only requests
+    // whose results feed a request-dependent guard (recordToolResult's
+    // result-aware counting needs name/args). The tool-agnostic
+    // error-repetition guard works from the result alone and is fed at
+    // round level through recordToolErrorBatch — unknown callIds included —
+    // so pairing any other tool would just accumulate full args objects
     // (write_file args can carry whole file contents) until eviction.
     if (event.value.callId && stateful) {
       this.requestByCallId.set(event.value.callId, {
@@ -1677,6 +1955,8 @@ export class LoopDetectionService {
     this.capMaxKeyRepeat = 0;
     this.statefulRepeatState.clear();
     this.statefulConsecutiveResults.clear();
+    this.toolErrorStreakSignature = null;
+    this.toolErrorStreakCount = 0;
     this.requestByCallId.clear();
   }
 
