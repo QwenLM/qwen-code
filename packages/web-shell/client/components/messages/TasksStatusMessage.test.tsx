@@ -1030,6 +1030,31 @@ describe('TasksStatusMessage workflow details', () => {
         id: 'workflow-saved',
         isHistorical: true,
         argsOmitted: true,
+        argsUnavailable: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
+  });
+
+  // Written before the daemon kept args: it cannot say whether the run had
+  // any, so a restart is refused -- and `argsOmitted` is not set to say why.
+  it('offers no restart for a restored run recorded before args were kept', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-legacy',
+        isHistorical: true,
+        argsUnavailable: true,
         status: 'failed',
         startTime: 500,
         endTime: 1_000,

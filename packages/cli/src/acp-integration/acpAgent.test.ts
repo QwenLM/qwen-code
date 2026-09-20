@@ -418,6 +418,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isWorkflowRunId: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isWorkflowRunId,
+  snapshotArgsUnavailable: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).snapshotArgsUnavailable,
   WorkflowJournalUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).WorkflowJournalUnavailableError,
@@ -16956,6 +16959,55 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
       await daemon.stop();
     });
+
+    // The wire field and the refusal are the same answer read twice. If they
+    // ever disagree, a client renders a button this call always refuses.
+    it.each([
+      ['kept its args', {}, false],
+      ['recorded that it had none', { args: undefined }, false],
+      ['could not keep its args', { argsOmitted: true, args: undefined }, true],
+      [
+        'predates kept args',
+        { argsRecorded: undefined, args: undefined },
+        true,
+      ],
+    ])(
+      'refuses a retry of a run that %s exactly when the wire says so',
+      async (_case, fields, refused) => {
+        const sdk = await actualSdk();
+        const daemon = await startDaemon();
+        const snapshot = historical(fields);
+        for (const [key, value] of Object.entries(fields)) {
+          if (value === undefined) {
+            delete (snapshot as Record<string, unknown>)[key];
+          }
+        }
+        mockReadWorkflowSnapshot.mockResolvedValue(snapshot);
+
+        // The projection reports this same predicate as `argsUnavailable`
+        // (pinned in tasksSnapshot.test.ts), so agreeing with it here is
+        // agreeing with the wire.
+        const { snapshotArgsUnavailable } = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core')
+        >('@qwen-code/qwen-code-core');
+        expect(snapshotArgsUnavailable(snapshot) !== undefined).toBe(refused);
+
+        vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+          sdk.RequestError.invalidParams,
+        );
+        if (refused) {
+          await expect(daemon.act('retry')).rejects.toMatchObject({
+            data: { errorKind: 'workflow_args_unavailable' },
+          });
+          expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+        } else {
+          await expect(daemon.act('retry')).resolves.toMatchObject({
+            changed: true,
+          });
+        }
+        await daemon.stop();
+      },
+    );
 
     it('retries only a failed run, and reruns any finished one', async () => {
       const daemon = await startDaemon();

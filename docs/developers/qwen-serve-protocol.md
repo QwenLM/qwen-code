@@ -2302,7 +2302,11 @@ with `args` too large to keep, so neither action applies to it. Neither does a
 snapshot written before `args` were kept, which carries neither `argsOmitted`
 nor `argsRecorded`: a run's journal is keyed from a hash of its `args`, so
 restarting one whose `args` its history cannot name would replay nothing and
-re-dispatch every agent. Both refusals are `workflow_args_unavailable`.
+re-dispatch every agent. Both refusals are `workflow_args_unavailable`, and
+`GET /session/:id/tasks` reports both as `argsUnavailable` on the entry, so a
+client can withhold the two actions instead of discovering the refusal by
+making the call. `argsOmitted` stays beside it as the reason, for a client
+that wants to say which. The `args` themselves are never put on the wire.
 
 `run-script` passes no definition name, so the run is labelled by the script's own
 `export const meta` — a compiled script should declare one, or the run shows

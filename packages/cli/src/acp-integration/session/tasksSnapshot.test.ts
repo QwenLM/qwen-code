@@ -817,18 +817,33 @@ describe('buildSessionTasksStatus workflow graph', () => {
       configWith([]),
       2_000,
       [
-        workflowSnapshot({ runId: 'wf_kept', args: { prompt: 'secret' } }),
+        workflowSnapshot({
+          runId: 'wf_kept',
+          args: { prompt: 'secret' },
+          argsRecorded: true,
+        }),
+        workflowSnapshot({ runId: 'wf_none', argsRecorded: true }),
         workflowSnapshot({ runId: 'wf_omitted', argsOmitted: true }),
+        // Written before args were kept: it cannot say whether there were any.
+        workflowSnapshot({ runId: 'wf_legacy' }),
       ],
       { includeWorkflows: true },
     );
-    const kept = tasks.find((task) => task.id === 'wf_kept');
-    const omitted = tasks.find((task) => task.id === 'wf_omitted');
+    const at = (id: string) => tasks.find((task) => task.id === id);
 
-    expect(kept).not.toHaveProperty('args');
-    expect(kept).not.toHaveProperty('argsOmitted');
-    expect(omitted).toMatchObject({ id: 'wf_omitted', argsOmitted: true });
-    expect(omitted).not.toHaveProperty('args');
+    expect(at('wf_kept')).not.toHaveProperty('args');
+    expect(at('wf_kept')).not.toHaveProperty('argsOmitted');
+    expect(at('wf_kept')).not.toHaveProperty('argsUnavailable');
+    expect(at('wf_none')).not.toHaveProperty('argsUnavailable');
+    // `argsOmitted` stays as the reason; `argsUnavailable` is the answer.
+    expect(at('wf_omitted')).toMatchObject({
+      id: 'wf_omitted',
+      argsOmitted: true,
+      argsUnavailable: true,
+    });
+    expect(at('wf_omitted')).not.toHaveProperty('args');
+    expect(at('wf_legacy')).toMatchObject({ argsUnavailable: true });
+    expect(at('wf_legacy')).not.toHaveProperty('argsOmitted');
   });
 
   it('prefers the in-memory workflow task over a persisted duplicate', () => {

@@ -1505,11 +1505,12 @@ function TaskDetail({
     task.status === 'running';
   const canResume = task.kind === 'workflow' && task.status === 'paused';
   // A run restored from history restarts like a live one, as long as the
-  // daemon takes those actions for history and its snapshot kept the args it
-  // was launched with.
+  // daemon takes those actions for history and its history has the args to
+  // start it with -- which covers a run whose args were too large to keep and
+  // one recorded before they were kept at all.
   const canRestart =
     task.kind === 'workflow' &&
-    (!task.isHistorical || (retryHistorical && !task.argsOmitted));
+    (!task.isHistorical || (retryHistorical && !task.argsUnavailable));
   const canRetry = canRestart && task.status === 'failed';
   const canRerun =
     canRestart &&
