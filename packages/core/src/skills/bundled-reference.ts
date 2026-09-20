@@ -200,10 +200,7 @@ export function resolveBundledReferenceSurface(
  * `tools.visible`. A ToolSearch reveal is not consulted, because `/clear`
  * drops it — a decision recorded once has to ask this.
  */
-export function isToolDeferredBehindToolSearch(
-  config: Config,
-  name: string,
-): boolean {
+function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
   if (!config.getToolRegistry?.()?.isPermissionDeferred?.(name)) return false;
   return !config.getVisibleTools?.()?.has(name);
 }

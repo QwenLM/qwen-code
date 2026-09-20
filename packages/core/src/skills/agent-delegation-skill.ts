@@ -35,10 +35,6 @@ import {
 /** Name of the bundled reference, as the model would invoke it. */
 export const AGENT_DELEGATION_SKILL_NAME = 'agent-delegation';
 
-export function readAgentDelegationReference(): BundledReference | null {
-  return readBundledReference(AGENT_DELEGATION_SKILL_NAME);
-}
-
 export function resolveAgentDelegationSurface(
   config: Config,
 ): BundledReferenceSurface {
@@ -67,7 +63,12 @@ const INLINE_NOTE =
  */
 export function buildAgentDelegationSection(
   surface: BundledReferenceSurface,
-  reference: BundledReference | null = readAgentDelegationReference(),
+  // Defaults to the real file read so that, in a session where skills are
+  // enabled but the file is somehow missing, the caller still gets a pointer
+  // rather than nothing. Tests can inject a stub.
+  reference: BundledReference | null = readBundledReference(
+    AGENT_DELEGATION_SKILL_NAME,
+  ),
 ): string {
   switch (surface) {
     case 'pointer':
