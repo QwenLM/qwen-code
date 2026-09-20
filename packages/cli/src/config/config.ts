@@ -1622,6 +1622,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
     sessionRestore?: {
@@ -1639,6 +1640,42 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
+  const requestedShellExecutionSandbox = hostPolicy?.shellExecutionSandbox;
+  const shellExecutionSandbox = requestedShellExecutionSandbox
+    ? {
+        ...requestedShellExecutionSandbox,
+        maskedPaths: [
+          ...(requestedShellExecutionSandbox.maskedPaths ?? []),
+          path.join(
+            requestedShellExecutionSandbox.workspace,
+            '.qwen',
+            'review-leases',
+          ),
+        ],
+      }
+    : undefined;
+  const sandboxEnabled = Boolean(shellExecutionSandbox);
+  if (
+    sandboxEnabled &&
+    (!bareMode ||
+      !argv.prompt ||
+      argv.promptInteractive !== undefined ||
+      argv.inputFormat === 'stream-json' ||
+      argv.acp ||
+      argv.experimentalAcp ||
+      argv.worktree !== undefined ||
+      argv.experimentalLsp ||
+      argv.mcpConfig ||
+      argv.extensions?.length ||
+      argv.includeDirectories?.length ||
+      overrideExtensions?.length ||
+      Object.keys(sessionMcpServers ?? {}).length ||
+      provisionalWorkspace)
+  ) {
+    throw new Error(
+      'The internal tool execution sandbox requires bare noninteractive mode without ACP, worktrees, LSP, MCP, extensions or provisional workspaces.',
+    );
+  }
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
 
@@ -1677,8 +1714,7 @@ export async function loadCliConfig(
   if (!Storage.hasRuntimeBaseDirContext()) {
     Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
   }
-
-  const ideMode = settings.ide?.enabled ?? false;
+  const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
   const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
@@ -2099,24 +2135,17 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
-  // Disable ToolSearch when explicitly configured or for models that benefit
-  // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)
-  // all use prefix-based disk KV caching with heavily discounted cached
-  // token pricing (up to 1/120 for v4). When tool_search is in the deny
-  // list, client.ts eagerly reveals all deferred tools so every MCP tool
-  // schema is in the initial declaration list, keeping the prompt prefix
-  // stable and maximizing cache hit rates.
-  // Note: no `^` anchor — model names may include a provider prefix
-  // (e.g. "openrouter/deepseek/deepseek-v4-flash").
-  const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
-  const shouldDisableToolSearch =
-    toolSearchExplicitlyEnabled === false ||
-    (toolSearchExplicitlyEnabled === undefined &&
-      resolvedModel !== undefined &&
-      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+  // The ToolSearch + ToolCall bridge keeps the model-facing declaration list
+  // stable, including for prefix-cache-sensitive models. Only an explicit
+  // opt-out disables both halves of the bridge and eagerly reveals deferred
+  // schemas through client.ts.
+  const shouldDisableToolSearch = settings.tools?.toolSearch?.enabled === false;
   if (shouldDisableToolSearch) {
     if (!mergedDeny.includes('tool_search')) {
       mergedDeny.push('tool_search');
+    }
+    if (!mergedDeny.includes('tool_call')) {
+      mergedDeny.push('tool_call');
     }
   }
 
@@ -2124,6 +2153,11 @@ export async function loadCliConfig(
     bareMode || safeMode ? ({} as Settings) : settings,
     argv,
   );
+  if (shellExecutionSandbox && sandboxConfig) {
+    throw new Error(
+      'Tool execution sandbox cannot be combined with a whole-CLI sandbox.',
+    );
+  }
   const screenReader =
     argv.screenReader !== undefined
       ? argv.screenReader
@@ -2379,6 +2413,7 @@ export async function loadCliConfig(
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
+    shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);
