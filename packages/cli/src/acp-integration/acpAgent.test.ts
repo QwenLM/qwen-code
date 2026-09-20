@@ -16979,20 +16979,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    // Terminal entries are evicted at a cap, so an entry can be gone while
-    // the run's handle is still settling it.
-    it('does not retry a run this session still holds a handle for', async () => {
-      const daemon = await startDaemon();
-      mockReadWorkflowSnapshot.mockResolvedValue(historical());
-      daemon.registry.getHandle.mockReturnValue({
-        runId,
-      } as unknown as ReturnType<typeof daemon.registry.getHandle>);
-
-      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
-      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
-      await daemon.stop();
-    });
-
     // The entry check runs before the claim's await; the run can register
     // in that window, and a second runner under its id would share its
     // journal.
@@ -17012,15 +16998,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    it('does not retry a run this session is already starting', async () => {
-      const daemon = await startDaemon();
-      mockReadWorkflowSnapshot.mockResolvedValue(historical());
-      daemon.registry.isStarting.mockReturnValue(true);
+    // A rerun cannot corrupt a live run — it takes a new id — but starting a
+    // second full copy of work already in flight is not what the button
+    // means, and the live path refuses it because a live entry is not
+    // terminal.
+    it.each(['retry', 'rerun'] as const)(
+      'does not %s a run this session is already starting',
+      async (action) => {
+        const daemon = await startDaemon();
+        mockReadWorkflowSnapshot.mockResolvedValue(historical());
+        daemon.registry.isStarting.mockReturnValue(true);
 
-      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
-      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
-      await daemon.stop();
-    });
+        await expect(daemon.act(action)).resolves.toEqual({ changed: false });
+        expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+        await daemon.stop();
+      },
+    );
+
+    it.each(['retry', 'rerun'] as const)(
+      'does not %s a run this session still holds a handle for',
+      async (action) => {
+        const daemon = await startDaemon();
+        mockReadWorkflowSnapshot.mockResolvedValue(historical());
+        daemon.registry.getHandle.mockReturnValue({
+          runId,
+        } as unknown as ReturnType<typeof daemon.registry.getHandle>);
+
+        await expect(daemon.act(action)).resolves.toEqual({ changed: false });
+        expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+        await daemon.stop();
+      },
+    );
 
     it('does not retry a run a sibling session is running', async () => {
       const siblingId = 'bbbbbbbb-2222-2222-2222-222222222222';
@@ -17042,6 +17050,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
       await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
+      // A rerun would start a second full copy of the run the sibling has.
+      await expect(daemon.act('rerun')).resolves.toEqual({ changed: false });
       expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
       await daemon.stop();
     });

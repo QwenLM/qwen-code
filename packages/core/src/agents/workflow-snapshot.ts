@@ -249,12 +249,17 @@ export async function readWorkflowSnapshot(
   const storage = config.storage;
   if (!storage) return undefined;
   try {
-    const raw = await fs.readFile(
-      storage.getWorkflowRunSnapshotPath(runId),
-      'utf8',
-    );
-    const parsed: unknown = JSON.parse(raw);
-    return isWorkflowSnapshot(parsed) ? parsed : undefined;
+    const file = storage.getWorkflowRunSnapshotPath(runId);
+    // The two checks the checkpoint reader makes, for the same reasons: the
+    // path is named by an id from outside the process, and what the file
+    // holds is now started as a run rather than only displayed. A symlink
+    // planted at the path would be read through to wherever it points, and
+    // a file that names another run would answer for this one.
+    if ((await fs.lstat(file)).isSymbolicLink()) return undefined;
+    const parsed: unknown = JSON.parse(await fs.readFile(file, 'utf8'));
+    return isWorkflowSnapshot(parsed) && parsed.runId === runId
+      ? parsed
+      : undefined;
   } catch {
     return undefined;
   }

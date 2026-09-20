@@ -251,6 +251,35 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     ).resolves.toBeUndefined();
   });
 
+  // What a snapshot holds is started as a run, not only displayed, so the
+  // reader makes the two checks the checkpoint reader makes.
+  it('reads nothing through a symlink, or from a file that names another run', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_real' }));
+    const real = config.storage.getWorkflowRunSnapshotPath('wf_real');
+
+    const planted = config.storage.getWorkflowRunSnapshotPath('wf_planted');
+    await fs.symlink(real, planted);
+    await expect(
+      readWorkflowSnapshot(config, 'wf_planted'),
+    ).resolves.toBeUndefined();
+
+    // A file placed under one id that claims to be another run.
+    await fs.writeFile(
+      config.storage.getWorkflowRunSnapshotPath('wf_mismatch'),
+      await fs.readFile(real, 'utf8'),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_mismatch'),
+    ).resolves.toBeUndefined();
+
+    // The run's own snapshot still reads.
+    expect((await readWorkflowSnapshot(config, 'wf_real'))?.runId).toBe(
+      'wf_real',
+    );
+  });
+
   it('loads a legacy snapshot without an event ledger', async () => {
     const config = fakeConfig(projectDir);
     await writeWorkflowSnapshot(config, task({ runId: 'wf_legacy' }));

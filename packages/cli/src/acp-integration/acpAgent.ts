@@ -15291,14 +15291,16 @@ class QwenAgent implements Agent {
         // goes stale before the retry registers.
         const current = registry.get(runId);
         if (current) return { changed: false, status: current.status };
+        // A run that is live is not history, whatever its snapshot says:
+        // starting here, settling here under a handle its evicted entry no
+        // longer shows (terminal entries are capped), or running in a
+        // sibling session. A rerun takes a new run id and so cannot corrupt
+        // the live run, but it would spend a second run's worth of tokens
+        // on work already in flight — and the live path refuses it too,
+        // because a live entry is not in a terminal state.
         if (
-          action === 'retry' &&
-          (registry.isStarting?.(runId) === true ||
-            // A run whose entry this registry has already evicted (terminal
-            // entries are capped) can still hold a handle while it settles;
-            // the live path gates on the handle for the same reason.
-            registry.getHandle?.(runId) !== undefined ||
-            this.isWorkflowRunLiveOutsideSession(sessionId, runId))
+          QwenAgent.isWorkflowRunLiveInRegistry(registry, runId) ||
+          this.isWorkflowRunLiveOutsideSession(sessionId, runId)
         ) {
           return { changed: false };
         }
