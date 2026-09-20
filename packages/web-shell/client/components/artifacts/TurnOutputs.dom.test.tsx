@@ -216,7 +216,7 @@ describe('TurnOutputs artifact downloads', () => {
 
     expect(readFileBytes).toHaveBeenCalledWith('reports/report.pdf', {
       offset: 0,
-      maxBytes: 100 * 1024,
+      maxBytes: 256 * 1024,
     });
     expect(click).toHaveBeenCalledOnce();
     expect(click.mock.instances[0]?.download).toBe('report.pdf');
@@ -273,7 +273,7 @@ describe('TurnOutputs artifact downloads', () => {
     expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
     expect(secondaryReadFileBytes).toHaveBeenCalledWith('report.txt', {
       offset: 0,
-      maxBytes: 100 * 1024,
+      maxBytes: 256 * 1024,
     });
     expect(readFileBytes).not.toHaveBeenCalled();
     expect(click).toHaveBeenCalledOnce();
