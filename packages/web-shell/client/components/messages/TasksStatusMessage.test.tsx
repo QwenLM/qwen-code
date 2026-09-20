@@ -972,6 +972,19 @@ describe('TasksStatusMessage workflow details', () => {
     await clickRetry(generic);
     expect(generic.textContent).toContain('Could not update the workflow');
     expect(generic.textContent).not.toContain('socket hang up');
+
+    // A conflict from somewhere else in the daemon is not a sentence about
+    // this action.
+    controlWorkflowTaskMock.mockRejectedValue(
+      Object.assign(new Error('Conflict'), {
+        status: 409,
+        body: { code: 'session_busy', error: 'The session is busy.' },
+      }),
+    );
+    const unrelated = renderPanel([historical()]);
+    await clickRetry(unrelated);
+    expect(unrelated.textContent).toContain('Could not update the workflow');
+    expect(unrelated.textContent).not.toContain('The session is busy');
   });
 
   it('offers no restart for a restored run when the daemon does not take history restarts', () => {
