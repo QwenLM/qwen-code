@@ -42,7 +42,14 @@ export interface LiveProviderCredential {
 export class LiveProviderConfigError extends Error {
   readonly code = 'live_provider_config' as const;
 
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /**
+     * `env_key_missing`: the route's `envKey` is simply unset — a state the
+     * user remediates, not a route configuration defect.
+     */
+    readonly reason?: 'env_key_missing',
+  ) {
     super(message);
     this.name = 'LiveProviderConfigError';
   }
@@ -247,6 +254,7 @@ function resolveRouteCredential(
   if (!apiKey) {
     throw new LiveProviderConfigError(
       `Live Voice model '${route.id}' requires ${route.envKey}.`,
+      'env_key_missing',
     );
   }
   return { endpoint, apiKey };
