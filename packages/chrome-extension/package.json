@@ -37,6 +37,7 @@
     "scan:artifacts": "node scripts/artifact-scan.js",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",
     "package": "npm run build && node scripts/package-extension.js",
+    "package:store": "npm run build && node scripts/package-extension.js --store",
     "clean": "./scripts/clean.sh",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.browser-use-bridge.json"
   },

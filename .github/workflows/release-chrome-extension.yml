@@ -1,0 +1,269 @@
+name: 'Release Chrome Extension'
+
+# Publishes packages/chrome-extension to the Chrome Web Store. The listing's
+# visibility (unlisted or public) is a dashboard setting; this workflow only
+# uploads a new package and asks the store to publish it, which starts the
+# store's own review. Stable releases only: the store requires a strictly
+# increasing version and reviews every upload, so nightly and preview builds
+# keep going to GitHub prereleases for side-loading instead.
+on:
+  release:
+    types: ['published']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'The branch or ref (full git sha) to release from.'
+        required: true
+        type: 'string'
+        default: 'main'
+      dry_run:
+        description: 'Package and scan only; nothing is uploaded to the Chrome Web Store.'
+        required: true
+        type: 'boolean'
+        default: true
+      publish:
+        description: 'Ask the store to publish the uploaded package. Unset to leave it as a draft in the dashboard.'
+        required: false
+        type: 'boolean'
+        default: true
+      force_skip_tests:
+        description: 'Skip the extension test suite. Prod releases should run tests.'
+        required: false
+        type: 'boolean'
+        default: false
+
+concurrency:
+  group: '${{ github.workflow }}'
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: 'ubuntu-latest'
+    # The release-event path can be paused by setting the repository variable
+    # RELEASE_CHROME_SYNC_PUBLISH=false; manual dispatch keeps working.
+    if: |-
+      ${{
+        github.repository == 'QwenLM/qwen-code' &&
+        (
+          github.event_name != 'release' ||
+          (
+            vars.RELEASE_CHROME_SYNC_PUBLISH != 'false' &&
+            startsWith(github.event.release.tag_name, 'v') &&
+            github.event.release.prerelease == false
+          )
+        )
+      }}
+    permissions:
+      contents: 'read'
+    outputs:
+      release_version: '${{ steps.version.outputs.release_version }}'
+      manifest_version: '${{ steps.version.outputs.manifest_version }}'
+      is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
+      should_publish: '${{ steps.vars.outputs.should_publish }}'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
+          # The manifest's build number falls back to the commit count, which
+          # a shallow checkout cannot compute.
+          fetch-depth: 0
+
+      - name: 'Set booleans for simplified logic'
+        id: 'vars'
+        env:
+          DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
+          PUBLISH_INPUT: '${{ github.event.inputs.publish }}'
+        run: |-
+          is_dry_run="false"
+          if [[ "${DRY_RUN_INPUT}" == "true" ]]; then
+            is_dry_run="true"
+          fi
+          echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
+
+          should_publish="true"
+          if [[ "${PUBLISH_INPUT}" == "false" ]]; then
+            should_publish="false"
+          fi
+          echo "should_publish=${should_publish}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          package-manager-cache: false
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+
+      - name: 'Run Tests'
+        if: "${{ github.event.inputs.force_skip_tests != 'true' }}"
+        run: |-
+          npm -w packages/chrome-extension run test:ci
+          npm -w packages/chrome-extension run typecheck
+
+      - name: 'Package for the store'
+        run: |-
+          npm -w packages/chrome-extension run package:store
+          npm -w packages/chrome-extension run scan:artifacts
+
+      - name: 'Verify the package'
+        id: 'version'
+        working-directory: 'packages/chrome-extension'
+        env:
+          RELEASE_TAG: '${{ github.event.release.tag_name }}'
+        run: |-
+          # The manifest inside the zip is what the store sees, so both checks
+          # read it back out of the archive rather than from the build tree.
+          manifest=$(unzip -p chrome-extension-store.zip manifest.json)
+          manifest_version=$(node -p "JSON.parse(process.argv[1]).version" "${manifest}")
+          release_version=$(node -p "JSON.parse(process.argv[1]).version_name" "${manifest}")
+
+          # The store rejects an upload whose manifest pins an extension id.
+          if node -p "JSON.parse(process.argv[1]).key ?? ''" "${manifest}" | grep -q .; then
+            echo "::error::The packaged manifest still carries a key; the store would reject it."
+            exit 1
+          fi
+
+          # A release-event run must ship that release, not whatever the
+          # checkout happened to build.
+          if [[ -n "${RELEASE_TAG}" && "${RELEASE_TAG#v}" != "${release_version}" ]]; then
+            echo "::error::Packaged ${release_version} but the release is ${RELEASE_TAG}."
+            exit 1
+          fi
+
+          echo "Packaged ${release_version} as manifest version ${manifest_version}."
+          {
+            echo "manifest_version=${manifest_version}"
+            echo "release_version=${release_version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: 'Upload the package'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'chrome-extension-${{ steps.version.outputs.release_version }}'
+          path: 'packages/chrome-extension/chrome-extension-store.zip'
+          if-no-files-found: 'error'
+
+  publish:
+    needs: 'build'
+    if: "${{ needs.build.outputs.is_dry_run == 'false' }}"
+    runs-on: 'ubuntu-latest'
+    environment:
+      name: 'production-release'
+      url: 'https://chromewebstore.google.com/detail/${{ secrets.CHROME_WEBSTORE_ITEM_ID }}'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Download the package'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'chrome-extension-${{ needs.build.outputs.release_version }}'
+
+      - name: 'Upload to the Chrome Web Store'
+        env:
+          CLIENT_ID: '${{ secrets.CHROME_WEBSTORE_CLIENT_ID }}'
+          CLIENT_SECRET: '${{ secrets.CHROME_WEBSTORE_CLIENT_SECRET }}'
+          REFRESH_TOKEN: '${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}'
+          ITEM_ID: '${{ secrets.CHROME_WEBSTORE_ITEM_ID }}'
+          RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
+        run: |-
+          for name in CLIENT_ID CLIENT_SECRET REFRESH_TOKEN ITEM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing repository secret CHROME_WEBSTORE_${name}."
+              exit 1
+            fi
+          done
+
+          # The refresh token is long-lived; the access token it mints lasts an
+          # hour, which covers an upload and a publish.
+          token=$(curl --fail --silent --show-error \
+            --data-urlencode "client_id=${CLIENT_ID}" \
+            --data-urlencode "client_secret=${CLIENT_SECRET}" \
+            --data-urlencode "refresh_token=${REFRESH_TOKEN}" \
+            --data-urlencode 'grant_type=refresh_token' \
+            'https://oauth2.googleapis.com/token' | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).access_token')
+          if [[ -z "${token}" || "${token}" == 'undefined' ]]; then
+            echo "::error::Could not mint an access token from the refresh token."
+            exit 1
+          fi
+          echo "::add-mask::${token}"
+
+          response=$(curl --fail --silent --show-error \
+            --request PUT \
+            --header "Authorization: Bearer ${token}" \
+            --header 'x-goog-api-version: 2' \
+            --upload-file 'chrome-extension-store.zip' \
+            "https://www.googleapis.com/upload/chromewebstore/v1.1/items/${ITEM_ID}")
+          echo "${response}"
+
+          # HTTP 200 with uploadState FAILURE is how the store reports a
+          # rejected package, so the body decides, not the status code.
+          state=$(node -p 'JSON.parse(process.argv[1]).uploadState ?? ""' "${response}")
+          if [[ "${state}" != 'SUCCESS' ]]; then
+            echo "::error::Upload of ${RELEASE_VERSION} ended in state ${state:-unknown}."
+            exit 1
+          fi
+          echo "QWEN_CHROME_TOKEN=${token}" >> "${GITHUB_ENV}"
+
+      - name: 'Ask the store to publish it'
+        if: "${{ needs.build.outputs.should_publish == 'true' }}"
+        env:
+          ITEM_ID: '${{ secrets.CHROME_WEBSTORE_ITEM_ID }}'
+          RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
+        run: |-
+          response=$(curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${QWEN_CHROME_TOKEN}" \
+            --header 'x-goog-api-version: 2' \
+            --header 'Content-Length: 0' \
+            "https://www.googleapis.com/chromewebstore/v1.1/items/${ITEM_ID}/publish")
+          echo "${response}"
+
+          # The extension carries the debugger permission, so a human review is
+          # expected on every upload: IN_REVIEW is a success, not a stall.
+          status=$(node -p '(JSON.parse(process.argv[1]).status ?? []).join(",")' "${response}")
+          case "${status}" in
+            *OK* | *ITEM_PENDING_REVIEW* | *PUBLISHED_WITH_FRICTION_WARNING*)
+              echo "Submitted ${RELEASE_VERSION}: ${status}"
+              ;;
+            *)
+              echo "::error::Publishing ${RELEASE_VERSION} reported ${status:-no status}."
+              exit 1
+              ;;
+          esac
+
+  report-failure:
+    name: 'Create Issue on Failure'
+    needs:
+      - 'build'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        (
+          needs.build.result == 'failure' ||
+          needs.build.result == 'cancelled' ||
+          needs.publish.result == 'failure' ||
+          needs.publish.result == 'cancelled'
+        )
+      }}
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Create failure issue'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          GH_REPO: '${{ github.repository }}'
+        run: |-
+          gh issue create \
+            --repo "${GH_REPO}" \
+            --title "Chrome extension release failed for ${RELEASE_VERSION:-unknown} on $(date +'%Y-%m-%d')" \
+            --body "The Chrome Web Store release workflow failed. See the full run for details: ${DETAILS_URL}"

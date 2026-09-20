@@ -40,6 +40,41 @@ describe.skipIf(!zipAvailable())('packageExtension', () => {
     }
   });
 
+  it('drops the manifest key for a store build and keeps it otherwise', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-store-'));
+    const source = path.join(root, 'extension');
+    const archive = path.join(root, 'extension.zip');
+    const manifest = { name: 'Qwen Code', version: '1.2.3.4', key: 'PUBKEY' };
+    try {
+      mkdirSync(source, { recursive: true });
+      writeFileSync(
+        path.join(source, 'manifest.json'),
+        JSON.stringify(manifest),
+      );
+
+      await packageExtension({ source, archive, store: true });
+      const stored = await readZipEntries(archive);
+      const storeManifest = JSON.parse(
+        String(stored.find((entry) => entry.name === 'manifest.json').content),
+      );
+      // The store rejects an upload carrying a key, and everything else about
+      // the build has to survive the staging copy.
+      expect(storeManifest).toEqual({ name: 'Qwen Code', version: '1.2.3.4' });
+
+      await packageExtension({ source, archive });
+      const unpacked = await readZipEntries(archive);
+      expect(
+        JSON.parse(
+          String(
+            unpacked.find((entry) => entry.name === 'manifest.json').content,
+          ),
+        ),
+      ).toEqual(manifest);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('lets the release scanner inspect the packaged contents', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-scan-'));
     const source = path.join(root, 'extension');

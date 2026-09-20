@@ -30,8 +30,8 @@
 11634 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
-1343 mobile-shell.yml
 7642 main-ci-failure-issue.yml
+1343 mobile-shell.yml
 2277 pnpm-store.yml
 2489 pnpm-worktree-smoke.yml
 7299 pr-force-push-reminder.yml
@@ -47,6 +47,7 @@
 2518 qwen-review-runner-schedule.yml
 27648 qwen-triage-finalize.yml
 354514 qwen-triage.yml
+10940 release-chrome-extension.yml
 9701 release-sdk-java.yml
 22345 release-sdk-python.yml
 20008 release-sdk.yml
