@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/chrome-bridge",
-  "version": "0.24.2",
+  "version": "0.24.2-nightly.20260920.eceaede18e",
   "description": "Chrome extension bridge for Qwen CLI - enables AI-powered browser interactions",
   "private": true,
   "repository": {
