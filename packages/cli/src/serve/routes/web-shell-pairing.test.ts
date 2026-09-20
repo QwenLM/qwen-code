@@ -19,6 +19,8 @@ import { registerWebShellPairingRoutes } from './web-shell-pairing.js';
 import { listLanCandidates } from '../local-control/lan-interfaces.js';
 import { tagListener } from '../local-control/listener-identity.js';
 import { createRateLimiter, type RateLimiterInstance } from '../rate-limit.js';
+import type { DaemonLogger } from '../daemon-logger.js';
+import { installAccessLogMiddleware } from '../server/access-log.js';
 
 vi.mock('../local-control/lan-interfaces.js', () => ({
   listLanCandidates: vi.fn(() => []),
@@ -31,10 +33,15 @@ const limiters: RateLimiterInstance[] = [];
 function setup(
   hostname = '0.0.0.0',
   token: string | undefined = 'runtime-secret',
-  options: { allowOrigins?: string[]; rateLimit?: boolean } = {},
+  options: {
+    allowOrigins?: string[];
+    rateLimit?: boolean;
+    logger?: DaemonLogger;
+  } = {},
 ) {
   const app = express();
   const credentials = new CredentialStore(token);
+  if (options.logger) installAccessLogMiddleware(app, options.logger, () => 0);
   installRemoteSelfOriginMiddleware(
     app,
     hostname,
@@ -47,9 +54,9 @@ function setup(
     ? createRateLimiter({
         hostname,
         tiers: {
-          prompt: { windowMs: 60_000, max: 2 },
+          prompt: { windowMs: 60_000, max: 1 },
           mutation: { windowMs: 60_000, max: 2 },
-          read: { windowMs: 60_000, max: 2 },
+          read: { windowMs: 60_000, max: 10 },
         },
       })
     : undefined;
@@ -58,6 +65,7 @@ function setup(
   app.use(bearerAuth(credentials));
   if (limiter) app.use(limiter.middleware);
   app.post('/probe', (_req, res) => res.sendStatus(204));
+  app.get('/probe', (_req, res) => res.sendStatus(204));
   const issue = () =>
     request(app)
       .post('/web-shell/pairing')
@@ -86,6 +94,48 @@ afterEach(() => {
 });
 
 describe('Web Shell pairing', () => {
+  it('preserves operator access logs after a throttled exchange flood', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const logger: DaemonLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      raw: vi.fn(),
+      getLogPath: () => '',
+      getDaemonId: () => 'pairing-test',
+      getStatus: () => ({
+        runId: 'pairing-test',
+        mode: 'stderr-only',
+        health: 'ok',
+        issues: [],
+        droppedRecords: 0,
+        droppedBytes: 0,
+      }),
+      flush: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+    };
+    const { app, exchange } = setup('0.0.0.0', 'runtime-secret', {
+      rateLimit: true,
+      logger,
+    });
+    for (let i = 0; i < 130; i++) {
+      expect((await exchange('invalid')).status).toBe(i < 2 ? 401 : 429);
+    }
+    for (let i = 0; i < 6; i++) {
+      await request(app)
+        .get('/probe')
+        .set('Host', authority)
+        .set('Origin', origin)
+        .set('Authorization', 'Bearer runtime-secret')
+        .expect(204);
+    }
+    expect(logger.info).toHaveBeenCalledTimes(6);
+    expect(logger.info).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /probe', status: 204 }),
+    );
+  });
+
   it('rejects an allowlisted foreign Origin without consuming the invitation', async () => {
     const allowedOrigin = 'http://allowed.test';
     const { issue, exchange } = setup('0.0.0.0', 'runtime-secret', {
@@ -132,9 +182,12 @@ describe('Web Shell pairing', () => {
         (await exchange('invalid').set('X-Qwen-Client-Id', clientId)).status,
       ).toBe(401);
     }
-    expect(
-      (await exchange(code).set('X-Qwen-Client-Id', 'untrusted-3')).status,
-    ).toBe(429);
+    const throttled = await exchange(code).set(
+      'X-Qwen-Client-Id',
+      'untrusted-3',
+    );
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers['cache-control']).toBe('no-store');
     now.mockReturnValue(31_000);
     const paired = await exchange(code).set('X-Qwen-Client-Id', 'untrusted-4');
     expect(paired.status).toBe(200);

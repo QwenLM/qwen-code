@@ -40,6 +40,7 @@ export function registerWebShellPairingRoutes(
   app.post(
     '/web-shell/pairing/exchange',
     (req, res, next) => {
+      res.setHeader('Cache-Control', 'no-store');
       if (
         rateLimiter &&
         !rateLimiter.checkRate(
@@ -47,6 +48,7 @@ export function registerWebShellPairingRoutes(
           'mutation',
         )
       ) {
+        res.locals[ACCESS_LOG_REJECT_LOCAL] = true;
         res.status(429).json({
           error: 'Rate limit exceeded',
           code: 'rate_limit_exceeded',
@@ -57,7 +59,6 @@ export function registerWebShellPairingRoutes(
       next();
     },
     (req, res) => {
-      res.setHeader('Cache-Control', 'no-store');
       const secret =
         req.headers.authorization?.match(/^Bearer ([\w-]{43})$/i)?.[1];
       const key = secret ? digest(secret) : '';

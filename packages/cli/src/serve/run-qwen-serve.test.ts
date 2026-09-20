@@ -13708,6 +13708,7 @@ describe('runQwenServe channel worker supervisor', () => {
 
   it('hands the quickstart the mounted-web-shell flag', async () => {
     mockRemoteQuickstart.print.mockClear();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-web-')),
     );
@@ -13726,8 +13727,18 @@ describe('runQwenServe channel worker supervisor', () => {
       );
       expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
       expect(mockRemoteQuickstart.print.mock.calls[0][0].web).toBe(true);
+      const startup = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(startup).toContain(
+        'same-origin Web Shell HTTP and WebSocket requests work without --allow-origin',
+      );
+      expect(startup).toContain(
+        'TLS-terminating proxy still need --allow-origin <origin>',
+      );
     } finally {
       vi.unstubAllEnvs();
+      stderr.mockRestore();
       await started?.close();
     }
   });
