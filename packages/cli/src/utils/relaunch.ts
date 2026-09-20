@@ -16,6 +16,7 @@ interface RelaunchOptions {
   afterSpawn?: () => void;
   childEnv?: Readonly<Record<string, string>>;
   onUpdateRelaunch?: (relaunchOnFailure: boolean) => Promise<number> | number;
+  replaceProcess?: boolean;
 }
 
 export async function relaunchOnExitCode(
@@ -52,29 +53,42 @@ export async function relaunchAppInChildProcess(
     return;
   }
 
-  const runner = () => {
-    let updateOnExitRequested = false;
-
-    // process.argv is [node, script, ...args]
-    // We want to construct [ ...nodeArgs, script, ...scriptArgs]
-    const script = process.argv[1];
-    const scriptArgs = process.argv.slice(2);
-
-    const nodeArgs = [
-      ...process.execArgv,
-      ...additionalNodeArgs,
-      script,
-      ...additionalScriptArgs,
-      ...scriptArgs,
-    ];
-    const newEnv: NodeJS.ProcessEnv = {
+  const script = process.argv[1];
+  const scriptArgs = process.argv.slice(2);
+  const nodeArgs = [
+    ...process.execArgv,
+    ...additionalNodeArgs,
+    script,
+    ...additionalScriptArgs,
+    ...scriptArgs,
+  ];
+  const createChildEnv = (): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       ...options?.childEnv,
       QWEN_CODE_NO_RELAUNCH: 'true',
     };
-    if (newEnv['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
-      newEnv['ELECTRON_RUN_AS_NODE'] = '1';
+    if (env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
+      env['ELECTRON_RUN_AS_NODE'] = '1';
     }
+    return env;
+  };
+
+  if (
+    options?.replaceProcess &&
+    typeof process.execve === 'function' &&
+    !['win32', 'os400'].includes(process.platform)
+  ) {
+    process.execve(
+      process.execPath,
+      [process.execPath, ...nodeArgs],
+      createChildEnv(),
+    );
+  }
+
+  const runner = () => {
+    let updateOnExitRequested = false;
+    const newEnv = createChildEnv();
 
     // The parent process should not be reading from stdin while the child is running.
     process.stdin.pause();

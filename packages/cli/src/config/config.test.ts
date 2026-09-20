@@ -5490,6 +5490,10 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({ shouldUseNodePtyShell: undefined }),
+    );
   });
 
   it('should be interactive if prompt-interactive is set', async () => {
@@ -5506,6 +5510,31 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should honor an explicit interactive shell setting in headless mode', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { enableInteractiveShell: true } } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should honor an explicit non-interactive shell setting in interactive mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { shell: { enableInteractiveShell: false } } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
   });
 
   it('should not be interactive if prompt is set', async () => {
@@ -5514,6 +5543,29 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({ shouldUseNodePtyShell: false }),
+    );
+  });
+
+  it('should keep the interactive shell default for ACP with a prompt', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
+  it('should keep the interactive shell default for configured file input', async () => {
+    process.argv = ['node', 'script.js', '--prompt', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { dualOutput: { inputFile: '/tmp/input.jsonl' } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
   });
 
   it('should not be interactive if positional prompt words are provided with other flags', async () => {
@@ -5522,6 +5574,7 @@ describe('loadCliConfig interactive', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
+    expect(config.getShouldUseNodePtyShell()).toBe(false);
   });
 
   it('should not be interactive if positional prompt words are provided with multiple flags', async () => {

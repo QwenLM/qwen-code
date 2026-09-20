@@ -7610,7 +7610,7 @@ const ZH: Messages = {
     '启用后，MCP 工具会通过 ToolSearch 按需加载，以减少提示词大小。对于依赖前缀 KV 缓存的模型（如 DeepSeek），可关闭此项来保持提示词前缀稳定并提高缓存命中率。',
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
-    '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
+    '使用 node-pty 提供交互式 shell 体验。未设置时，明确的单次 prompt 默认使用 child_process；交互式和输入驱动模式默认使用 PTY。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',

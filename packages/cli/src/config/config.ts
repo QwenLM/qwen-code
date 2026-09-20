@@ -2562,7 +2562,15 @@ export async function loadCliConfig(
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
-    shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    shouldUseNodePtyShell:
+      settings.tools?.shell?.enableInteractiveShell ??
+      (!interactive &&
+      hasPrompt &&
+      !isAcpMode &&
+      !(argv.inputFile ?? settings.dualOutput?.inputFile) &&
+      inputFormat !== InputFormat.STREAM_JSON
+        ? false
+        : undefined),
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
