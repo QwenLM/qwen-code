@@ -25,7 +25,7 @@ const verifier = path.join(
 // `prepublishOnly` drives it: the real script copied into a throwaway package
 // root that carries only the shape under test. Nothing imports the workspace,
 // and `npm pack` answers for the fixture's own `files` globs.
-function runVerifier(build) {
+function runVerifier(build, getEnv = () => ({})) {
   const fixture = mkdtempSync(path.join(tmpdir(), 'web-shell-publish-'));
   try {
     build(fixture);
@@ -37,7 +37,12 @@ function runVerifier(build) {
     return spawnSync(
       process.execPath,
       ['scripts/verify-publish-artifacts.mjs'],
-      { cwd: fixture, encoding: 'utf8', timeout: 120_000 },
+      {
+        cwd: fixture,
+        encoding: 'utf8',
+        env: { ...process.env, ...getEnv(fixture) },
+        timeout: 120_000,
+      },
     );
   } finally {
     rmSync(fixture, { recursive: true, force: true });
@@ -166,6 +171,28 @@ describe('web-shell publish artifact verifier', () => {
         'export declare const c: number;\n',
       );
     });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('keeps npm warnings out of the verifier output', () => {
+    const result = runVerifier(
+      (fixture) => {
+        declarePackage(fixture, {
+          '.': { import: './dist/index.js' },
+        });
+        write(fixture, 'dist/index.js', 'export default 1;\n');
+        write(
+          fixture,
+          'unknown.npmrc',
+          'ELECTRON_MIRROR=https://mirror.invalid\n',
+        );
+      },
+      (fixture) => ({
+        NPM_CONFIG_USERCONFIG: path.join(fixture, 'unknown.npmrc'),
+      }),
+    );
 
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
