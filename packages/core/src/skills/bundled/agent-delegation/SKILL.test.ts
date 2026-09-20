@@ -36,9 +36,14 @@ function skillProse(): string {
  * The Agent tool's description in a session that can load skills — the shape
  * almost every session sends, and the one the moved guidance must be gone
  * from. `skills: false` models a session with no route to any skill, where the
- * reference travels inside the description instead.
+ * reference travels inside the description instead. `bundledDisabled: true`
+ * models a user who turned the reference off, where the description carries
+ * neither.
  */
-async function agentDescription({ skills = true } = {}): Promise<string> {
+async function agentDescription({
+  skills = true,
+  bundledDisabled = false,
+}: { skills?: boolean; bundledDisabled?: boolean } = {}): Promise<string> {
   const subagentManager = {
     listSubagents: vi.fn().mockResolvedValue([]),
     addChangeListener: vi.fn().mockReturnValue(() => {}),
@@ -49,6 +54,11 @@ async function agentDescription({ skills = true } = {}): Promise<string> {
     getLlmClient: () => undefined,
     isAgentTeamEnabled: () => false,
     isTodoWriteEnabled: () => true,
+    // Read before the Skill tool is asked about: a user opt-out wins over the
+    // lack of a route, which is the ordering the withheld test below pins.
+    ...(bundledDisabled
+      ? { getDisabledSkillLevels: () => new Set(['bundled']) }
+      : {}),
     ...(skills
       ? {
           getSkillManager: () => ({}),
@@ -174,5 +184,66 @@ describe('bundled agent-delegation skill', () => {
     expect(description).not.toContain(
       `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
     );
+  });
+
+  /**
+   * The user opt-out is the one route that must not be satisfied by inlining
+   * instead: `skills.disabled` naming this reference, or the whole `bundled`
+   * level turned off, has to remove the text rather than move it to a seat
+   * that costs more per turn. Asserted with the Skill tool both present and
+   * absent, because the opt-out outranks the lack of a route — that ordering
+   * is the invariant, not an implementation detail of `bundled-reference.ts`.
+   *
+   * The heading check is what keeps the shape clean: with the section empty,
+   * the description must not be left carrying `## Writing the prompt` over
+   * nothing, nor the inline preamble.
+   */
+  it.each([
+    ['a Skill tool is registered', true],
+    ['no route to any skill exists', false],
+  ])(
+    'carries nothing when the user turned it off and %s',
+    async (_, skills) => {
+      const description = await agentDescription({
+        skills,
+        bundledDisabled: true,
+      });
+
+      expect(description).not.toContain(
+        `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
+      );
+      expect(description).not.toContain(
+        'Skills cannot be loaded in this session',
+      );
+      expect(description).not.toContain('Never delegate understanding');
+      expect(description).not.toContain('## Writing the prompt');
+    },
+  );
+
+  /**
+   * One sentence left the description without arriving here, and this pins it
+   * as a deliberate dedup rather than a loss. Base `agent.ts` also carried
+   * "After launching an agent, do not fabricate or predict what it found
+   * before it returns…"; the resident **Don't race** bullet already states the
+   * same rule more strongly and stays in every shape, so keeping both would
+   * have charged every request for the same instruction twice.
+   *
+   * Asserted in all three shapes because the surviving rule is the one that
+   * has to hold in each: were it ever gated behind the reference, a session
+   * that never loads the skill would lose the rule entirely.
+   */
+  it("keeps Don't race and drops the sentence it already covers", async () => {
+    const dropped = 'do not fabricate or predict what it found';
+    const surviving = 'Never fabricate or predict its results in any format';
+
+    expect(skillProse()).not.toContain(dropped);
+    for (const description of [
+      await agentDescription(),
+      await agentDescription({ skills: false }),
+      await agentDescription({ bundledDisabled: true }),
+    ]) {
+      expect(description).not.toContain(dropped);
+      expect(description).toContain(surviving);
+    }
   });
 });

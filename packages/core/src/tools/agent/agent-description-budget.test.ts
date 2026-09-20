@@ -157,11 +157,14 @@ describe('AgentTool per-turn size budgets', () => {
    */
   it('keeps the description within its budget when the reference is inlined', async () => {
     // Default shape, no route to any skill. Measured at 10,377 — 647 more
-    // than the description carried before the move: 182 for the reference's
-    // own title and framing paragraph, the rest for the
-    // definition-outranks-the-prompt rule. That rule is new text rather than
-    // relocated text, and it costs a pointer-shaped session nothing, because
-    // only this shape carries the reference body at all.
+    // than the description carried before the move: 92 for the inline
+    // preamble and its separator, 265 for the reference's own title and
+    // framing paragraph, and 465 for the definition-outranks-the-prompt rule
+    // with its blank line, less 175 because the relocated prose itself
+    // renders shorter here than it did in the description's bullet list.
+    // That rule is new text rather than relocated text, and it costs a
+    // pointer-shaped session nothing, because only this shape carries the
+    // reference body at all.
     const tool = await buildTool({ skills: false });
     expect(tool.description.length).toBeLessThanOrEqual(10_750);
   });

@@ -4,7 +4,7 @@
 
 **Status:** implemented for [#12054](https://github.com/QwenLM/qwen-code/issues/12054), part of [#12028](https://github.com/QwenLM/qwen-code/issues/12028). Builds on the Agent/Shell size budgets from [#12142](https://github.com/QwenLM/qwen-code/pull/12142) — landed as `36887c49` — whose rows this change lowers.
 
-Every figure below was produced by rendering the description template statically — substituting `ToolNames`, two subagent entries, team off, todo on — not by running the CLI. Nothing was built or tested locally; the repo tests added here are CI's to run. Token counts are characters ÷ 4, the same rough conversion the issue uses.
+Every figure below was measured, not rendered on paper: the real `AgentTool` is constructed and its assembled `description` read, with the two subagent entries the budget test uses, team off, todo on. The _Before_ column is the same measurement with the two changed source files reverted to the merge base, so exactly one variable moves. Run locally on Linux — `packages/core` built, then 98 tests across the three affected files and 20 in the bundled-skills integration file, all passing, and every row of §3 reproduced from the constructed tool. The macOS and Windows unit jobs are `skipped` by CI for this PR rather than green, so nothing automated covers them; this is platform-independent string and module work, and `Desktop Shell (windows-2022)` does run. Token counts are characters ÷ 4, the same rough conversion the issue uses.
 
 ## 1. Problem
 
@@ -16,7 +16,7 @@ The Workflow tool had the same shape and solved it in [#11013](https://github.co
 
 Moved into `packages/core/src/skills/bundled/agent-delegation/SKILL.md`:
 
-- the `## Writing the prompt` section (the "smart colleague" briefing paragraph, its five bullets, "Terse command-style prompts…", **Never delegate understanding**, and the don't-predict-the-result sentence);
+- the `## Writing the prompt` section (the "smart colleague" briefing paragraph, its five bullets, "Terse command-style prompts…", and **Never delegate understanding**);
 - the `**Writing a fork prompt.**` paragraph;
 - two craft bullets from `Usage notes:` — "Provide clear, detailed prompts…" and "Clearly tell the agent whether you expect it to write code or just to do research…";
 - the `<example_agent_descriptions>` / `isPrime` / `test-runner` worked example.
@@ -30,22 +30,27 @@ Kept in the description, on purpose, because a session that never loads the skil
 
 The split is the test's subject, not a comment: `SKILL.test.ts` asserts each moved anchor **is** in the skill and **is not** in the description a skill-capable session sends, and each kept anchor the other way round. Either half alone would let guidance vanish, or be pasted back, with every test green.
 
-The text moved verbatim rather than being rewritten, with one addition: a rule that a custom subagent's own definition outranks the dispatching prompt. #12142's review threads carry a real dispatch that asked a subagent defined as read-only over one file to search the whole repository, and the relocated "Provide clear, detailed prompts…" bullet encourages that override without ever saying whose contract wins. The rule sits in this reference rather than in the description because it is prompt-writing craft: a session that never loads the reference still cannot widen a subagent's tools, it only wastes the dispatch. A general compression pass on this description was reverted under review in #12142; keeping everything else to relocation keeps the two questions separable.
+The text moved verbatim rather than being rewritten, with one addition and one deletion. The addition is a rule that a custom subagent's own definition outranks the dispatching prompt. #12142's review threads carry a real dispatch that asked a subagent defined as read-only over one file to search the whole repository, and the relocated "Provide clear, detailed prompts…" bullet encourages that override without ever saying whose contract wins. The rule sits in this reference rather than in the description because it is prompt-writing craft: a session that never loads the reference still cannot widen a subagent's tools, it only wastes the dispatch.
+
+The deletion is one sentence, and it is a dedup rather than a loss. Base `agent.ts` carried "After launching an agent, do not fabricate or predict what it found before it returns. If the user asks a follow-up before the result arrives, provide status rather than guessing." The resident **Don't race** bullet already states the same rule more strongly — "Never fabricate or predict its results in any format…give status, not a guess" — and stays in the description in every shape, so carrying both would have charged every request for one instruction twice. `SKILL.test.ts` pins this: the dropped sentence appears in neither surface, and the surviving rule appears in all three shapes. A general compression pass on this description was reverted under review in #12142; keeping everything else to relocation keeps the two questions separable.
 
 ## 3. Measured effect
 
-Description rendered with the two subagent entries the budget test uses, team off, todo on:
+Description length read off the constructed tool, with the two subagent entries the budget test uses, team off, todo on:
 
-| Shape                                            | chars  | ≈tokens |
-| ------------------------------------------------ | ------ | ------- |
-| Before                                           | 9,730  | 2,433   |
-| After, pointer (a session that can load skills)  | 7,386  | 1,847   |
-| After, reference withheld by `skills.disabled`   | 7,192  | 1,798   |
-| After, reference inlined (no route to any skill) | 10,377 | 2,594   |
+| Shape                                                                                 | chars  | ≈tokens |
+| ------------------------------------------------------------------------------------- | ------ | ------- |
+| Before                                                                                | 9,730  | 2,433   |
+| After, pointer (a session that can load skills)                                       | 7,386  | 1,847   |
+| After, pointer + ToolSearch note (a `tools.eager` allowlist withholds the Skill tool) | 7,463  | 1,866   |
+| After, reference withheld by `skills.disabled`                                        | 7,192  | 1,798   |
+| After, reference inlined (no route to any skill)                                      | 10,377 | 2,594   |
 
 So the normal case saves **2,344 characters ≈ 586 tokens per request**, against a 192-character pointer. The new skill costs one listing entry in the system prompt — its 247-character `description`, ≈62 tokens — so the net is **≈524 tokens per request**, recovered on every turn of every session including the ones that never delegate.
 
-The inline shape is 647 characters larger than today's description: 182 because the skill body adds a title and a framing paragraph the description did not need, and 465 for the precedence rule, which is new text rather than relocated text. That is the deliberate price for sessions that cannot load a skill — a pointer there would name something the model cannot reach — and a pointer-shaped session pays none of it, because only the inline shape carries the reference body at all.
+The ToolSearch variant costs 77 characters more than the plain pointer: one sentence telling the model to reveal the Skill tool before it can load the reference.
+
+The inline shape is 647 characters larger than today's description, and that 647 decomposes exactly: 92 for the inline preamble and its `---` separator, 265 for the reference's own title and framing paragraph, and 465 for the precedence rule with its blank line, less 175 because the relocated prose reads shorter inside the reference than it did in the description's bullet list. Only the precedence rule is new text rather than relocated text. The total is the deliberate price for sessions that cannot load a skill — a pointer there would name something the model cannot reach — and a pointer-shaped session pays none of it, because only the inline shape carries the reference body at all.
 
 ## 4. How the route is decided
 
@@ -81,7 +86,7 @@ The inline shape is 647 characters larger than today's description: 182 because 
 
 ## 7. Validation
 
-- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` — the two-way split table, the pointer's wording, the precedence rule, and the inline shape.
+- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` — the two-way split table, the pointer's wording, the precedence rule, the inline shape, the withheld shape (asserted with the Skill tool both registered and absent, since the opt-out outranks the lack of a route), and the don't-predict dedup.
 - `packages/core/src/tools/agent/agent-description-budget.test.ts` — the lowered budgets, the inline ceiling, and the pointer-vs-inline floor.
 - `packages/core/src/skills/workflow-authoring-skill.test.ts` and `workflow-description.test.ts` — unchanged, and they are what pins that the extraction did not change #11013's behaviour.
 - `packages/core/src/skills/bundled-skills.integration.test.ts` — the new `SKILL.md` parses with `name` matching its directory.

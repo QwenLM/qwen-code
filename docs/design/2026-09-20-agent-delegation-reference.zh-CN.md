@@ -4,7 +4,7 @@
 
 **状态：** [#12054](https://github.com/QwenLM/qwen-code/issues/12054) 的实现，属于 [#12028](https://github.com/QwenLM/qwen-code/issues/12028)。建立在 [#12142](https://github.com/QwenLM/qwen-code/pull/12142) 的 Agent/Shell 体积预算之上（已合入，`36887c49`），并把其中几条预算下调。
 
-下文所有数字都来自对描述模板的静态渲染（代入 `ToolNames`、两个 subagent 条目、team 关、todo 开），不是运行 CLI 得到的。本地没有构建、没有跑测试；新增的仓库测试交由 CI 执行。token 数按字符数 ÷ 4 折算，与 issue 中的口径一致。
+下文所有数字都是实测得到的，不是纸面渲染：构造真实的 `AgentTool` 并读取它装配完成的 `description`，代入预算测试所用的两个 subagent 条目、team 关、todo 开。"改动前"那一列用的是同一套量法，只把两个被改的源文件回退到 merge base，因此只有一个变量在动。本地在 Linux 上跑过——构建 `packages/core`，然后三个受影响文件共 98 个测试、内置 skill 集成文件 20 个测试全部通过，§3 的每一行都由构造出来的工具复现。macOS 与 Windows 的单测任务在本 PR 上被 CI `skipped`、并非绿色，所以没有自动化覆盖它们；这次改动是与平台无关的字符串与模块工作，而 `Desktop Shell (windows-2022)` 确实会跑。token 数按字符数 ÷ 4 折算，与 issue 中的口径一致。
 
 ## 1. 问题
 
@@ -16,7 +16,7 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 
 搬入 `packages/core/src/skills/bundled/agent-delegation/SKILL.md`：
 
-- `## Writing the prompt` 整节（"像对聪明同事交代"那段、五条要点、"Terse command-style prompts…"、**Never delegate understanding**，以及"结果没回来之前不要编造"那句）；
+- `## Writing the prompt` 整节（"像对聪明同事交代"那段、五条要点、"Terse command-style prompts…"，以及 **Never delegate understanding**）；
 - `**Writing a fork prompt.**` 那一段；
 - `Usage notes:` 里的两条手艺条目——"Provide clear, detailed prompts…" 与 "Clearly tell the agent whether you expect it to write code or just to do research…"；
 - `<example_agent_descriptions>` / `isPrime` / `test-runner` 的完整示例。
@@ -30,22 +30,27 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 
 这条分界线本身就是测试对象，而不是一句注释：`SKILL.test.ts` 对每个搬走的锚点同时断言"**在** skill 里"和"**不在**可加载 skill 的会话所发送的描述里"，对每个保留的锚点则反向断言。只做一半，都会让指南悄悄消失或被粘回来，而测试全绿。
 
-文本是原样搬移，没有重写，只有一处新增：一条"自定义 subagent 自己的定义优先于派发提示词"的规则。#12142 的评审线程里有一个真实派发——它要求一个被定义为只读单个文件的 subagent 去全库搜索，而搬走的 "Provide clear, detailed prompts…" 那条恰恰在鼓励这种覆盖，却从没说清谁的契约优先。这条规则放在这份参考里而不是描述里，因为它属于提示词手艺：从不加载这份参考的会话仍然无法放宽 subagent 的工具，只会白白浪费那次派发。#12142 中一次针对该描述的整体压缩在评审后被回退；把其余部分限定为"搬移"，可以让这两个问题彼此独立。
+文本是原样搬移，没有重写，只有一处新增和一处删除。新增的是一条"自定义 subagent 自己的定义优先于派发提示词"的规则。#12142 的评审线程里有一个真实派发——它要求一个被定义为只读单个文件的 subagent 去全库搜索，而搬走的 "Provide clear, detailed prompts…" 那条恰恰在鼓励这种覆盖，却从没说清谁的契约优先。这条规则放在这份参考里而不是描述里，因为它属于提示词手艺：从不加载这份参考的会话仍然无法放宽 subagent 的工具，只会白白浪费那次派发。
+
+删除的是一句话，而且它是去重、不是丢失。base 的 `agent.ts` 里有 "After launching an agent, do not fabricate or predict what it found before it returns. If the user asks a follow-up before the result arrives, provide status rather than guessing."；而常驻的 **Don't race** 那条已经用更强的措辞说明了同一条规则——"Never fabricate or predict its results in any format…give status, not a guess"——并且它在任何形态下都留在描述里，所以两处都留等于让每次请求为同一条指令付两遍钱。`SKILL.test.ts` 把这次去重钉住了：被删的那句在两个面里都不出现，而留下来的那条规则在三种形态里都出现。#12142 中一次针对该描述的整体压缩在评审后被回退；把其余部分限定为"搬移"，可以让这两个问题彼此独立。
 
 ## 3. 实测效果
 
-以预算测试所用的两个 subagent 条目、team 关、todo 开渲染描述：
+描述长度取自构造出来的工具，代入预算测试所用的两个 subagent 条目、team 关、todo 开：
 
-| 形态                                | 字符   | ≈token |
-| ----------------------------------- | ------ | ------ |
-| 改动前                              | 9,730  | 2,433  |
-| 改动后，指针（可加载 skill 的会话） | 7,386  | 1,847  |
-| 改动后，被 `skills.disabled` 关掉   | 7,192  | 1,798  |
-| 改动后，内联（完全没有 skill 通路） | 10,377 | 2,594  |
+| 形态                                                                    | 字符   | ≈token |
+| ----------------------------------------------------------------------- | ------ | ------ |
+| 改动前                                                                  | 9,730  | 2,433  |
+| 改动后，指针（可加载 skill 的会话）                                     | 7,386  | 1,847  |
+| 改动后，指针 + ToolSearch 提示（`tools.eager` 白名单扣住了 Skill 工具） | 7,463  | 1,866  |
+| 改动后，被 `skills.disabled` 关掉                                       | 7,192  | 1,798  |
+| 改动后，内联（完全没有 skill 通路）                                     | 10,377 | 2,594  |
 
 即常见情形下每次请求省下 **2,344 字符 ≈ 586 token**，代价是 192 字符的指针。新 skill 会在系统提示词里增加一条清单项——它 247 字符的 `description`，≈62 token——因此净收益是**每次请求 ≈524 token**，且在每个会话的每一轮都成立，包括那些从不委派的轮次。
 
-内联形态比今天的描述多 647 字符：182 来自 skill 正文多出的标题和一段说明（描述本来不需要它们），465 来自优先级规则——那是新增文本，不是搬移文本。这是为"无法加载 skill 的会话"刻意付的价：在那里放指针，等于指向模型拿不到的东西。而指针形态的会话一点都不用付，因为只有内联形态才会携带参考正文。
+ToolSearch 那一形态比纯指针多 77 字符：一句话告诉模型，要加载这份参考得先把 Skill 工具取出来。
+
+内联形态比今天的描述多 647 字符，而这 647 可以精确分解：92 是内联前言及其 `---` 分隔符，265 是这份参考自己的标题和开头那段说明，465 是优先级规则连同它的空行，再减去 175——因为搬移过来的那部分文字在这份参考里比在原来的 bullet 列表里更短。其中只有优先级规则是新增文本，不是搬移文本。这个总量是为"无法加载 skill 的会话"刻意付的价：在那里放指针，等于指向模型拿不到的东西。而指针形态的会话一点都不用付，因为只有内联形态才会携带参考正文。
 
 ## 4. 路由如何决定
 
@@ -81,7 +86,7 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 
 ## 7. 验证
 
-- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` —— 双向分界表、指针措辞、优先级规则、内联形态。
+- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` —— 双向分界表、指针措辞、优先级规则、内联形态、被关掉（withheld）形态（在 Skill 工具已注册与不存在两种情况下都断言，因为用户的退出选择优先于"没有通路"），以及"不要编造结果"那句的去重。
 - `packages/core/src/tools/agent/agent-description-budget.test.ts` —— 下调后的预算、内联上限、指针与内联的差值下限。
 - `packages/core/src/skills/workflow-authoring-skill.test.ts` 与 `workflow-description.test.ts` —— 未改动，它们正是"抽取没有改变 #11013 行为"的钉子。
 - `packages/core/src/skills/bundled-skills.integration.test.ts` —— 新 `SKILL.md` 能被解析，且 `name` 与目录名一致。
