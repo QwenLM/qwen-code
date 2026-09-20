@@ -576,6 +576,119 @@
         font-size: 12px;
       }
 
+      .tool-flow-diagram {
+        margin: 18px 0 14px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background:
+          radial-gradient(
+            circle at 12% 0%,
+            rgba(81, 214, 199, 0.08),
+            transparent 28rem
+          ),
+          rgba(4, 13, 21, 0.58);
+      }
+
+      .tool-flow-track {
+        display: grid;
+        gap: 13px;
+      }
+
+      .tool-flow-stage {
+        position: relative;
+        display: grid;
+        grid-template-columns: 190px minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+        padding: 16px 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(13, 29, 43, 0.78);
+      }
+
+      .tool-flow-stage:not(:last-child)::after {
+        content: '↓';
+        position: absolute;
+        left: 105px;
+        bottom: -19px;
+        z-index: 2;
+        width: 20px;
+        color: var(--cyan);
+        font-weight: 900;
+        text-align: center;
+      }
+
+      .tool-flow-stage h4 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      .tool-flow-index {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--cyan);
+        font-family: var(--mono);
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+      }
+
+      .tool-flow-owner {
+        display: block;
+        margin-top: 6px;
+        color: #7f96aa;
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+
+      .tool-flow-steps {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .tool-flow-step {
+        padding: 7px 9px;
+        border: 1px solid rgba(104, 167, 255, 0.25);
+        border-radius: 9px;
+        background: rgba(104, 167, 255, 0.07);
+        color: #cce0ff;
+        font-family: var(--mono);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+
+      .tool-flow-step.commit {
+        border-color: rgba(81, 214, 199, 0.42);
+        background: rgba(81, 214, 199, 0.09);
+        color: #afe9e2;
+      }
+
+      .tool-flow-step.wait {
+        border-color: rgba(242, 189, 101, 0.42);
+        background: rgba(242, 189, 101, 0.08);
+        color: #efd3a5;
+      }
+
+      .tool-flow-step.execute {
+        border-color: rgba(181, 154, 255, 0.42);
+        background: rgba(181, 154, 255, 0.08);
+        color: #d7c9ff;
+      }
+
+      .tool-flow-arrow {
+        color: #6689aa;
+        font-size: 11px;
+      }
+
+      .tool-flow-diagram figcaption {
+        margin-top: 13px;
+        color: #8298ab;
+        font-size: 11px;
+      }
+
       .state-flow {
         display: flex;
         flex-wrap: wrap;
@@ -754,6 +867,16 @@
           bottom: -21px;
           transform: translateX(50%);
         }
+
+        .tool-flow-stage {
+          grid-template-columns: 1fr;
+          gap: 11px;
+        }
+
+        .tool-flow-stage:not(:last-child)::after {
+          left: 50%;
+          transform: translateX(-50%);
+        }
       }
 
       @media print {
@@ -785,6 +908,8 @@
         .table-wrap,
         .phase,
         .sequence-step,
+        .tool-flow-diagram,
+        .tool-flow-stage,
         .checklist li {
           break-inside: avoid;
           box-shadow: none;
@@ -811,6 +936,8 @@
         </div>
         <div class="nav-title">方案目录</div>
         <nav class="nav">
+          <a href="#minimum-runtime">首版运行条件</a>
+          <a href="#ordinary-tools">普通工具接线</a>
           <a href="#overview">架构总览</a>
           <a href="#goals">目标与边界</a>
           <a href="#roles">组件职责</a>
@@ -825,13 +952,14 @@
           <a href="#security">安全隔离</a>
           <a href="#capacity">容量与观测</a>
           <a href="#agent-api">Agent API</a>
+          <a href="#event-storage">事件与存储</a>
           <a href="#delivery">实施阶段</a>
           <a href="#acceptance">验收标准</a>
         </nav>
         <div class="sidebar-note">
-          方案版本 v1.2<br />
+          方案版本 v1.6 · 2026-09-20<br />
           核心决策：一个 Session 一个固定执行引擎；Managed Harness
-          从第一轮起负责完整模型循环。
+          从第一轮起负责完整模型循环；公开事件先可靠提交，再向客户端推送。
         </div>
       </aside>
 
@@ -873,6 +1001,418 @@
             </div>
           </div>
         </header>
+
+        <section id="minimum-runtime">
+          <div class="section-head">
+            <div>
+              <div class="section-index">00 / FIRST RUNTIME</div>
+              <h2>首版运行条件</h2>
+            </div>
+          </div>
+          <p class="lead">
+            v1.6 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线和
+            v1.5 的统一 Session 身份，并补充事件接受、SSE
+            直推、异步分发与恢复边界。Java 在创建前生成全局唯一 RFC UUID， 公共
+            API、qwen Session Authority、Managed Harness、JSONL 和 Runtime
+            Broker scope 使用完全相同的
+            <code>sessionId</code>。不得再生成或持久化第二套 Harness Session
+            ID。 首版仍采用单 Java + qwen Sidecar、预发布静态
+            AgentBundle、Session 独占 Runtime， 复用现有产品 REST/SSE
+            与正式历史。同 Session 多轮复用环境，Harness 仍可承载多个 Session。
+          </p>
+          <p>
+            首版只支持普通工具，以 Read、Write、Edit 和前台 Shell 为最小验收集；
+            自动记忆、子 Agent、后台 Shell 暂不涉及，本轮不补充其专项设计。
+            复用现有配置与 AgentBundle 工具目录表达范围，不新增开关协议。
+            普通工具所需的审批、输出与文件历史保存、Shell
+            后代进程的取消清理仍须完成。 该 profile
+            的初始化和轮次结束不自动启动延期能力；配置要求范围外能力时，
+            创建前按既有 selector 选择 Legacy，显式要求不兼容的 Managed
+            则拒绝准入。
+          </p>
+          <div class="callout warning">
+            <strong>租户边界：</strong>独立 Spring
+            参考服务不做终端用户鉴权，但要求
+            <code>X-Qwen-Tenant-Id</code> 并将它贯穿 Session、Turn、Event 与
+            Broker scope；本地 WebShell 的
+            <code>tenant</code> 参数只用于开发代理。生产部署必须由
+            可信上游鉴权后注入
+            tenantId。完整多租户授权、配额和跨租户隔离仍是生产门槛。
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>项目</th>
+                  <th>首版要求</th>
+                  <th>最小完成边界</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Prompt 受理与幂等</td>
+                  <td>必需</td>
+                  <td>
+                    固定请求 ID；qwen 持久输入与 WakeIntent 后 Java 才
+                    ACK，响应丢失查原请求；不新增 Java 提前 ACK 的输入队列。
+                  </td>
+                </tr>
+                <tr>
+                  <td>统一 Session 身份</td>
+                  <td>必需</td>
+                  <td>
+                    公共 API、qwen/Harness、JSONL 与 Broker scope 共用 Java
+                    预分配的 RFC UUID；数据库不保存公共 ID 到 Harness ID
+                    的映射。
+                  </td>
+                </tr>
+                <tr>
+                  <td>Broker 调用与查询</td>
+                  <td>必需</td>
+                  <td>
+                    同轮等待、原 execution
+                    查询、门禁映射、取消和实际释放；execute accepted
+                    不等于完成。
+                  </td>
+                </tr>
+                <tr>
+                  <td>AgentBundle</td>
+                  <td>必需</td>
+                  <td>
+                    预发布不可变版本与资源闭包，Harness
+                    离线可读；缺失拒绝准入，Runtime 核验 manifest。
+                  </td>
+                </tr>
+                <tr>
+                  <td>Session 归属与存储</td>
+                  <td>必需</td>
+                  <td>
+                    固定后端、明确持久位置；重启无证明则阻塞，不能新建空 Session
+                    替代。
+                  </td>
+                </tr>
+                <tr>
+                  <td>Runtime 生命周期</td>
+                  <td>必需</td>
+                  <td>
+                    持久创建意图、创建去重、有限启动/idle 期限和容量；取消后迟到
+                    ready 重新校验，释放核验真实退出。
+                  </td>
+                </tr>
+                <tr>
+                  <td>审批与用户问答</td>
+                  <td>条件必需</td>
+                  <td>
+                    已开放工具需要交互时，响应必须经 Java
+                    回到原持久仲裁；不静默自动批准。
+                  </td>
+                </tr>
+                <tr>
+                  <td>跨 Session 共享 Runtime</td>
+                  <td>默认关闭</td>
+                  <td>
+                    独立
+                    ToolSessionBinding、配置/权限/gate/历史及引用计数通过验收后启用。
+                  </td>
+                </tr>
+                <tr>
+                  <td>公开事件接受与 SSE</td>
+                  <td>已有 P0/P1 切片</td>
+                  <td>
+                    源游标、公开序号、Turn
+                    终态和事件在一个事务中提交；同节点提交后直推，溢出或断线从
+                    SQL 补齐。
+                  </td>
+                </tr>
+                <tr>
+                  <td>稳定 Item / Snapshot 物化</td>
+                  <td>后续</td>
+                  <td>
+                    补稳定 itemId/contentPartId、批次日志/Outbox、物化进度与
+                    Snapshot；当前逐事件 SQL 行不能作为最终容量形态。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3 style="margin-top: 28px">最小受理与故障边界</h3>
+          <pre>
+Client stable request ID → Java 持久统一 Session UUID / BackendBinding
+                        → qwen 提交 input + WakeIntent → CommitReceipt
+                        → Java 返回 accepted
+模型推进与 Runtime 预热并行，不等待 Runtime ready。
+ACK 丢失：原 ID 查询；started 失联：原执行对账或 recovery_blocked。
+取消：先持久请求，再追踪实际停止与资源释放。</pre
+          >
+          <p>
+            qwen Transcript/checkpoint、资源与 Broker Ledger
+            必须有明确持久保存位置。 Java 单独重启查询原
+            Sidecar/Runtime；Sidecar 重启核验 writer 与原调用； Pod
+            替换、卷不可用或旧 owner 不明时，首版不保证自动恢复。
+            多实例必须先完成原 owner 路由与 provision
+            竞争控制，自动跨实例接管仍属于 G。
+          </p>
+          <p>
+            首版使用 A/B/C/E 与 F 的必要验收，完整 D 不阻塞现有产品 API 上的 E
+            闭环。 方法与字段、Bundle 发布、部署矩阵、生命周期、审批及 M01～M10
+            验收见
+            <a href="managed-agent-first-runtime.md">首版运行契约</a>；
+            这些是目标条件，不表示实现或测试已经完成。
+          </p>
+        </section>
+
+        <section id="ordinary-tools">
+          <div class="section-head">
+            <div>
+              <div class="section-index">00B / ORDINARY TOOL INTEGRATION</div>
+              <h2>普通工具首版接线</h2>
+            </div>
+          </div>
+          <p class="lead">
+            Read / Write / Edit / 前台 Shell 复用现有 TS 工具与权限流程。
+            本节补齐发布、会话、工具阶段、资源和环境生命周期之间的衔接；
+            自动记忆、子 Agent、后台 Shell 暂缓；tenantId
+            已贯穿调用链，完整租户授权语义继续作为生产门槛。
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>接缝</th>
+                  <th>v1.6 沿用决策</th>
+                  <th>失败边界</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Bundle 发布 / 装载</td>
+                  <td>
+                    受信步骤复用共享 TS 定义生成不可变包；Java/Sidecar
+                    共享只读目录，staging 校验资源闭包后原子发布。Session 固定
+                    revision/ref；核验构建与模板。
+                  </td>
+                  <td>
+                    缺资源、摘要或版本不符拒绝准入；bundleDigest、toolManifestDigest、Hosted
+                    capabilityDigest 分型，不能互相代替。
+                  </td>
+                </tr>
+                <tr>
+                  <td>创建 / Prompt</td>
+                  <td>
+                    Java 创建前固定全局 RFC UUID
+                    sessionId、commandId、bundleRef、Workspace storage
+                    binding；同一 sessionId 直接交给公共
+                    API、qwen/Harness、JSONL 与 Broker。qwen 持久
+                    header/定义后确认创建，持久 input/WakeIntent 后确认
+                    Prompt；原命令提供只读查询。
+                  </td>
+                  <td>
+                    不得生成第二套 Harness Session ID；ACK 丢失查原
+                    receipt；not_found/过期/owner 不明不是未执行证明，不能换 ID
+                    或空 Session 重跑。
+                  </td>
+                </tr>
+                <tr>
+                  <td>工具阶段</td>
+                  <td>
+                    control 显式映射原 prepare/confirmation/confirm/preflight
+                    及文件历史；新能力按版本协商，逐操作严格校验；Java
+                    不重写调度与权限。
+                  </td>
+                  <td>
+                    环境 prepare 不代替 invocation build；status/cancel 不创建
+                    execution；改参使旧授权失效，unknown 不重新执行。
+                  </td>
+                </tr>
+                <tr>
+                  <td>结果 bytes</td>
+                  <td>
+                    Runtime 登记不可变输出；Java 代理授权资源分片；qwen
+                    校验、持久接收完整必要引用后返回 CommitReceipt，再 ACK
+                    delivered。
+                  </td>
+                  <td>
+                    下载失败只续读原内容，未转存不得删除唯一副本；ACK
+                    不等于环境可释放。
+                  </td>
+                </tr>
+                <tr>
+                  <td>回收后下一轮</td>
+                  <td>
+                    持久 Workspace 与 file-history root 独立于计算环境。干净
+                    released 后创建新 binding，挂回同一存储与稳定 history
+                    owner；Workspace generation 不变。
+                  </td>
+                  <td>
+                    旧 execution 永远归旧
+                    binding；存储缺失或原执行未知则阻塞，不从 Git
+                    clone/空目录伪造恢复。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3 style="margin-top: 28px">一轮工具调用的提交顺序</h3>
+          <figure
+            class="tool-flow-diagram"
+            aria-label="普通工具从会话受理到执行、结果提交和运行时回收的五阶段流程"
+          >
+            <div class="tool-flow-track">
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">01 / ADMISSION</span>
+                  <h4>受理与模型先行</h4>
+                  <span class="tool-flow-owner">Java · Harness</span>
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">发布 Bundle</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">创建 Session</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">持久 Prompt</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">CommitReceipt</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">模型先行</span>
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">02 / PREPARE</span>
+                  <h4>环境与历史准备</h4>
+                  <span class="tool-flow-owner"
+                    >Harness · Broker · Workspace</span
+                  >
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">Tool Call</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">tool.intent</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step wait"
+                    >Runtime / manifest / gate</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">bindHistory</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">beginTurn 起始快照</span>
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">03 / EXECUTE</span>
+                  <h4>授权与执行</h4>
+                  <span class="tool-flow-owner">Harness · Runtime</span>
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">prepareInvocation</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step wait">确认 / 权限仲裁</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">confirm</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">preflight</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step wait">Harness final guard</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step execute"
+                    >execute / 原执行查询</span
+                  >
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">04 / RESULT COMMIT</span>
+                  <h4>结果持久提交</h4>
+                  <span class="tool-flow-owner">Runtime · Java · Harness</span>
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step execute">结果 bytes</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">持久接收</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit"
+                    >result CommitReceipt</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">ACK delivered</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">模型继续</span>
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">05 / SETTLE</span>
+                  <h4>结算、释放与恢复</h4>
+                  <span class="tool-flow-owner"
+                    >Harness · Workspace · Broker</span
+                  >
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">全部工具结算</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit"
+                    >readHistory / 持久备份</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit"
+                    >checkpoint + turn.settled</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">释放 / Runtime idle</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">新 binding 挂回原历史</span>
+                </div>
+              </div>
+            </div>
+            <figcaption>
+              青色表示可靠提交点，琥珀色表示等待或仲裁，紫色表示实际执行；下方文字版保留完整协议顺序。
+            </figcaption>
+          </figure>
+          <pre>
+发布 Bundle → 创建 Session → 持久受理 Prompt → 模型先行
+  Tool Call → 提交 tool.intent → 等待 Runtime / manifest / activation gate
+  → bindHistory → Workspace 工具轮次占用 → beginTurn 起始快照
+  → prepareInvocation → 确认 / 原权限仲裁 → confirm（需要时）
+  → preflight → Harness 最终 guard → execute → 原执行查询
+  → 结果 bytes 持久接收 → result CommitReceipt → ACK delivered
+  → 模型继续 → 全部工具结算 → readHistory / 持久备份
+  → authority checkpoint + turn.settled → 释放占用 → Runtime idle
+  → 干净回收 → 下一轮新 binding 挂回原文件与历史</pre
+          >
+          <div class="callout warning">
+            原
+            <code>fileHistory.checkpoint(promptId)</code> 确保的是轮次起始快照，
+            不是轮末持久提交。模型 Final、工具 ACK、Runtime release 分别核验。
+            Session 独占 Runtime 不等于文件隔离：首版同 Workspace
+            的工具轮次从起始快照 到 history
+            提交串行占用；外部文件变更仍按工具原有身份校验处理。
+          </div>
+          <h3 style="margin-top: 28px">首版验证与参数</h3>
+          <p>
+            验证初值：环境启动 120 秒、idle 5 分钟、每 owner 最多 4 个 Runtime
+            和 4 个活跃模型 Turn； 有界队列最多 32、等待 60 秒；Session 工具并发
+            1；前台 Shell 默认 120 秒、上限 600 秒； 审批最长 10
+            分钟，更短既有预算优先。资源分片最多 1 MiB，单次 RPC/读取空闲期限 30
+            秒， 长任务用 accepted + 原状态查询；状态轮询 250 ms 至 2
+            秒并加抖动。
+            模型、输出总量与存储保留沿用既有有限预算并在启动报告列出实际值，
+            超时或未知物理退出仍计入容量；这些初值不代表生产容量结论。
+          </p>
+          <p>
+            M01～M10 加 S01～S08 验证“Edit diff → 审批 → Shell 大输出 → 持久历史
+            → idle 回收 → 同 Session 下一轮读到修改”，并注入
+            ACK/下载丢失、存储缺失与取消。
+            调研锚点、精确字段、封闭操作枚举、资源提交顺序、回收竞争和验收清单见
+            <a href="managed-agent-ordinary-tools-integration.md"
+              >普通工具首版接线设计</a
+            >。 现有代码已有阶段适配基础；新契约仍待实现和跨进程验收。
+          </p>
+        </section>
 
         <section id="overview">
           <div class="section-head">
@@ -1322,7 +1862,7 @@ Tool Runtime Pod（按需）</pre
           <pre>
 {
   "schemaVersion": 1,
-  "sessionId": "session_xxx",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
   "executionEngine": "managed"
 }</pre
           >
@@ -1341,15 +1881,21 @@ Tool Runtime Pod（按需）</pre
             </div>
           </div>
           <p class="lead">
-            Java 收到请求后，同时启动模型链路和 Runtime 链路。Harness
-            已经持有版本化 AgentBundle，因此模型调用不依赖 Runtime
-            在线发现工具。
+            Java 收到请求后，同时转发原请求与预热 Runtime；只有 qwen
+            持久受理后才对客户端 ACK。Harness 已经持有预发布的版本化
+            AgentBundle，因此模型调用不依赖 Runtime
+            在线发现工具。缺少必要配置快照时拒绝 Managed 准入。
           </p>
           <div class="sequence">
             <article class="sequence-step">
               <div class="step-no">01</div>
               <h4>接收 Prompt</h4>
-              <p>Java完成鉴权、Session 路由和稳定 turnId 分配。</p>
+              <p>
+                Java 取得可信 tenantId，按统一 sessionId 路由并持久命令
+                ID；参考服务从必填 Header 接收
+                tenantId，生产由上游鉴权注入。qwen 使用同一个 Session UUID
+                持久受理后才返回 accepted。
+              </p>
             </article>
             <article class="sequence-step">
               <div class="step-no">02</div>
@@ -1389,9 +1935,12 @@ Prompt → Model → Tool Call
             </article>
           </div>
           <div class="callout">
-            AgentBundle 至少包含 System Prompt、Tool Schema、Skill 静态描述、MCP
-            能力快照、权限摘要和 <code>agentDefinitionRevision</code>。Runtime
-            启动后必须核验相同 revision/manifest digest。
+            AgentBundle 包含 System Prompt、Tool Schema、权限摘要和
+            <code>agentDefinitionRevision</code>；启用扩展时另含 Skill
+            静态描述和 MCP
+            能力快照。普通工具首版的未启用扩展目录为空，不要求预先生成扩展快照。Runtime
+            启动后必须核验相同 revision/manifest digest。首版 definition
+            固定，更新定义使用新 Session；动态发现与完整热更新按 H 扩展。
           </div>
         </section>
 
@@ -1406,13 +1955,15 @@ Prompt → Model → Tool Call
             <article class="card">
               <h3>前端 → Java</h3>
               <p>
-                继续使用产品 REST/SSE。浏览器不直接访问 Harness 和 Runtime。
+                继续使用产品 REST/SSE。审批复用现有入口；没有对应入口时补充下列
+                responses 路由。浏览器不直接访问 Harness 和 Runtime。
               </p>
               <pre>
 POST /sessions
 POST /sessions/{id}/prompt
 POST /sessions/{id}/cancel
-GET  /sessions/{id}/events</pre
+GET  /sessions/{id}/events
+POST /sessions/{id}/actions/{requestId}/responses</pre
               >
             </article>
             <article class="card">
@@ -1425,6 +1976,8 @@ POST /session/{id}/cancel
 POST /session/{id}/resume
 GET  /events</pre
               >
+              <p>v1.4 补充只读原命令查询（operation 为必填查询参数）：</p>
+              <pre>GET /session/{id}/commands/{commandId}</pre>
             </article>
             <article class="card">
               <h3>qwen serve → Java 内部 Broker</h3>
@@ -1437,11 +1990,32 @@ POST /internal/agent-runtime/v1/prepare
 POST /internal/agent-runtime/v1/manifest
 POST /internal/agent-runtime/v1/execute
 POST /internal/agent-runtime/v1/cancel
-POST /internal/agent-runtime/v1/release</pre
+POST /internal/agent-runtime/v1/release
+GET  /internal/agent-runtime/v1/executions/{executionCallId}
+POST /internal/agent-runtime/v1/control
+POST /internal/agent-runtime/v1/executions/{executionCallId}/ack
+GET  /internal/agent-runtime/v1/resources/{resourceId}</pre
               >
             </article>
           </div>
 
+          <div class="callout">
+            v1.4 补齐工具阶段、原命令查询与资源读取。execute 返回 accepted 后，
+            Harness 可有界轮询原 ID，连接中断不能重新派发。 control 按
+            activation / tool / history / receipt 分型：包含 stageGate /
+            enableGate / renewGate / revokeGate / queryGate、 prepareInvocation
+            / getConfirmation / confirmInvocation / preflightInvocation /
+            cancelInvocation / queryInvocation、bindHistory / beginTurn /
+            checkpoint / readHistory 及 queryReceipt。
+            每种操作单独校验，复用原门禁与 tool v2；status/cancel 不能创建
+            execution。 qwen 持久接收结果与必要 bytes 后的 CommitReceipt
+            经可信入口核验才记 delivered， release 还需核对轮末
+            history/checkpoint、资源引用和物理退出。 完整方法映射见
+            <a
+              href="managed-agent-first-runtime.md#3-broker-到-runtime-的最小协议"
+              >运行契约</a
+            >。
+          </div>
           <h3 style="margin-top: 28px">Java → Runtime</h3>
           <div class="table-wrap">
             <table>
@@ -1457,6 +2031,11 @@ POST /internal/agent-runtime/v1/release</pre
                   <td><code>GET /healthz</code></td>
                   <td>存活与版本探测</td>
                   <td>状态和协议版本</td>
+                </tr>
+                <tr>
+                  <td><code>POST /v1/control</code></td>
+                  <td>封闭门禁、工具 v2、history 与原回执操作</td>
+                  <td>类型化结果 / command receipt</td>
                 </tr>
                 <tr>
                   <td><code>POST /v1/prepare</code></td>
@@ -1489,6 +2068,11 @@ POST /internal/agent-runtime/v1/release</pre
                   <td>cancel accepted</td>
                 </tr>
                 <tr>
+                  <td><code>GET /v1/resources/{resourceId}</code></td>
+                  <td>原调用登记的授权资源分片</td>
+                  <td>bytes / 长度 / 内容摘要</td>
+                </tr>
+                <tr>
                   <td><code>POST /v1/release</code></td>
                   <td>释放绑定或进入 draining</td>
                   <td>release receipt</td>
@@ -1515,7 +2099,7 @@ POST /internal/agent-runtime/v1/release</pre
               <h3>SessionBackendBinding</h3>
               <pre>
 {
-  "sessionId": "session_xxx",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
   "engine": "managed",
   "backendType": "qwen-serve-harness",
   "backendInstanceId": "harness_xxx",
@@ -1542,7 +2126,7 @@ POST /internal/agent-runtime/v1/release</pre
               <pre>
 {
   "executionCallId": "exec_xxx",
-  "sessionId": "session_xxx",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
   "turnId": "turn_xxx",
   "runtimeBindingId": "binding_xxx",
   "activationEpoch": 3,
@@ -1585,11 +2169,16 @@ POST /internal/agent-runtime/v1/release</pre
             </div>
           </div>
           <p class="lead">
-            第一阶段建议按
-            <code
-              >tenantId + workspaceId + workspaceGeneration + canonicalCwd</code
-            >
-            复用 Runtime，不跨租户共享。
+            首版默认 Session 独占 Runtime：归属绑定原 Workspace scope、
+            workspaceGeneration、canonicalCwd 和 sessionId，同 Session
+            多轮复用。 原 workspace 级跨 Session
+            复用作为可选优化，须先通过逻辑绑定与隔离验收。 tenantId
+            语义本轮不扩展设计。
+          </p>
+          <p>
+            环境 ready 与 activation gate 分开：没有活跃 Turn 时可以预热并保持
+            gate closed； 实际 Tool Call 仍须安装原 Session/activation
+            门禁并取得 enable ACK，迟到 ready 不授予执行资格。
           </p>
           <div class="state-flow">
             <span class="state">absent</span><span class="state-arrow">→</span>
@@ -1608,11 +2197,35 @@ POST /internal/agent-runtime/v1/release</pre
             <article class="card">
               <h3>复用规则</h3>
               <ul>
-                <li>Java只允许同一 binding key 一个 active provision。</li>
+                <li>
+                  同 key 只允许一个 active provision；外部创建前持久保存
+                  provisionRequestId。
+                </li>
+                <li>
+                  创建结果不明查原请求，无法确认保持待处理，不换 ID 重建。
+                </li>
+                <li>
+                  取消后迟到 ready 重新核验 Session、generation
+                  和需求，无人持有则 draining。
+                </li>
                 <li>Runtime endpoint 不由 Harness 或模型指定。</li>
                 <li>Workspace generation 变化时创建新 Binding。</li>
-                <li>Idle Runtime 保留一段时间服务第二、三轮。</li>
-                <li>强隔离任务可以升级为 Session 独占 Runtime。</li>
+                <li>
+                  干净 idle 回收后下一轮可创建新
+                  binding，挂回原持久文件/history，Workspace generation 不变。
+                </li>
+                <li>
+                  旧执行查询仍指向旧
+                  binding；旧环境未知或持久存储缺失则阻塞，不能重放。
+                </li>
+                <li>
+                  启动 deadline、idle 保留时间和容量有界；同 Session
+                  第二、三轮可复用。
+                </li>
+                <li>
+                  跨 Session 共享必须先有独立配置、权限、文件历史、gate
+                  和释放引用计数。
+                </li>
               </ul>
             </article>
             <article class="card">
@@ -1816,13 +2429,21 @@ POST /internal/agent-runtime/v1/release</pre
           <div class="section-head">
             <div>
               <div class="section-index">12 / SECURITY</div>
-              <h2>安全与租户隔离</h2>
+              <h2>安全与隔离边界</h2>
             </div>
           </div>
           <ul class="checklist">
+            <li>
+              参考 Spring 服务不实现终端用户鉴权，但要求并透传
+              <code>X-Qwen-Tenant-Id</code
+              >；生产由可信上游从鉴权上下文注入，不能信任浏览器查询参数。
+            </li>
             <li>浏览器只能访问 Java，不能直接访问 Harness 或 Runtime。</li>
             <li>Hosted qwen serve 只监听 loopback，并由 Java Sidecar 调用。</li>
-            <li>Java只代理必要的 Session、Prompt、Cancel 和 Event API。</li>
+            <li>
+              Java 只代理必要的 Session、Prompt、Cancel、Event
+              和已开放能力需要的审批/问答 API。
+            </li>
             <li>Runtime endpoint 不返回给浏览器和模型。</li>
             <li>Java与 Runtime 使用短期 Token 或 mTLS。</li>
             <li>Token 绑定 tenant、workspace、generation 和 epoch。</li>
@@ -1830,7 +2451,10 @@ POST /internal/agent-runtime/v1/release</pre
               Runtime 不持有模型凭证，Harness 不持有 Kubernetes 管理凭证。
             </li>
             <li>Hosted Managed 禁止本地 Tool fallback。</li>
-            <li>tenantId 取自服务端鉴权上下文，不信任客户端字段。</li>
+            <li>
+              tenantId 已进入 Session/Turn/Event/Broker
+              scope；授权、配额与防伪造仍须由产品接入层完成。
+            </li>
             <li>不同租户禁止复用 RuntimeBinding 和 Workspace。</li>
           </ul>
           <h3 style="margin-top: 28px">大输出与 Artifact</h3>
@@ -1852,7 +2476,7 @@ POST /internal/agent-runtime/v1/release</pre
         <section id="capacity">
           <div class="section-head">
             <div>
-              <div class="section-index">13 / CAPACITY & OBSERVABILITY</div>
+              <div class="section-index">13 / CAPACITY &amp; OBSERVABILITY</div>
               <h2>容量模型与可观测性</h2>
             </div>
           </div>
@@ -1873,7 +2497,10 @@ POST /internal/agent-runtime/v1/release</pre
                 <li>Provisioning、Ready、Idle、Draining 分开计量。</li>
                 <li>监控 Tool 并发、Workspace、子进程和未决副作用。</li>
                 <li>Harness 容量与 Runtime 容量独立扩缩容。</li>
-                <li>不跨租户复用；同租户复用需匹配 generation。</li>
+                <li>
+                  首版 Session 独占且匹配 generation；跨 Session
+                  共享经隔离验收后开启。
+                </li>
                 <li>高风险任务支持 Session 独占。</li>
               </ul>
             </article>
@@ -1922,9 +2549,10 @@ runtimeInstanceId · activationEpoch</pre
           </div>
           <p class="lead">
             对外 Agent API 由 Java Control Plane 提供，qwen serve 作为内部
-            Harness 执行引擎，Tool Runtime
-            始终隐藏在服务端。公共资源与内部进程、Pod、ACP Session 和
-            RuntimeBinding 解耦，避免执行实现变化破坏客户端协议。
+            Harness 执行引擎，Tool Runtime 始终隐藏在服务端。公共 Session UUID
+            直接作为 qwen/Harness Session 身份；Turn、Item、ACP
+            attachment、内部进程、Pod、 Runtime Session 和 RuntimeBinding
+            继续解耦，避免执行实现变化破坏客户端协议。
           </p>
           <div class="callout">
             <strong>兼容目标：</strong>资源结构参考
@@ -1958,7 +2586,10 @@ runtimeInstanceId · activationEpoch</pre
                   <td><strong>Session</strong></td>
                   <td>租户、Agent、Workspace、BackendBinding</td>
                   <td>Managed Session Authority 与 Harness activation</td>
-                  <td>一个 Session 生命周期内只有一个执行引擎</td>
+                  <td>
+                    公共 API 与执行侧共用一个 RFC
+                    UUID；生命周期内只有一个执行引擎
+                  </td>
                 </tr>
                 <tr>
                   <td><strong>Turn</strong></td>
@@ -2010,37 +2641,76 @@ interface AgentBundle {
             digest，防止模型看到的工具定义与实际执行能力不一致。
           </p>
 
-          <h3 style="margin-top: 28px">第一版公共接口</h3>
+          <div class="callout">
+            当前独立 Spring 服务已经提供 Session 创建/列表/查询、输入/取消以及按
+            eventSequence 查询或 SSE 订阅的阶段性接口；这些仍是实验实现。稳定
+            Item、
+            Snapshot、Artifact、AgentDefinition、完整历史物化和生产兼容承诺继续属于
+            D。 D
+            对外开放前还必须完成源事件键、公共版本、源进度、原子提交以及重放/重建规则的验收。
+          </div>
+          <h3 style="margin-top: 28px">当前阶段性 Session/Event 接口</h3>
+          <pre>
+Public REST
+POST /v1/agents/sessions
+GET  /v1/agents/sessions?cursor=&amp;limit=
+GET  /v1/agents/sessions/{sessionId}
+POST /v1/agents/sessions/{sessionId}/events
+GET  /v1/agents/sessions/{sessionId}/events?after=&amp;limit=&amp;stream=
+
+WebShell adapter
+POST /api/agent/web-shell/v1/sessions/query
+POST /api/agent/web-shell/v1/sessions/get
+POST /api/agent/web-shell/v1/transcript/query
+POST /api/agent/web-shell/v1/events/stream
+POST /api/agent/web-shell/v1/sessions/create
+POST /api/agent/web-shell/v1/turns/submit
+POST /api/agent/web-shell/v1/turns/cancel</pre
+          >
+          <p>
+            WebShell 的流式接口因使用 POST 请求体与可信租户 Header，由前端通过
+            <code>fetch + response.body</code> 解析 SSE，不使用浏览器原生
+            <code>EventSource</code>。当前 Java records 与 TypeScript interfaces
+            分别维护，尚无 OpenAPI/Schema 单一来源；<code>requestId</code>
+            和流请求的 <code>limit</code>
+            也尚未形成有效服务端语义，冻结生产契约前应实现或删除。
+          </p>
+          <h3 style="margin-top: 28px">阶段 D 扩展接口</h3>
           <pre>
 POST   /v1/agents
 GET    /v1/agents/{agentId}
 POST   /v1/agents/{agentId}
 
-POST   /v1/agent-sessions
-GET    /v1/agent-sessions/{sessionId}
-DELETE /v1/agent-sessions/{sessionId}
+POST   /v1/agents/sessions
+GET    /v1/agents/sessions
+GET    /v1/agents/sessions/{sessionId}
+DELETE /v1/agents/sessions/{sessionId}
 
-POST   /v1/agent-sessions/{sessionId}/events
-GET    /v1/agent-sessions/{sessionId}/events
-GET    /v1/agent-sessions/{sessionId}/turns
-GET    /v1/agent-sessions/{sessionId}/turns/{turnId}
-GET    /v1/agent-sessions/{sessionId}/items
+POST   /v1/agents/sessions/{sessionId}/events
+GET    /v1/agents/sessions/{sessionId}/events
+GET    /v1/agents/sessions/{sessionId}/turns
+GET    /v1/agents/sessions/{sessionId}/turns/{turnId}
+GET    /v1/agents/sessions/{sessionId}/items
 
-GET    /v1/agent-sessions/{sessionId}/artifacts
-GET    /v1/agent-sessions/{sessionId}/artifacts/{artifactId}/content</pre
+GET    /v1/agents/sessions/{sessionId}/artifacts
+GET    /v1/agents/sessions/{sessionId}/artifacts/{artifactId}/content</pre
           >
 
           <div class="grid-2">
             <article class="card accent-blue">
               <h3>写入与执行</h3>
               <ul>
-                <li>所有写请求支持服务端生成或客户端提供的幂等键。</li>
+                <li>
+                  可重试写请求携带调用前已确定的稳定幂等键；同键不同内容拒绝，仅在响应中生成
+                  ID 不足以处理响应丢失。
+                </li>
                 <li>
                   创建 Session 时固定 agentRevision、executionEngine 和
                   workspaceGeneration。
                 </li>
                 <li>
-                  输入 Event 持久化成功后即可返回 accepted，不等待 Turn 完成。
+                  首版等待 qwen 输入与 WakeIntent 持久提交后返回
+                  accepted，不等待 Turn 完成。Java 提前 ACK 的异步交付方案后置。
                 </li>
                 <li>Java 同时转发 Harness 并异步创建或复用 RuntimeBinding。</li>
                 <li>Cancel 是一个持久化输入事件，不以 HTTP 连接关闭代替。</li>
@@ -2079,10 +2749,277 @@ turn.settled          -> Turn terminal state</pre
             <code>/session + executionEngines</code> 作为 Harness 接线。
           </div>
           <div class="callout danger">
-            <strong>ID 边界：</strong>公共 agentId、sessionId、turnId、itemId 和
-            artifactId 必须由 Java 管控面管理；不得把 ACP clientId、Harness
-            instanceId、Runtime sessionId、Pod 名称或 Runtime endpoint 当作公共
-            ID 返回。
+            <strong>ID 边界：</strong>公共 sessionId 由 Java
+            创建前分配，并原样用于 qwen Session Authority、Managed
+            Harness、JSONL 与 Runtime Broker scope； 不存在 publicSessionId 到
+            harnessSessionId 的映射。公共 agentId、turnId、itemId 和 artifactId
+            仍由 Java 管控面管理；不得把 ACP clientId/attachment、Harness
+            boot/instance、Runtime sessionId、Pod 名称、Runtime endpoint 或
+            execution ID 当作公共 ID 返回。
+          </div>
+        </section>
+
+        <section id="event-storage">
+          <div class="section-head">
+            <div>
+              <div class="section-index">14B / STORAGE &amp; EVENT FLOW</div>
+              <h2>事件接受、推送与持久恢复</h2>
+            </div>
+          </div>
+          <p class="lead">
+            v1.6
+            将“事件已经被可靠接受”和“事件正在向客户端展示”拆成两个明确阶段。
+            第一阶段仍以 SQL 事务作为可靠接受点：同一事务推进 Harness
+            源游标、分配 Session 公开序号、更新 Turn
+            终态并保存公开事件；事务提交后，本节点直接唤醒 SSE。MQ
+            是后续异步分发通道，不是浏览器游标，也不取代首阶段的 SQL 接受点。
+          </p>
+          <div class="callout">
+            <strong>实现基线：</strong
+            ><code>feature/managed-agents-p0-p8</code> 的
+            <code>c818c21910</code> 已落地一部分
+            P0/P1。以下“当前切片”描述实际代码，
+            “目标链路”与“后续阶段”仍是待实现设计，不能作为生产能力声明。
+          </div>
+
+          <h3 style="margin-top: 28px">当前已实现的提交后直推</h3>
+          <pre>
+Hosted Harness source SSE
+  → HarnessEventProjector
+  → bounded batcher
+      首段可见文本立即刷新
+      后续：75ms / 64 events / 64KiB 任一触发
+      tool、审批、错误、取消、终态等边界先刷新前序文本
+  → ManagedAgentStore.recordHarnessEvents（单 SQL 事务）
+      source cursor + public sequence + Turn terminal + event rows
+  → afterCommit
+  → SessionEventHub（本进程、每 Session 有界 512 条）
+  → Public SSE / WebShell SSE
+      gap、overflow、断线：按公开 sequence 从 SQL 补齐
+      空闲 reconciliation 默认 5s</pre
+          >
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>能力</th>
+                  <th>当前实现</th>
+                  <th>边界</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>AgentStateStore</code></td>
+                  <td>
+                    已抽出会话、Turn、命令、事件与恢复游标所需的存储契约。
+                  </td>
+                  <td>
+                    当前仍只有 JDBC/MySQL 方向实现；不是完整数据库无关层。
+                  </td>
+                </tr>
+                <tr>
+                  <td>有界事件批处理</td>
+                  <td>
+                    首段文本优先
+                    TTFT；后续按时间、条数或字节上限成批提交；非文本边界及时刷新。
+                  </td>
+                  <td>
+                    批的是内存接收与 JDBC 写入；数据库中仍是一条公开事件一行。
+                  </td>
+                </tr>
+                <tr>
+                  <td>原子状态推进</td>
+                  <td>
+                    源游标、Session 序号、Turn
+                    终态和该批公开事件在同一事务内更新。
+                  </td>
+                  <td>
+                    尚无 <code>managed_agent_event_batch</code> / Outbox
+                    表，也未做长期保留清理。
+                  </td>
+                </tr>
+                <tr>
+                  <td>同节点 SSE</td>
+                  <td>
+                    只在事务提交成功后发布到
+                    <code>SessionEventHub</code>，避免未提交数据泄漏；连接按
+                    sequence 去重和补洞。
+                  </td>
+                  <td>
+                    Hub 是进程内结构，不承担持久化，也不能直接通知另一个 Java
+                    实例。
+                  </td>
+                </tr>
+                <tr>
+                  <td>跨节点可见性</td>
+                  <td>
+                    另一个 Java 实例可通过数据库 reconciliation
+                    最终发现已提交事件。
+                  </td>
+                  <td>
+                    当前最坏会受默认 5s reconciliation
+                    周期影响；尚无跨节点唤醒总线。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 style="margin-top: 28px">目标链路：SQL 批次日志兼 Outbox</h3>
+          <pre>
+Harness SSE → projector + bounded batcher
+  → AgentStateStore.acceptBatch transaction
+      Session / Turn / source cursor / public sequence
+      + managed_agent_event_batch（短期日志兼 Outbox）
+  ├─ afterCommit → local SessionEventHub → SSE
+  └─ Outbox relay → EventTransport（优先 RocketMQ；Redis Streams 可选；无 MQ 时 SQL scanner）
+                      → Message / Item / Snapshot materializer
+
+reconnect / history → SessionReplayService
+  → consistent Snapshot + journal tail by public sequence</pre
+          >
+          <p>
+            首个关系存储后端继续使用 MySQL；PostgreSQL
+            作为同一业务契约的后续适配器。
+            后端由部署配置选择，不按请求切换，也不以数据库双写作为迁移手段。
+          </p>
+          <div class="grid-2">
+            <article class="card accent-blue">
+              <h3>必须保持的不变量</h3>
+              <ul>
+                <li>
+                  客户端只使用 Session 公开 sequence，不暴露或持久依赖 MQ
+                  offset。
+                </li>
+                <li>
+                  同一个 batch 的状态、水位和 Outbox
+                  内容在一个数据库事务中接受。
+                </li>
+                <li>
+                  SSE 只发布已提交事件；提交响应丢失先按稳定 batch/command
+                  身份核对。
+                </li>
+                <li>
+                  Relay 与消费者按至少一次投递设计，重复发布不能重复追加文本。
+                </li>
+                <li>Snapshot 只覆盖已物化的连续前缀，清理不能制造重放缺口。</li>
+              </ul>
+            </article>
+            <article class="card accent-green">
+              <h3>职责边界</h3>
+              <ul>
+                <li>
+                  <code>AgentStateStore</code
+                  >：业务事务、租约代际、游标、序号和重放。
+                </li>
+                <li>
+                  <code>EventTransport</code>：已提交批次的异步至少一次分发。
+                </li>
+                <li>
+                  <code>SessionReplayService</code>：拼接
+                  Snapshot、短期日志和实时订阅。
+                </li>
+                <li>
+                  <code>SessionArtifactStore</code
+                  >：不可变资源及摘要校验，不承担业务租约。
+                </li>
+                <li>
+                  Harness 私有 journal 仍是模型上下文权威；公共 Item
+                  不能反向重建它。
+                </li>
+              </ul>
+            </article>
+          </div>
+          <div class="callout warning">
+            <strong>不要改成无事务双写：</strong>“Harness SSE 同时异步写 MQ
+            和数据库”无法保证 Session 序号、Turn
+            终态、源游标与公开事件一致。第一阶段先使用 SQL 可靠接受；
+            只有持久源日志、fencing、回放和容量数据都证明可行后，才评估 MQ-first
+            接受路径。
+          </div>
+
+          <h3 style="margin-top: 28px">后续实施顺序</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>阶段</th>
+                  <th>工作</th>
+                  <th>完成判据</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>P0</td>
+                  <td>统一 Session 身份、存储契约和现状基线。</td>
+                  <td>
+                    已完成当前切片；公共 API、Harness、JSONL 与 Broker 使用同一
+                    UUID。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P1</td>
+                  <td>
+                    有界批处理、提交后本机直推；补稳定
+                    itemId/contentPartId、用户输入 Item 和 Snapshot。
+                  </td>
+                  <td>
+                    当前只完成前半；重连不重文、终态不越序、Snapshot 与 tail
+                    可一致拼接。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P2</td>
+                  <td>
+                    批次表/Outbox、Relay、RocketMQ 或 SQL
+                    scanner、物化器、保留清理和跨实例唤醒。
+                  </td>
+                  <td>
+                    两个 Java
+                    实例上的订阅者都能低延迟看到同一提交，重复/乱序/丢通知可自动修复。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P3</td>
+                  <td>
+                    Broker Repository、Harness 私有 journal、Runtime
+                    binding、Workspace 与 Artifact 持久恢复。
+                  </td>
+                  <td>
+                    进程或 Pod 替换后能恢复，不能证明的工具副作用进入
+                    <code>recovery_blocked</code>。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P4</td>
+                  <td>
+                    仅当压测证明 SQL 接受路径无法满足目标时，评估持久源日志或
+                    MQ-first。
+                  </td>
+                  <td>
+                    以
+                    TTFT、写放大、积压、故障恢复和成本数据决策，不以组件偏好替换事务语义。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            完整的数据结构、重放拼接、清理条件、故障语义和容量公式见
+            <a
+              href="https://github.com/doudouOUC/qwen-code/blob/feature/managed-agents-p0-p8/docs/design/2026-09-20-managed-agent-storage-event-architecture.zh-CN.md"
+              >《Managed Agent 存储、事件与会话恢复设计》</a
+            >。
+          </p>
+          <div class="callout danger">
+            <strong>当前验证证据：</strong
+            ><code
+              >mvn -f packages/sdk-java/managed-agent-server/pom.xml
+              verify</code
+            >
+            在 <code>c818c21910</code> 上通过 20 个测试及
+            Checkstyle；测试数据库是 H2。 真实 MySQL、真实 Hosted Harness、双
+            JVM、跨节点通知、故障注入、吞吐与 TTFT 仍未形成生产级证明。
           </div>
         </section>
 
@@ -2092,6 +3029,12 @@ turn.settled          -> Turn terminal state</pre
               <div class="section-index">15 / DELIVERY PLAN</div>
               <h2>分阶段实施</h2>
             </div>
+          </div>
+          <div class="callout">
+            A～H 为能力阶段。首个运行闭环先完成 A/B/C/E 及 F 的 M01～M10 和
+            S01～S08； D 已有 Session/Event API 与本机提交后直推切片，但完整
+            Item/Snapshot 物化、跨实例通知、G 共享 Authority 与 H
+            全量扩展仍按各自门槛后续开放。
           </div>
           <div class="timeline">
             <article class="phase">
@@ -2164,6 +3107,17 @@ turn.settled          -> Turn terminal state</pre
               <h2>核心验收标准</h2>
             </div>
           </div>
+          <p class="lead">
+            首版运行验收以
+            <a href="managed-agent-first-runtime.md#8-首版验收与阶段关系"
+              >M01～M10</a
+            >
+            为准：慢启动首 token、同轮工具、受理/执行 ACK 丢失、取消/迟到
+            ready、独占隔离、 重启恢复或准确阻塞、SSE
+            重连、容量与审批。多副本/共享 Runtime 只在启用时追加门槛。 以下保留
+            A～H 全量清单；租户语义仍需单独验收，公开序号已有实验切片， 稳定
+            Item/Snapshot 属于 D，跨实例接管属于 G。
+          </p>
           <ol class="checklist">
             <li>Runtime 人为延迟 15 秒，模型首 token 仍提前返回。</li>
             <li>无 Tool Turn 在 Runtime 未就绪时可以正常完成。</li>
@@ -2187,15 +3141,28 @@ turn.settled          -> Turn terminal state</pre
               Items。
             </li>
             <li>
-              公共 API 与 Harness 使用同一个 Session UUID，但不暴露 Runtime
-              endpoint、Pod 名称和内部 attachment/execution ID。
+              公共 API 与 qwen/Harness 共用同一个 Session UUID，但不暴露 Runtime
+              endpoint、Pod、ACP attachment、Harness boot/instance 或 Runtime
+              Session ID。
+            </li>
+            <li>
+              事务回滚时 Hub 不发布事件；提交成功后同节点 SSE
+              无需等待数据库轮询。
+            </li>
+            <li>
+              Hub overflow、断线或跨节点丢通知后按公开 sequence
+              补齐，不重复或跳过事件。
+            </li>
+            <li>
+              两个 Java 实例共享真实 MySQL 时，命令幂等、单活
+              Turn、序号和终态保持一致。
             </li>
           </ol>
           <div class="callout">
-            <strong>推荐的首个可交付闭环：</strong>保持 qwen serve 外部协议与 TS
-            Agent Loop 不变，在现有 Java Control Plane 内加入 Runtime Broker
-            模块；用 15 秒 Runtime 延迟验证首 token、同轮 Tool 等待、双链路固定
-            owner 和无重复副作用。
+            <strong>下一项可交付证明：</strong>在保持 qwen serve 与 TS Agent
+            Loop 不变的前提下，使用真实 MySQL、真实 Hosted Harness 和两个 Java
+            实例验证 事件跨实例低延迟可见、重连补齐、命令幂等和单活 Turn；再加入
+            15 秒 Runtime 延迟，分别记录首 token、首个工具等待和完整 Turn 时延。
           </div>
         </section>
 
@@ -2203,7 +3170,7 @@ turn.settled          -> Turn terminal state</pre
           <div class="section-head">
             <div>
               <div class="section-index">17 / CURRENT GAP</div>
-              <h2>现有基础与主要缺口</h2>
+              <h2>现有基础与主要缺口（v1.6 代码快照）</h2>
             </div>
           </div>
           <div class="grid-2">
@@ -2218,32 +3185,65 @@ turn.settled          -> Turn terminal state</pre
                 <li>prepare/manifest/execute/cancel/release 协议。</li>
                 <li>Auto Local Runtime 激活。</li>
                 <li>Session engine owner 与部分恢复保护。</li>
+                <li>独立 Spring 服务与阶段性 Public Session/Event API。</li>
+                <li>
+                  Hosted Harness Java Client、提交/取消/Transcript/SSE 接线。
+                </li>
+                <li>
+                  Java 内嵌 Runtime Broker、HTTP 适配器与本地进程 Provisioner。
+                </li>
+                <li>
+                  统一 Session UUID、MySQL Session/Turn/Command/Event 状态。
+                </li>
+                <li>
+                  有界 Harness 事件批处理、原子状态推进与本机提交后 SSE 直推。
+                </li>
               </ul>
             </article>
             <article class="card accent-amber">
               <h3>待补齐</h3>
               <ul>
+                <li>Runtime Broker Repository 与 Execution Ledger 持久化。</li>
                 <li>
-                  Java Control Plane 内嵌 Runtime Broker 与 Execution Ledger。
+                  Hosted Harness 安全 Profile 的生产化与多实例 owner 路由。
                 </li>
-                <li>JavaBrokerManagedRuntimeProvider。</li>
-                <li>Hosted Harness 安全 Profile。</li>
-                <li>Java→Runtime 异步 HTTP/SSE。</li>
-                <li>Java Public Agent API 与 AgentDefinition Repository。</li>
-                <li>稳定的 Session、Turn、Item 公共投影。</li>
+                <li>完整 Public Agent API 与 AgentDefinition Repository。</li>
+                <li>
+                  稳定 itemId/contentPartId、Item/Snapshot 物化与输入消息版本。
+                </li>
+                <li>
+                  SQL 批次日志/Outbox、EventTransport、跨实例唤醒和保留清理。
+                </li>
                 <li>AgentBundle/Manifest 版本一致性。</li>
                 <li>Artifact Store 和 RuntimeTemplate。</li>
-                <li>共享 Session Authority 和可替换 Harness。</li>
+                <li>
+                  Harness 私有 journal、资源闭包、共享 Session Authority
+                  和可替换 Harness。
+                </li>
+                <li>
+                  真实 MySQL、双 JVM、真实 Harness/Runtime 的故障与容量验证。
+                </li>
                 <li>Legacy → Managed continuation。</li>
                 <li>MCP、Hooks、Channels 等完整迁移。</li>
                 <li>删除旧 <code>/managed/sessions*</code> 实验控制面。</li>
               </ul>
             </article>
           </div>
+          <div class="callout" style="margin-top: 18px">
+            <strong>2026-09-20 实现对齐：</strong>实验分支
+            <code>feature/managed-agents-p0-p8</code> 的
+            <code>fc32ab0c95</code> 统一 Session 身份；<code>c818c21910</code>
+            进一步加入
+            <code>AgentStateStore</code
+            >、有界事件批处理、事务内游标/序号/终态更新、
+            <code>afterCommit</code> 本机直推和 SQL 补发。验证只覆盖 H2 上的 20
+            个测试与 Checkstyle；这证明代码切片，不代表上表其余 A～H
+            能力或生产部署已经验收。
+          </div>
         </section>
 
         <footer class="footer">
-          Managed Agent 双链路技术方案 · v1.2 · 单文件自包含 HTML<br />
+          Managed Agent 双链路技术方案 · v1.6 · 2026-09-20 · 单文件展示<br />
           核心原则：一个 Session 一个固定执行引擎；一个模型循环
           owner；工具副作用结果不确定时不自动重放。
         </footer>
