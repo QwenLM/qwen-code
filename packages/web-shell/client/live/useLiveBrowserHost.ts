@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import type { DaemonLiveStatus } from '@qwen-code/sdk';
 import {
   describeMicError,
@@ -33,6 +39,10 @@ const OUTPUT_HEADER_BYTES = 16;
 // Skip microphone frames rather than queue them behind a stalled socket: late
 // audio is worse than missing audio in a live call.
 const MAX_SOCKET_BUFFERED_BYTES = 256 * 1024;
+// `bufferedAmount` hovering around the limit would flip the dropping flag on
+// every 64 ms frame. Reported state holds for this long after the last frame
+// actually dropped, so it changes a couple of times a second at most.
+const DROPPING_HOLD_MS = 500;
 // The daemon fails a call that receives audio before its realtime session is
 // open, so nothing is sent while the call is still `starting`.
 const STREAMING_STATES: ReadonlySet<DaemonLiveStatus['state']> = new Set([
@@ -40,6 +50,26 @@ const STREAMING_STATES: ReadonlySet<DaemonLiveStatus['state']> = new Set([
   'thinking',
   'speaking',
 ]);
+
+/**
+ * What the capture callback last saw. `at` is the `performance.now()` of that
+ * frame: a meter that only kept the level would go on showing the last value
+ * after the callback stops firing (a suspended AudioContext, a device change),
+ * which is exactly when it is being looked at.
+ */
+export interface LiveInputLevel {
+  /** RMS of the frame, 0..1. Zero while input is muted. */
+  level: number;
+  at: number;
+  /**
+   * The call is running but frames are not being sent: the socket is backed
+   * up. The microphone is fine and the daemon is still not hearing it. Held
+   * for a moment after the last dropped frame, so it does not flicker.
+   */
+  dropping: boolean;
+}
+
+const SILENT_INPUT: LiveInputLevel = { level: 0, at: 0, dropping: false };
 
 export type LiveBrowserHostPhase =
   | 'idle'
@@ -70,6 +100,13 @@ export interface UseLiveBrowserHostResult {
   phase: LiveBrowserHostPhase;
   closeReason: LiveBrowserHostCloseReason | undefined;
   errorMessage: string | undefined;
+  /**
+   * Most recent microphone frame, for a meter. A ref rather than state:
+   * at 64 ms frames this changes ~16 times a second, and re-rendering the
+   * dialog that often would steal the main thread from the very
+   * ScriptProcessor callback that produces the audio.
+   */
+  inputLevel: RefObject<LiveInputLevel>;
   /** Must run inside a user gesture: it asks for the microphone. */
   connect: (options?: { takeover?: boolean }) => void;
   disconnect: () => void;
@@ -118,6 +155,8 @@ export function useLiveBrowserHost({
   const resourcesRef = useRef<HostResources>({});
   const statusRef = useRef<DaemonLiveStatus | undefined>(undefined);
   const epochRef = useRef(0);
+  const inputLevelRef = useRef<LiveInputLevel>(SILENT_INPUT);
+  const droppingUntilRef = useRef(0);
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
 
@@ -148,6 +187,8 @@ export function useLiveBrowserHost({
       }
     }
     statusRef.current = undefined;
+    inputLevelRef.current = SILENT_INPUT;
+    droppingUntilRef.current = 0;
   }, []);
 
   const end = useCallback(
@@ -243,6 +284,9 @@ export function useLiveBrowserHost({
           1,
           1,
         );
+        // ScriptProcessorNode (not AudioWorklet): the Web Shell CSP `script-src`
+        // omits `blob:`, which blocks a Blob-URL worklet module, and
+        // ScriptProcessor needs no module load. Dictation makes the same choice.
         // ScriptProcessor fires only while connected to a destination. A muted
         // gain node keeps the microphone out of the speakers.
         const sink = capture.createGain();
@@ -337,17 +381,37 @@ export function useLiveBrowserHost({
         };
 
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
-          if (!isCurrent() || ws.readyState !== WebSocket.OPEN) return;
+          if (!isCurrent()) return;
+          const at = performance.now();
           const status = statusRef.current;
           if (
+            ws.readyState !== WebSocket.OPEN ||
             !status ||
-            status.inputMuted === true ||
-            !STREAMING_STATES.has(status.state) ||
-            ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES
+            status.inputMuted === true
           ) {
+            // No socket, or muted: the meter reads zero rather than freezing
+            // at the last level it saw.
+            inputLevelRef.current = { level: 0, at, dropping: false };
             return;
           }
-          const { pcm } = floatToPcm16(event.inputBuffer.getChannelData(0));
+          const { pcm, level } = floatToPcm16(
+            event.inputBuffer.getChannelData(0),
+          );
+          const streaming = STREAMING_STATES.has(status.state);
+          // Whether THIS frame is dropped decides what is sent; whether
+          // dropping is REPORTED outlives it, or the flag would flicker.
+          const dropped =
+            streaming && ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES;
+          if (dropped) droppingUntilRef.current = at + DROPPING_HOLD_MS;
+          if (!streaming) droppingUntilRef.current = 0;
+          const dropping = streaming && at < droppingUntilRef.current;
+          // Measured whenever the microphone is open, including before the
+          // call starts: "will it hear me?" is the question to answer while
+          // there is still a button to press. During a call a dropped frame
+          // is flagged, so a moving bar never means "the daemon hears this"
+          // when it does not.
+          inputLevelRef.current = { level, at, dropping };
+          if (!streaming || dropped) return;
           const frame = new Uint8Array(INPUT_EPOCH_BYTES + pcm.byteLength);
           new DataView(frame.buffer).setBigUint64(0, BigInt(epochRef.current));
           frame.set(new Uint8Array(pcm), INPUT_EPOCH_BYTES);
@@ -371,5 +435,12 @@ export function useLiveBrowserHost({
     };
   }, [end, release]);
 
-  return { phase, closeReason, errorMessage, connect, disconnect };
+  return {
+    phase,
+    closeReason,
+    errorMessage,
+    inputLevel: inputLevelRef,
+    connect,
+    disconnect,
+  };
 }

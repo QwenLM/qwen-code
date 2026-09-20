@@ -45,7 +45,11 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-describe('bwrap execution adapter', () => {
+// The suite fakes Linux (platform is mocked below) but still assumes POSIX
+// temp semantics — Node ignores TMPDIR on Windows and there is no '/tmp'
+// fallback — and its fs mock matches POSIX separators, so it cannot run
+// under win32.
+describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   let root: string;
   let workspace: string;
   let installation: string;
