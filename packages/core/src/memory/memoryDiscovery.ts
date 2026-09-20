@@ -430,8 +430,11 @@ export interface LoadServerHierarchicalMemoryResponse {
   /**
    * Extension rules dropped for having no `paths:`, by display path.
    *
-   * Optional so the many tests that build this response by hand keep type
-   * checking; `loadRules` always returns it, and Config reads it with `?? []`.
+   * Present only when at least one was dropped. An empty list and an absent
+   * field mean the same thing to every consumer (Config reads it with `?? []`),
+   * and omitting it keeps this response's shape — asserted whole with `toEqual`
+   * in a dozen `memoryDiscovery` tests that have no opinion about extension
+   * rules — unchanged for every session that has none.
    */
   ignoredExtensionRules?: string[];
   /** Effective project root used for glob matching. */
@@ -669,7 +672,8 @@ export async function loadServerHierarchicalMemory(
     contextFilePaths,
     ruleCount,
     conditionalRules,
-    ignoredExtensionRules,
+    // See the field's doc comment: reported only when something was dropped.
+    ...(ignoredExtensionRules.length > 0 ? { ignoredExtensionRules } : {}),
     projectRoot: effectiveRoot,
   };
 }
