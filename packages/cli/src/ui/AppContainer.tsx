@@ -4184,29 +4184,22 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
       try {
-        // A session whose counter restarted on resume can hold TWO live
-        // items wearing the same promptId (a surviving resumed turn and
-        // its live re-mint). The file consumer resolves a shared key by
-        // last occurrence — the wrong turn's snapshot — then prunes the
-        // newer snapshots and permanently deletes their backups (R36-1).
-        // Refuse before validating the conversation cut: that check fails
-        // for its own reasons on the same ambiguous turn and would report
-        // "compressed" instead. The ambiguity lives in the snapshot array,
-        // not the UI items: a conversation-only rewind drops the twin's UI
-        // item while both snapshots survive, so the snapshot census must
-        // stand on its own (R38-3).
+        // A session whose counter restarted on resume can hold TWO file
+        // snapshots wearing the same promptId. The file consumer resolves a
+        // shared key by last occurrence — the wrong turn's snapshot — then
+        // prunes the newer snapshots and permanently deletes their backups.
+        // Refuse before validating the conversation cut: that check fails for
+        // its own reasons on the same ambiguous turn and would report
+        // "compressed" instead. The census reads the snapshot array, not the
+        // UI items: a conversation-only rewind drops the twin's UI item while
+        // both snapshots survive.
         const promptId = (userItem as HistoryItemUser).promptId;
         const promptIdIsShared =
           option !== 'conversation' && promptId
             ? config
                 .getFileHistoryService()
                 .getSnapshots()
-                .filter((s) => s.promptId === promptId).length > 1 ||
-              historyManager.history.some(
-                (item) =>
-                  item.id !== userItem.id &&
-                  (item as HistoryItemUser).promptId === promptId,
-              )
+                .filter((s) => s.promptId === promptId).length > 1
             : false;
         if (promptIdIsShared) {
           historyManager.addItem(

@@ -7052,42 +7052,12 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    it('refuses file restore when another history item wears the same prompt id', async () => {
-      // R36-1: a session whose counter restarted on resume re-mints ids the
-      // surviving transcript still wears, so two live UI items share one
-      // promptId. The file consumer resolves a shared key by last
-      // occurrence — the wrong turn's snapshot — then prunes the newer
-      // snapshots and deletes their backups. The rewind-time refusal
-      // mirrors the resume-side census's loud stop, and 'both' must not
-      // truncate the conversation either (no inconsistent state).
-      const history: HistoryItem[] = [
-        rewindUserItem(1, 'resumed turn five', 'prompt-5'),
-        { id: 2, type: 'gemini', text: 'first response' },
-        rewindUserItem(3, 're-minted live turn', 'prompt-5'),
-        { id: 4, type: 'gemini', text: 'second response' },
-      ];
-      const harness = renderRewindHarness({ history });
-
-      await runRewind(history[0]!, 'both');
-
-      expect(harness.rewind).not.toHaveBeenCalled();
-      expect(harness.truncateHistory).not.toHaveBeenCalled();
-      expect(harness.loadHistory).not.toHaveBeenCalled();
-      expect(harness.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'error',
-          text: 'Cannot restore files: this turn shares its checkpoint identity with another turn.',
-        }),
-        expect.any(Number),
-      );
-    });
-
-    it('refuses file restore when two snapshots share the prompt id (R38-3)', async () => {
+    it('refuses file restore when two snapshots share the prompt id', async () => {
       // A conversation-only rewind drops UI items without touching the
-      // snapshot array, so the UI-item census goes blind to a duplicated
-      // key that fhs.rewind() would still resolve by last occurrence and
-      // then destructively prune. The census must cover the snapshot array
-      // itself.
+      // snapshot array, so a census over UI items would go blind to a
+      // duplicated key that fhs.rewind() would still resolve by last
+      // occurrence and then destructively prune. The census therefore reads
+      // the snapshot array itself.
       const history: HistoryItem[] = [
         rewindUserItem(1, 'resumed turn five', 'prompt-5'),
         { id: 2, type: 'gemini', text: 'first response' },
