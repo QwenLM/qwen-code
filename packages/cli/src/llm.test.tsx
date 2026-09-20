@@ -1267,6 +1267,71 @@ describe('llm.tsx main function', () => {
     }
   });
 
+  // Regression: `/update` exits with UPDATE_RELAUNCH_EXIT_CODE and relies on
+  // the supervisor loop in relaunchOnExitCode to carry out the update. Process
+  // replacement leaves no supervisor behind, so a headless prompt that
+  // dispatches as a slash command has to keep the parent — otherwise
+  // `qwen -p "/update"` exits having installed nothing and printed nothing.
+  it.each([
+    ['/update', false],
+    ['summarize this repository', true],
+  ])(
+    'keeps the relaunch supervisor for the headless prompt %s (replaceProcess=%s)',
+    async (prompt, expectedReplaceProcess) => {
+      const originalIsTTY = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        'isTTY',
+      );
+      Object.defineProperty(process.stdin, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+      vi.mocked(parseArguments).mockResolvedValue({ prompt } as CliArgs);
+      vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: {
+          advanced: {},
+          security: { auth: {} },
+          ui: {},
+        },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+
+      let replaceProcess: boolean | undefined;
+      vi.mocked(relaunchAppInChildProcess).mockImplementation(
+        async (_memoryArgs, _extraArgs, options) => {
+          replaceProcess = options?.replaceProcess;
+          throw new Error('stop after replaceProcess check');
+        },
+      );
+
+      try {
+        await expect(main()).rejects.toThrow('stop after replaceProcess check');
+      } finally {
+        vi.unstubAllEnvs();
+        if (originalIsTTY) {
+          Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+        } else {
+          delete (process.stdin as { isTTY?: unknown }).isTTY;
+        }
+      }
+
+      expect(replaceProcess).toBe(expectedReplaceProcess);
+    },
+  );
+
   // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
   // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
   // stage of a daemon-spawned ACP child must still scrub.

@@ -104,6 +104,7 @@ import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-r
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
+import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { initializeLlmOutputLanguage } from './i18n/languageUtils.js';
@@ -800,7 +801,11 @@ export async function main() {
           !argv.promptInteractive &&
           !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
           argv.jsonFd === undefined &&
-          Boolean(argv.prompt),
+          Boolean(argv.prompt) &&
+          // A headless slash command can exit with a relaunch code that only
+          // the supervisor consumes — `/update` exits 43 to hand the update
+          // off — so those runs have to keep the parent process.
+          !isSlashCommand(argv.prompt ?? ''),
       });
     }
   }
