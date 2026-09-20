@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isSubpath, realpathNearestExisting } from '../utils/paths.js';
 import { isInternalSecretEnvVar } from '../utils/sanitize-child-env.js';
 import {
   ShellExecutionService,
@@ -32,6 +33,7 @@ export interface BwrapPolicy {
   workspace: string;
   installation: string;
   state: string;
+  maskedPaths?: readonly string[];
   filesystem: 'read-only' | 'workspace-write';
   network: 'open' | 'closed';
   bwrapPath?: string;
@@ -64,16 +66,7 @@ export function sandboxAsset(name: 'bwrap-relay' | 'file-worker'): string {
   return realpathSync(asset);
 }
 
-const contains = (parent: string, child: string) => {
-  const relative = path.relative(parent, child);
-  return (
-    relative === '' ||
-    (relative !== '..' &&
-      !relative.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(relative))
-  );
-};
-const overlaps = (a: string, b: string) => contains(a, b) || contains(b, a);
+const overlaps = (a: string, b: string) => isSubpath(a, b) || isSubpath(b, a);
 const directory = (value: string) => {
   if (!path.isAbsolute(value))
     throw new Error('Sandbox paths must be absolute.');
@@ -136,7 +129,7 @@ export async function executeBwrap(
   ];
   const checkWritable = (root: string) => {
     if (
-      contains(root, realpathSync(os.homedir())) ||
+      isSubpath(root, realpathSync(os.homedir())) ||
       protectedRoots.some((protectedRoot) => overlaps(root, protectedRoot))
     ) {
       throw new Error('Writable directory overlaps a protected root.');
@@ -145,8 +138,16 @@ export async function executeBwrap(
   // Keep this admission invariant even for read-only profiles so a later profile
   // change cannot turn a trusted installation/state directory into a workspace.
   checkWritable(workspace);
+  const maskedPaths = (policy.maskedPaths ?? []).map((value) => {
+    if (!path.isAbsolute(value))
+      throw new Error('Sandbox mask paths must be absolute.');
+    const resolved = realpathNearestExisting(value);
+    if (resolved === workspace || !isSubpath(workspace, resolved))
+      throw new Error('Sandbox mask paths must remain inside the workspace.');
+    return resolved;
+  });
   const cwd = directory(payload.cwd);
-  if (!contains(workspace, cwd))
+  if (!isSubpath(workspace, cwd))
     throw new Error('Payload cwd must be inside the workspace.');
   const executable = payload.executable;
   const args = [...payload.args];
@@ -180,9 +181,9 @@ export async function executeBwrap(
         ? realpathSync(requestedScratchRoot)
         : realpathSync('/tmp');
     if (
-      contains(workspace, scratchRoot) ||
+      isSubpath(workspace, scratchRoot) ||
       protectedRoots.some((protectedRoot) =>
-        contains(protectedRoot, scratchRoot),
+        isSubpath(protectedRoot, scratchRoot),
       )
     )
       throw new Error(
@@ -229,6 +230,7 @@ export async function executeBwrap(
     bwrapArgs.push('--bind', scratch, scratch);
     if (filesystem === 'workspace-write')
       bwrapArgs.push('--bind', workspace, workspace);
+    for (const maskedPath of maskedPaths) bwrapArgs.push('--tmpfs', maskedPath);
     if (network === 'closed') bwrapArgs.push('--unshare-net');
     bwrapArgs.push('--chdir', cwd, '--', executable, ...args);
     const statusPath = path.join(control, 'status.json');

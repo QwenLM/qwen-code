@@ -4838,6 +4838,9 @@ describe('loadCliConfig with includeDirectories', () => {
       { shellExecutionSandbox: policy },
     );
     expect(config.getShellExecutionSandbox()).toMatchObject(policy);
+    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual([
+      path.join(policy.workspace, '.qwen', 'review-leases'),
+    ]);
     expect(config.getCoreTools()).toEqual(
       expect.arrayContaining([
         ToolNames.SHELL,
@@ -4854,10 +4857,35 @@ describe('loadCliConfig with includeDirectories', () => {
       [],
     );
     expect(ordinary.getShellExecutionSandbox()).toBeUndefined();
+    const rejectedModes: Array<[string, Partial<CliArgs>]> = [
+      ['interactive frontend', { bare: false }],
+      ['missing prompt', { prompt: undefined }],
+      ['prompt-interactive frontend', { promptInteractive: 'fixture' }],
+      ['stream-json frontend', { inputFormat: 'stream-json' }],
+      ['worktree startup', { worktree: 'review' }],
+      ['additional context directories', { includeDirectories: ['/outside'] }],
+    ];
+    for (const [, overrides] of rejectedModes) {
+      await expect(
+        loadCliConfig(
+          {},
+          { ...argv, ...overrides },
+          policy.workspace,
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { shellExecutionSandbox: policy },
+        ),
+      ).rejects.toThrow('requires bare noninteractive mode');
+    }
+    vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
     await expect(
       loadCliConfig(
         {},
-        { ...argv, bare: false },
+        argv,
         policy.workspace,
         [],
         undefined,
@@ -4867,7 +4895,7 @@ describe('loadCliConfig with includeDirectories', () => {
         false,
         { shellExecutionSandbox: policy },
       ),
-    ).rejects.toThrow('requires bare noninteractive mode');
+    ).rejects.toThrow('agent execution environments');
   });
 
   it('should ignore coreTools overrides in bare mode', async () => {

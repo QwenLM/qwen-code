@@ -8,18 +8,8 @@ import { realpathSync, statSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { ConfigParameters } from '../config/config.js';
-import { realpathNearestExisting } from '../utils/paths.js';
+import { isSubpath, realpathNearestExisting } from '../utils/paths.js';
 import type { BwrapPolicy } from './bwrap-execution.js';
-
-const contains = (parent: string, child: string) => {
-  const relative = path.relative(parent, child);
-  return (
-    relative === '' ||
-    (!relative.startsWith(`..${path.sep}`) &&
-      relative !== '..' &&
-      !path.isAbsolute(relative))
-  );
-};
 
 export function assertShellSandboxCwd(
   policy: Readonly<BwrapPolicy>,
@@ -28,7 +18,7 @@ export function assertShellSandboxCwd(
   if (
     !path.isAbsolute(cwd) ||
     !statSync(cwd).isDirectory() ||
-    !contains(policy.workspace, realpathSync(cwd))
+    !isSubpath(policy.workspace, realpathSync(cwd))
   ) {
     throw new Error(
       'Shell sandbox cwd must remain inside the admitted workspace.',
@@ -50,14 +40,13 @@ export function admitShellSandbox(
   }
   const legacySelection = process.env['QWEN_SANDBOX']?.trim().toLowerCase();
   if (
-    process.env['SANDBOX'] ||
+    process.env['SANDBOX']?.trim() ||
     (legacySelection && !['false', '0'].includes(legacySelection)) ||
-    process.env['QWEN_SANDBOX_NET'] !== undefined ||
-    process.env['QWEN_SANDBOX_PROXY_COMMAND'] !== undefined ||
-    process.env['PROXY_COMMAND'] !== undefined
+    process.env['QWEN_SANDBOX_NET']?.trim() ||
+    process.env['QWEN_SANDBOX_PROXY_COMMAND']?.trim()
   ) {
     throw new Error(
-      'Tool execution sandbox cannot be combined with legacy sandbox environment settings. Remove SANDBOX, QWEN_SANDBOX, QWEN_SANDBOX_NET, QWEN_SANDBOX_PROXY_COMMAND and PROXY_COMMAND and restart.',
+      'Tool execution sandbox cannot be combined with legacy sandbox environment settings. Remove SANDBOX, QWEN_SANDBOX, QWEN_SANDBOX_NET and QWEN_SANDBOX_PROXY_COMMAND and restart.',
     );
   }
   if (
@@ -66,7 +55,7 @@ export function admitShellSandbox(
     params.experimentalZedIntegration ||
     params.sandbox ||
     params.overrideExtensions?.some(
-      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
+      (name) => name.trim() !== '' && name.trim().toLowerCase() !== 'none',
     ) ||
     Object.keys(params.mcpServers ?? {}).length ||
     Object.keys(params.topTierMcpServers ?? {}).length ||
@@ -74,10 +63,12 @@ export function admitShellSandbox(
     params.toolDiscoveryCommand ||
     params.toolCallCommand ||
     params.lsp?.enabled ||
-    params.lspClient
+    params.lspClient ||
+    params.agentExecutionBackend !== undefined ||
+    params.executionEnvironmentFactory !== undefined
   ) {
     throw new Error(
-      'Tool execution sandbox does not support SDK/ACP sessions, provisional workspaces, extensions, MCP, discovery, LSP, or a whole-CLI sandbox.',
+      'Tool execution sandbox does not support SDK/ACP sessions, provisional workspaces, extensions, MCP, discovery, LSP, agent execution environments, or a whole-CLI sandbox.',
     );
   }
   if (
@@ -100,22 +91,32 @@ export function admitShellSandbox(
   const workspace = canonical(policy.workspace);
   const installation = canonical(policy.installation);
   const state = canonical(policy.state);
+  const maskedPaths = Object.freeze((policy.maskedPaths ?? []).map(canonical));
   const protectedRoots = Object.freeze(
     [installation, state, runtimeRoot, globalConfigRoot].map(canonical),
   );
   if (
     protectedRoots.some(
-      (root) => contains(root, workspace) || contains(workspace, root),
+      (root) => isSubpath(root, workspace) || isSubpath(workspace, root),
     )
   ) {
     throw new Error(
       'Shell sandbox workspace overlaps protected state or installation.',
     );
   }
+  if (
+    maskedPaths.some(
+      (maskedPath) =>
+        maskedPath === workspace || !isSubpath(workspace, maskedPath),
+    )
+  ) {
+    throw new Error('Shell sandbox masks must remain inside the workspace.');
+  }
   const admitted: Readonly<BwrapPolicy> = Object.freeze({
     workspace,
     installation,
     state,
+    ...(maskedPaths.length > 0 ? { maskedPaths } : {}),
     filesystem: policy.filesystem,
     network: policy.network,
     ...(policy.bwrapPath ? { bwrapPath: policy.bwrapPath } : {}),
@@ -141,8 +142,8 @@ export async function probeShellSandbox(
   const handle = await executeBwrap(
     policy,
     {
-      executable: '/usr/bin/true',
-      args: [],
+      executable: '/bin/bash',
+      args: ['-c', 'true'],
       cwd: policy.workspace,
       env: { PATH: '/usr/bin:/bin' },
     },

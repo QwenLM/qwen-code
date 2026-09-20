@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   hashFile,
   readSourceIdentity,
@@ -24,7 +24,11 @@ async function fixture() {
   roots.push(root);
   await fs.writeFile(path.join(root, 'input.txt'), 'before\n');
   execFileSync('git', ['init', '-q'], { cwd: root });
-  execFileSync('git', ['config', 'core.hooksPath', '/dev/null'], { cwd: root });
+  execFileSync('git', ['config', 'core.hooksPath', os.devNull], { cwd: root });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+  execFileSync('git', ['config', 'status.showUntrackedFiles', 'normal'], {
+    cwd: root,
+  });
   execFileSync('git', ['add', 'input.txt'], { cwd: root });
   execFileSync(
     'git',
@@ -51,10 +55,30 @@ async function fixture() {
 
 describe('sandbox runtime source manifest', () => {
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await Promise.all(
       roots
         .splice(0)
         .map((root) => fs.rm(root, { recursive: true, force: true })),
+    );
+  });
+
+  it('records untracked files despite ambient Git status configuration', async () => {
+    const { root } = await fixture();
+    const globalConfig = path.join(root, 'ambient-gitconfig');
+    await fs.writeFile(globalConfig, '[status]\n\tshowUntrackedFiles = no\n');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', globalConfig);
+    await fs.writeFile(path.join(root, 'untracked.txt'), 'new\n');
+    expect(readSourceIdentity(root).dirty).toBe(true);
+  });
+
+  it('uses the declared SHA-256 byte encoding', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-source-hash-'));
+    roots.push(root);
+    const file = path.join(root, 'known.txt');
+    await fs.writeFile(file, 'known bytes\n');
+    await expect(hashFile(file)).resolves.toBe(
+      '43697ca3ebe6227d6017713ca8449d76dc37602e0d5742e8728875c5a876cd5e',
     );
   });
 
@@ -110,5 +134,36 @@ describe('sandbox runtime source manifest', () => {
         inputs: { '../outside': '0'.repeat(64) },
       }),
     ).rejects.toThrow('escapes the source root');
+  });
+
+  it('rejects absolute source inputs', async () => {
+    const { root, manifest } = await fixture();
+    await expect(
+      verifySourceManifest(root, {
+        ...manifest,
+        inputs: { [path.join(root, 'input.txt')]: '0'.repeat(64) },
+      }),
+    ).rejects.toThrow('must be relative');
+  });
+
+  it('reports a missing declared source input', async () => {
+    const { root, manifest } = await fixture();
+    await expect(
+      verifySourceManifest(root, {
+        ...manifest,
+        inputs: { 'missing.txt': '0'.repeat(64) },
+      }),
+    ).rejects.toThrow('Source manifest input is unavailable: missing.txt');
+  });
+
+  it('reports revision drift before stale input paths', async () => {
+    const { root, manifest } = await fixture();
+    await expect(
+      verifySourceManifest(root, {
+        ...manifest,
+        revision: '0'.repeat(40),
+        inputs: { 'missing.txt': '0'.repeat(64) },
+      }),
+    ).rejects.toThrow('Source revision differs from the candidate build');
   });
 });

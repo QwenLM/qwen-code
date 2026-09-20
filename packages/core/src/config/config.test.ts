@@ -3061,6 +3061,37 @@ describe('Server Config (config.ts)', () => {
         probe.mockRestore();
       }
     });
+
+    it('omits user-interaction tools from the admitted headless registry', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue();
+      try {
+        const config = new Config({
+          ...parameters(),
+          interactive: false,
+          bareMode: true,
+        });
+        await config.initialize();
+        expect(
+          (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual([
+          ToolNames.SHELL,
+          ToolNames.TASK_STOP,
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+          ToolNames.MONITOR,
+          ToolNames.AGENT,
+          ToolNames.GLOB,
+          ToolNames.LS,
+        ]);
+      } finally {
+        probe.mockRestore();
+      }
+    });
   });
 
   describe('derived Config ownership', () => {

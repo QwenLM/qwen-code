@@ -656,20 +656,37 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     if (sandboxed) {
       try {
+        const shellExecutionConfig = this.config.getShellExecutionConfig();
         const handle = await executeRuntimeShell(
           this.config,
           command,
           this.params.directory || this.config.getTargetDir(),
           (event) => {
-            if (event.type === 'data' && typeof event.chunk === 'string')
+            if (event.type === 'binary_detected') {
+              if (registration.status === 'running') {
+                registry.fail(monitorId, 'Binary output detected');
+                entryAc.abort();
+              }
+            } else if (
+              event.type === 'data' &&
+              typeof event.chunk === 'string'
+            ) {
               processLines(
                 event.stream === 'stderr' ? stderrBuf : stdoutBuf,
                 event.chunk,
               );
+            }
           },
           entryAc.signal,
           false,
-          this.config.getShellExecutionConfig(),
+          {
+            ...shellExecutionConfig,
+            maxBufferedOutputBytes: Math.min(
+              shellExecutionConfig.maxBufferedOutputBytes ??
+                PARTIAL_LINE_BUFFER_CAP,
+              PARTIAL_LINE_BUFFER_CAP,
+            ),
+          },
           { streamStdout: true },
         );
         registration.pid = handle.pid;

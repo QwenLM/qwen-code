@@ -427,7 +427,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       if (abortSignal.aborted) {
         throw error;
       }
-      const errorMsg = getErrorMessage(error);
+      const errorMsg =
+        isNodeError(error) && error.code === 'EISDIR'
+          ? `Target is a directory, not a file: ${this.params.file_path} (${error.code})`
+          : getErrorMessage(error);
       throw new Error(`Error preparing edit: ${errorMsg}`);
     }
 
@@ -751,9 +754,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         error: {
           message: errorMsg,
           type:
-            isNodeError(error) && error.code === 'ESTALE'
+            isNodeError(error) &&
+            error.code === 'ESTALE' &&
+            this.config.getShellExecutionSandbox?.()
               ? ToolErrorType.FILE_CHANGED_SINCE_READ
-              : ToolErrorType.FILE_WRITE_FAILURE,
+              : isNodeError(error) && error.code === 'EISDIR'
+                ? ToolErrorType.TARGET_IS_DIRECTORY
+                : ToolErrorType.FILE_WRITE_FAILURE,
         },
       };
     }

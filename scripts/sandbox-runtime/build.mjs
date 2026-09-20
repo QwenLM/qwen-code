@@ -120,29 +120,30 @@ for (const file of Object.keys({
   ...workers.metafile.inputs,
 })) {
   if (file.startsWith('wasm-binary:')) continue;
-  try {
-    inputs[file] = await hashFile(path.resolve(root, file));
-  } catch {
-    /* virtual loader modules are described in esbuild metafile */
-  }
+  inputs[file] = await hashFile(path.resolve(root, file));
 }
-for (const name of [
-  'baseline.mjs',
-  'build.mjs',
-  'launcher.mjs',
-  'source-manifest.mjs',
-  'verify.mjs',
-  'README.md',
-]) {
+for (const name of (await fs.readdir(source))
+  .filter((name) => name.endsWith('.mjs') || name === 'README.md')
+  .sort()) {
   const file = path.join(source, name);
   inputs[path.relative(root, file)] = await hashFile(file);
 }
-const sourceManifestTest = path.join(
-  root,
-  'scripts/tests/sandbox-runtime-source-manifest.test.js',
-);
-inputs[path.relative(root, sourceManifestTest)] =
-  await hashFile(sourceManifestTest);
+for (const name of [
+  'package.json',
+  'package-lock.json',
+  'tsconfig.json',
+  'packages/core/package.json',
+  'packages/cli/package.json',
+]) {
+  inputs[name] = await hashFile(path.join(root, name));
+}
+const scriptsTests = path.join(root, 'scripts/tests');
+for (const name of (await fs.readdir(scriptsTests))
+  .filter((name) => /^sandbox-runtime-.*\.test\.js$/.test(name))
+  .sort()) {
+  const file = path.join(scriptsTests, name);
+  inputs[path.relative(root, file)] = await hashFile(file);
+}
 await fs.copyFile(
   path.join(source, 'verify.mjs'),
   path.join(output, 'verify.mjs'),
@@ -155,8 +156,9 @@ const artifacts = {};
 for (const file of await fs.readdir(output))
   artifacts[file] = await hashFile(path.join(output, file));
 const sourceIdentity = readSourceIdentity(root);
+const manifestPath = path.join(output, 'manifest.json');
 await fs.writeFile(
-  path.join(output, 'manifest.json'),
+  manifestPath,
   JSON.stringify(
     {
       created: new Date().toISOString(),
@@ -168,11 +170,12 @@ await fs.writeFile(
     2,
   ),
 );
+const manifestSha256 = await hashFile(manifestPath);
 if (sourceIdentity.dirty)
   console.warn('WARNING: candidate built from a dirty worktree.');
 console.log(
   JSON.stringify(
-    { output, inputs: Object.keys(inputs).length, artifacts },
+    { output, inputs: Object.keys(inputs).length, artifacts, manifestSha256 },
     null,
     2,
   ),

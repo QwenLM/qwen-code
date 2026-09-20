@@ -34,7 +34,6 @@ describe('runtime shell policy admission', () => {
       'QWEN_SANDBOX',
       'QWEN_SANDBOX_NET',
       'QWEN_SANDBOX_PROXY_COMMAND',
-      'PROXY_COMMAND',
     ])
       vi.stubEnv(name, undefined);
     root = realpathSync(
@@ -77,6 +76,26 @@ describe('runtime shell policy admission', () => {
     );
 
   it('snapshots the canonical policy and both host state roots', () => {
+    const workspaceAlias = path.join(root, 'workspace-alias');
+    const installationAlias = path.join(root, 'installation-alias');
+    const stateAlias = path.join(root, 'state-alias');
+    for (const [target, alias] of [
+      [path.join(root, 'workspace'), workspaceAlias],
+      [path.join(root, 'installation'), installationAlias],
+      [path.join(root, 'state'), stateAlias],
+    ])
+      symlinkSync(
+        target,
+        alias,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      workspace: workspaceAlias,
+      installation: installationAlias,
+      state: stateAlias,
+      bwrapPath: path.join(root, 'installation', 'bwrap'),
+    };
     const policy = admit(params, root)!;
     params.shellExecutionSandbox = {
       ...params.shellExecutionSandbox!,
@@ -84,9 +103,29 @@ describe('runtime shell policy admission', () => {
       network: 'open',
     };
     expect(policy.workspace).toBe(path.join(root, 'workspace'));
+    expect(policy.installation).toBe(path.join(root, 'installation'));
+    expect(policy.state).toBe(path.join(root, 'state'));
+    expect(policy.bwrapPath).toBe(path.join(root, 'installation', 'bwrap'));
     expect(policy.network).toBe('closed');
     expect(Object.isFrozen(policy)).toBe(true);
     expect(policy).not.toHaveProperty('protectedRoots');
+  });
+
+  it('canonicalizes workspace-local masks and rejects masks outside it', () => {
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      maskedPaths: [path.join(root, 'workspace', '.qwen', 'review-leases')],
+    };
+    const policy = admit(params, root)!;
+    expect(policy.maskedPaths).toEqual([
+      path.join(root, 'workspace', '.qwen', 'review-leases'),
+    ]);
+    expect(Object.isFrozen(policy.maskedPaths)).toBe(true);
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox,
+      maskedPaths: [path.join(root, 'outside')],
+    };
+    expect(() => admit(params, root)).toThrow('inside the workspace');
   });
 
   it('keeps frontend mode outside core policy admission', () => {
@@ -113,10 +152,22 @@ describe('runtime shell policy admission', () => {
     'QWEN_SANDBOX',
     'QWEN_SANDBOX_NET',
     'QWEN_SANDBOX_PROXY_COMMAND',
-    'PROXY_COMMAND',
   ])('rejects legacy %s environment', (name) => {
     vi.stubEnv(name, 'bwrap');
     expect(() => admit(params, root)).toThrow('legacy sandbox environment');
+  });
+
+  it.each(['SANDBOX', 'QWEN_SANDBOX_NET', 'QWEN_SANDBOX_PROXY_COMMAND'])(
+    'ignores empty legacy %s environment',
+    (name) => {
+      vi.stubEnv(name, '  ');
+      expect(() => admit(params, root)).not.toThrow();
+    },
+  );
+
+  it.each(['false', '0'])('accepts disabled QWEN_SANDBOX=%s', (value) => {
+    vi.stubEnv('QWEN_SANDBOX', value);
+    expect(() => admit(params, root)).not.toThrow();
   });
 
   it('rejects a distinct cwd outside the admitted workspace', () => {
@@ -152,6 +203,35 @@ describe('runtime shell policy admission', () => {
     },
   );
 
+  it('rejects workspace ancestors and descendants of protected roots', () => {
+    params.targetDir = root;
+    params.cwd = root;
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      workspace: root,
+    };
+    expect(() => admit(params, root)).toThrow('overlaps protected');
+
+    const nested = path.join(root, 'runtime', 'nested');
+    mkdirSync(nested);
+    params.targetDir = nested;
+    params.cwd = nested;
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox,
+      workspace: nested,
+    };
+    expect(() => admit(params, root)).toThrow('overlaps protected');
+  });
+
+  it.each([[['']], [['none']], [[' NONE ']]])(
+    'accepts the no-extension override %j',
+    (overrideExtensions) => {
+      expect(() =>
+        admit({ ...params, overrideExtensions }, root),
+      ).not.toThrow();
+    },
+  );
+
   it.each<Partial<ConfigParameters>>([
     { provisionalWorkspace: true },
     { sdkMode: true },
@@ -164,6 +244,8 @@ describe('runtime shell policy admission', () => {
     { mcpServerCommand: 'node' },
     { lsp: { enabled: true } },
     { sandbox: { command: 'docker' } },
+    { agentExecutionBackend: 'container' },
+    { executionEnvironmentFactory: vi.fn() },
   ])('rejects unsupported startup inputs %j', (overrides) => {
     expect(() => admit({ ...params, ...overrides }, root)).toThrow(
       'does not support',
@@ -183,8 +265,8 @@ describe('runtime shell policy admission', () => {
     expect(executeBwrap).toHaveBeenCalledWith(
       expect.anything(),
       {
-        executable: '/usr/bin/true',
-        args: [],
+        executable: '/bin/bash',
+        args: ['-c', 'true'],
         cwd: params.targetDir,
         env: { PATH: '/usr/bin:/bin' },
       },

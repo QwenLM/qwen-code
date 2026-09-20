@@ -2320,9 +2320,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // are preserved through to execution; the rewriters operate at the
     // top-level shell layer and become no-ops when the commit hides
     // inside a wrapper.
-    const processedCommand = this.addAttributionToPR(
-      this.addCoAuthorToGitCommit(this.params.command.trim()),
-    );
+    const processedCommand = this.config.getShellExecutionSandbox?.()
+      ? this.params.command.trim()
+      : this.addAttributionToPR(
+          this.addCoAuthorToGitCommit(this.params.command.trim()),
+        );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
 
@@ -3852,9 +3854,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         'Stripped trailing & from background shell command — managed path handles backgrounding',
       );
     }
-    const processedCommand = this.addAttributionToPR(
-      this.addCoAuthorToGitCommit(noTrailingAmp),
-    );
+    const processedCommand = this.config.getShellExecutionSandbox?.()
+      ? noTrailingAmp
+      : this.addAttributionToPR(this.addCoAuthorToGitCommit(noTrailingAmp));
     const cwd = this.params.directory || this.config.getTargetDir();
 
     // Output goes under the project temp dir (which `ReadFileTool`
@@ -3934,6 +3936,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       );
     } catch (error) {
       outputStream.destroy();
+      try {
+        fs.rmSync(outputPath, { force: true });
+      } catch (cleanupError) {
+        debugLogger.warn(
+          `background shell ${shellId} output cleanup failed: ${getErrorMessage(cleanupError)}`,
+        );
+      }
       throw error;
     }
     const { result: resultPromise, pid } = executionHandle;

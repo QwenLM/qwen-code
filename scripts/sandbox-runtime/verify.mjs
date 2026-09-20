@@ -18,10 +18,54 @@ const output = process.argv[3];
 const sourceRoot = process.argv[4];
 if (!installation || !output || !sourceRoot)
   throw new Error('Usage: verify.mjs INSTALLATION OUTPUT SOURCE_ROOT');
-const manifest = JSON.parse(
-  await fs.readFile(path.join(installation, 'manifest.json'), 'utf8'),
-);
-const source = await verifySourceManifest(sourceRoot, manifest);
+const manifestPath = path.join(installation, 'manifest.json');
+const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+let source;
+try {
+  source = await verifySourceManifest(sourceRoot, manifest);
+} catch (error) {
+  await fs.writeFile(
+    output,
+    JSON.stringify(
+      {
+        time: new Date().toISOString(),
+        installation,
+        sourceRoot,
+        sourceVerification: {
+          passed: false,
+          error: error instanceof Error ? error.stack : String(error),
+        },
+      },
+      null,
+      2,
+    ),
+  );
+  throw error;
+}
+const manifestSha256 = createHash('sha256')
+  .update(await fs.readFile(manifestPath))
+  .digest('hex');
+const uid = process.geteuid?.();
+if (uid === 0) {
+  const error = new Error('Run the sandbox verifier as an unprivileged user');
+  await fs.writeFile(
+    output,
+    JSON.stringify(
+      {
+        time: new Date().toISOString(),
+        installation,
+        sourceRoot,
+        uid,
+        manifestSha256,
+        source,
+        environmentVerification: { passed: false, error: error.message },
+      },
+      null,
+      2,
+    ),
+  );
+  throw error;
+}
 const root = await fs.mkdtemp('/tmp/qwen-runtime-shell-candidate-');
 const results = [];
 const allRequests = [];
@@ -1028,8 +1072,8 @@ try {
       pipelineOkay(run);
       assert.equal((await fs.stat(fifo)).isFIFO(), true);
       assert.match(
-        JSON.stringify(run.requests),
-        /regular file|special file|not.*file/i,
+        JSON.stringify(run.requests.at(-1).toolResults),
+        /regular file|special file/i,
       );
       return {
         fixture: f.dir,
@@ -1084,23 +1128,30 @@ try {
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
   const actualHashes = {};
-  const artifactErrors = [];
-  for (const name of Object.keys(manifest.artifacts)) {
-    try {
-      actualHashes[name] = await hash(path.join(installation, name));
-    } catch (error) {
-      artifactErrors.push(`${name}: ${error.message}`);
+  await check('artifact integrity after verification', async () => {
+    const artifactErrors = [];
+    const expectedFiles = new Set([
+      ...Object.keys(manifest.artifacts),
+      'manifest.json',
+      'node_modules',
+    ]);
+    for (const name of await fs.readdir(installation)) {
+      if (!expectedFiles.has(name)) artifactErrors.push(`${name}: unexpected`);
     }
-  }
-  for (const [name, expected] of Object.entries(manifest.artifacts)) {
-    if (actualHashes[name] !== expected) {
-      artifactErrors.push(`${name}: hash differs from the candidate build`);
+    for (const name of Object.keys(manifest.artifacts)) {
+      try {
+        actualHashes[name] = await hash(path.join(installation, name));
+      } catch (error) {
+        artifactErrors.push(`${name}: ${error.message}`);
+      }
     }
-  }
-  results.push({
-    name: 'artifact integrity after verification',
-    passed: artifactErrors.length === 0,
-    errors: artifactErrors,
+    for (const [name, expected] of Object.entries(manifest.artifacts)) {
+      if (actualHashes[name] !== expected) {
+        artifactErrors.push(`${name}: hash differs from the candidate build`);
+      }
+    }
+    assert.deepEqual(artifactErrors, []);
+    return { actualHashes };
   });
   let bwrap;
   try {
@@ -1121,6 +1172,8 @@ try {
         node: process.version,
         kernel: execFileSync('uname', ['-r'], { encoding: 'utf8' }).trim(),
         bwrap,
+        uid,
+        manifestSha256,
         source,
         expectedArtifactHashes: manifest.artifacts,
         actualHashes,

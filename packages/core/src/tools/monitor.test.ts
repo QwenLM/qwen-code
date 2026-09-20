@@ -317,7 +317,7 @@ describe('MonitorTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        { maxBufferedOutputBytes: 4096 },
         { streamStdout: true },
       );
       const entry = monitorRegistry.getRunning()[0]!;
@@ -336,6 +336,40 @@ describe('MonitorTool', () => {
         'last',
       ]);
       expect(entry.status).toBe('completed');
+    });
+
+    it('fails and stops a sandboxed monitor after binary output', async () => {
+      let output!: (event: ShellOutputEvent) => void;
+      let signal!: AbortSignal;
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, onOutput, abortSignal) => {
+          output = onOutput;
+          signal = abortSignal;
+          return { result: new Promise(() => {}) };
+        },
+      );
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      const entry = monitorRegistry.getRunning()[0]!;
+      output({ type: 'binary_detected' });
+      expect(entry.status).toBe('failed');
+      expect(signal.aborted).toBe(true);
+    });
+
+    it('fails an unconfirmed sandbox completion', async () => {
+      mockRuntimeShell.mockResolvedValue({
+        result: Promise.resolve({
+          error: new Error('Sandbox termination is unconfirmed'),
+          exitCode: 0,
+          signal: null,
+        }),
+      });
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      await Promise.resolve();
+      expect(monitorRegistry.getAll()[0]?.status).toBe('failed');
     });
 
     it('stops through the monitor abort controller without replaying on the host', async () => {

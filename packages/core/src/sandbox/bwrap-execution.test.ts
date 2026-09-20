@@ -121,9 +121,10 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
       });
 
   it('builds a literal launch, filters internal secrets, and cleans confirmed resources', async () => {
+    const maskedPath = path.join(workspace, '.qwen', 'review-leases');
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await executeBwrap(
-      policy(),
+      { ...policy(), maskedPaths: [maskedPath] },
       payload(),
       () => {},
       new AbortController().signal,
@@ -133,6 +134,12 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     });
     const relayLaunch = launch.mock.calls[0][0];
     const argv = relayLaunch.args;
+    const admittedWorkspace = realpathSync(workspace);
+    const admittedMaskedPath = path.join(
+      admittedWorkspace,
+      '.qwen',
+      'review-leases',
+    );
     expect(argv).toContain('--unshare-pid');
     expect(argv).toContain('--unshare-net');
     expect(argv).toContain('--clearenv');
@@ -140,6 +147,16 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     expect(argv).toContain('visible-user-value');
     expect(argv).not.toContain('QWEN_SERVER_TOKEN');
     expect(argv).not.toContain('internal-secret');
+    const workspaceBind = argv.findIndex(
+      (value, index) =>
+        value === '--bind' &&
+        argv[index + 1] === admittedWorkspace &&
+        argv[index + 2] === admittedWorkspace,
+    );
+    const mask = argv.indexOf('--tmpfs');
+    expect(workspaceBind).toBeGreaterThan(-1);
+    expect(argv.slice(mask, mask + 2)).toEqual(['--tmpfs', admittedMaskedPath]);
+    expect(mask).toBeGreaterThan(workspaceBind);
     const term = argv.indexOf('TERM');
     expect(argv.slice(term - 1, term + 2)).toEqual([
       '--setenv',
@@ -150,6 +167,17 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     expect(path.isAbsolute(scratch)).toBe(true);
     expect(existsSync(scratch)).toBe(false);
     expect(readdirSync(state)).toEqual([]);
+  });
+
+  it('rejects mask paths outside the workspace', async () => {
+    await expect(
+      executeBwrap(
+        { ...policy(), maskedPaths: [state] },
+        payload(),
+        () => {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('inside the workspace');
   });
 
   it('uses an absolute scratch root for a relative TMPDIR without leaking it', async () => {

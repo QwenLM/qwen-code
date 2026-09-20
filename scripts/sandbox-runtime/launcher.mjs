@@ -134,6 +134,7 @@ try {
       },
       () => true,
     );
+    void promise.catch(() => {});
     if (spec.direct.ready)
       await until(() => exists(spec.direct.ready), 'payload ready');
     if (spec.direct.promote) {

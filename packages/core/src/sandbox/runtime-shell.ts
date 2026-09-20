@@ -56,7 +56,6 @@ export function executeRuntimeShell(
         ...sessionIdContext.run(runtime.getSessionId(), getShellContextEnvVars),
         QWEN_CODE_SESSION_ID: runtime.getSessionId(),
         QWEN_CODE_PROJECT_DIR: runtime.storage.getProjectDir(),
-        PWD: cwd,
       }).filter(
         (entry): entry is [string, string] => typeof entry[1] === 'string',
       ),

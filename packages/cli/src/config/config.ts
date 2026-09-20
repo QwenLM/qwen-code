@@ -1640,18 +1640,33 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
-  const shellExecutionSandbox = hostPolicy?.shellExecutionSandbox;
+  const requestedShellExecutionSandbox = hostPolicy?.shellExecutionSandbox;
+  const shellExecutionSandbox = requestedShellExecutionSandbox
+    ? {
+        ...requestedShellExecutionSandbox,
+        maskedPaths: [
+          path.join(
+            requestedShellExecutionSandbox.workspace,
+            '.qwen',
+            'review-leases',
+          ),
+        ],
+      }
+    : undefined;
   const sandboxEnabled = Boolean(shellExecutionSandbox);
   if (
     sandboxEnabled &&
     (!bareMode ||
       !argv.prompt ||
+      argv.promptInteractive !== undefined ||
+      argv.inputFormat === 'stream-json' ||
       argv.acp ||
       argv.experimentalAcp ||
       argv.worktree !== undefined ||
       argv.experimentalLsp ||
       argv.mcpConfig ||
       argv.extensions?.length ||
+      argv.includeDirectories?.length ||
       overrideExtensions?.length ||
       Object.keys(sessionMcpServers ?? {}).length ||
       provisionalWorkspace)
@@ -2304,7 +2319,7 @@ export async function loadCliConfig(
   // servers are an explicit, per-invocation argument from the caller (ACP
   // `session/new`, `--mcp-config`), not ambient local state, so they survive.
   const mcpServers =
-    bareMode || safeMode || sandboxEnabled
+    bareMode || safeMode
       ? { ...topTierMcpServers }
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
   // Top-tier servers are never gated (#4615, see the comment above), so this
@@ -2314,7 +2329,7 @@ export async function loadCliConfig(
   // state at all, not even a read with no behavioral effect. Revisit if a
   // future gated top-tier source needs this to run under safe mode too.
   const pendingMcpServers =
-    bareMode || safeMode || sandboxEnabled || approvalMode === ApprovalMode.YOLO
+    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
@@ -2420,17 +2435,11 @@ export async function loadCliConfig(
       }
     },
     toolDiscoveryCommand:
-      bareMode || safeMode || sandboxEnabled
-        ? undefined
-        : settings.tools?.discoveryCommand,
+      bareMode || safeMode ? undefined : settings.tools?.discoveryCommand,
     toolCallCommand:
-      bareMode || safeMode || sandboxEnabled
-        ? undefined
-        : settings.tools?.callCommand,
+      bareMode || safeMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand:
-      bareMode || safeMode || sandboxEnabled
-        ? undefined
-        : settings.mcp?.serverCommand,
+      bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
     mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
@@ -2659,9 +2668,7 @@ export async function loadCliConfig(
       bareMode || safeMode,
     ),
     disableAllHooks:
-      bareMode || safeMode || sandboxEnabled
-        ? true
-        : (settings.disableAllHooks ?? false),
+      bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
       bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
     channel: argv.channel,

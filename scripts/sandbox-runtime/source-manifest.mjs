@@ -22,15 +22,25 @@ export function readSourceIdentity(root) {
       encoding: 'utf8',
     }).trim(),
     dirty:
-      execFileSync('git', ['status', '--porcelain'], {
-        cwd: root,
-        encoding: 'utf8',
-      }).trim() !== '',
+      execFileSync(
+        'git',
+        ['-c', 'status.showUntrackedFiles=normal', 'status', '--porcelain'],
+        {
+          cwd: root,
+          encoding: 'utf8',
+        },
+      ).trim() !== '',
   };
 }
 
 export async function verifySourceManifest(root, manifest) {
   const canonicalRoot = await fs.realpath(root);
+  const identity = readSourceIdentity(canonicalRoot);
+  assert.equal(
+    identity.revision,
+    manifest.revision,
+    'Source revision differs from the candidate build',
+  );
   const actualInputs = {};
   for (const name of Object.keys(manifest.inputs)) {
     if (path.isAbsolute(name)) {
@@ -41,14 +51,15 @@ export async function verifySourceManifest(root, manifest) {
     if (relative === '..' || relative.startsWith(`..${path.sep}`)) {
       throw new Error(`Source manifest input escapes the source root: ${name}`);
     }
-    actualInputs[name] = await hashFile(file);
+    try {
+      actualInputs[name] = await hashFile(file);
+    } catch (error) {
+      throw new Error(
+        `Source manifest input is unavailable: ${name}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
   }
-  const identity = readSourceIdentity(canonicalRoot);
-  assert.equal(
-    identity.revision,
-    manifest.revision,
-    'Source revision differs from the candidate build',
-  );
   assert.deepEqual(
     actualInputs,
     manifest.inputs,

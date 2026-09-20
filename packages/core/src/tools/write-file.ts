@@ -304,11 +304,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     try {
       sandboxFileVersion = captureRuntimeFileVersion(this.config, file_path);
     } catch (error) {
-      const message = getErrorMessage(error);
+      const message = `${file_path}: ${getErrorMessage(error)}`;
       return {
         llmContent: message,
         returnDisplay: message,
-        error: { message, type: ToolErrorType.FILE_WRITE_FAILURE },
+        error: {
+          message,
+          type:
+            isNodeError(error) && error.code === 'EISDIR'
+              ? ToolErrorType.TARGET_IS_DIRECTORY
+              : ToolErrorType.FILE_WRITE_FAILURE,
+        },
       };
     }
 
@@ -669,7 +675,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         errorMsg = `Error writing to file '${file_path}': ${error.message} (${error.code})`;
 
         // Log specific error types for better debugging
-        if (error.code === 'ESTALE') {
+        if (
+          error.code === 'ESTALE' &&
+          this.config.getShellExecutionSandbox?.()
+        ) {
           errorType = ToolErrorType.FILE_CHANGED_SINCE_READ;
         } else if (error.code === 'EACCES') {
           errorMsg = `Permission denied writing to file: ${file_path} (${error.code})`;

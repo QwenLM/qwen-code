@@ -22,7 +22,7 @@
 
 将原型的 JSON 内容传输改为有限长度 JSON header、换行和原始编码字节。header 最多 16 KiB，校验操作、绝对目标路径和版本结构。内容不再受原型 1 MiB JSON 限制；工具仍使用现有内存文本准备流程。worker 复用 atomicWriteFile，保留 mode、fsync、跟随符号链接的行为及已有所有权/跨设备回退。工作区内链接和悬空链接保留原有语义；解析到可写授权之外的路径由内核拒绝。即使禁用先读缓存，也拒绝特殊文件。
 
-worker 返回结构化成功或文件系统错误码。client 只有在沙箱回执已确认、退出码为零且回复有效时才接受成功；无法确认的完成绝不重放。保留普通工具错误、确认、替换匹配、diff 展示、artifact 元数据和写后缓存更新。已有署名记录仅更新宿主内存。明确启用文件历史时，备份继续作为可信 runtime 写入受保护的 session 存储；它不授权工作区写入或回滚工具。
+worker 返回结构化成功或文件系统错误码。client 只有在沙箱回执已确认、退出码为零且回复有效时才接受成功；无法确认的完成绝不重放。保留普通工具错误、确认、替换匹配、diff 展示、artifact 元数据和写后缓存更新。已有署名记录仅更新宿主内存。此内部策略启用时不提供文件 checkpoint，因为其宿主侧备份与回滚生命周期不在受约束的文件路径内。
 
 ## 影响代码与兼容性
 
@@ -40,10 +40,10 @@ Core Config 仅调整受限工具注册表/允许列表，并拒绝自定义文�
 
 ## 验证结果
 
-2026-09-16，实施前的全局 qwen 0.23.4 基线完成了七次真实 Read/Edit 调用。候选产物在 Lima qwen-sbx、ARM64 Linux 7.0.0-31-generic、Node 22.22.1、bubblewrap 0.11.1 上通过 31 组生产 headless runtime 检查和 34 组 adapter/worker 检查，覆盖原有 Shell 生命周期、私有 PID namespace 清理、文件语义、越界写拒绝和启动失败不在宿主重放。worker 套件通过了超过 1 MiB 的原始二进制内容、空内容、权限/符号链接保留、目标变化/替换/删除/新出现冲突和 FIFO 拒绝。
+2026-09-16，实施前的全局 qwen 0.23.4 基线完成了七次真实 Read/Edit 调用。在记录的 revision `661f5416f2b0e9c73a47582fac742ef78d777a3d` 上，候选产物在 Lima qwen-sbx、ARM64 Linux 7.0.0-31-generic、Node 22.22.1、bubblewrap 0.11.1 上通过 31 组生产 headless runtime 检查和 34 组 adapter/worker 检查。这些冻结的测量只描述该 revision 及其记录的 artifact；后续审查修复需要在准确 head 上重新验证。测量覆盖原有 Shell 生命周期、私有 PID namespace 清理、文件语义、越界写拒绝和启动失败不在宿主重放。worker 套件通过了超过 1 MiB 的原始二进制内容、空内容、权限/符号链接保留、目标变化/替换/删除/新出现冲突和 FIFO 拒绝。
 
 Build、typecheck 和 bundle 通过。定向 core 与 CLI 单测通过 3,328 项，另有一项原有跳过。runtime 产物的 4,791 个源码输入匹配，launcher SHA-256 为 `18a7a557bf41e8ecc3baa3de1a6826fccc21a7fb93cbac3f49584d83a362b8e1`。adapter 产物的 278 个输入匹配，其 worker SHA-256 `439e880137e0ef7ab383fb54f8d4f42804a406e363c6513468a102c7f90e3a18` 与生产 bundle worker 一致。精确证据与清理记录在 `.qwen/e2e-tests/runtime-file-sandbox.md`。
 
 Linux 证据覆盖上述 ARM64 环境。Linux x64、其他内核、公开前端启用和 Landlock 尚未验证或实现。取消与不确定回执处理由现有真实 Linux adapter 生命周期检查和文件 client 单测拒绝路径共同覆盖；runtime 文件用例没有中断正在执行的文件提交。不承诺原子 compare-and-swap 或通用回滚。
 
-两轮干净自审及独立审查未发现剩余可操作问题。打包预检包含两个安装 worker；预检后再次确认最终源码及 worker hash 一致。
+对于记录的 revision，打包预检包含两个安装 worker，并在预检后再次确认了所记录源码与 worker hash。这些历史 hash 不作为后续提交的证据。

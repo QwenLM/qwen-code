@@ -100,7 +100,6 @@ describe('runtime shell dispatch', () => {
           QWEN_CODE: '1',
           QWEN_CODE_SESSION_ID: 'runtime-session',
           QWEN_CODE_PROJECT_DIR: '/state/runtime-session',
-          PWD: '/workspace/sub',
           TERM: 'xterm-256color',
           PAGER: 'less',
         },

@@ -18,7 +18,7 @@ Run `node scripts/sandbox-runtime/baseline.mjs` on the development host with a g
 ## Build and verify a candidate
 
 1. Run `node scripts/sandbox-runtime/build.mjs /absolute/empty/installation` from the exact source revision under test. The directory must be empty. The builder resolves repository paths from its own location and bundles the actual CLI and core sources into one production headless launcher. The manifest records the Git revision, worktree dirtiness, source inputs, all test scripts, and output hashes.
-2. Copy the complete installation to the Linux host if necessary. It must be outside the test workspaces. Install or link only Linux native dependencies into this owned installation when needed.
+2. Copy the complete installation to the Linux host if necessary. It must be outside the test workspaces. Link Linux native dependencies into this owned installation when possible. If they must be installed there, use npm with `--no-save --package-lock=false`; changing the manifest-tracked `package.json` invalidates the candidate by design.
 3. Keep the exact source checkout available on Linux, then run `node /absolute/installation/verify.mjs /absolute/installation /tmp/runtime-shell-report.json /absolute/source-checkout`. The verifier refuses a different revision, dirty state, or source-input hash before exercising the candidate. Store output on a writable Linux filesystem. Lima may mount the host repository read-only; copy the report back afterward.
 4. Retain stdout and the JSON report under `.qwen/e2e-tests`. The driver verifies artifact hashes again after execution, and exits nonzero on any failed check.
 

@@ -351,7 +351,25 @@ describe('ShellTool', () => {
             is_background: false,
           })
           .execute(new AbortController().signal);
-        expect(mockExecuteBwrap).toHaveBeenCalledTimes(2);
+        await shellTool
+          .build({
+            command: 'gh pr create --title background --body background',
+            is_background: true,
+          })
+          .execute(new AbortController().signal);
+        expect(mockExecuteBwrap).toHaveBeenCalledTimes(3);
+        expect(mockExecuteBwrap.mock.calls[0][1].args).toEqual([
+          '-c',
+          'git commit -m test',
+        ]);
+        expect(mockExecuteBwrap.mock.calls[1][1].args).toEqual([
+          '-c',
+          'gh pr create --title test --body test',
+        ]);
+        expect(mockExecuteBwrap.mock.calls[2][1].args).toEqual([
+          '-c',
+          'gh pr create --title background --body background',
+        ]);
         expect(gitSpy).not.toHaveBeenCalled();
         expect(mockExecFile).not.toHaveBeenCalled();
         expect(fetchCurrentBranchPullRequest).not.toHaveBeenCalled();
@@ -374,6 +392,12 @@ describe('ShellTool', () => {
       ).rejects.toThrow('sandbox setup failed');
       expect(mockExecuteBwrap.mock.calls[0][4]).toBe(false);
       expect(destroy).toHaveBeenCalledOnce();
+      expect(fs.rmSync).toHaveBeenCalledWith(
+        expect.stringMatching(/\.output$/),
+        {
+          force: true,
+        },
+      );
       expect(
         mockConfig.getBackgroundShellRegistry().register,
       ).not.toHaveBeenCalled();
