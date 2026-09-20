@@ -60,10 +60,22 @@ DashScope 自行组装请求，从其合并步骤调用同一份修复。映射�
 若在 converter 中处理，就意味着为所有 OpenAI 兼容路由选定同一种形状，
 而 `provider/minimax.ts` 明确记录了这一约束。
 
-在请求层而非工具列表层处理，也同时覆盖了工具缺失该字段的两种成因：
+在请求层而非工具列表层处理，也同时覆盖了工具完全没有 `parameters` 的两种成因：
 声明了空参数列表的工具（被 converter 归约为 `undefined`），
 以及完全没有声明 schema 的工具（从未获得 schema）。
 在 converter 侧的修复只能覆盖前者。
+
+第三种形状被原样保留，因为它本就带有该字段。MCP 工具声明的 schema 若是
+`{ "type": "object" }` 且没有 `properties` 键 —— 这是 MCP 服务器声明无参数的
+常见写法 —— 就不满足 converter 归约的两个条件，因此
+`relaxSchemaForFunctionCalling` 保留这个裸对象；node-repl 的 MCP 服务器把它的
+kernel-reset 工具声明为 `{}`，上线时连 `type` 也没有。修复以
+`parameters === undefined` 为条件，因此这两种形状都不被改动：开启开关的请求
+对上面那些工具发出空对象 schema，对这些工具则发出服务器自己声明的形状。
+两种情况字段都在，下面的 TabbyAPI 实测记录裸形状为 HTTP 200，
+所以这是形状不一致，而非请求被拒。给这些工具补上 `properties`
+以使所有无参数工具发出同一形状，已记入下方的不在范围内，
+面向用户的文档也以同样方式限定这一承诺。
 
 ### 形状
 
@@ -114,6 +126,7 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
 ## 不在范围内
 
 - 修改 converter 的默认省略行为，或 `relaxSchemaForFunctionCalling` 产生的形状。
+- 对已经带有该字段的无参数工具补上 `properties`，使所有无参数工具发出同一形状。
 - 通过 URL 探测 TabbyAPI 或任何其他自托管服务器。
 - Responses 线（`openaiResponsesContentGenerator`），它同样省略该字段；
   该报告针对的是 Chat Completions。

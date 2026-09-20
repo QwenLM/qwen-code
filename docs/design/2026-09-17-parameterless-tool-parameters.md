@@ -67,10 +67,25 @@ Doing it in the converter instead would mean choosing one shape for every
 OpenAI-compatible route, and `provider/minimax.ts` records that constraint
 explicitly.
 
-Acting on the request rather than the tool list also covers both ways a tool can
-end up without the field: one that declares an empty argument list, which the
-converter reduces to `undefined`, and one that declares no schema at all, which
-never receives a schema. A converter-side fix only reaches the first.
+Acting on the request rather than the tool list also covers the two ways a tool
+can end up with no `parameters` at all: one that declares an empty argument
+list, which the converter reduces to `undefined`, and one that declares no
+schema at all, which never receives a schema. A converter-side fix only reaches
+the first.
+
+A third shape is left alone because it already carries the field. An MCP tool
+whose declared schema is `{ "type": "object" }` with no `properties` key — the
+common way an MCP server says "no arguments" — satisfies neither of the two
+conditions the converter reduces on, so `relaxSchemaForFunctionCalling` leaves
+the bare object; the node-repl MCP server declares its kernel-reset tool as
+`{}` and reaches the wire with no `type` either. The repair keys on
+`parameters === undefined`, so it leaves both of those untouched: an opted-in
+request carries the empty-object schema for the tools above and whatever shape
+the server declared for these. The field is present either way, and the TabbyAPI
+run below records HTTP 200 for the bare shape, so this is a shape split rather
+than a rejected request. Filling `properties` on those tools so every
+parameterless tool ships one shape is recorded under Not in scope; the
+user-facing documents qualify the promise the same way.
 
 ### Shape
 
@@ -128,6 +143,8 @@ hostname-gated, so it applies wherever the user opted in.
 
 - Changing the converter's default omission, or the shapes
   `relaxSchemaForFunctionCalling` produces.
+- Filling `properties` on a parameterless tool whose schema already carries the
+  field, so that every parameterless tool ships one shape.
 - Detecting TabbyAPI, or any other self-hosted server, from its URL.
 - The Responses wire (`openaiResponsesContentGenerator`), which omits the field
   the same way; the report concerns Chat Completions.
