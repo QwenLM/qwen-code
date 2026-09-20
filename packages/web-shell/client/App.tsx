@@ -6669,6 +6669,11 @@ export function App({
       if (request.kind === 'background_task') {
         if (!request.sourceSessionId) return;
         const turn = request.backgroundTurn;
+        // A peer turn handled a message inside this session: what it did is
+        // the transcript already on screen, and no task registry entry can
+        // hydrate a pending tab for it. A rendering of its own is a
+        // follow-up; until then there is nothing to open.
+        if (turn.kind === 'peer') return;
         const tab: ArtifactPanelTab =
           turn.kind === 'workflow'
             ? {
