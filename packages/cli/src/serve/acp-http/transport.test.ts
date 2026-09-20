@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
@@ -6980,6 +6981,31 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(spawn).not.toHaveBeenCalled();
     },
   );
+
+  it('session/new maps a definite startup rejection to an explicit 422 RPC error', async () => {
+    vi.spyOn(bridge, 'spawnOrAttach').mockRejectedValueOnce(
+      new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      ),
+    );
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 432,
+      method: 'session/new',
+      params: { startupConfig: { modelServiceId: 'm' } },
+    });
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      code: -32603,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+  });
 
   it('session/new always uses thread scope (ACP standard compliance)', async () => {
     // ACP standard: session/new MUST create a new isolated session.

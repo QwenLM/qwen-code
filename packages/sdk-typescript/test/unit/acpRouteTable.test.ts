@@ -71,6 +71,23 @@ describe('acpRouteTable – matchRoute', () => {
     );
   });
 
+  it('preserves startup scope when mapping a caller-supplied session id', () => {
+    const route = matchRoute('/session', 'POST')!;
+    const startupConfig = { modelServiceId: 'gpt-5.4(openai)' };
+    const sessionId = '550E8400-E29B-41D4-A716-446655440000';
+    expect(
+      route.mapping.extractParams(
+        route.segments,
+        { sessionId, startupConfig, sessionScope: 'single' },
+        'POST',
+      ),
+    ).toEqual({
+      startupConfig,
+      sessionScope: 'single',
+      _meta: { 'qwen-code/sessionId': sessionId },
+    });
+  });
+
   it('POST /session maps sessionId into ACP metadata', () => {
     const result = matchRoute('/session', 'POST')!;
     const params = result.mapping.extractParams(

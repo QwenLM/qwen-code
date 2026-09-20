@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
+import { isSessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
@@ -819,7 +819,7 @@ export function sendBridgeError(
     });
     return;
   }
-  if (err instanceof SessionStartupConfigError) {
+  if (isSessionStartupConfigError(err)) {
     res.status(err.code === 'invalid_startup_config' ? 400 : 422).json({
       error: err.message,
       code: err.code,

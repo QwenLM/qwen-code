@@ -6,6 +6,7 @@
 
 import {
   applySessionStartupConfig,
+  isSessionStartupConfigError,
   parseSessionStartupConfig,
   type SessionStartupConfig,
 } from '@qwen-code/acp-bridge/sessionStartupConfig';
@@ -2779,7 +2780,7 @@ export class StandaloneSessionService {
                 sessionId,
                 startupConfig,
               ).catch((error: unknown) => {
-                startupPreparationFailed = true;
+                startupPreparationFailed = isSessionStartupConfigError(error);
                 throw error;
               });
               this.assertRuntimeCurrentOrQuarantine(runtime);
@@ -2802,8 +2803,22 @@ export class StandaloneSessionService {
       this.assertRuntimeCurrentOrQuarantine(runtime);
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
+      if (startupPreparationFailed) {
+        await this.cleanRollbackBeforePersistence(runtime, sessionId);
+        try {
+          await this.options.workspace.discardEmptyConversationDirectory(
+            sessionId,
+          );
+        } catch (cleanupError) {
+          debugLogger.warn(
+            'Could not discard the rolled-back standalone directory',
+            cleanupError,
+          );
+        }
+        this.directoryStates.delete(sessionId);
+        throw error;
+      }
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
-      if (startupPreparationFailed) throw error;
       throw serviceError('standalone_creation_outcome_unknown', sessionId);
     }
 

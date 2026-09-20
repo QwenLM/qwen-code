@@ -3609,14 +3609,17 @@ export interface SessionStartupConfigApplied extends SessionStartupConfig {
 }
 
 /** Returned from `POST /session/:id/config-option`. */
-export type ReasoningSelection =
-  | 'none'
-  | 'default'
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | 'max';
+export const DAEMON_REASONING_SELECTIONS = [
+  'none',
+  'default',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
+
+export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];

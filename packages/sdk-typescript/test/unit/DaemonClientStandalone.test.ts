@@ -221,6 +221,46 @@ describe('DaemonClient standalone sessions', () => {
     ).toEqual({ sessionId: SESSION_ID, startupConfig });
   });
 
+  it.each([
+    undefined,
+    {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high',
+      effectiveReasoning: { state: 'enabled', effort: 'medium' },
+    },
+  ])(
+    'rejects a definite unconfirmed standalone result without recovery',
+    async (startupConfigApplied) => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              features: ['standalone_sessions_v1', 'session_startup_config'],
+            })
+          : jsonResponse(200, {
+              ...standaloneSession(),
+              modelApplied: true,
+              startupConfigApplied,
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.createStandaloneSession({
+          sessionId: SESSION_ID,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        }),
+      ).rejects.toThrow('did not confirm');
+      expect(
+        calls.filter(
+          (call) => call.method === 'GET' && call.url.includes('/standalone/'),
+        ),
+      ).toEqual([]);
+    },
+  );
+
   it('gates standalone options with their dedicated capability', async () => {
     const { fetch, calls } = recordingFetch(() =>
       capabilityResponse(true, false),

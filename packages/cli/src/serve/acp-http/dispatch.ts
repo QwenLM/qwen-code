@@ -6,7 +6,7 @@
 
 import {
   parseSessionStartupConfig,
-  SessionStartupConfigError,
+  isSessionStartupConfigError,
 } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   APPROVAL_MODES,
@@ -675,7 +675,7 @@ export function toRpcError(err: unknown): {
       },
     };
   }
-  if (err instanceof SessionStartupConfigError) {
+  if (isSessionStartupConfigError(err)) {
     return {
       code:
         err.code === 'invalid_startup_config'

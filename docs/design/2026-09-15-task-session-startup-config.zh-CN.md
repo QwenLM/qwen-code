@@ -34,6 +34,9 @@ daemon 声明 `session_startup_config` 能力。TypeScript SDK 检查能力并�
 
 普通 bridge 创建在返回之前应用并确认组合。standalone 在 managed binding commit 完成延迟认证后、
 release 和首条 prompt 放行前准备组合。准备失败沿用已有的本次会话清理，不关闭共享子进程里的其他会话。
+确定的 standalone 选择拒绝会删除本次持久记录，使同一 ID 可重试，并尽力清理空输出目录。
+超时和断连保持既有的结果不确定恢复语义；清理无法确认时进入原有隔离流程。
+SDK 收到可读的成功响应但确认不匹配时直接报错，不触发恢复或采用该会话。
 启动选择只发送会话状态变更，不发送共享 `settings_changed` 事件。
 
 复用模型路由解析和 config-option 返回值进行确认，不引入第二套 provider reasoning 模型。

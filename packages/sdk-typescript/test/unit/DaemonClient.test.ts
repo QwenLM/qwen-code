@@ -19,6 +19,7 @@ import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 import {
   DaemonCapabilityMissingError,
+  DAEMON_REASONING_SELECTIONS,
   isDaemonContentHash,
   requireWorkspaceCwd,
 } from '../../src/daemon/types.js';
@@ -3316,6 +3317,67 @@ describe('DaemonClient', () => {
       effectiveReasoning: { state: 'enabled', effort: 'high' },
     };
 
+    it.each(DAEMON_REASONING_SELECTIONS)(
+      'accepts and confirms the SDK reasoning selection %s',
+      async (reasoningEffort) => {
+        const applied = {
+          ...startupConfig,
+          reasoningEffort,
+          effectiveReasoning:
+            reasoningEffort === 'none'
+              ? { state: 'disabled' }
+              : reasoningEffort === 'default'
+                ? { state: 'provider-default' }
+                : { state: 'enabled', effort: reasoningEffort },
+        };
+        const { fetch } = recordingFetch((request) =>
+          request.url.endsWith('/capabilities')
+            ? jsonResponse(200, { v: 1, features: ['session_startup_config'] })
+            : jsonResponse(200, {
+                sessionId: 'new',
+                modelApplied: true,
+                startupConfigApplied: applied,
+              }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        expect(
+          (
+            await client.createOrAttachSession({
+              startupConfig: { ...startupConfig, reasoningEffort },
+            })
+          ).startupConfigApplied,
+        ).toEqual(applied);
+      },
+    );
+
+    it('accepts a toggle-only default and rejects enabled reasoning for a none request', async () => {
+      for (const reasoningEffort of ['default', 'none'] as const) {
+        const { fetch } = recordingFetch((request) =>
+          request.url.endsWith('/capabilities')
+            ? jsonResponse(200, { v: 1, features: ['session_startup_config'] })
+            : jsonResponse(200, {
+                sessionId: 'new',
+                modelApplied: true,
+                startupConfigApplied: {
+                  ...startupConfig,
+                  reasoningEffort,
+                  effectiveReasoning: { state: 'enabled' },
+                },
+              }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const create = client.createOrAttachSession({
+          startupConfig: { ...startupConfig, reasoningEffort },
+        });
+        if (reasoningEffort === 'none')
+          await expect(create).rejects.toThrow('did not confirm');
+        else
+          await expect(create).resolves.toMatchObject({
+            startupConfigApplied: { effectiveReasoning: { state: 'enabled' } },
+          });
+      }
+    });
+
     it('preflights and serializes startup configuration and reads its confirmation', async () => {
       const { fetch, calls } = recordingFetch((request) =>
         request.url.endsWith('/capabilities')
@@ -3373,6 +3435,28 @@ describe('DaemonClient', () => {
 
     it.each([
       {},
+      {
+        modelApplied: true,
+        startupConfigApplied: { ...startupConfigApplied, modelServiceId: ' ' },
+      },
+      {
+        modelApplied: true,
+        startupConfigApplied: { ...startupConfigApplied, modelServiceId: 123 },
+      },
+      {
+        modelApplied: true,
+        startupConfigApplied: {
+          ...startupConfigApplied,
+          effectiveReasoning: { state: 'enabled', effort: 'medium' },
+        },
+      },
+      {
+        modelApplied: true,
+        startupConfigApplied: {
+          ...startupConfigApplied,
+          effectiveReasoning: { state: 'provider-default' },
+        },
+      },
       { modelApplied: false, startupConfigApplied },
       {
         modelApplied: true,

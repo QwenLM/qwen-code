@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import express, { type RequestHandler } from 'express';
 import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -123,6 +124,7 @@ describe('standalone session routes', () => {
     service.create.mockClear();
     for (const body of [
       { sessionId, startupConfig: {} },
+      { sessionId, startupConfig: { modelServiceId: 'x'.repeat(257) } },
       { sessionId, startupConfig, modelServiceId: 'legacy' },
       { sessionId, startupConfig: { ...startupConfig, extra: true } },
     ]) {
@@ -133,6 +135,27 @@ describe('standalone session routes', () => {
       expect(response.body.code).toBe('invalid_startup_config');
     }
     expect(service.create).not.toHaveBeenCalled();
+  });
+
+  it('returns 422 for a definite startup selection rejection', async () => {
+    const { app, service } = createHarness();
+    service.create.mockRejectedValueOnce(
+      new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      ),
+    );
+    const response = await request(app)
+      .post('/standalone/sessions')
+      .send({
+        sessionId,
+        startupConfig: { modelServiceId: 'm', reasoningEffort: 'high' },
+      })
+      .expect(422);
+    expect(response.body).toMatchObject({
+      code: 'startup_config_rejected',
+      error: 'unsupported effort',
+    });
   });
 
   it('rejects invalid standalone compacted replay mode', async () => {

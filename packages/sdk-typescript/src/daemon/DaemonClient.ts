@@ -2887,6 +2887,7 @@ export class DaemonClient {
     const sessionId = (
       requestedSessionId ?? createStandaloneSessionId()
     ).toLowerCase();
+    let session: DaemonStandaloneSession;
     try {
       const response = await this.jsonRequest<unknown>(
         '/standalone/sessions',
@@ -2897,13 +2898,11 @@ export class DaemonClient {
           mode: 'rest',
         },
       );
-      const session = parseStandaloneSession(
+      session = parseStandaloneSession(
         response,
         'POST /standalone/sessions',
         sessionId,
       );
-      assertStartupConfigApplied(session, options.startupConfig);
-      return session;
     } catch (error) {
       if (
         error instanceof DaemonHttpError &&
@@ -2918,6 +2917,8 @@ export class DaemonClient {
         error,
       );
     }
+    assertStartupConfigApplied(session, options.startupConfig);
+    return session;
   }
 
   async listStandaloneSessions(

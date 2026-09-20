@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReasoningEffort } from '@qwen-code/qwen-code-core';
+import {
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import { MAX_CRON_TASK_ROUTING_ID_LENGTH } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 import type { AcpSessionBridge } from './bridgeTypes.js';
 
 export interface SessionStartupConfig {
@@ -30,12 +34,29 @@ export class SessionStartupConfigError extends Error {
   }
 }
 
+export function isSessionStartupConfigError(
+  error: unknown,
+): error is Pick<SessionStartupConfigError, 'code' | 'message'> {
+  // Split bundles can load distinct constructors for the same error contract.
+  return (
+    error !== null &&
+    typeof error === 'object' &&
+    'code' in error &&
+    (error.code === 'invalid_startup_config' ||
+      error.code === 'startup_config_rejected') &&
+    'message' in error &&
+    typeof error.message === 'string'
+  );
+}
+
 function isReasoningSelection(
   value: unknown,
 ): value is NonNullable<SessionStartupConfig['reasoningEffort']> {
   return (
     typeof value === 'string' &&
-    ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value)
+    (value === 'default' ||
+      value === 'none' ||
+      REASONING_EFFORT_TIERS.some((tier) => tier === value))
   );
 }
 
@@ -54,6 +75,7 @@ export function parseSessionStartupConfig(
     ) ||
     typeof config.modelServiceId !== 'string' ||
     !config.modelServiceId.trim() ||
+    config.modelServiceId.length > MAX_CRON_TASK_ROUTING_ID_LENGTH ||
     (config.reasoningEffort !== undefined &&
       !isReasoningSelection(config.reasoningEffort)) ||
     request.modelServiceId !== undefined ||
@@ -61,7 +83,7 @@ export function parseSessionStartupConfig(
   ) {
     throw new SessionStartupConfigError(
       'invalid_startup_config',
-      'startupConfig requires modelServiceId and an optional valid reasoningEffort, without unknown fields, a legacy modelServiceId or single session scope.',
+      'startupConfig requires modelServiceId (1-256 characters) and an optional valid reasoningEffort, without unknown fields, a legacy modelServiceId or single session scope.',
     );
   }
   return {
@@ -72,16 +94,35 @@ export function parseSessionStartupConfig(
   };
 }
 
+function rejectInvalidSelection(error: unknown): never {
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'code' in error &&
+    error.code === -32602 &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    throw new SessionStartupConfigError(
+      'startup_config_rejected',
+      error.message,
+    );
+  }
+  throw error;
+}
+
 export async function applySessionStartupConfig(
   bridge: Pick<AcpSessionBridge, 'setSessionConfigOption'>,
   sessionId: string,
   config: SessionStartupConfig,
 ): Promise<SessionStartupConfigApplied> {
-  const model = await bridge.setSessionConfigOption(sessionId, {
-    sessionId,
-    configId: 'model',
-    value: config.modelServiceId,
-  });
+  const model = await bridge
+    .setSessionConfigOption(sessionId, {
+      sessionId,
+      configId: 'model',
+      value: config.modelServiceId,
+    })
+    .catch(rejectInvalidSelection);
   const modelServiceId = model.configOptions?.find(
     (option) => option.id === 'model',
   )?.currentValue;
@@ -92,11 +133,13 @@ export async function applySessionStartupConfig(
     );
   }
   if (config.reasoningEffort === undefined) return { modelServiceId };
-  const result = await bridge.setSessionConfigOption(sessionId, {
-    sessionId,
-    configId: 'reasoning_effort',
-    value: config.reasoningEffort,
-  });
+  const result = await bridge
+    .setSessionConfigOption(sessionId, {
+      sessionId,
+      configId: 'reasoning_effort',
+      value: config.reasoningEffort,
+    })
+    .catch(rejectInvalidSelection);
   const reasoning = result.configOptions?.find(
     (option) => option.id === 'reasoning_effort',
   );

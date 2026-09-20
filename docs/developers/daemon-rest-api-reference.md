@@ -42,6 +42,8 @@ this contract, not deprecated.
   deprecated `unstable_session_resume` capability name is only an alias; use
   `session_resume` for the stable resume route.
 
+Creation with `startupConfig: { modelServiceId, reasoningEffort? }` additionally requires `session_startup_config`. Only the model is required; omission of reasoning does not set a default. Successful preparation returns `modelApplied: true` and `startupConfigApplied`; malformed input returns `400 invalid_startup_config`, while rejected selection returns `422 startup_config_rejected`. See the [startup negotiation contract](./qwen-serve-protocol.md#capabilities) for ordinary and standalone behavior.
+
 ## Discovery
 
 | Operation                                                        | Capability     | Scope            | TypeScript SDK              |

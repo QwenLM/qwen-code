@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { RequestError } from '@agentclientprotocol/sdk';
+import {
+  BridgeTimeoutError,
+  BridgeChannelClosedError,
+} from '@qwen-code/acp-bridge/status';
 import {
   SessionNotFoundError,
   AcpChildCapacityExceededError,
@@ -621,39 +626,96 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.sendPrompt).toHaveBeenCalledOnce();
   });
 
-  it('does not release or admit a prompt after startup selection fails', async () => {
+  it('rolls back a rejected selection and allows the same standalone id to be retried', async () => {
     mockDurableStandalone();
+    let persisted = false;
+    vi.mocked(SessionService.prototype.findSessionIdIgnoringCase)
+      .mockReset()
+      .mockImplementation(async () => (persisted ? sessionId : undefined));
+    const remove = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        persisted = false;
+        return true;
+      });
     const harness = createHarness();
-    harness.bridge.setSessionConfigOption.mockRejectedValueOnce(
-      new Error('selection failed'),
-    );
+    harness.bridge.spawnStandaloneSession.mockImplementation(async () => {
+      persisted = true;
+      return {
+        sessionId,
+        workspaceCwd: root.canonicalRoot,
+        attached: false,
+        sourceType: 'standalone',
+        sourcePersisted: true,
+      };
+    });
+    harness.bridge.setSessionConfigOption
+      .mockRejectedValueOnce(
+        RequestError.invalidParams(undefined, 'selection failed'),
+      )
+      .mockResolvedValue({
+        configOptions: [
+          { id: 'model', currentValue: 'gpt-5.4(openai)' },
+          { id: 'reasoning_effort', currentValue: 'high' },
+        ],
+      });
+    const request = {
+      sessionId,
+      startupConfig: {
+        modelServiceId: 'gpt-5.4(openai)',
+        reasoningEffort: 'high' as const,
+      },
+    };
     await expect(
-      harness.service.createWithInitialPrompt(
-        {
-          sessionId,
-          startupConfig: {
-            modelServiceId: 'gpt-5.4(openai)',
-            reasoningEffort: 'high',
-          },
-        },
-        'hello',
-      ),
-    ).rejects.toThrow('selection failed');
+      harness.service.createWithInitialPrompt(request, 'hello'),
+    ).rejects.toMatchObject({
+      code: 'startup_config_rejected',
+      message: expect.stringContaining('selection failed'),
+    });
+    expect(persisted).toBe(false);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(sessionId);
     expect(
-      harness.bridge.commitManagedConversationBinding,
-    ).toHaveBeenCalledOnce();
+      harness.discardEmptyConversationDirectory,
+    ).toHaveBeenCalledExactlyOnceWith(sessionId);
+    expect(harness.bridge.killSession).toHaveBeenCalledTimes(1);
     expect(
       harness.bridge.releaseManagedConversationBinding,
     ).not.toHaveBeenCalled();
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
-    expect(harness.bridge.killSession).toHaveBeenCalled();
+    await expect(
+      harness.service.createWithInitialPrompt(request, 'retry'),
+    ).resolves.toMatchObject({ session: { sessionId, modelApplied: true } });
+    expect(persisted).toBe(true);
+    expect(harness.bridge.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    new Error('channel closed'),
+    new BridgeTimeoutError('setSessionConfigOption', 10),
+    new BridgeChannelClosedError('mid-request'),
+  ])('keeps uncertain startup failures recoverable: %s', async (error) => {
+    mockDurableStandalone();
+    const remove = vi.spyOn(SessionService.prototype, 'removeSession');
+    const harness = createHarness();
+    harness.bridge.setSessionConfigOption.mockRejectedValueOnce(error);
+    await expect(
+      harness.service.createWithInitialPrompt(
+        { sessionId, startupConfig: { modelServiceId: 'gpt-5.4(openai)' } },
+        'hello',
+      ),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(remove).not.toHaveBeenCalled();
+    expect(
+      harness.bridge.releaseManagedConversationBinding,
+    ).not.toHaveBeenCalled();
+    expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('retains uncertain-outcome containment when startup cleanup fails', async () => {
     mockDurableStandalone();
     const harness = createHarness();
     harness.bridge.setSessionConfigOption.mockRejectedValueOnce(
-      new Error('selection failed'),
+      RequestError.invalidParams(undefined, 'selection failed'),
     );
     harness.bridge.killSession.mockRejectedValueOnce(new Error('close failed'));
     await expect(

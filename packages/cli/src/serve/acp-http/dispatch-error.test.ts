@@ -20,6 +20,26 @@ import {
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
+describe('startup errors across bundle boundaries', () => {
+  it.each([
+    ['invalid_startup_config', 400, RPC.INVALID_PARAMS],
+    ['startup_config_rejected', 422, RPC.INTERNAL_ERROR],
+  ] as const)(
+    'maps %s by its stable contract',
+    (errorKind, httpStatus, code) => {
+      const error = Object.assign(new Error('startup rejected'), {
+        name: 'SessionStartupConfigError',
+        code: errorKind,
+      });
+      expect(toRpcError(error)).toEqual({
+        code,
+        message: 'startup rejected',
+        data: { errorKind, httpStatus },
+      });
+    },
+  );
+});
+
 describe('capacity RPC errors', () => {
   it('carries an explicit HTTP status and machine reason', () => {
     const error = new AcpChildCapacityExceededError(6, 6);

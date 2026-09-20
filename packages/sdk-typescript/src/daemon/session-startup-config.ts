@@ -4,16 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { DAEMON_REASONING_SELECTIONS } from './types.js';
+
 import type {
   DaemonSession,
   ReasoningSelection,
   SessionStartupConfig,
 } from './types.js';
 
+const REASONING_EFFORTS = DAEMON_REASONING_SELECTIONS.filter(
+  (selection) => selection !== 'none' && selection !== 'default',
+);
+
 function isSelection(value: unknown): value is ReasoningSelection {
   return (
     typeof value === 'string' &&
-    ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value)
+    (DAEMON_REASONING_SELECTIONS as readonly string[]).includes(value)
   );
 }
 
@@ -33,13 +39,14 @@ export function validateStartupConfigRequest(request: {
     ) ||
     typeof config.modelServiceId !== 'string' ||
     !config.modelServiceId.trim() ||
+    config.modelServiceId.length > 256 ||
     (config.reasoningEffort !== undefined &&
       !isSelection(config.reasoningEffort)) ||
     request.modelServiceId !== undefined ||
     request.sessionScope === 'single'
   ) {
     throw new TypeError(
-      'Invalid startupConfig: provide modelServiceId and an optional valid reasoningEffort without legacy modelServiceId or single session scope.',
+      'Invalid startupConfig: provide modelServiceId (1-256 characters) and an optional valid reasoningEffort without legacy modelServiceId or single session scope.',
     );
   }
 }
@@ -57,9 +64,7 @@ export function assertStartupConfigApplied(
       effective.state === 'provider-default' ||
       (effective.state === 'enabled' &&
         (effective.effort === undefined ||
-          ['low', 'medium', 'high', 'xhigh', 'max'].includes(
-            effective.effort,
-          ))));
+          REASONING_EFFORTS.includes(effective.effort))));
   if (
     session.modelApplied !== true ||
     !applied ||

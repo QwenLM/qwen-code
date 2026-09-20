@@ -9,6 +9,7 @@ import {
   RequestError,
   type SessionConfigOption,
 } from '@agentclientprotocol/sdk';
+import { REASONING_EFFORT_TIERS } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 import {
   applySessionStartupConfig,
@@ -48,6 +49,7 @@ describe('session startup configuration', () => {
     [],
     {},
     { reasoningEffort: 'high' },
+    { modelServiceId: 'x'.repeat(257) },
     { modelServiceId: 'x', reasoningEffort: null },
     { ...startupConfig, reasoningEffort: 'invalid' },
     { ...startupConfig, extra: true },
@@ -67,6 +69,87 @@ describe('session startup configuration', () => {
     expect(() =>
       parseSessionStartupConfig(startupConfig, { sessionScope: 'single' }),
     ).toThrow();
+  });
+
+  it.each(REASONING_EFFORT_TIERS)(
+    'accepts the core reasoning tier %s',
+    (reasoningEffort) => {
+      expect(
+        parseSessionStartupConfig({ modelServiceId: 'm', reasoningEffort }),
+      ).toEqual({ modelServiceId: 'm', reasoningEffort });
+    },
+  );
+
+  it('uses the canonical confirmation for model-only selection instead of echoing input', async () => {
+    const setSessionConfigOption = vi
+      .fn()
+      .mockResolvedValue({ configOptions: options() });
+    expect(
+      await applySessionStartupConfig({ setSessionConfigOption }, 'session', {
+        modelServiceId: 'gpt-5.4',
+      }),
+    ).toEqual({ modelServiceId: startupConfig.modelServiceId });
+  });
+
+  it.each(
+    [
+      [],
+      options().filter((option) => option.id !== 'model'),
+      options('high', ''),
+    ].map((configOptions) => ({ configOptions })),
+  )(
+    'rejects a missing model confirmation for model-only startup',
+    async ({ configOptions }) => {
+      const setSessionConfigOption = vi
+        .fn()
+        .mockResolvedValue({ configOptions });
+      await expect(
+        applySessionStartupConfig({ setSessionConfigOption }, 'session', {
+          modelServiceId: 'gpt-5.4',
+        }),
+      ).rejects.toMatchObject({ code: 'startup_config_rejected' });
+      expect(setSessionConfigOption).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('reports toggle-only reasoning as enabled without inventing an effort', async () => {
+    const configOptions = options('default');
+    configOptions[1]!._meta = { 'qwenCode/reasoning': { toggleOnly: true } };
+    const setSessionConfigOption = vi.fn().mockResolvedValue({ configOptions });
+    const result = await applySessionStartupConfig(
+      { setSessionConfigOption },
+      'session',
+      { ...startupConfig, reasoningEffort: 'default' },
+    );
+    expect(result.effectiveReasoning).toEqual({ state: 'enabled' });
+  });
+
+  it('maps only deterministic parameter rejection to startup_config_rejected', async () => {
+    const invalid = RequestError.invalidParams(undefined, 'unsupported effort');
+    const setSessionConfigOption = vi.fn().mockRejectedValue(invalid);
+    await expect(
+      applySessionStartupConfig(
+        { setSessionConfigOption },
+        'session',
+        startupConfig,
+      ),
+    ).rejects.toMatchObject({
+      code: 'startup_config_rejected',
+      message: invalid.message,
+    });
+    for (const error of [
+      RequestError.authRequired(),
+      new Error('transport closed'),
+    ]) {
+      setSessionConfigOption.mockRejectedValueOnce(error);
+      await expect(
+        applySessionStartupConfig(
+          { setSessionConfigOption },
+          'session',
+          startupConfig,
+        ),
+      ).rejects.toBe(error);
+    }
   });
 
   it('only selects the model when reasoning is omitted and no reasoning option exists', async () => {
@@ -114,6 +197,26 @@ describe('session startup configuration', () => {
     },
   );
 
+  it('applies explicit none and confirms disabled reasoning', async () => {
+    const setSessionConfigOption = vi
+      .fn()
+      .mockResolvedValue({ configOptions: options('none') });
+    const result = await applySessionStartupConfig(
+      { setSessionConfigOption },
+      'session',
+      { ...startupConfig, reasoningEffort: 'none' },
+    );
+    expect(result).toEqual({
+      ...startupConfig,
+      reasoningEffort: 'none',
+      effectiveReasoning: { state: 'disabled' },
+    });
+    expect(setSessionConfigOption.mock.calls[1]?.[1]).toMatchObject({
+      configId: 'reasoning_effort',
+      value: 'none',
+    });
+  });
+
   it('fails when reasoning is not applied or model changes between responses', async () => {
     for (const configOptions of [
       options('low'),
@@ -142,7 +245,19 @@ describe('session startup configuration', () => {
       .mockResolvedValueOnce({ sessionId: 'configured' });
     const setter = vi
       .spyOn(handle.agent, 'setSessionConfigOption')
-      .mockResolvedValue({ configOptions: options() });
+      .mockImplementation(async (request) => {
+        if (request.configId === 'model') {
+          await handle.agentConnection.extNotification(
+            'qwen/notify/session/model-update',
+            {
+              v: 1,
+              sessionId: request.sessionId,
+              currentModelId: startupConfig.modelServiceId,
+            },
+          );
+        }
+        return { configOptions: options() };
+      });
     const bridge = makeBridge({
       channelFactory: async () => handle.channel,
       sessionScope: 'single',
@@ -175,9 +290,16 @@ describe('session startup configuration', () => {
           value: 'high',
         },
       ]);
+      expect(
+        bridge
+          .getDaemonStatusSnapshot()
+          .sessions.find((entry) => entry.sessionId === 'configured')
+          ?.currentModelId,
+      ).toBe(startupConfig.modelServiceId);
       const abort = new AbortController();
       const events = bridge.subscribeEvents('ordinary', {
         signal: abort.signal,
+        lastEventId: 0,
       });
       const replay: string[] = [];
       const reading = (async () => {
@@ -186,6 +308,7 @@ describe('session startup configuration', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       abort.abort();
       await reading;
+      expect(replay).toContain('replay_complete');
       expect(replay).not.toContain('settings_changed');
       expect(bridge.getSessionSummary('ordinary')).toBeDefined();
     } finally {
@@ -208,7 +331,10 @@ describe('session startup configuration', () => {
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await expect(
         bridge.spawnOrAttach({ workspaceCwd: WS_A, startupConfig }),
-      ).rejects.toThrow('unsupported effort');
+      ).rejects.toMatchObject({
+        code: 'startup_config_rejected',
+        message: expect.stringContaining('unsupported effort'),
+      });
       expect(() => bridge.getSessionSummary('failed')).toThrow();
       expect(bridge.getSessionSummary('sibling')).toBeDefined();
       await expect(
