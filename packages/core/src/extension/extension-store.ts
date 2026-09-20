@@ -11,7 +11,12 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { Mutex } from 'async-mutex';
 import { Storage } from '../config/storage.js';
-import { atomicWriteJSON, renameWithRetry } from '../utils/atomicFileWrite.js';
+import {
+  atomicWriteFile,
+  atomicWriteJSON,
+  renameWithRetry,
+} from '../utils/atomicFileWrite.js';
+import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 
@@ -80,6 +85,8 @@ export interface CommitExtensionArtifactInput {
   stagingDirectory?: string;
   initialActivation?: InitialExtensionActivation;
   expectedArtifactGeneration?: number;
+  /** The caller verified that no same-name managed source is currently available. */
+  allowManagedPolicyAdoption?: boolean;
 }
 
 interface ExtensionTransactionJournal {
@@ -680,13 +687,64 @@ export class ExtensionStore {
       );
       const journalPath = path.join(transactionsDir, `${transactionId}.json`);
       const currentPolicy = snapshot.extensions[input.identity.id];
+      const nameConflict = Object.entries(snapshot.extensions).find(
+        ([extensionId, policy]) =>
+          extensionId !== input.identity.id &&
+          policy.name.toLowerCase() === input.identity.name.toLowerCase(),
+      );
       const destinationDirectory =
         input.operation !== 'install' && currentPolicy?.artifactDirectory
           ? path.join(this.extensionsDir, currentPolicy.artifactDirectory)
           : input.destinationDirectory;
       this.assertArtifactDestination(destinationDirectory);
       const destinationExists = await this.pathExists(destinationDirectory);
-      if (input.operation === 'install' && destinationExists) {
+      const retainedPolicy = currentPolicy ?? nameConflict?.[1];
+      let adoptManagedSettingsDirectory = false;
+      let retainedEnv: string | undefined;
+      if (
+        input.operation === 'install' &&
+        input.allowManagedPolicyAdoption &&
+        retainedPolicy?.managed
+      ) {
+        const stats = await fsp
+          .lstat(destinationDirectory)
+          .catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+              return undefined;
+            throw error;
+          });
+        if (stats && !stats.isDirectory()) {
+          throw new ExtensionConflictError(
+            `Extension "${input.identity.name}" has a non-directory installation path.`,
+          );
+        }
+        if (
+          stats &&
+          path.resolve(
+            this.extensionsDir,
+            retainedPolicy.artifactDirectory ?? retainedPolicy.name,
+          ) === path.resolve(destinationDirectory)
+        ) {
+          const entries = await fsp.readdir(destinationDirectory, {
+            withFileTypes: true,
+          });
+          adoptManagedSettingsDirectory = entries.every(
+            (entry) =>
+              entry.name === EXTENSION_SETTINGS_FILENAME && entry.isFile(),
+          );
+          if (adoptManagedSettingsDirectory && entries.length > 0) {
+            retainedEnv = await fsp.readFile(
+              path.join(destinationDirectory, EXTENSION_SETTINGS_FILENAME),
+              'utf8',
+            );
+          }
+        }
+      }
+      if (
+        input.operation === 'install' &&
+        destinationExists &&
+        !adoptManagedSettingsDirectory
+      ) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is installed.`,
         );
@@ -699,24 +757,23 @@ export class ExtensionStore {
       if (input.operation === 'install' && !input.initialActivation) {
         throw new Error('Install requires an initial activation.');
       }
-      const nameConflict = Object.entries(snapshot.extensions).find(
-        ([extensionId, policy]) =>
-          extensionId !== input.identity.id &&
-          policy.name.toLowerCase() === input.identity.name.toLowerCase(),
-      );
       const currentPolicyIsAdoptable =
         input.operation === 'install' &&
         !!currentPolicy &&
         (currentPolicy.declarationOnly ||
-          (currentPolicy.preserveActivationOnNextInstall &&
-            !(await this.extensionArtifactExists(currentPolicy))));
+          ((currentPolicy.preserveActivationOnNextInstall ||
+            (input.allowManagedPolicyAdoption && currentPolicy.managed)) &&
+            (adoptManagedSettingsDirectory ||
+              !(await this.extensionArtifactExists(currentPolicy)))));
       const nameConflictIsAdoptable =
         input.operation === 'install' &&
         !currentPolicy &&
         !!nameConflict &&
         (nameConflict[1].declarationOnly ||
-          (nameConflict[1].preserveActivationOnNextInstall &&
-            !(await this.extensionArtifactExists(nameConflict[1]))));
+          ((nameConflict[1].preserveActivationOnNextInstall ||
+            (input.allowManagedPolicyAdoption && nameConflict[1].managed)) &&
+            (adoptManagedSettingsDirectory ||
+              !(await this.extensionArtifactExists(nameConflict[1])))));
       if (
         input.operation !== 'uninstall' &&
         nameConflict &&
@@ -826,6 +883,31 @@ export class ExtensionStore {
       targetSnapshot.legacyProjectionHash = projectionHash(
         this.buildLegacyProjection(targetSnapshot),
       );
+
+      if (retainedEnv !== undefined) {
+        const stagedEnvPath = path.join(
+          input.stagingDirectory!,
+          EXTENSION_SETTINGS_FILENAME,
+        );
+        let stagedEnv = '';
+        try {
+          if (!(await fsp.lstat(stagedEnvPath)).isFile()) {
+            throw new ExtensionConflictError(
+              'Prepared extension settings must be a regular file.',
+            );
+          }
+          stagedEnv = await fsp.readFile(stagedEnvPath, 'utf8');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        // dotenv uses the last value for duplicate keys. Keep retained bytes
+        // while giving explicitly prepared settings precedence.
+        await atomicWriteFile(stagedEnvPath, `${retainedEnv}\n${stagedEnv}`, {
+          mode: 0o600,
+          forceMode: true,
+          noFollow: true,
+        });
+      }
 
       const journal: ExtensionTransactionJournal = {
         version: 1,

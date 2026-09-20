@@ -528,6 +528,7 @@ export async function updateSetting(
   }
 
   const newEnvContent = formatEnvContent(nonSensitiveSettings);
+  await fs.mkdir(path.dirname(envFilePath), { recursive: true, mode: 0o700 });
   await atomicWriteFile(envFilePath, newEnvContent, { noFollow: true });
 }
 

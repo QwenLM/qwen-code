@@ -19,6 +19,7 @@ import {
   DEFAULT_COMMAND_DESC,
   QUERY_POSITIONAL,
   TOP_LEVEL_DEPRECATED_OPTIONS,
+  TOP_LEVEL_GLOBAL_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
@@ -431,6 +432,10 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
+    .option(
+      'managed-extensions',
+      TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+    )
     .version(false)
     .help()
     .alias('h', 'help')

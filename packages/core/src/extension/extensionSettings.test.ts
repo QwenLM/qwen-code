@@ -1009,6 +1009,36 @@ describe('extensionSettings', () => {
       );
     });
 
+    it('creates user settings storage before the first managed setting write', async () => {
+      await fsPromises.rm(extensionDir, { recursive: true, force: true });
+      const managedDir = path.join(
+        tempHomeDir,
+        'managed-packages',
+        config.name,
+      );
+      await fsPromises.mkdir(managedDir, { recursive: true });
+      const manifestPath = path.join(managedDir, 'qwen-extension.json');
+      const manifest = JSON.stringify(config);
+      await fsPromises.writeFile(manifestPath, manifest);
+      mockRequestSetting.mockResolvedValue('first-value');
+
+      await updateSetting(
+        config,
+        'managed-id',
+        'VAR1',
+        mockRequestSetting,
+        ExtensionSettingScope.USER,
+      );
+
+      expect(
+        await fsPromises.readFile(path.join(extensionDir, '.env'), 'utf-8'),
+      ).toContain('VAR1=first-value');
+      expect(await fsPromises.readdir(managedDir)).toEqual([
+        'qwen-extension.json',
+      ]);
+      expect(await fsPromises.readFile(manifestPath, 'utf-8')).toBe(manifest);
+    });
+
     it('should update a non-sensitive setting in WORKSPACE scope', async () => {
       mockRequestSetting.mockResolvedValue('new-workspace-value');
 

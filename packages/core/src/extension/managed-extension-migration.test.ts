@@ -14,6 +14,11 @@ import {
   ManagedExtensionReadOnlyError,
 } from './extensionManager.js';
 import { ExtensionStore } from './extension-store.js';
+import {
+  updateSetting,
+  getScopedEnvContents,
+  ExtensionSettingScope,
+} from './extensionSettings.js';
 
 function inventory(root: string): Record<string, string> {
   return Object.fromEntries(
@@ -251,6 +256,172 @@ describe('managed extension activation migration', () => {
     await user.uninstallExtension(userName, false);
     expect(fs.existsSync(installed.path)).toBe(false);
     expect(inventory(managedExtensionsDir)).toEqual(managedBefore);
+  });
+
+  it.each(['package removed', 'launcher option removed'] as const)(
+    'allows an explicit user install to adopt retained managed preferences after %s',
+    async (withdrawal) => {
+      const managedPackage = path.join(managedExtensionsDir, 'deployed');
+      writePackage(managedPackage, '2.0.0');
+      const deployed = manager();
+      await deployed.refreshCache();
+      const managedId = deployed.getLoadedExtensions()[0].id;
+      await deployed.setExtensionDefaultActivation(managedId, 'disabled');
+      await deployed.setExtensionWorkspaceActivation(
+        managedId,
+        otherWorkspace,
+        'disabled',
+      );
+      deployed.toggleFavorite(name);
+      deployed.setMcpServerDisabled(name, 'helper', true);
+      const before = await deployed.getExtensionStoreSnapshot();
+      if (withdrawal === 'package removed')
+        fs.rmSync(managedPackage, { recursive: true });
+      const user = manager(withdrawal === 'package removed');
+      await user.refreshCache();
+      expect(user.getLoadedExtensions()).toEqual([]);
+      expect(await user.getExtensionStoreSnapshot()).toEqual(before);
+      const installed = await user.installExtension({ type: 'local', source });
+      const after = await user.getExtensionStoreSnapshot();
+      expect(installed).toMatchObject({
+        name,
+        source: 'user',
+        isActive: false,
+      });
+      expect(installed.id).not.toBe(managedId);
+      expect(after.extensions[managedId]).toBeUndefined();
+      expect(after.extensions[installed.id]).toMatchObject({
+        defaultActivation: 'disabled',
+        workspaceOverrides: before.extensions[managedId].workspaceOverrides,
+        artifactGeneration: after.generation,
+      });
+      expect(after.extensions[installed.id].managed).toBeUndefined();
+      expect(user.isFavorite(name)).toBe(true);
+      expect(user.getDisabledMcpServers(name)).toEqual(['helper']);
+      const installedFiles = inventory(installed.path);
+      await expect(
+        user.uninstallExtensionById(managedId, false),
+      ).resolves.toEqual(after);
+      expect(inventory(installed.path)).toEqual(installedFiles);
+      expect(await user.getExtensionStoreSnapshot()).toEqual(after);
+    },
+  );
+
+  it('preserves saved managed settings when an explicit user install takes over its settings directory', async () => {
+    const settings = [
+      {
+        name: 'Endpoint',
+        description: 'Public endpoint',
+        envVar: 'PUBLIC_ENDPOINT',
+      },
+      {
+        name: 'Retained',
+        description: 'Saved extra setting',
+        envVar: 'RETAINED_VALUE',
+      },
+    ];
+    const managedPackage = path.join(managedExtensionsDir, 'deployed');
+    writePackage(managedPackage, '2.0.0');
+    fs.writeFileSync(
+      path.join(managedPackage, 'qwen-extension.json'),
+      JSON.stringify({ name, version: '2.0.0', settings }),
+    );
+    const deployed = manager();
+    await deployed.refreshCache();
+    const [managed] = deployed.getLoadedExtensions();
+    await deployed.setExtensionDefaultActivation(managed.id, 'disabled');
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Endpoint',
+      async () => 'https://example.invalid/saved',
+      ExtensionSettingScope.USER,
+    );
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Retained',
+      async () => 'saved value',
+      ExtensionSettingScope.USER,
+    );
+    const userDirectory = path.join(
+      process.env['QWEN_HOME']!,
+      'extensions',
+      name,
+    );
+    expect(fs.readdirSync(userDirectory)).toEqual(['.env']);
+    const saved = fs.readFileSync(path.join(userDirectory, '.env'), 'utf8');
+    fs.rmSync(managedPackage, { recursive: true });
+    await deployed.refreshCache();
+    fs.writeFileSync(
+      path.join(source, 'qwen-extension.json'),
+      JSON.stringify({ name, version: '3.0.0', settings: [settings[0]] }),
+    );
+    const installed = await deployed.installExtension(
+      { type: 'local', source },
+      undefined,
+      async () => 'https://example.invalid/new',
+    );
+    expect(installed).toMatchObject({ source: 'user', isActive: false });
+    expect(
+      await getScopedEnvContents(
+        installed.config,
+        installed.id,
+        ExtensionSettingScope.USER,
+      ),
+    ).toEqual({
+      PUBLIC_ENDPOINT: 'https://example.invalid/new',
+      RETAINED_VALUE: 'saved value',
+    });
+    expect(fs.readFileSync(path.join(userDirectory, '.env'), 'utf8')).toContain(
+      saved,
+    );
+    const snapshot = await deployed.getExtensionStoreSnapshot();
+    expect(snapshot.extensions[managed.id]).toBeUndefined();
+    expect(snapshot.extensions[installed.id]).not.toHaveProperty('managed');
+    const installedFiles = inventory(userDirectory);
+    await deployed.uninstallExtensionById(managed.id, false);
+    expect(inventory(userDirectory)).toEqual(installedFiles);
+  });
+
+  it('rejects installing over a managed source hidden by a name-filtered cache', async () => {
+    writePackage(path.join(managedExtensionsDir, 'deployed'), '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    const before = await deployed.getExtensionStoreSnapshot();
+    await deployed.refreshCache({ names: ['unrelated'] });
+    expect(deployed.getLoadedExtensions()).toEqual([]);
+    await expect(
+      deployed.installExtension({ type: 'local', source }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await deployed.getExtensionStoreSnapshot()).toEqual(before);
+    expect(
+      fs.existsSync(path.join(process.env['QWEN_HOME']!, 'extensions', name)),
+    ).toBe(false);
+  });
+
+  it('rechecks managed ownership when committing a prepared user install', async () => {
+    const managedPackage = path.join(managedExtensionsDir, 'deployed');
+    writePackage(managedPackage, '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    fs.rmSync(managedPackage, { recursive: true });
+    await deployed.refreshCache();
+    const prepared = await deployed.prepareExtensionInstall({
+      installMetadata: { type: 'local', source },
+      initialActivation: { scope: 'user' },
+    });
+    try {
+      writePackage(managedPackage, '3.0.0');
+      const before = await deployed.getExtensionStoreSnapshot();
+      await expect(
+        deployed.commitPreparedExtension(prepared),
+      ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+      expect(await deployed.getExtensionStoreSnapshot()).toEqual(before);
+      expect(fs.existsSync(prepared.destinationDirectory)).toBe(false);
+    } finally {
+      await deployed.disposePreparedExtension(prepared);
+    }
   });
 
   it('still demotes a real user installation when its artifact is missing', async () => {

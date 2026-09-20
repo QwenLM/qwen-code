@@ -18,7 +18,7 @@ format.
 
 The option selects one collection root at process startup. No recursive scan,
 additional public environment variable/settings option, watcher, package format,
-marketplace, migration, or deployment-specific packaging is introduced.
+marketplace, state-format migration, or deployment-specific packaging is introduced.
 
 ## Launcher authorization
 
@@ -31,12 +31,12 @@ Managed describes package ownership, not Qwen authorship or execution isolation.
 The CLI resolves the root against its startup cwd once. A missing, non-directory,
 or unreadable explicit root is a configuration error; an empty root is valid.
 ExtensionManager receives `managedExtensionsDir` separately from the writable
-ExtensionStore. Reject overlaps (including symlink aliases) with writable
+ExtensionStore. Reject overlaps (including symlink and filesystem case aliases) with writable
 extension/state directories to preserve the read-only boundary. Discovery and lookup share the same resolver: validate managed
 names using existing rules, reject duplicate managed names case-insensitively,
 then give managed precedence over user packages and diagnose shadowing. Resolve
 ownership before activation so disabling managed never activates a shadowed copy.
-An individual invalid manifest uses the existing diagnostics.
+An individual invalid manifest uses the existing diagnostics. The daemon catalog uses the same source precedence and identities while reading manifests only. Re-reading an unchanged catalog preserves existing policies and store generation without hydrating extension contributions.
 
 Loaded extensions expose `source` (`managed` or `user`). Managed identity is derived
 from normalized name, not version or deployment path. Manageds default enabled;
@@ -126,7 +126,7 @@ or its root moves. It also means a different package reusing the same name
 inherits those preferences. Deployment owners should keep names stable and avoid
 reusing them for unrelated extensions.
 
-A remaining ownership-transition question is whether removing a managed package should release its retained name policy for a new user installation. A previously installed user copy can be rediscovered when it is no longer shadowed. However, a fresh managed package with no adoptable installer policy can leave a same-name install conflict after its source disappears. Automatic adoption of that retained policy is not implemented here and needs an explicit decision before release.
+After a managed package is removed from its source, an explicit user installation of the same name can adopt its retained activation and resource preferences when no user package is already installed. Installation checks the managed source again immediately before commit, including for a prepared installation; a filtered discovery result does not establish removal. The store transfers the policy atomically to the user identity and removes the managed marker. A previously installed shadowed user package is rediscovered normally. An obsolete managed identity cannot uninstall the replacement user package. A settings-only directory at the installation destination can be adopted when it is empty or contains only a regular `.env` file. Existing values are retained and explicitly prepared values take precedence. Unknown contents, symlinks, existing packages and secret-selector metadata remain conflicts; failed commits restore the original directory and policy.
 
 Read-only loading does not make deployment changes atomic, and no watcher is
 added. Deployment tooling remains responsible for publishing complete package

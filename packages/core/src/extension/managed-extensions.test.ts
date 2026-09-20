@@ -342,6 +342,71 @@ describe('managed extensions', () => {
     ).toBe(true);
   });
 
+  it('catalog discovery keeps managed ownership and full-cache contents without loading subresources', async () => {
+    writeExtension(user, 'shadowed', { name: 'PORTABLE', version: 'user' });
+    writeExtension(user, 'user-only');
+    const extensionPath = writeExtension(managed, 'deployed', {
+      name: 'portable',
+      version: 'managed',
+    });
+    const skillFile = path.join(extensionPath, 'skills', 'helper', 'SKILL.md');
+    fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+    fs.writeFileSync(
+      skillFile,
+      '---\nname: helper\ndescription: Helper\n---\nSkill body',
+    );
+    fs.writeFileSync(path.join(extensionPath, 'QWEN.md'), 'Managed context');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    const first = await subject.refreshCatalogSnapshot();
+    expect(
+      first.extensions.map(({ name, source }) => ({ name, source })),
+    ).toEqual([
+      { name: 'portable', source: 'managed' },
+      { name: 'user-only', source: 'user' },
+    ]);
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+    const full = subject.getLoadedExtensions();
+    const managedExtension = full.find(
+      (extension) => extension.source === 'managed',
+    )!;
+    expect(managedExtension.skills?.[0].body).toBe('Skill body');
+    await subject.setExtensionDefaultActivation(
+      managedExtension.id,
+      'disabled',
+    );
+    const before = await subject.getExtensionStoreSnapshot();
+    const readFile = vi.spyOn(fs.promises, 'readFile');
+    const catalog = await subject.refreshCatalogSnapshot({
+      names: ['PORTABLE'],
+    });
+    expect(catalog.extensions).toEqual([
+      expect.objectContaining({
+        id: managedExtension.id,
+        name: 'portable',
+        source: 'managed',
+        version: 'managed',
+      }),
+    ]);
+    expect(catalog.extensions[0].skills).toBeUndefined();
+    expect(catalog.extensions[0].contextFiles).toEqual([]);
+    expect(
+      readFile.mock.calls.some(([file]) => String(file) === skillFile),
+    ).toBe(false);
+    expect(catalog.snapshot).toEqual(before);
+    expect(subject.getLoadedExtensions()).toEqual(full);
+    const filtered = await subject.refreshCatalogSnapshot({
+      names: ['user-only'],
+    });
+    expect(filtered.snapshot).toEqual(before);
+    expect(filtered.snapshot.extensions[managedExtension.id].managed).toBe(
+      true,
+    );
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
   it('rejects duplicate managed names on full, filtered and by-name discovery', async () => {
     writeExtension(managed, 'first', { name: 'duplicate' });
     writeExtension(managed, 'second', { name: 'DUPLICATE' });
@@ -355,6 +420,9 @@ describe('managed extensions', () => {
     await expect(subject.loadExtensionByName('unrelated')).rejects.toThrow(
       'Duplicate managed extension name',
     );
+    await expect(
+      subject.refreshCatalogSnapshot({ names: ['unrelated'] }),
+    ).rejects.toThrow('Duplicate managed extension name');
   });
 
   it('ignores managed install sidecars and resolves external hook file variables in memory', async () => {

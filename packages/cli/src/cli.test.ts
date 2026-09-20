@@ -900,6 +900,49 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['mcp', 'list', '--managed-extensions', '/deployment/extensions'],
+    ['mcp', 'list', '--managed-extensions=/deployment/extensions'],
+  ])('passes the managed root through the MCP parser: %j', async (...argv) => {
+    await runCliEntry(argv);
+
+    expect(mocks.mcpListHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ managedExtensions: '/deployment/extensions' }),
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(stderr.join('')).not.toContain('Unknown argument');
+  });
+
+  it('requires a directory value for the managed MCP option', async () => {
+    await runCliEntry(['mcp', 'list', '--managed-extensions']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain(
+      'Not enough arguments following: managed-extensions',
+    );
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+  });
+
+  it('does not parse managed-looking server arguments after the delimiter', async () => {
+    let managedArgument: unknown = 'handler not called';
+    mocks.mcpAddHandler.mockImplementation((argv: Record<string, unknown>) => {
+      managedArgument = argv['managedExtensions'];
+      expect(argv['--']).toEqual(['--managed-extensions', 'server-argument']);
+    });
+    await runCliEntry([
+      'mcp',
+      'add',
+      'fixture',
+      'node',
+      '--',
+      '--managed-extensions',
+      'server-argument',
+    ]);
+
+    expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+    expect(managedArgument).toBeUndefined();
+  });
+
   it('executes MCP subcommands after -- through the fast path', async () => {
     await runCliEntry(['mcp', '--', 'list']);
 

@@ -48,3 +48,57 @@ it('rejects an unavailable filesystem root instead of repeatedly checking its pa
     `filesystem root "${root}" is unavailable`,
   );
 });
+
+it('rejects case aliases of managed state roots on case-insensitive filesystems', (ctx) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-case-'));
+  const managed = path.join(root, 'ManagedPackages');
+  const alias = path.join(root, 'managedpackages');
+  fs.mkdirSync(managed);
+  try {
+    if (!fs.existsSync(alias)) {
+      ctx.skip();
+      return;
+    }
+    expect(fs.statSync(alias).ino).toBe(fs.statSync(managed).ino);
+    expect(() =>
+      assertManagedExtensionStateSeparation(managed, [alias]),
+    ).toThrow('must not overlap');
+    expect(() =>
+      assertManagedExtensionStateSeparation(managed, [
+        path.join(alias, 'new-state', 'extensions'),
+      ]),
+    ).toThrow('must not overlap');
+    fs.mkdirSync(path.join(managed, 'nested'));
+    expect(() =>
+      assertManagedExtensionStateSeparation(path.join(alias, 'nested'), [
+        managed,
+      ]),
+    ).toThrow('must not overlap');
+    expect(() =>
+      assertManagedExtensionStateSeparation(managed, [
+        path.join(root, 'unrelated-state'),
+      ]),
+    ).not.toThrow();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it('keeps genuinely different case-sensitive directories separate', (ctx) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-case-'));
+  const managed = path.join(root, 'ManagedPackages');
+  const writable = path.join(root, 'managedpackages');
+  fs.mkdirSync(managed);
+  try {
+    if (fs.existsSync(writable)) {
+      ctx.skip();
+      return;
+    }
+    fs.mkdirSync(writable);
+    expect(() =>
+      assertManagedExtensionStateSeparation(managed, [writable]),
+    ).not.toThrow();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

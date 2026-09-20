@@ -146,7 +146,12 @@ vi.mock('fs', async (importOriginal) => {
       }
       return (actualFs as typeof import('fs')).statSync(p as unknown as string);
     }),
-    realpathSync: vi.fn((p) => p),
+    realpathSync: Object.assign(
+      vi.fn((p) => p),
+      {
+        native: vi.fn((p) => p),
+      },
+    ),
   };
 });
 

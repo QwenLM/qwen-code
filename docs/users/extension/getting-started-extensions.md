@@ -325,6 +325,7 @@ qwen --managed-extensions ./prepared-extensions -e example
 qwen --managed-extensions ./prepared-extensions extensions list
 qwen --managed-extensions ./prepared-extensions extensions disable example
 qwen --managed-extensions ./prepared-extensions extensions enable example
+qwen mcp list --managed-extensions ./prepared-extensions
 ```
 
 There is one optional root. Only direct children are discovered. Relative paths
@@ -333,7 +334,7 @@ to all workspaces and new, resumed, or recreated Agent processes. Session reques
 cannot override it. An empty directory is valid; a missing, unreadable, or non-directory
 root fails with a configuration error. The managed root must be disjoint from
 Qwen’s writable extension and extension-store directories, including symlink
-aliases. Without this option, only the existing user extension source is discovered.
+and filesystem case aliases. Without this option, only the existing user extension source is discovered.
 Continue supplying the option to management commands. Unchanged skill bodies remain deduplicated during refresh.
 
 For managed extensions, User-scope CLI enable/disable changes the default across
@@ -356,16 +357,13 @@ its install-URL meaning for user packages. Settings, preferences, and caches sta
 in writable user state. Qwen never writes managed installation metadata or copies
 packages to `QWEN_HOME`. Update, uninstall, and replacement are refused by core
 operations; update-all reports and skips managed entries while processing user
-extensions. The deployment owner supplies new package versions.
+extensions. The deployment owner supplies new package versions. After the owner removes a managed package, an explicit same-name user installation can inherit its saved activation and resource preferences if no user package is already installed. A still-present managed package remains protected from replacement. An empty settings directory or one containing only the regular user `.env` file can be adopted without discarding saved values; values explicitly supplied during installation take precedence. Other existing files, symlinks and secret-selector metadata are retained and reported as conflicts instead of being overwritten.
 
 Skills, hooks, MCP, context, and commands use the normal extension runtime.
 `${CLAUDE_PLUGIN_ROOT}` and `${extensionPath}` resolve at load time to the actual
 package directory; extension scripts should likewise locate their resources at
 runtime and write output outside the package. Use the existing explicit extension
-refresh after deployment changes. In serve, refresh each selected workspace through
-`POST /workspaces/:workspace/extensions/refresh` (or the primary workspace's
-`POST /workspace/extensions/refresh`); its normal reconciliation updates live
-Agent sessions. No new watcher or MCP dynamic-tool notification mechanism is added.
+refresh after deployment changes. In serve, prefer `POST /workspaces/:workspace/extensions/refresh` for each selected workspace and wait for the returned operation to succeed; reconciliation updates live Agent sessions. The primary-workspace compatibility route, `POST /workspace/extensions/refresh`, returns synchronously and does not record the applied generation, so the background reconciler may refresh it again. No new watcher or MCP dynamic-tool notification mechanism is added.
 
 See the [design](../../design/managed-extension-directory.md) for scope and
 validation requirements.

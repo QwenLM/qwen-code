@@ -46,7 +46,7 @@ function canonicalDirectory(directory: string): string {
     missing.unshift(path.basename(existing));
     existing = parent;
   }
-  return path.join(fs.realpathSync(existing), ...missing);
+  return path.join(fs.realpathSync.native(existing), ...missing);
 }
 
 export function assertManagedExtensionStateSeparation(

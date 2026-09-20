@@ -177,6 +177,250 @@ describe('ExtensionStore', () => {
     },
   );
 
+  it.each([
+    {
+      managed: true,
+      allowAdoption: true,
+      artifactExists: false,
+      succeeds: true,
+    },
+    {
+      managed: true,
+      allowAdoption: false,
+      artifactExists: false,
+      succeeds: false,
+    },
+    {
+      managed: false,
+      allowAdoption: true,
+      artifactExists: false,
+      succeeds: false,
+    },
+    {
+      managed: true,
+      allowAdoption: true,
+      artifactExists: true,
+      succeeds: false,
+    },
+  ])(
+    'limits retained managed policy adoption to a confirmed vacant managed source: %j',
+    async ({ managed, allowAdoption, artifactExists, succeeds }) => {
+      const store = makeStore();
+      const identity = { id: 'af'.repeat(32), name: 'retained' };
+      const userIdentity = { ...identity, id: 'b0'.repeat(32) };
+      const previousDirectory = path.join(extensionsDir, 'previous-user-copy');
+      if (artifactExists) {
+        await fsp.mkdir(previousDirectory);
+        await fsp.writeFile(
+          path.join(previousDirectory, 'untouched'),
+          'User artifact',
+        );
+        await store.ensureInitialized([
+          { ...identity, name: 'previous-user-copy', source: 'user' },
+        ]);
+      }
+      await store.ensureInitialized([
+        { ...identity, source: managed ? 'managed' : 'user' },
+      ]);
+      await store.setDefaultActivation(identity, 'disabled');
+      await store.setWorkspaceActivation(
+        identity,
+        workspacePath('kept'),
+        'enabled',
+      );
+      await store.setSkillWorkspaceOverrides(
+        identity,
+        workspacePath('kept'),
+        { helper: false },
+        0,
+      );
+      const before = await store.readSnapshot();
+      const destination = path.join(extensionsDir, identity.name);
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      const commit = store.commitArtifact({
+        operation: 'install',
+        identity: userIdentity,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: allowAdoption,
+      });
+      if (succeeds) {
+        const after = await commit;
+        const expectedPolicy = {
+          ...before.extensions[identity.id],
+          artifactGeneration: after.generation,
+        };
+        delete expectedPolicy.managed;
+        expect(after.extensions).toEqual({ [userIdentity.id]: expectedPolicy });
+      } else {
+        await expect(commit).rejects.toBeInstanceOf(ExtensionConflictError);
+        expect(await store.readSnapshot()).toEqual(before);
+        expect(
+          await fsp.readFile(path.join(staging, 'qwen-extension.json'), 'utf8'),
+        ).toBe('{}');
+        if (artifactExists)
+          expect(
+            await fsp.readFile(
+              path.join(previousDirectory, 'untouched'),
+              'utf8',
+            ),
+          ).toBe('User artifact');
+      }
+    },
+  );
+
+  it.each(['empty directory', 'settings only'] as const)(
+    'adopts a withdrawn managed %s without losing its settings',
+    async (contents) => {
+      const store = makeStore();
+      const managed = {
+        id: 'b1'.repeat(32),
+        name: 'configured',
+        source: 'managed' as const,
+      };
+      const user = { id: 'b2'.repeat(32), name: managed.name };
+      await store.ensureInitialized([managed]);
+      await store.setDefaultActivation(managed, 'disabled');
+      const destination = path.join(extensionsDir, managed.name);
+      await fsp.mkdir(destination);
+      if (contents === 'settings only')
+        await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      const after = await store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      });
+      expect(after.extensions[user.id]).toMatchObject({
+        defaultActivation: 'disabled',
+        artifactGeneration: after.generation,
+      });
+      expect(after.extensions[managed.id]).toBeUndefined();
+      if (contents === 'settings only')
+        expect(
+          await fsp.readFile(path.join(destination, '.env'), 'utf8'),
+        ).toContain('SAVED=old\n');
+    },
+  );
+
+  it.each([
+    'notes.txt',
+    'qwen-extension.json',
+    '.qwen-extension-install.json',
+    '.qwen-extension-settings.json',
+    'subdirectory',
+    'env symlink',
+    'directory symlink',
+  ])(
+    'does not adopt a managed settings directory containing %s',
+    async (extra) => {
+      const store = makeStore();
+      const managed = {
+        id: 'b3'.repeat(32),
+        name: 'configured',
+        source: 'managed' as const,
+      };
+      const user = { id: 'b4'.repeat(32), name: managed.name };
+      const before = await store.ensureInitialized([managed]);
+      const destination = path.join(extensionsDir, managed.name);
+      const outside = path.join(root, 'outside');
+      await fsp.mkdir(outside);
+      await fsp.writeFile(path.join(outside, '.env'), 'OUTSIDE=untouched\n');
+      if (extra === 'directory symlink') {
+        await fsp.symlink(
+          outside,
+          destination,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } else {
+        await fsp.mkdir(destination);
+        if (extra === 'env symlink')
+          await fsp.symlink(
+            path.join(outside, '.env'),
+            path.join(destination, '.env'),
+          );
+        else {
+          await fsp.writeFile(
+            path.join(destination, '.env'),
+            'SAVED=untouched\n',
+          );
+          if (extra === 'subdirectory')
+            await fsp.mkdir(path.join(destination, 'subdirectory'));
+          else await fsp.writeFile(path.join(destination, extra), '{}');
+        }
+      }
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      await expect(
+        store.commitArtifact({
+          operation: 'install',
+          identity: user,
+          destinationDirectory: destination,
+          stagingDirectory: staging,
+          initialActivation: { scope: 'user' },
+          allowManagedPolicyAdoption: true,
+        }),
+      ).rejects.toBeInstanceOf(ExtensionConflictError);
+      expect(await store.readSnapshot()).toEqual(before);
+      expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+        extra.includes('symlink') ? 'OUTSIDE=untouched\n' : 'SAVED=untouched\n',
+      );
+      expect(await fsp.readFile(path.join(outside, '.env'), 'utf8')).toBe(
+        'OUTSIDE=untouched\n',
+      );
+      expect(
+        await fsp.readFile(path.join(staging, 'qwen-extension.json'), 'utf8'),
+      ).toBe('{}');
+    },
+  );
+
+  it('rolls back the original settings directory and managed policy after a failed adoption commit', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'b5'.repeat(32),
+      name: 'configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'b6'.repeat(32), name: managed.name };
+    await store.ensureInitialized([managed]);
+    const before = await store.setDefaultActivation(managed, 'disabled');
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination);
+    const originalEnv = 'SAVED=original\n';
+    await fsp.writeFile(path.join(destination, '.env'), originalEnv);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await fsp.writeFile(path.join(staging, '.env'), 'SAVED=new\n');
+    const internals = store as unknown as {
+      writeSnapshotUnlocked(snapshot: unknown): Promise<void>;
+    };
+    vi.spyOn(internals, 'writeSnapshotUnlocked').mockRejectedValueOnce(
+      new Error('adoption state write failed'),
+    );
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toThrow('adoption state write failed');
+    expect(await fsp.readdir(destination)).toEqual(['.env']);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      originalEnv,
+    );
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readdir(path.join(storeDir, 'transactions'))).toEqual([]);
+  });
+
   it('does not infer a user artifact directory from managed name changes', async () => {
     const store = makeStore();
     const managed = {

@@ -393,6 +393,8 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
 | `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
 
+Catalog and workspace extension entries may include `extensionSource: "managed" | "user"`; older daemons may omit it. This identifies package ownership and is separate from the existing `source` install-URL field. Managed entries are included in the manifest-only catalog with the same identities and same-name precedence as a full refresh. Clients may change their activation and resource preferences, but must not offer update, uninstall or replacement actions for managed packages.
+
 #### Workspace resource state
 
 Preflight `extension_state` independently. It supports Skills only; it does not imply MCP resource management. Both routes select the registered workspace runtime and never fall back to primary. GET follows the existing read-only trust rules; PUT requires a trusted workspace.

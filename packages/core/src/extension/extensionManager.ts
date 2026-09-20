@@ -1496,11 +1496,7 @@ export class ExtensionManager {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
-        // Default: load all extensions from QWEN_HOME-aware user extensions
-        // dir, then filter names from the manifest-only result so a filtered
-        // catalog never falls back to a full subresource load.
-        const loadedAll = await this.loadExtensionsFromExtensionsDir(
-          this.configDir,
+        const loadedAll = await this.loadDiscoveredExtensions(
           this.workspaceDir,
           { manifestOnly: true },
         );
@@ -1517,6 +1513,7 @@ export class ExtensionManager {
           extensions: loaded.map((extension) => ({
             id: extension.id,
             name: extension.name,
+            source: extension.source,
           })),
         };
       });
@@ -1708,12 +1705,13 @@ export class ExtensionManager {
 
   private async loadManagedExtensions(
     workspaceDir: string,
+    options: { manifestOnly?: boolean } = {},
   ): Promise<Extension[]> {
     if (!this.managedExtensionsDir) return [];
     const extensions = await this.loadExtensionsFromExtensionsDir(
       this.managedExtensionsDir,
       workspaceDir,
-      { source: 'managed' },
+      { ...options, source: 'managed' },
     );
     const names = new Map<string, Extension>();
     for (const extension of extensions) {
@@ -1731,14 +1729,16 @@ export class ExtensionManager {
 
   private async loadDiscoveredExtensions(
     workspaceDir: string,
+    options: { manifestOnly?: boolean } = {},
   ): Promise<Extension[]> {
-    const manageds = await this.loadManagedExtensions(workspaceDir);
+    const manageds = await this.loadManagedExtensions(workspaceDir, options);
     const managedNames = new Set(
       manageds.map((extension) => extension.name.toLowerCase()),
     );
     const users = await this.loadExtensionsFromExtensionsDir(
       this.configDir,
       workspaceDir,
+      options,
     );
     const visibleUsers = users.filter((extension) => {
       if (!managedNames.has(extension.name.toLowerCase())) return true;
@@ -2853,7 +2853,9 @@ export class ExtensionManager {
           identity: { id: extensionId, name: newExtensionName },
           stagingDirectory: stagingPath,
           destinationDirectory: destinationPath,
-          ...(!isUpdate ? { initialActivation } : {}),
+          ...(!isUpdate
+            ? { initialActivation, allowManagedPolicyAdoption: true }
+            : {}),
           ...(expectedArtifactGeneration === undefined
             ? {}
             : { expectedArtifactGeneration }),
@@ -3096,7 +3098,10 @@ export class ExtensionManager {
           stagingDirectory: prepared.stagingDirectory,
           destinationDirectory: prepared.destinationDirectory,
           ...(prepared.operation === 'install'
-            ? { initialActivation: prepared.initialActivation }
+            ? {
+                initialActivation: prepared.initialActivation,
+                allowManagedPolicyAdoption: true,
+              }
             : {
                 expectedArtifactGeneration:
                   prepared.expectedArtifactGeneration ?? 0,
