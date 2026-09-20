@@ -200,6 +200,60 @@ describe('verify-capture helper', () => {
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
 
+  // The comparison above pins that bold DIFFERS from plain; it cannot pin
+  // the direction. Inverting the bold ternary (bold cells plain, plain cells
+  // stroked) keeps every byte unequal and passed 27/27 on all three probed
+  // hosts — the one mutant to survive the suite. Render the same word as a
+  // plain cell and a bold cell on one line and require the bold cell's ink
+  // to exceed the plain one's; the inversion swaps the two and goes red.
+  it('renders a bold cell heavier than the same plain cell', async () => {
+    let png;
+    withDir((dir) => {
+      const out = path.join(dir, 'bold-direction.png');
+      const res = run(['--out', out, '--cols', '30'], {
+        input: `FAIL      ${ESC}[1mFAIL${ESC}[0m\n`,
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      png = readFileSync(out);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const { data, info } = await sharp(png)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    // Same ink definition as the title-band test: any pixel off the #1e1e1e
+    // canvas. The first FAIL occupies cells 0-3, the bold one cells 10-13;
+    // the blank columns between them keep either word's antialiasing out of
+    // the other's slice.
+    const PAD = 12;
+    const CELL_W = 8.4;
+    const ink = (firstCell) => {
+      let n = 0;
+      const x0 = Math.floor(PAD + firstCell * CELL_W);
+      const x1 = Math.floor(PAD + (firstCell + 4) * CELL_W);
+      for (let y = 0; y < info.height; y += 1) {
+        for (let x = x0; x < x1; x += 1) {
+          const i = (y * info.width + x) * info.channels;
+          if (
+            data[i] !== 0x1e ||
+            data[i + 1] !== 0x1e ||
+            data[i + 2] !== 0x1e
+          ) {
+            n += 1;
+          }
+        }
+      }
+      return n;
+    };
+    const plainInk = ink(0);
+    const boldInk = ink(10);
+    expect(
+      boldInk,
+      `bold cell ink ${boldInk} vs plain cell ink ${plainInk}: bold ` +
+        'rendered no heavier than plain — the bold ternary is inverted',
+    ).toBeGreaterThan(plainInk);
+  });
+
   // font-weight="bold" rasterises as a no-op where the matched family has no
   // bold face, so on a font-less host the stroke is the only thing keeping
   // bold visible. The test above cannot see a dropped stroke where CI runs:
@@ -208,41 +262,48 @@ describe('verify-capture helper', () => {
   // Point fontconfig at an empty font list so the host's fonts cannot mask a
   // missing stroke; with no fonts librsvg draws .notdef boxes, so this pins
   // the stroke mechanism, not legibility.
+  // Linux-only: FONTCONFIG_FILE disarms fontconfig there, but sharp's darwin
+  // bundle ignores it — measured on macOS, the renders are byte-identical
+  // with and without it — so off Linux the test never enters the state its
+  // name claims.
   // Decoded pixels are compared, not PNG bytes — see the black-on-black test.
-  it('keeps bold visible on a host with no fonts at all', async () => {
-    let plain;
-    let bold;
-    withDir((dir) => {
-      const fontsDir = path.join(dir, 'fonts');
-      mkdirSync(fontsDir);
-      const conf = path.join(dir, 'fonts.conf');
-      writeFileSync(
-        conf,
-        '<?xml version="1.0"?>\n' +
-          '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n' +
-          `<fontconfig><dir>${fontsDir}</dir><cachedir>${fontsDir}</cachedir></fontconfig>\n`,
-      );
-      const env = { ...process.env, FONTCONFIG_FILE: conf };
-      const render = (name, input) => {
-        const out = path.join(dir, `${name}.png`);
-        const res = run(['--out', out, '--cols', '30'], { input, env });
-        expect(res.status).toBe(0);
-        expect(isPng(out)).toBe(true);
-        return readFileSync(out);
-      };
-      plain = render('plain', 'FAIL PASS\n');
-      bold = render('bold', `${ESC}[1mFAIL PASS${ESC}[0m\n`);
-    });
-    const sharp = createRequire(import.meta.url)('sharp');
-    const [p, b] = await Promise.all([
-      sharp(plain).raw().toBuffer({ resolveWithObject: true }),
-      sharp(bold).raw().toBuffer({ resolveWithObject: true }),
-    ]);
-    expect(
-      b.data.equals(p.data),
-      'bold was dropped: the stroke is gone and no host bold face remains',
-    ).toBe(false);
-  });
+  it.skipIf(process.platform !== 'linux')(
+    'keeps bold visible on a host with no fonts at all',
+    async () => {
+      let plain;
+      let bold;
+      withDir((dir) => {
+        const fontsDir = path.join(dir, 'fonts');
+        mkdirSync(fontsDir);
+        const conf = path.join(dir, 'fonts.conf');
+        writeFileSync(
+          conf,
+          '<?xml version="1.0"?>\n' +
+            '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n' +
+            `<fontconfig><dir>${fontsDir}</dir><cachedir>${fontsDir}</cachedir></fontconfig>\n`,
+        );
+        const env = { ...process.env, FONTCONFIG_FILE: conf };
+        const render = (name, input) => {
+          const out = path.join(dir, `${name}.png`);
+          const res = run(['--out', out, '--cols', '30'], { input, env });
+          expect(res.status).toBe(0);
+          expect(isPng(out)).toBe(true);
+          return readFileSync(out);
+        };
+        plain = render('plain', 'FAIL PASS\n');
+        bold = render('bold', `${ESC}[1mFAIL PASS${ESC}[0m\n`);
+      });
+      const sharp = createRequire(import.meta.url)('sharp');
+      const [p, b] = await Promise.all([
+        sharp(plain).raw().toBuffer({ resolveWithObject: true }),
+        sharp(bold).raw().toBuffer({ resolveWithObject: true }),
+      ]);
+      expect(
+        b.data.equals(p.data),
+        'bold was dropped: the stroke is gone and no host bold face remains',
+      ).toBe(false);
+    },
+  );
 
   // The stroke must follow the glyph's OWN fill: the other bold arms feed
   // \x1b[1m (default grey), where a stroke drifted to a constant grey is
@@ -343,8 +404,9 @@ describe('verify-capture helper', () => {
   // title must not render LIGHTER than the bold cells it heads. Only a pixel
   // comparison sees a title whose stroke was dropped or made conditional
   // while the body kept its own, and it is host-relative, so it holds with
-  // and without fonts (measured title/body ink: 605/605 with fonts,
-  // 1062/882 without; a stroke-less title falls to 478/605 and 414/882).
+  // and without fonts: title/body ink measures near-parity on both and a
+  // stroke-less title falls well below; the absolute counts are
+  // host-specific.
   it('renders the title band no lighter than the body band', async () => {
     let png;
     withDir((dir) => {
@@ -384,8 +446,9 @@ describe('verify-capture helper', () => {
     };
     const titleInk = ink(PAD);
     const bodyInk = ink(PAD + CELL_H);
-    // The 10% slack absorbs host rasterisation noise; the defect measures 21%
-    // (fonts) and 53% (no fonts) below parity, so the slack cannot hide it.
+    // The 10% slack absorbs host rasterisation noise; the defect measures
+    // 20% or more below parity on every host probed (fonts or none), so the
+    // slack cannot hide it.
     expect(
       titleInk,
       `title band ink ${titleInk} vs body band ink ${bodyInk}: the caption ` +
