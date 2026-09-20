@@ -651,7 +651,13 @@ export interface ServeContextCategoryBreakdown {
   mcpTools: number;
   memoryFiles: number;
   skills: number;
+  /** Startup prelude outside the skill listing. Absent from older servers. */
+  startupContext?: number;
   messages: number;
+  /** Provider total not accounted for by any category. Absent from older servers. */
+  unattributed?: number;
+  /** Cached prefix tokens; an annotation that overlaps categories. Absent from older servers. */
+  cachedTokens?: number;
   freeSpace: number;
   autocompactBuffer: number;
 }
@@ -714,6 +720,11 @@ export interface ServeSessionSupportedCommandsStatus {
      * own `run-saved`, `run-script`, `retry` and `rerun` are not restricted.
      */
     nameOnly?: boolean;
+    /**
+     * Whether `retry` and `rerun` accept a run restored from history
+     * (`isHistorical`), such as one a daemon restart interrupted.
+     */
+    retryHistorical?: boolean;
   };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
@@ -1034,8 +1045,17 @@ export interface ServeSessionWorkflowTaskStatus {
   toolUseId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
-  /** Restored from the project snapshot store; controls are read-only. */
+  /**
+   * Restored from the project snapshot store. `pause` and `resume` do not
+   * apply; `delete-history` does, and so do `retry` and `rerun` when
+   * `workflowToolFeatures.retryHistorical` is reported.
+   */
   isHistorical?: boolean;
+  /**
+   * The run was launched with `args` too large for its snapshot to keep, so
+   * it cannot be retried or rerun from history.
+   */
+  argsOmitted?: true;
   sourceRunId?: string;
   startMode?: 'retry' | 'rerun';
   label: string;

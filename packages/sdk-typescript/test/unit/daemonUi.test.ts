@@ -15,6 +15,7 @@ import {
   daemonBlockToPlainText,
   daemonUiEventToTerminalText,
   estimateDaemonTranscriptBlockBytes,
+  extractTranscriptTiming,
   getOutputText,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
@@ -10725,4 +10726,139 @@ it('retains the same background text execution ID for live and replay events', (
   expect(
     normalizeDaemonEvent({ ...event, promptId: 'explicit' })[0],
   ).toMatchObject({ promptId: 'explicit' });
+});
+
+describe('transcript timing frames', () => {
+  const TIMING_FRAME = {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      timing: {
+        kind: 'request',
+        status: 'ok',
+        durationMs: 6544,
+        ttftMs: 2344,
+        startedAt: 1_760_000_000_000,
+        responseId: 'chatcmpl-abc',
+        promptId: 'session-1########0',
+        model: 'qwen3.8-max',
+      },
+    },
+  };
+
+  it('normalizes a timing frame to no UI events', () => {
+    // Existing clients must stay unaffected by the new frame: it carries no
+    // text and no usage, so the normalizer has nothing to surface.
+    expect(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { update: TIMING_FRAME },
+      } as never),
+    ).toEqual([]);
+  });
+
+  it('reads a request timing frame', () => {
+    expect(extractTranscriptTiming(TIMING_FRAME)).toEqual({
+      kind: 'request',
+      status: 'ok',
+      durationMs: 6544,
+      ttftMs: 2344,
+      startedAt: 1_760_000_000_000,
+      responseId: 'chatcmpl-abc',
+      promptId: 'session-1########0',
+      model: 'qwen3.8-max',
+    });
+  });
+
+  it('reads a tool timing frame', () => {
+    expect(
+      extractTranscriptTiming({
+        ...TIMING_FRAME,
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            toolName: 'read_file',
+            toolStatus: 'success',
+            responseId: 'chatcmpl-abc',
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'tool',
+      durationMs: 16,
+      callId: 'call-1',
+      toolName: 'read_file',
+      toolStatus: 'success',
+      responseId: 'chatcmpl-abc',
+    });
+  });
+
+  it.each([
+    ['a plain assistant chunk', { sessionUpdate: 'agent_message_chunk' }],
+    ['a usage frame', { _meta: { usage: { inputTokens: 1 } } }],
+    ['a non-object update', 'nope'],
+    ['a non-object timing', { _meta: { timing: 'nope' } }],
+    ['an unknown kind', { _meta: { timing: { kind: 'x', durationMs: 1 } } }],
+    ['a missing duration', { _meta: { timing: { kind: 'tool' } } }],
+    [
+      'a non-numeric duration',
+      { _meta: { timing: { kind: 'tool', durationMs: '16' } } },
+    ],
+  ])('returns nothing for %s', (_label, update) => {
+    expect(extractTranscriptTiming(update)).toBeUndefined();
+  });
+
+  it('drops a start time that showed up on a tool frame', () => {
+    // The producer never puts one there; a reader must not trust one anyway.
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: 1_760_000_000_000,
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
+  });
+
+  it('rejects a negative duration', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: { timing: { kind: 'request', durationMs: -1 } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('drops a negative TTFT but keeps the frame', () => {
+    const timing = extractTranscriptTiming({
+      _meta: { timing: { kind: 'request', durationMs: 10, ttftMs: -5 } },
+    });
+
+    expect(timing).toEqual({ kind: 'request', durationMs: 10 });
+  });
+
+  it('drops fields that do not belong to the frame kind', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            // Request-only fields on a tool frame, and a bad tool status.
+            ttftMs: 100,
+            status: 'ok',
+            toolStatus: 'timed_out',
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
+  });
 });

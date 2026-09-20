@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { getTranslator, I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { AddMenu, type AddMenuProps } from './AddMenu';
 
@@ -56,7 +56,10 @@ function render(ui?: ReactNode): AddMenuProps {
   return props;
 }
 
-function renderWith(props: AddMenuProps): void {
+function renderWith(
+  props: AddMenuProps,
+  language: WebShellLanguage = 'en',
+): void {
   container = document.createElement('div');
   portalRoot = document.createElement('div');
   portalRoot.dataset.webShellPortalRoot = '';
@@ -66,7 +69,7 @@ function renderWith(props: AddMenuProps): void {
   act(() =>
     root!.render(
       <WebShellPortalRootContext.Provider value={portalRoot}>
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <AddMenu {...props} />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -217,9 +220,6 @@ describe('AddMenu', () => {
     overrides: Partial<NonNullable<AddMenuProps['plan']>> = {},
   ): NonNullable<AddMenuProps['plan']> => ({
     checked: false,
-    disabledReason: 'Switching mode',
-    label: 'Plan mode',
-    description: 'Plan first, run after you approve',
     onToggle: vi.fn(),
     ...overrides,
   });
@@ -282,6 +282,28 @@ describe('AddMenu', () => {
     expect(onToggle).not.toHaveBeenCalled();
     // A disabled row does not close the menu either.
     expect(menuItem('composer-add-menu-plan')).not.toBeNull();
+  });
+
+  it('localizes the Plan row, including the reason it is disabled', async () => {
+    renderWith(baseProps({ plan: planControl({ disabled: true }) }), 'zh-CN');
+    await openMenu();
+    // Read from the catalog, so a literal in place of t() goes red.
+    const zh = getTranslator('zh-CN');
+    // The catalog oracle cannot see a key dropped from zh-CN: the translator
+    // falls back to English on both sides. Pin that the keys are translated.
+    const en = getTranslator('en');
+    for (const key of [
+      'composerAdd.plan.label',
+      'composerAdd.plan.description',
+      'composerAdd.plan.busy',
+    ] as const) {
+      expect(zh(key)).not.toBe(en(key));
+    }
+    expect(menuItem('composer-add-menu-plan')!.textContent).toBe(
+      `${zh('composerAdd.plan.label')}${zh(
+        'composerAdd.plan.description',
+      )}${zh('composerAdd.plan.busy')}`,
+    );
   });
 
   it('closes on a Plan choice and toggles once without refocusing the trigger', async () => {
@@ -883,5 +905,276 @@ describe('AddMenu', () => {
       expect(subTrigger).not.toBeNull();
       expect(subTrigger!.getAttribute('data-disabled')).toBe('');
     });
+  });
+});
+
+describe('mobile AddMenu', () => {
+  function mobileProps(overrides: Partial<AddMenuProps> = {}) {
+    return baseProps({
+      mobileActions: {
+        commands: [{ name: 'goal', description: 'Set a goal' }],
+        onHistory: vi.fn(),
+        onToggleShell: vi.fn(),
+        shellMode: false,
+      },
+      ...overrides,
+    });
+  }
+  async function tap(label: string) {
+    const button = Array.from(portalRoot!.querySelectorAll('button')).find(
+      (item) =>
+        item.textContent === label || item.getAttribute('aria-label') === label,
+    );
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+    });
+    await settle();
+  }
+  it('uses the scoped bottom drawer and supports reference search and back', async () => {
+    const props = mobileProps({
+      getWorkspaceActions: () => ({
+        globWorkspace: vi.fn().mockResolvedValue({ matches: ['src/main.ts'] }),
+      }),
+    });
+    renderWith(props);
+    await openMenu();
+    expect(
+      portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).not.toBeNull();
+    await tap('Reference file');
+    await typeIntoSearch('composer-add-menu-reference-file-search', 'main');
+    expect(menuItem('composer-add-menu-reference-file-item')!.textContent).toBe(
+      'src/main.ts',
+    );
+    await tap('back');
+    expect(menuItem('composer-add-menu-reference-file-search')).toBeNull();
+    await tap('close');
+    expect(
+      portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).toBeNull();
+    expect(props.onInsertReference).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['Photos', 'image/*', null, 'attach'],
+    ['Take photo', 'image/*', 'environment', 'attach'],
+    ['Attach files', '', null, 'attach'],
+    ['Upload to workspace', '', null, 'upload'],
+  ] as const)(
+    'opens %s with the correct picker and destination',
+    async (label, accept, capture, destination) => {
+      const props = mobileProps({ uploadAvailable: true });
+      renderWith(props);
+      await openMenu();
+      const input =
+        container!.querySelector<HTMLInputElement>('input[type="file"]')!;
+      const click = vi
+        .spyOn(input, 'click')
+        .mockImplementation(() => undefined);
+      input.accept = 'video/*';
+      input.multiple = label === 'Take photo';
+      input.setAttribute('capture', 'user');
+      await tap(label);
+      expect(input.multiple).toBe(label !== 'Take photo');
+      expect(click).toHaveBeenCalledOnce();
+      expect(input.accept).toBe(accept);
+      expect(input.getAttribute('capture')).toBe(capture);
+      const file = new File(['image'], 'photo.png', { type: 'image/png' });
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [file],
+      });
+      await act(async () =>
+        input.dispatchEvent(new Event('change', { bubbles: true })),
+      );
+      expect(props.onAddFiles).toHaveBeenCalledWith([file], destination);
+    },
+  );
+  it('waits for the mobile skills catalog before announcing an empty result', async () => {
+    const props = mobileProps({
+      skills: [],
+      skillsLoaded: false,
+      onSkillsOpenChange: vi.fn(),
+    });
+    renderWith(props);
+    await openMenu();
+    await tap('Skills');
+    expect(portalRoot!.querySelector('[role="status"]')).toBeNull();
+    rerenderWith({ ...props, skillsLoading: true });
+    expect(portalRoot!.querySelector('[role="status"]')!.textContent).toContain(
+      'Loading',
+    );
+    rerenderWith({ ...props, skillsLoaded: true });
+    expect(portalRoot!.querySelector('[role="status"]')!.textContent).toContain(
+      'No results',
+    );
+  });
+
+  it.each([false, true])(
+    'does not insert slash commands in shell mode (commandsOnly=%s)',
+    async (commandsOnly) => {
+      const props = mobileProps({ commandsOnly });
+      props.mobileActions!.shellMode = true;
+      renderWith(props);
+      await openMenu();
+      const drawer = portalRoot!.querySelector(
+        '[data-web-shell-mobile-add-menu]',
+      )!;
+      expect(
+        [...drawer.querySelectorAll('button')].some(
+          (b) =>
+            b.textContent === 'All commands' ||
+            b.textContent?.includes('/goal'),
+        ),
+      ).toBe(false);
+      expect(props.onPrependSkill).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves command metadata, ordering, slash normalization and description search', async () => {
+    const props = mobileProps();
+    props.mobileActions!.commands = [
+      { name: 'later', description: 'Secondary choice', completionPriority: 5 },
+      {
+        name: 'goal',
+        description: 'Plan an objective',
+        completionLabel: 'Goal shortcut',
+        completionSection: 'Host actions',
+        completionPriority: -1,
+        argumentHint: '<objective>',
+      },
+    ];
+    renderWith(props);
+    await openMenu();
+    await tap('All commands');
+    const rows = () =>
+      [
+        ...portalRoot!.querySelectorAll(
+          '[data-web-shell-mobile-add-menu] button',
+        ),
+      ].filter(
+        (b) =>
+          b.textContent?.includes('Goal shortcut') ||
+          b.textContent?.includes('Secondary choice'),
+      );
+    expect(rows()[0]!.textContent).toContain('Goal shortcut');
+    expect(rows()[0]!.textContent).toContain('<objective>');
+    const search = portalRoot!.querySelector<HTMLInputElement>(
+      '[aria-label="Search commands"]',
+    )!;
+    for (const query of ['  /goal  ', 'objective']) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, query);
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]!.textContent).toContain('Goal shortcut');
+    }
+    await act(async () => (rows()[0] as HTMLButtonElement).click());
+    await settle();
+    expect(props.onPrependSkill).toHaveBeenCalledExactlyOnceWith('/goal');
+  });
+
+  it('inserts a mobile reference only after the drawer releases focus', async () => {
+    const props = mobileProps({
+      getWorkspaceActions: () => ({
+        globWorkspace: vi.fn().mockResolvedValue({ matches: ['src/main.ts'] }),
+      }),
+    });
+    props.onInsertReference.mockImplementation(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
+    });
+    renderWith(props);
+    await openMenu();
+    await tap('Reference file');
+    await typeIntoSearch('composer-add-menu-reference-file-search', 'main');
+    await act(async () =>
+      menuItem('composer-add-menu-reference-file-item')!.click(),
+    );
+    await settle();
+    expect(props.onInsertReference).toHaveBeenCalledOnce();
+    expect(props.onInsertReference.mock.calls[0]![0].serialized).toContain(
+      'src/main.ts',
+    );
+  });
+
+  it.each([false, true])(
+    'closes before toggling shell from shellMode=%s',
+    async (shellMode) => {
+      const props = mobileProps();
+      props.mobileActions!.shellMode = shellMode;
+      const onToggle = vi.fn(() => {
+        expect(
+          portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+        ).toBeNull();
+      });
+      props.mobileActions!.onToggleShell = onToggle;
+      renderWith(props);
+      await openMenu();
+      await tap(shellMode ? 'Exit Shell' : 'Shell mode');
+      expect(onToggle).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('prefixes a selected command through the insertion lane and closes', async () => {
+    const props = mobileProps();
+    renderWith(props);
+    await openMenu();
+    await tap('All commands');
+    const command = Array.from(portalRoot!.querySelectorAll('button')).find(
+      (button) => button.textContent?.startsWith('/goal'),
+    )!;
+    await act(async () => command.click());
+    await settle();
+    expect(props.onPrependSkill).toHaveBeenCalledExactlyOnceWith('/goal');
+    expect(
+      portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).toBeNull();
+  });
+  it.each(['en', 'zh-CN'] as const)(
+    'localizes the busy mobile Plan row in %s',
+    async (language) => {
+      const onToggle = vi.fn();
+      renderWith(
+        mobileProps({ plan: { checked: false, disabled: true, onToggle } }),
+        language,
+      );
+      await openMenu();
+      const row = menuItem('composer-add-menu-plan') as HTMLButtonElement;
+      const t = getTranslator(language);
+      expect(row.textContent).toBe(
+        `${t('composerAdd.plan.label')}${t('composerAdd.plan.busy')}`,
+      );
+      expect(row.disabled).toBe(true);
+      await act(async () => row.click());
+      expect(onToggle).not.toHaveBeenCalled();
+    },
+  );
+
+  it('toggles Plan once and notifies history only after closing', async () => {
+    const onToggle = vi.fn();
+    const props = mobileProps({
+      plan: {
+        checked: false,
+        onToggle,
+      },
+    });
+    props.mobileActions!.onHistory = vi.fn(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
+    });
+    renderWith(props);
+    await openMenu();
+    await tap('Plan mode');
+    expect(onToggle).toHaveBeenCalledOnce();
+    await openMenu();
+    await tap('Input history');
+    expect(props.mobileActions!.onHistory).toHaveBeenCalledOnce();
   });
 });

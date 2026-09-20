@@ -2976,7 +2976,13 @@ export interface DaemonContextCategoryBreakdown {
   mcpTools: number;
   memoryFiles: number;
   skills: number;
+  /** Startup prelude outside the skill listing. Absent from older daemons. */
+  startupContext?: number;
   messages: number;
+  /** Provider total not accounted for by any category. Absent from older daemons. */
+  unattributed?: number;
+  /** Cached prefix tokens; an annotation that overlaps categories. Absent from older daemons. */
+  cachedTokens?: number;
   freeSpace: number;
   autocompactBuffer: number;
 }
@@ -3046,6 +3052,11 @@ export interface DaemonSessionSupportedCommandsStatus {
      * own `run-saved`, `run-script`, `retry` and `rerun` are not restricted.
      */
     nameOnly?: boolean;
+    /**
+     * Whether `retry` and `rerun` accept a run restored from history
+     * (`isHistorical`), such as one a daemon restart interrupted.
+     */
+    retryHistorical?: boolean;
   };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
@@ -3311,8 +3322,17 @@ export interface DaemonSessionWorkflowTaskStatus {
   toolUseId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
-  /** Restored from the project snapshot store; controls are read-only. */
+  /**
+   * Restored from the project snapshot store. `pause` and `resume` do not
+   * apply; `delete-history` does, and so do `retry` and `rerun` when
+   * `workflowToolFeatures.retryHistorical` is reported.
+   */
   isHistorical?: boolean;
+  /**
+   * The run was launched with `args` too large for its snapshot to keep, so
+   * it cannot be retried or rerun from history.
+   */
+  argsOmitted?: true;
   sourceRunId?: string;
   startMode?: 'retry' | 'rerun';
   label: string;
@@ -3959,6 +3979,29 @@ export interface DaemonLiveSetupStatus {
   enabled: boolean;
   keyConfigured: boolean;
   model: string;
+  /**
+   * Where the selected model's key comes from. `route`: the `envKey` of its
+   * `realtimeOnly` route — `apiKey` cannot be set and `replace` is refused.
+   * `settings`: the stored `liveVoice.apiKey`. Absent on older daemons, which
+   * only know `settings`.
+   */
+  keySource?: 'route' | 'settings';
+  /** The environment variable a `route` key is read from. Never its value. */
+  keyEnv?: string;
+  /**
+   * Why the resolved route cannot produce a credential (rejected `baseUrl`,
+   * missing `envKey`). Absent when the credential resolves, when the only
+   * problem is the unset `keyEnv` variable, and on older daemons.
+   */
+  keyError?: string;
+  /**
+   * Whether a clear-text `liveVoice.apiKey` is stored (never its value), so
+   * `clear` can be offered even when the selected model cannot use the key.
+   * Absent on older daemons.
+   */
+  storedKey?: boolean;
+  /** Why `model` cannot be resolved; absent when it resolves. */
+  modelError?: string;
   /** Absent on daemons that predate selectable Live Voice models. */
   voice?: string;
   /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
