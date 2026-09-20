@@ -699,7 +699,7 @@ describe('serve fast path argument parsing', () => {
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['open-with-auth', ['--open-with-auth']],
-      ['pairing-qr', ['--pairing-qr']],
+      ['token-qr', ['--token-qr']],
       ['local-control', ['--local-control']],
       ['local-control-address', ['--local-control-address', '192.168.1.2']],
       ['http-bridge', ['--no-http-bridge']],
@@ -1725,40 +1725,38 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.serve).toEqual({ channels: ['telegram'] });
   });
 
-  it('loads serve.pairingQr from user scope but never from workspace scope', () => {
+  it('loads serve.tokenQr from user scope but never from workspace scope', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pairing-qr-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     // A workspace file must never enable it — the key would push the
     // operator's stable bearer into captured stdout.
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
-      JSON.stringify({ serve: { pairingQr: true } }),
+      JSON.stringify({ serve: { tokenQr: true } }),
     );
     expect(
-      loadServeFastPathSettings(tempWorkspace).serve?.pairingQr,
+      loadServeFastPathSettings(tempWorkspace).serve?.tokenQr,
     ).toBeUndefined();
 
     writeFileSync(
       join(qwenHome, 'settings.json'),
-      JSON.stringify({ serve: { pairingQr: true } }),
+      JSON.stringify({ serve: { tokenQr: true } }),
     );
-    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
-      true,
-    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
   });
 
-  it('keeps user-scope serve.pairingQr when workspace startup channels merge', () => {
+  it('keeps user-scope serve.tokenQr when workspace startup channels merge', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pairing-qr-channels-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-channels-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
       join(qwenHome, 'settings.json'),
-      JSON.stringify({ serve: { pairingQr: true } }),
+      JSON.stringify({ serve: { tokenQr: true } }),
     );
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
@@ -1767,40 +1765,68 @@ describe('serve fast path environment bootstrap', () => {
 
     expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
       channels: ['telegram'],
-      pairingQr: true,
+      tokenQr: true,
     });
   });
 
-  it('loads serve.pairingQr from the system scope and lets system override user', () => {
+  it('loads serve.tokenQr from the system scope and lets system override user', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pairing-qr-system-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-system-')),
     );
     writeFileSync(
       process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
-      JSON.stringify({ serve: { pairingQr: true } }),
+      JSON.stringify({ serve: { tokenQr: true } }),
     );
-    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
-      true,
-    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
 
     // Merge precedence: system applies last, so an explicit system false
     // must override a user true — otherwise a fleet policy cannot force the
     // suppression back on.
     writeFileSync(
       join(qwenHome, 'settings.json'),
-      JSON.stringify({ serve: { pairingQr: true } }),
+      JSON.stringify({ serve: { tokenQr: true } }),
     );
-    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
-      true,
-    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
     writeFileSync(
       process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
-      JSON.stringify({ serve: { pairingQr: false } }),
+      JSON.stringify({ serve: { tokenQr: false } }),
     );
-    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
-      false,
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(false);
+  });
+
+  it('loads serve.tokenQr from the system-defaults scope', () => {
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-defaults-')),
     );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
+  });
+
+  it('passes a malformed serve.tokenQr through without discarding the summary', () => {
+    const qwenHome = useTempQwenHome();
+    const workspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-malformed-')),
+    );
+    tempWorkspace = workspace;
+    // The reader must not throw here: it is shared with policy.* and
+    // serve.channels, and a whole-summary abort would downgrade permission
+    // mediation to its default because of a display knob. The consumer
+    // (run-qwen-serve) validates, warns, and treats it as absent.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        policy: { permissionStrategy: 'consensus', consensusQuorum: 2 },
+        serve: { tokenQr: 'true' },
+      }),
+    );
+    const settings = loadServeFastPathSettings(workspace);
+    expect(settings.policy?.permissionStrategy).toBe('consensus');
+    expect(settings.serve?.tokenQr).toBe('true');
   });
 
   it.each([

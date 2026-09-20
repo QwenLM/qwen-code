@@ -41,6 +41,31 @@ export function quickstartPrintMode(
   return generated ? 'token-only' : 'silent';
 }
 
+/**
+ * Why a requested token QR cannot print, or `undefined` when it can. Covers
+ * the two causes that are known before the printer runs: an unmounted Web
+ * Shell (`--no-web`, unresolved assets) and a loopback bind, which prints no
+ * QR — `quickstartPrintMode` answers `token-only` or `silent` there, and both
+ * collapse to this one cause, so `generated` cannot change the result (a
+ * generated bearer still gets its own plain-text line from the printer). The
+ * flag exists to remove silent no-ops, so both causes are named on stderr.
+ * The third inert case — no dialable LAN candidate to encode — is discovered
+ * inside the printer and reported by its own `QR unavailable` line on stdout.
+ */
+export function tokenQrNoEffectReason(input: {
+  requested: boolean;
+  webShellMounted: boolean;
+  boundAddress: string;
+  generated: boolean;
+}): string | undefined {
+  if (!input.requested) return undefined;
+  if (!input.webShellMounted)
+    return 'qwen serve: --token-qr / serve.tokenQr has no effect because the Web Shell is not mounted.';
+  if (quickstartPrintMode(input.boundAddress, input.generated) !== 'full')
+    return 'qwen serve: --token-qr / serve.tokenQr has no effect on this bind: a loopback listener prints no quickstart QR.';
+  return undefined;
+}
+
 interface QuickstartAddress {
   label: string;
   url: string;
@@ -132,7 +157,13 @@ export async function printRemoteQuickstart(input: {
   token: string;
   generated: boolean;
   web: boolean;
-  pairingQr?: boolean;
+  tokenQr?: boolean;
+  /**
+   * True when the operator explicitly passed `--no-token-qr`. Distinguishes a
+   * deliberate veto from policy suppression so the hint does not tell them to
+   * pass the flag they just passed.
+   */
+  tokenQrVetoed?: boolean;
   interfaces?: ReturnType<typeof networkInterfaces>;
 }): Promise<void> {
   // An informational block whose reader going away (`qwen serve | head`) must
@@ -187,20 +218,27 @@ export async function printRemoteQuickstart(input: {
     // The QR may encode the resolved bearer. That happens when the
     // credential is the ephemeral one this process generated (it has no
     // other delivery channel), when the operator is at an interactive
-    // terminal, or when the operator explicitly opted in via --pairing-qr /
-    // serve.pairingQr; otherwise a stable operator token must not be
+    // terminal, or when the operator explicitly opted in via --token-qr /
+    // serve.tokenQr; otherwise a stable operator token must not be
     // re-published into captured stdout (container/systemd logs) on every
     // restart. A pty-allocated container counts as interactive, so its logs
-    // remain secret-bearing by design. The suppressed case still delivers
-    // the address by QR — the same URL is printed as plain text above, so
-    // the marginal disclosure is zero, and the Web Shell's auth gate asks
-    // for the token on arrival.
+    // remain secret-bearing by design. An explicit --no-token-qr vetoes the
+    // QR on every path, including the two above — a generated bearer is
+    // still printed as plain text on its own line, so the veto costs
+    // access to nothing. The suppressed case still delivers the address by
+    // QR — the same URL is printed as plain text above, so the marginal
+    // disclosure is zero, and the Web Shell's auth gate asks for the token
+    // on arrival.
     const suppressTokenQr =
-      !input.generated && !process.stdout.isTTY && input.pairingQr !== true;
+      input.tokenQrVetoed === true ||
+      (!input.generated && !process.stdout.isTTY && input.tokenQr !== true);
     if (suppressTokenQr)
       writeStdoutLineSafe(
-        'Token-bearing QR suppressed: stable operator token with ' +
-          'non-interactive stdout. Pass --pairing-qr to print it anyway.',
+        input.tokenQrVetoed
+          ? 'Token-bearing QR suppressed: the token QR was explicitly ' +
+              'disabled for this run.'
+          : 'Token-bearing QR suppressed: stable operator token with ' +
+              'non-interactive stdout. Pass --token-qr to print it anyway.',
       );
     try {
       const { default: qrcode } = (await import('qrcode-terminal')) as {

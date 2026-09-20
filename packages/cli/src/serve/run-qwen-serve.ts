@@ -110,7 +110,10 @@ import {
 } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
-import { printRemoteQuickstart } from './remote-quickstart.js';
+import {
+  printRemoteQuickstart,
+  tokenQrNoEffectReason,
+} from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -4032,11 +4035,11 @@ async function runQwenServeImpl(
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* / serve.channels / serve.pairingQr ` +
+        `policy.* / serve.channels / serve.tokenQr ` +
         `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
         `to apply context.fileName / policy.* / serve.channels / ` +
-        `serve.pairingQr overrides.`,
+        `serve.tokenQr overrides.`,
     );
   }
   // Init daemon logger early so all subsequent lifecycle events
@@ -9875,6 +9878,45 @@ async function runQwenServeImpl(
       // way in.
       const boundAddress =
         typeof addr === 'object' && addr ? addr.address : opts.hostname;
+      // The settings source is resolved here rather than in the yargs
+      // command layer so the serve fast path (which never runs that
+      // handler) honors serve.tokenQr identically. An explicit flag
+      // (either polarity) wins over the setting; the setting applies
+      // only when the flag was omitted.
+      const settingTokenQr = bootSettings?.serve?.tokenQr;
+      if (
+        opts.tokenQr === undefined &&
+        settingTokenQr !== undefined &&
+        typeof settingTokenQr !== 'boolean'
+      ) {
+        // Validated here rather than in the shared settings reader:
+        // throwing there would discard the whole summary — policy.* and
+        // serve.channels with it, silently downgrading permission
+        // mediation to its default — because of a display knob. Name the
+        // field and its type, never the value: settings strings go through
+        // ${VAR} substitution, so a mis-keyed `"${QWEN_SERVER_TOKEN}"` would
+        // otherwise re-publish the live bearer into captured stderr on every
+        // boot — the exact exposure this feature exists to prevent.
+        writeStderrLine(
+          `qwen serve: serve.tokenQr must be a boolean; ignoring a ${typeof settingTokenQr} value.`,
+        );
+      }
+      const tokenQr =
+        opts.tokenQr !== undefined
+          ? opts.tokenQr === true
+          : settingTokenQr === true;
+      // Name why a requested QR cannot print instead of discarding the
+      // request silently — the same silent-no-op shape this flag exists to
+      // remove. Outside the `if (token)` block on purpose: a loopback bind
+      // with no bearer is the commonest inert case, and it must be reported
+      // too.
+      const tokenQrNoEffect = tokenQrNoEffectReason({
+        requested: tokenQr,
+        webShellMounted,
+        boundAddress,
+        generated: generatedToken,
+      });
+      if (tokenQrNoEffect) writeStderrLine(tokenQrNoEffect);
       if (token) {
         void printRemoteQuickstart({
           bind: opts.hostname,
@@ -9884,15 +9926,8 @@ async function runQwenServeImpl(
           token,
           generated: generatedToken,
           web: webShellMounted,
-          // The settings source is resolved here rather than in the yargs
-          // command layer so the serve fast path (which never runs that
-          // handler) honors serve.pairingQr identically. An explicit flag
-          // (either polarity) wins over the setting; the setting applies
-          // only when the flag was omitted.
-          pairingQr:
-            opts.pairingQr !== undefined
-              ? opts.pairingQr === true
-              : bootSettings?.serve?.pairingQr === true,
+          tokenQr,
+          tokenQrVetoed: opts.tokenQr === false,
         });
       }
       // Operator log on stderr too (systemd/docker/k8s default

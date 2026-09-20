@@ -1240,7 +1240,7 @@ describe('serve startup import boundary', () => {
   );
 });
 
-describe('serve pairingQr resolution', () => {
+describe('serve tokenQr resolution', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
@@ -1270,22 +1270,22 @@ describe('serve pairingQr resolution', () => {
     });
   }
 
-  it('sets pairingQr from the --pairing-qr flag', async () => {
-    await startWith('--pairing-qr --no-web');
+  it('sets tokenQr from the --token-qr flag', async () => {
+    await startWith('--token-qr --no-web');
     expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ pairingQr: true }),
+      expect.objectContaining({ tokenQr: true }),
     );
   });
 
-  it('passes an explicit --no-pairing-qr through as false', async () => {
-    await startWith('--no-pairing-qr --no-web');
+  it('passes an explicit --no-token-qr through as false', async () => {
+    await startWith('--no-token-qr --no-web');
     expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ pairingQr: false }),
+      expect.objectContaining({ tokenQr: false }),
     );
   });
 
-  it('leaves pairingQr unset by default', async () => {
+  it('leaves tokenQr unset by default', async () => {
     await startWith('--no-web');
-    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty('pairingQr');
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty('tokenQr');
   });
 });

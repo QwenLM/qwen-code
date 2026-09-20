@@ -48,7 +48,7 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
-  serve?: { channels?: unknown; pairingQr?: unknown };
+  serve?: { channels?: unknown; tokenQr?: unknown };
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -427,7 +427,7 @@ function isWorkspaceTrustedFastPath(
 function readSettingsSummary(
   filePath: string,
   includeServe = false,
-  includePairingQr = false,
+  includeTokenQr = false,
 ): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
 
@@ -446,7 +446,7 @@ function readSettingsSummary(
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  return pickFastPathSettings(parsed, includeServe, includePairingQr);
+  return pickFastPathSettings(parsed, includeServe, includeTokenQr);
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -464,7 +464,7 @@ function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
 function pickFastPathSettings(
   value: Record<string, unknown>,
   includeServe = false,
-  includePairingQr = false,
+  includeTokenQr = false,
 ): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   const useLegacyKeys = shouldUseLegacyFastPathKeys(value);
@@ -660,14 +660,18 @@ function pickFastPathSettings(
   const serve = value['serve'];
   if (isPlainObject(serve)) {
     const channels = includeServe ? serve['channels'] : undefined;
-    // serve.pairingQr pushes the operator's stable bearer into captured
+    // serve.tokenQr pushes the operator's stable bearer into captured
     // stdout, so only operator-owned scopes (user/system/system-defaults)
-    // may set it — never a workspace file, trusted or not.
-    const pairingQr = includePairingQr ? serve['pairingQr'] : undefined;
-    if (channels !== undefined || pairingQr !== undefined) {
+    // may set it — never a workspace file, trusted or not. The value is
+    // passed through untyped on purpose: this reader is shared with
+    // policy.* and serve.channels, and throwing here would discard the
+    // whole summary — downgrading permission mediation to its default —
+    // because of a display knob. The consumer validates and warns.
+    const tokenQr = includeTokenQr ? serve['tokenQr'] : undefined;
+    if (channels !== undefined || tokenQr !== undefined) {
       out.serve = {
         ...(channels !== undefined ? { channels } : {}),
-        ...(pairingQr !== undefined ? { pairingQr } : {}),
+        ...(tokenQr !== undefined ? { tokenQr } : {}),
       };
     }
   }
@@ -730,10 +734,10 @@ function mergeFastPathSettings(
     if (source.policy) {
       merged.policy = { ...(merged.policy ?? {}), ...source.policy };
     }
-    if (source.serve?.pairingQr !== undefined) {
+    if (source.serve?.tokenQr !== undefined) {
       merged.serve = {
         ...(merged.serve ?? {}),
-        pairingQr: source.serve.pairingQr,
+        tokenQr: source.serve.tokenQr,
       };
     }
   }

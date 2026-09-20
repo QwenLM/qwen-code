@@ -347,14 +347,14 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         items: { type: 'string' },
       },
-      pairingQr: {
+      tokenQr: {
         type: 'boolean',
-        label: 'Pairing QR',
+        label: 'Token QR',
         category: 'Advanced',
         requiresRestart: true,
         default: false,
         description:
-          "Print the token-bearing pairing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-pairing-qr vetoes this setting for that run. Same effect as qwen serve --pairing-qr.",
+          "Print the token-bearing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-token-qr suppresses the QR for that run. Same effect as qwen serve --token-qr.",
         showInDialog: false,
       },
       maxConcurrentSubSessionsPerCaller: {
