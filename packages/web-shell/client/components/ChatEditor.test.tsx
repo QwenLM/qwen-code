@@ -2069,7 +2069,471 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
-describe('ChatEditor Plan toggle', () => {
+describe('ChatEditor Plan in the add menu', () => {
+  const actions = ['addMenu', 'approvalMode', 'plan', 'model'] as const;
+  const planButton = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>('[data-web-shell-plan-button]');
+
+  async function openPlanMenuItem(container: HTMLDivElement) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector('[data-testid="composer-add-menu-trigger"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    // A missing entry only means something once the menu is known to be open.
+    const menu = portalRoot.querySelector('[role="menu"]');
+    expect(menu).not.toBeNull();
+    const entry = portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-plan"]',
+    );
+    if (entry) {
+      const rows = menu!.querySelectorAll('[role^="menuitem"]');
+      expect(rows[rows.length - 1]).toBe(entry);
+    }
+    return entry;
+  }
+
+  it('keeps Plan off the toolbar until it is on and enables it from the menu', async () => {
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: actions,
+      onTogglePlan,
+    });
+    expect(planButton(container)).toBeNull();
+    expect(container.querySelector('[data-web-shell-plan-control]')).toBeNull();
+    expect(
+      container.querySelector('[data-toolbar-measure^="plan:"]'),
+    ).toBeNull();
+
+    const item = (await openPlanMenuItem(container))!;
+    expect(item.getAttribute('role')).toBe('menuitemcheckbox');
+    expect(item.getAttribute('aria-checked')).toBe('false');
+    expect(item.textContent).toBe('Plan modePlan first, run after you approve');
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      // The menu runs the choice once it has closed.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).toHaveBeenCalledOnce();
+  });
+
+  it('reports an enabled Plan as a dismissible chip after the permission control', async () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: actions,
+      planMode: true,
+      currentMode: 'yolo',
+      isRunning: true,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const chip = planButton(container)!;
+    expect(
+      container.querySelectorAll('[data-web-shell-plan-button]'),
+    ).toHaveLength(1);
+    expect(chip.hasAttribute('data-web-shell-plan-chip')).toBe(true);
+    // The close mark is what makes the chip dismissible. It sits inside the
+    // icon slot, which it takes over on hover, rather than trailing the label
+    // where revealing it would widen the chip.
+    const iconSlot = chip.querySelector('[class*="planChipIcon"]')!;
+    const closeMarks = chip.querySelectorAll('[class*="planChipClose"]');
+    expect(closeMarks).toHaveLength(1);
+    // The stylesheet reaches both through a child combinator: the Plan icon
+    // first, then the mark stacked over it.
+    expect(Array.from(iconSlot.children)).toEqual([
+      iconSlot.querySelector('[style*="mode-icon-url"]'),
+      closeMarks[0],
+    ]);
+    expect(closeMarks[0]!.getAttribute('aria-hidden')).toBe('true');
+    expect(closeMarks[0]!.querySelector('svg')).not.toBeNull();
+    // The slot the mark fills is the fixed icon box, which is why revealing
+    // it cannot change the width of the chip; and the forced-colours repaint
+    // is written for the icon being a span.
+    expect(iconSlot.className).toContain('toolBtnModeIcon');
+    expect(iconSlot.firstElementChild?.tagName).toBe('SPAN');
+    // Hosts that select the Plan control by this hook still find it.
+    expect(chip.hasAttribute('data-web-shell-plan-control')).toBe(true);
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    expect(chip.getAttribute('aria-label')).toBe('Plan');
+    expect(
+      document.getElementById(chip.getAttribute('aria-describedby')!)
+        ?.textContent,
+    ).toBe(
+      'Planning; execute with Full Access after approval. Click to exit planning.',
+    );
+    const controls = Array.from(
+      container.querySelectorAll('[data-web-shell-toolbar-leading] button'),
+    );
+    expect(controls.indexOf(chip)).toBe(
+      controls.indexOf(
+        container.querySelector('[data-web-shell-mode-button]')!,
+      ) + 1,
+    );
+    expect(
+      (await openPlanMenuItem(container))!.getAttribute('aria-checked'),
+    ).toBe('true');
+
+    // Propagation is what closes a menu the chip was clicked on top of.
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    composerCoreState.focus.mockClear();
+    act(() => chip.click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    // The chip's own handoff, and the composer surface the click reaches. The
+    // permission button above stops propagation, so it added none.
+    expect(composerCoreState.focus).toHaveBeenCalledTimes(2);
+    // Controlled: the chip stays until the host reports Plan off.
+    expect(planButton(container)).not.toBeNull();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+  });
+
+  it('stays operable with the input disabled and hands focus past it when Plan ends', () => {
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: actions,
+      disabled: true,
+      planMode: true,
+      onTogglePlan,
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-add-menu-trigger"]',
+      )!.disabled,
+    ).toBe(true);
+    // With the input disabled the click cannot move focus into it, so the
+    // chip still holds focus when Plan turns off and takes it down with it
+    // unless it is handed on.
+    const props = {
+      visibleToolbarActions: actions,
+      disabled: true,
+      onTogglePlan,
+    };
+    act(() => planButton(container)!.focus());
+    act(() => planButton(container)!.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    // Both hosts go busy inside that click and stay so until the mode has
+    // changed, and the chip keeps focus throughout.
+    rerenderChatEditor(container, {
+      ...props,
+      planMode: true,
+      modeControlsDisabled: true,
+    });
+    expect(document.activeElement).toBe(planButton(container));
+    // The mode event can land before the request settles, so the permission
+    // control may still be disabled when the chip goes; the model control
+    // beside it never is.
+    rerenderChatEditor(container, {
+      ...props,
+      planMode: false,
+      modeControlsDisabled: true,
+    });
+    expect(planButton(container)).toBeNull();
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-web-shell-model-button]'),
+    );
+  });
+
+  it('prefers the permission control beside the chip once it is enabled again', () => {
+    const props = {
+      visibleToolbarActions: actions,
+      disabled: true,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-web-shell-mode-button]'),
+    );
+  });
+
+  it('hands focus nowhere when the host shows no control beside the chip', () => {
+    // The chip renders only where the host lists the add menu, so the
+    // narrowest host without a handoff target still keeps it.
+    const props = {
+      visibleToolbarActions: ['addMenu', 'plan'] as const,
+      disabled: true,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('hands focus nowhere while the only control beside the chip is disabled', () => {
+    // The permission control stays disabled for as long as the reported mode
+    // change is in flight, which can outlast the chip.
+    const props = {
+      visibleToolbarActions: ['addMenu', 'approvalMode', 'plan'] as const,
+      disabled: true,
+      modeControlsDisabled: true,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('leaves focus where the user has since put it', () => {
+    const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+    const container = renderChatEditor({ ...props, planMode: true });
+    const elsewhere = document.createElement('input');
+    container.appendChild(elsewhere);
+    act(() => planButton(container)!.focus());
+    // A blur React never hears of, which it listens for as `focusout` on the
+    // root: the flag goes stale while the focus does not.
+    planButton(container)!.addEventListener('focusout', (event) =>
+      event.stopPropagation(),
+    );
+    act(() => elsewhere.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('hands focus on once, not again when the input is later disabled', () => {
+    const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(composerCoreState.focus).toHaveBeenCalledOnce();
+    // The input going disabled re-runs the handoff's effect; a flag left set
+    // would send focus to the permission control out of nowhere.
+    rerenderChatEditor(container, {
+      ...props,
+      planMode: false,
+      disabled: true,
+    });
+    expect(composerCoreState.focus).toHaveBeenCalledOnce();
+    expect(document.activeElement).not.toBe(
+      container.querySelector('[data-web-shell-mode-button]'),
+    );
+  });
+
+  it('does not spend the had-focus flag while the chip is still mounted', () => {
+    const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    // `disabled` is the one dep of the handoff effect that can flip while
+    // Plan is still on — an approval overlay arriving, say — and re-running
+    // the effect must not spend the flag on a chip that has not unmounted.
+    rerenderChatEditor(container, {
+      ...props,
+      planMode: true,
+      disabled: true,
+    });
+    expect(document.activeElement).toBe(planButton(container));
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    rerenderChatEditor(container, {
+      ...props,
+      planMode: false,
+      disabled: true,
+    });
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-web-shell-mode-button]'),
+    );
+  });
+
+  it('does not raise the keyboard by handing focus on where the pointer is coarse', () => {
+    const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      rerenderChatEditor(container, { ...props, planMode: false });
+      expect(composerCoreState.focus).not.toHaveBeenCalled();
+      // A button raises no keyboard, so the handoff still happens there.
+      expect(document.activeElement).toBe(
+        container.querySelector('[data-web-shell-mode-button]'),
+      );
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('hands focus to the input when Plan ends under a focused chip with no click', () => {
+    // The host reports the mode; Plan can end without the chip being used.
+    const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+    expect(composerCoreState.focus).toHaveBeenCalledOnce();
+  });
+
+  it('leaves focus alone when Plan ends while the chip does not hold it', () => {
+    const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    act(() => planButton(container)!.blur());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('makes the menu entry and the chip inert during a plan handoff', async () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: actions,
+      planMode: true,
+      modeControlsDisabled: true,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const chip = planButton(container)!;
+    // Inert rather than natively disabled: both hosts go busy inside the
+    // chip's own click, and a focused button that becomes `disabled` loses
+    // focus to the body there and then.
+    expect(chip.getAttribute('aria-disabled')).toBe('true');
+    expect(chip.disabled).toBe(false);
+    act(() => chip.click());
+    const item = (await openPlanMenuItem(container))!;
+    expect(item.hasAttribute('data-disabled')).toBe(true);
+    // The add menu never disables a row without saying why.
+    expect(item.textContent).toContain('Switching mode');
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(onTogglePlan).not.toHaveBeenCalled();
+
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: false });
+    expect(chip.hasAttribute('aria-disabled')).toBe(false);
+    act(() => chip.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { width: 0, label: '' },
+    { width: 300, label: 'Plan' },
+  ])(
+    'fits the chip label to available toolbar width $width',
+    ({ width, label }) => {
+      const bounds = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+            return { width: 72 } as DOMRect;
+          if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+            return { width: 44 } as DOMRect;
+          if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+            return { width } as DOMRect;
+          return { width: 0 } as DOMRect;
+        });
+      try {
+        const container = renderChatEditor({
+          visibleToolbarActions: actions,
+          planMode: true,
+          onTogglePlan: vi.fn(),
+        });
+        expect(planButton(container)!.textContent).toBe(label);
+        // Where nothing can hover, the close mark replaces the icon only on a
+        // chip that still names itself.
+        expect(planButton(container)!.hasAttribute('data-labelled')).toBe(
+          label !== '',
+        );
+        // The budget is only right if the replicas stand in for the real chip,
+        // and the mark, being stacked over the icon, takes no room in either.
+        expect(
+          container.querySelector(
+            '[data-toolbar-measure^="plan:"] [class*="planChipClose"]',
+          ),
+        ).toBeNull();
+        expect(
+          container.querySelector('[data-toolbar-measure="plan:collapsed"]')
+            ?.textContent,
+        ).toBe('');
+        expect(
+          container.querySelector('[data-toolbar-measure="plan:expanded"]')
+            ?.textContent,
+        ).toBe('Plan');
+      } finally {
+        bounds.mockRestore();
+      }
+    },
+  );
+
+  it('measures the chip when Plan turns on after mount', () => {
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+          return { width: 72 } as DOMRect;
+        if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+          return { width: 44 } as DOMRect;
+        if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+          return { width: 300 } as DOMRect;
+        return { width: 0 } as DOMRect;
+      });
+    try {
+      const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+      const container = renderChatEditor(props);
+      expect(planButton(container)).toBeNull();
+      rerenderChatEditor(container, { ...props, planMode: true });
+      expect(planButton(container)!.textContent).toBe('Plan');
+    } finally {
+      bounds.mockRestore();
+    }
+  });
+
+  it.each([
+    { visibleToolbarActions: ['addMenu'] as const, onTogglePlan: vi.fn() },
+    { visibleToolbarActions: ['addMenu', 'plan'] as const },
+  ])(
+    'requires both the plan action and a toggle handler: %j',
+    async (props) => {
+      const container = renderChatEditor({ ...props, planMode: true });
+      expect(planButton(container)).toBeNull();
+      expect(await openPlanMenuItem(container)).toBeNull();
+    },
+  );
+});
+
+// A host that lists `plan` without `addMenu` has no menu to hold the entry.
+describe('ChatEditor Plan toolbar switch fallback', () => {
   it('associates the Plan switch with its changing accessible description', () => {
     const props = {
       visibleToolbarActions: ['plan'] as const,
@@ -2360,7 +2824,9 @@ describe('ChatEditor toolbar popovers', () => {
     );
     await act(async () => {
       yolo?.click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Long enough to catch a focus restore that arrives from the popover's
+      // post-unmount timeout, which is what this asserts does not happen.
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
     expect(onSelectMode).toHaveBeenCalledWith('yolo');

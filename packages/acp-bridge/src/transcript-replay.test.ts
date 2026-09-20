@@ -81,6 +81,34 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('replays exported artifact descriptors with the slash command result', () => {
+    const sessionArtifacts = [
+      {
+        kind: 'html',
+        storage: 'workspace',
+        title: 'export.html',
+        workspacePath: 'export.html',
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('export-result', {
+        type: 'assistant',
+        text: 'Session exported to HTML: export.html',
+        sessionArtifacts,
+      }),
+    );
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'agent_message_chunk',
+        _meta: expect.objectContaining({
+          source: 'slash_command',
+          sessionArtifacts,
+        }),
+      }),
+    ]);
+  });
+
   it('projects the daemon identity on every user block before a turn result', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -396,7 +424,7 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
-  it('emits legacy goalTerminal metadata for a terminal goal_state', () => {
+  it('emits one achieved card for a terminal goal_state, with no terminal twin', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       goalStateRecord('goal-complete', 'complete', {
@@ -406,14 +434,14 @@ describe('createTranscriptReplayMachine', () => {
     );
 
     expect(projected[0]?._meta).toMatchObject({
-      goalStatus: { kind: 'achieved', condition: GOAL.objective },
-      goalTerminal: {
+      goalStatus: {
         kind: 'achieved',
         condition: GOAL.objective,
         iterations: GOAL.turnCount,
         durationMs: GOAL.activeTimeMs,
       },
     });
+    expect(projected[0]?._meta).not.toHaveProperty('goalTerminal');
   });
 
   it('carries a recorded compression payload back through replay', () => {

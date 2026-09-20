@@ -22,6 +22,7 @@ import {
   CalendarClockIcon,
   FolderClosedIcon,
   FolderOpenIcon,
+  Globe2Icon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
@@ -85,15 +86,30 @@ function getSessionLabel(session: DaemonSessionSummary): string {
   return displayName || session.sessionId.slice(0, 8);
 }
 
-function WorkspaceFolderIcon({ open }: { open: boolean }) {
+function WorkspaceFolderIcon({
+  open,
+  remote,
+}: {
+  open: boolean;
+  remote: boolean;
+}) {
   const Icon = open ? FolderOpenIcon : FolderClosedIcon;
   return (
-    <Icon
-      className={styles.folderIcon}
-      size={14}
-      strokeWidth={1.4}
-      aria-hidden="true"
-    />
+    <span className={styles.folderIconWrap}>
+      <Icon
+        className={styles.folderIcon}
+        size={14}
+        strokeWidth={1.4}
+        aria-hidden="true"
+      />
+      {remote && (
+        <Globe2Icon
+          className={styles.folderRemoteBadge}
+          data-testid="remote-workspace-folder-icon"
+          aria-hidden="true"
+        />
+      )}
+    </span>
   );
 }
 
@@ -105,6 +121,7 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
   reloadToken: number;
@@ -210,6 +227,7 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
+  remote = false,
   renderHeader,
   client,
   reloadToken,
@@ -782,7 +800,7 @@ export function WorkspaceSection({
             <span
               className={cx(styles.chevron, expanded && styles.chevronOpen)}
             >
-              <WorkspaceFolderIcon open={expanded} />
+              <WorkspaceFolderIcon open={expanded} remote={remote} />
             </span>
             <span className={styles.headerContent}>
               <span className={styles.name} title={workspace.cwd}>
