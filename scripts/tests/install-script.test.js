@@ -737,7 +737,66 @@ describe('standalone release packaging', () => {
     expect(releaseVerifyScript).not.toContain('assertInstallAliasMatches');
   });
 
+  it('allowlists every npm-published dist entry for standalone packaging', () => {
+    // Regression gate for PR #12067 review: prepare-package.js's npm `files`
+    // list and create-standalone-package.js's allowlists must not drift
+    // apart — an entry missing from both DIST_ALLOWED_ENTRIES (or its
+    // patterns) and DIST_NPM_PACKAGE_ONLY_ENTRIES aborts the release build
+    // with "Unexpected dist asset" at archive time, and an asset that must
+    // ship inside the archive (the sandbox workers) must land in
+    // DIST_ALLOWED_ENTRIES specifically, not the npm-only skip list.
+    const prepareScript = readScript('scripts/prepare-package.js');
+    const packageScript = readScript('scripts/create-standalone-package.js');
+    const filesBlock = /files:\s*\[([\s\S]*?)\]/.exec(prepareScript);
+    expect(filesBlock).not.toBeNull();
+    const entries = [...filesBlock[1].matchAll(/'([^']+)'/g)].map(
+      (match) => match[1],
+    );
+    expect(entries.length).toBeGreaterThan(0);
+    const allowedBlock =
+      /DIST_ALLOWED_ENTRIES = new Set\(\[([\s\S]*?)\]\)/.exec(packageScript);
+    const npmOnlyBlock =
+      /DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set\(\[([\s\S]*?)\]\)/.exec(
+        packageScript,
+      );
+    expect(allowedBlock).not.toBeNull();
+    expect(npmOnlyBlock).not.toBeNull();
+    for (const entry of entries) {
+      if (entry.includes('*')) {
+        // Glob entries (today: '*.sb') are covered by
+        // DIST_ALLOWED_ENTRY_PATTERNS rather than a literal name.
+        expect(packageScript).toContain('DIST_ALLOWED_ENTRY_PATTERNS');
+        continue;
+      }
+      const known =
+        allowedBlock[1].includes(`'${entry}'`) ||
+        npmOnlyBlock[1].includes(`'${entry}'`);
+      expect(known, `npm files entry '${entry}' unknown to packager`).toBe(
+        true,
+      );
+    }
+    // The sandbox workers are resolved from the installed bundle at
+    // execution time, so they must be copied into the archive's lib/ —
+    // the npm-only skip list is the wrong home for them — and they must be
+    // required, so an archive that somehow lacked them fails at build time
+    // rather than at first sandbox launch.
+    const requiredBlock = /DIST_REQUIRED_PATHS = \[([\s\S]*?)\]/.exec(
+      packageScript,
+    );
+    expect(requiredBlock).not.toBeNull();
+    for (const asset of ['sandboxBwrapRelay.js', 'sandboxFileWorker.js']) {
+      expect(allowedBlock[1]).toContain(`'${asset}'`);
+      expect(npmOnlyBlock[1]).not.toContain(`'${asset}'`);
+      expect(requiredBlock[1]).toContain(`'${asset}'`);
+    }
+  });
+
   it('loads the standalone release packaging helper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    expect(releaseScript).toMatch(
+      /let pnpmLockedKeys;[\s\S]*if \(isMainModule\(\)\)/,
+    );
+
     const output = execFileSync(
       process.execPath,
       ['scripts/build-standalone-release.js', '--help'],
@@ -2558,6 +2617,9 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    expect(ossWorkflow).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(ossWorkflow).toContain('corepack pnpm install --frozen-lockfile');
+    expect(ossWorkflow).toContain('npm ci --no-audit --progress=false');
     // The sync workflow can be re-dispatched for any tag, and its steps come
     // from the default branch while the checkout and the assets come from that
     // tag, so it derives the flavor from the archives the release actually
@@ -4691,6 +4753,8 @@ function ensureMinimalDist({
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
   writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxBwrapRelay.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxFileWorker.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
     writeFileSync(path.join(distPath, 'execution-worker.js'), '');
