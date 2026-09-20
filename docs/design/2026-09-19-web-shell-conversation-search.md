@@ -39,3 +39,11 @@ None. The threshold is a host component option; a settings-page control and cros
 The promise returns a `status`: `located` (the navigation target is activated; scrolling/highlighting occurs on the subsequent React render, not an animation-completion signal), `not_found` (absent persisted user/assistant record), `not_ready` (session/history/viewport not ready), `session_mismatch`, `unsupported` (legacy history), `cancelled`, or `error` (read/navigation failure). Host callers should react to readiness instead of treating `not_ready` as an empty result. `AbortSignal`, an accepted newer host request, session/workspace changes, transcript revision changes, and unmounting invalidate pending work. Rejected calls (stale API owners, already-aborted signals, mismatched sessions, or empty record IDs) do not supersede an active navigation.
 
 Cross-session search still returns a session and one snippet, without record IDs. A host must retain the persisted record ID in its search results before using exact navigation. Extending that search endpoint, archive search, and downstream host UI are separate work; this API does not imply those capabilities exist.
+
+## Review fixes: dialog lifetime and exact navigation
+
+The search state and dialog stay mounted above the transcript viewport. Only the trigger moves between the global and in-list timelines; switching navigation modes or hiding the timeline preserves an open query. Closing restores focus to the current trigger, or the composer when that trigger is unavailable. Session identity still resets the search state.
+
+A persisted user record can resolve through its verified live prompt alias. Assistant records must resolve to their own block, loading retained history even when the user turn is live. Search navigation waits for an existing boundary read and can retry a retryable boundary failure; it never substitutes the user turn for an assistant record.
+
+IME confirmation keys do not select a result. Incomplete scans cannot replace an established visibility count, and reconnecting retries the count probe and active query. A search keeps the currently viewed historical page pinned until it succeeds, so cancellation or failure cannot evict the page being read.

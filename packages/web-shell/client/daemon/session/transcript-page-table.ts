@@ -339,6 +339,7 @@ export class HistoricalTranscriptPageTable {
     turnId: string,
     snapshot: string,
     response: DaemonSessionTranscriptPage,
+    targetRecordId?: string,
   ): AdmittedHistoricalTarget {
     const previous = this.snapshot;
     const requests = new Map(this.cachedBoundaryRequests);
@@ -346,7 +347,13 @@ export class HistoricalTranscriptPageTable {
     const selectedRange = this.selectedRangeId;
     const selectedPage = this.selectedPageId;
     try {
-      return this.admitAnchorPage(ordinal, turnId, snapshot, response);
+      return this.admitAnchorPage(
+        ordinal,
+        turnId,
+        snapshot,
+        response,
+        targetRecordId,
+      );
     } catch (error) {
       this.snapshot = previous;
       this.cachedBoundaryRequests.clear();
@@ -365,6 +372,7 @@ export class HistoricalTranscriptPageTable {
     turnId: string,
     snapshot: string,
     response: DaemonSessionTranscriptPage,
+    targetRecordId?: string,
   ): AdmittedHistoricalTarget {
     assertContinuationCursor(response);
     if (response.targetRecordId !== turnId) {
@@ -375,7 +383,11 @@ export class HistoricalTranscriptPageTable {
     const cached = this.findTurn(turnId);
     if (cached) return cached;
 
-    const knownRecordIds = this.liveRecordIds;
+    // Exact-message navigation may need pages after a live user turn. Keep
+    // that turn as the historical anchor while searching for its record.
+    const knownRecordIds = targetRecordId
+      ? new Set([...this.liveRecordIds].filter((id) => id !== turnId))
+      : this.liveRecordIds;
     const materialized = this.materializePage(
       snapshot,
       response.events,
@@ -411,14 +423,15 @@ export class HistoricalTranscriptPageTable {
             },
           }
         : { kind: 'end' };
-    const newer: TranscriptBoundary = reachedLive
-      ? { kind: 'live' }
-      : response.hasMore && response.nextCursor
-        ? {
-            kind: 'loadable',
-            request: { kind: 'cursor', cursor: response.nextCursor },
-          }
-        : { kind: 'end' };
+    const newer: TranscriptBoundary =
+      reachedLive && !targetRecordId
+        ? { kind: 'live' }
+        : response.hasMore && response.nextCursor
+          ? {
+              kind: 'loadable',
+              request: { kind: 'cursor', cursor: response.nextCursor },
+            }
+          : { kind: 'end' };
     const range: HistoricalTranscriptRange = Object.freeze({
       id: rangeId,
       anchorOrdinal: ordinal,

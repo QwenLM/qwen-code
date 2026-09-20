@@ -953,6 +953,14 @@ vi.mock('./hooks/useMessageNavigation', () => {
   return { useMessageNavigation: () => navigate };
 });
 
+vi.mock('./components/ConversationSearch', () => ({
+  ConversationSearch: ({
+    children,
+  }: {
+    children: (trigger: ReactNode) => ReactNode;
+  }) => children(undefined),
+}));
+
 vi.mock('./hooks/useMessages', () => ({
   projectStreamingTailMessages: () => testState.streamingTailMessages,
   useMessages: () => testState.messages,

@@ -242,6 +242,96 @@ describe('conversation search', () => {
       blockId: expect.stringContaining('a1'),
     });
   });
+  it.each(['user', 'assistant', 'later assistant'] as const)(
+    'locates the exact persisted %s record when its turn has an unstamped live alias',
+    async (role) => {
+      const { store, first, second, turns } = fixture();
+      if (role === 'later assistant') second.unshift(first.pop()!);
+      turns.turns[0]!.promptId = 'prompt-1';
+      first[0]!.promptId = 'prompt-1';
+      await ready(store);
+      store.observeLiveBlocks([
+        { ...first[0]!, id: 'local-user', sourceRecordIds: [] },
+      ]);
+      const hit = (
+        await store.scanConversation(
+          role === 'user' ? 'First prompt' : 'older MATCH',
+          { isCurrent: () => true },
+        )
+      ).hits[0]!;
+      expect(hit.recordId).toBe(role === 'user' ? 'u1' : 'a1');
+      await expect(
+        store.locateViewportSearchHit(hit, { isCurrent: () => true }, () => {}),
+      ).resolves.toMatchObject(
+        role === 'user'
+          ? { view: 'live', blockId: 'local-user' }
+          : { view: 'historical', blockId: expect.stringContaining('a1') },
+      );
+    },
+  );
+
+  it.each(['loading', 'error'] as const)(
+    'locates an exact record beyond a %s newer boundary',
+    async (boundaryState) => {
+      const { store, client, first, second } = fixture();
+      second.unshift(first.pop()!);
+      await ready(store);
+      const hit = (
+        await store.scanConversation('older MATCH', { isCurrent: () => true })
+      ).hits[0]!;
+      const anchor = await store.locateOrdinal(0);
+      expect(anchor.rangeId).toBeDefined();
+      let release!: () => void;
+      if (boundaryState === 'loading') {
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        vi.mocked(client.getTranscriptPage).mockImplementationOnce(async () => {
+          await gate;
+          return {
+            v: 1,
+            sessionId: 'session',
+            events: second.map((data) => ({ v: 1, type: 'test', data })),
+            hasMore: false,
+          };
+        });
+      } else {
+        vi.mocked(client.getTranscriptPage).mockRejectedValueOnce(
+          new Error('temporary network failure'),
+        );
+      }
+      const boundary = store.loadViewportBoundary(anchor.rangeId!, 'newer', {
+        isCurrent: () => true,
+      });
+      if (boundaryState === 'error')
+        await expect(boundary).rejects.toThrow('temporary network failure');
+      expect(store.getViewportSnapshot().ranges[0]!.newer.kind).toBe(
+        boundaryState,
+      );
+      let settled = false;
+      const pending = store
+        .locateViewportSearchHit(hit, { isCurrent: () => true }, () => {})
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        )
+        .finally(() => {
+          settled = true;
+        });
+      if (boundaryState === 'loading') {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const settledBeforeLoad = settled;
+        release();
+        await boundary;
+        expect(settledBeforeLoad).toBe(false);
+      }
+      const result = await pending;
+      expect(result).toMatchObject({
+        value: { view: 'historical', blockId: expect.stringContaining('a1') },
+      });
+    },
+  );
+
   it('locates a later page of a long turn while evicting the old page', async () => {
     const { store, client, first, second } = fixture(2);
     second.unshift(first.pop()!);

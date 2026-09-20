@@ -141,9 +141,9 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
         const provisional =
           navigation.provisionalTurns[ordinal - navigation.totalTurns];
         const location = hit
-          ? await store.locateViewportSearchHit(hit, request, () =>
-              store.setViewportAnchor(viewportId),
-            )
+          ? await store.locateViewportSearchHit(hit, request, () => {
+              // A cancelled search must retain the page the user is reading.
+            })
           : provisional?.blockId
             ? { blockId: provisional.blockId, view: 'live' as const }
             : await store.locateViewportOrdinal(ordinal, request, () =>

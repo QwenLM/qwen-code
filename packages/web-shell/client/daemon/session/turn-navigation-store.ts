@@ -279,6 +279,7 @@ export function createDaemonTurnNavigationStore(
   let liveRecordIds = new Set<string>();
   let liveBlockIdByPromptId = new Map<string, string>();
   let lastLiveBlocks: readonly DaemonTranscriptBlock[] | undefined;
+  const boundaryLoads = new Map<string, Promise<void>>();
   let headRequest: Promise<void> | undefined;
   let headReadGeneration = 0;
   let ownerRevision = 0;
@@ -1048,6 +1049,7 @@ export function createDaemonTurnNavigationStore(
       hit.turnOrdinal,
       { isCurrent: valid },
       releaseAnchor,
+      hit.recordId === hit.turnId ? undefined : hit.recordId,
     );
     let rangeId = location.rangeId;
     while (valid()) {
@@ -1074,15 +1076,32 @@ export function createDaemonTurnNavigationStore(
             };
         }
       }
-      if (location.view !== 'historical' || !rangeId) break;
+      if (location.view === 'live') {
+        const alias = livePromptAliases.get(hit.turnId);
+        if (hit.role === 'user' && hit.recordId === hit.turnId && alias)
+          return alias;
+        break;
+      }
+      if (!rangeId) break;
       const range = table.ranges.find((item) => item.id === rangeId);
       if (
         !range ||
-        (range.newer.kind !== 'loadable' && range.newer.kind !== 'cached')
+        (range.newer.kind !== 'loadable' &&
+          range.newer.kind !== 'cached' &&
+          range.newer.kind !== 'loading' &&
+          !(range.newer.kind === 'error' && range.newer.retryable))
       )
         break;
       if (range.newer.kind === 'cached') {
         rangeId = range.newer.rangeId;
+        continue;
+      }
+      if (range.newer.kind === 'loading') {
+        const pending = boundaryLoads.get(
+          `${sessionEpoch}:${chainEpoch}:${range.id}:newer`,
+        );
+        if (!pending) break;
+        await pending;
         continue;
       }
       const edge = range.pageIds.at(-1);
@@ -1109,6 +1128,7 @@ export function createDaemonTurnNavigationStore(
     ordinal: number,
     request?: HistoryViewportRequest,
     releaseAnchor?: () => void,
+    targetRecordId?: string,
   ): Promise<DaemonTurnLocation> {
     assertOrdinal(ordinal);
     const generation = ++selectionGeneration;
@@ -1127,7 +1147,14 @@ export function createDaemonTurnNavigationStore(
       const entryWithSnapshot = findIndexEntry(ordinal);
       if (!entryWithSnapshot) throw new Error('Turn metadata is unavailable');
       const existing = snapshot.locations.get(entryWithSnapshot.entry.turnId);
-      if (existing) {
+      if (
+        existing &&
+        (existing.view !== 'live' ||
+          !targetRecordId ||
+          lastLiveBlocks?.some((block) =>
+            block.sourceRecordIds?.includes(targetRecordId),
+          ))
+      ) {
         if (
           existing.view === 'historical' &&
           existing.rangeId &&
@@ -1170,7 +1197,7 @@ export function createDaemonTurnNavigationStore(
         );
       }
       const live = findLiveLocation(entryWithSnapshot.entry.turnId);
-      if (live) {
+      if (live && !targetRecordId) {
         publish({
           selected: {
             ordinal,
@@ -1190,6 +1217,7 @@ export function createDaemonTurnNavigationStore(
         entryWithSnapshot.entry.turnId,
         entryWithSnapshot.page.snapshot,
         response,
+        targetRecordId,
       );
       const location: DaemonTurnLocation = {
         turnId: entryWithSnapshot.entry.turnId,
@@ -1232,7 +1260,28 @@ export function createDaemonTurnNavigationStore(
     }
   }
 
-  async function loadBoundary(
+  function loadBoundary(
+    rangeId: string,
+    direction: 'older' | 'newer',
+    viewportRequest?: HistoryViewportRequest,
+    beforeAdmit?: () => void,
+  ): Promise<void> {
+    const key = `${sessionEpoch}:${chainEpoch}:${rangeId}:${direction}`;
+    const pending = boundaryLoads.get(key);
+    if (pending) return pending;
+    const load = performBoundaryLoad(
+      rangeId,
+      direction,
+      viewportRequest,
+      beforeAdmit,
+    ).finally(() => {
+      if (boundaryLoads.get(key) === load) boundaryLoads.delete(key);
+    });
+    boundaryLoads.set(key, load);
+    return load;
+  }
+
+  async function performBoundaryLoad(
     rangeId: string,
     direction: 'older' | 'newer',
     viewportRequest?: HistoryViewportRequest,

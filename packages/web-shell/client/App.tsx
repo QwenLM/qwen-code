@@ -7580,6 +7580,9 @@ export function App({
   const messageListRef = useRef<MessageListHandle | null>(null);
   const navigateToMessage = useMessageNavigation(messageListRef);
   const editorRef = useRef<EditorHandle | null>(null);
+  const restoreConversationSearchFocus = useCallback(() => {
+    editorRef.current?.focus();
+  }, []);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
   const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
     useState(false);
@@ -19883,6 +19886,15 @@ export function App({
                               .join(' ');
 
                             const messageListContent = (
+                              <ConversationSearch
+                                key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
+                                threshold={conversationSearchThreshold}
+                                registerInteractionBlocker={registerInteractionBlocker}
+                                messageListRef={messageListRef}
+                                className={styles.conversationSearchButton}
+                                onRestoreFocus={restoreConversationSearchFocus}
+                              >
+                                {(searchTrigger) => (
                               <LiveMessageList
                                 ref={messageListRef}
                                 sessionKey={connection.sessionId}
@@ -19928,15 +19940,7 @@ export function App({
                                       activeTurnStartedAt)
                                 }
                                 workspaceCwd={connection.workspaceCwd || ''}
-                                timelineAction={connection.sessionId ? (
-                                  <ConversationSearch
-                                    key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
-                                    threshold={conversationSearchThreshold}
-                                    registerInteractionBlocker={registerInteractionBlocker}
-                                    messageListRef={messageListRef}
-                                    className={styles.conversationSearchButton}
-                                  />
-                                ) : undefined}
+                                timelineAction={connection.sessionId ? searchTrigger : undefined}
                                 hideSessionTimeline={
                                   effectiveChatWidthMode === 'wide'
                                 }
@@ -20008,6 +20012,8 @@ export function App({
                                     : undefined
                                 }
                               />
+                                )}
+                              </ConversationSearch>
                             );
                             const messageListWithWorkflowDetails = (
                               <WorkflowDetailsProvider tasks={sessionTasks}>

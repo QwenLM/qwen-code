@@ -11,6 +11,7 @@ import {
   useState,
   useSyncExternalStore,
   type RefObject,
+  type ReactNode,
 } from 'react';
 import { ChevronDownIcon, ChevronUpIcon, SearchIcon } from 'lucide-react';
 import { useTranscriptStore } from '../daemon-react-sdk';
@@ -38,6 +39,8 @@ interface SearchResult {
 }
 
 interface ConversationSearchProps {
+  children?: (trigger: ReactNode) => ReactNode;
+  onRestoreFocus?: () => void;
   threshold?: number;
   className?: string;
   messageListRef: RefObject<MessageListHandle | null>;
@@ -45,6 +48,8 @@ interface ConversationSearchProps {
 }
 
 export function ConversationSearch({
+  children,
+  onRestoreFocus,
   threshold = 10,
   className,
   messageListRef,
@@ -92,11 +97,13 @@ export function ConversationSearch({
     const restoreFocus = wasOpen.current && !open;
     wasOpen.current = open;
     if (!restoreFocus) return;
-    const frame = requestAnimationFrame(() =>
-      trigger.current?.focus({ preventScroll: true }),
-    );
+    const frame = requestAnimationFrame(() => {
+      trigger.current?.focus({ preventScroll: true });
+      if (!trigger.current || document.activeElement !== trigger.current)
+        onRestoreFocus?.();
+    });
     return () => cancelAnimationFrame(frame);
-  }, [open]);
+  }, [open, onRestoreFocus]);
 
   useEffect(() => {
     if (open) return registerInteractionBlocker?.();
@@ -105,7 +112,12 @@ export function ConversationSearch({
   useEffect(() => setCount(0), [limit, viewportState.revision]);
 
   useEffect(() => {
-    if (liveCount > limit || navigation.mode !== 'ready') return;
+    if (
+      !viewportState.connected ||
+      liveCount > limit ||
+      navigation.mode !== 'ready'
+    )
+      return;
     let current = true;
     void history
       .scanConversation('', {
@@ -113,13 +125,21 @@ export function ConversationSearch({
         stopAfterMessages: limit + 1,
       })
       .then((result) => {
-        if (current) setCount(result.messageCount);
+        if (current && (result.complete || result.messageCount > limit))
+          setCount(result.messageCount);
       })
       .catch(() => {});
     return () => {
       current = false;
     };
-  }, [history, liveCount, limit, navigation.mode, viewportState.revision]);
+  }, [
+    history,
+    liveCount,
+    limit,
+    navigation.mode,
+    viewportState.revision,
+    viewportState.connected,
+  ]);
 
   useEffect(() => {
     navigationIntent.current += 1;
@@ -128,7 +148,12 @@ export function ConversationSearch({
     setSelected(0);
     setPersisted(undefined);
     setError(false);
-    if (!open || !needle || navigation.mode !== 'ready') {
+    if (
+      !open ||
+      !needle ||
+      !viewportState.connected ||
+      navigation.mode !== 'ready'
+    ) {
       setLoading(false);
       return;
     }
@@ -145,7 +170,7 @@ export function ConversationSearch({
         .then((result) => {
           if (current) {
             setPersisted(result);
-            setCount(result.messageCount);
+            if (result.complete) setCount(result.messageCount);
           }
         })
         .catch(() => {
@@ -159,7 +184,15 @@ export function ConversationSearch({
       current = false;
       clearTimeout(timer);
     };
-  }, [history, navigation.mode, needle, open, retry, viewportState.revision]);
+  }, [
+    history,
+    navigation.mode,
+    needle,
+    open,
+    retry,
+    viewportState.revision,
+    viewportState.connected,
+  ]);
 
   useEffect(
     () => () => {
@@ -218,10 +251,8 @@ export function ConversationSearch({
     }
   };
 
-  if (Math.max(liveCount, count) <= limit && !open) return null;
-
-  return (
-    <>
+  const button =
+    Math.max(liveCount, count) > limit || open ? (
       <button
         ref={trigger}
         type="button"
@@ -237,6 +268,11 @@ export function ConversationSearch({
           aria-hidden="true"
         />
       </button>
+    ) : undefined;
+
+  return (
+    <>
+      {children ? children(button) : button}
       {open && (
         <DialogShell
           title={t('chat.searchConversation')}
@@ -258,7 +294,8 @@ export function ConversationSearch({
               className="min-h-11 shrink-0"
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing) return;
+                if (event.nativeEvent.isComposing || event.keyCode === 229)
+                  return;
                 if (
                   event.key === 'Enter' &&
                   results[activeIndex] &&

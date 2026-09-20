@@ -389,3 +389,88 @@ describe('TranscriptViewport pending first entry', () => {
     },
   );
 });
+
+it('preserves the historical reading position when a distant search is cancelled', async () => {
+  const { ref, store, client, mode, open, getTranscriptPage, settle } =
+    await setup();
+  await open();
+  settle();
+  expect(mode()).toBe('historical');
+  const originalRange = store.getViewportSnapshot().ranges[0]!;
+  const request = deferred<DaemonSessionTranscriptPage>();
+  client.materializeTranscriptEvents = (events, nextOrdinal, excluded) => {
+    const ids = events.map(
+      (event) => (event.data as { recordId: string }).recordId,
+    );
+    return {
+      blocks: ids
+        .filter((id) => !excluded.has(id))
+        .map((id) => ({
+          id,
+          kind: id === 'turn-1' ? ('user' as const) : ('assistant' as const),
+          text: id,
+          sourceRecordIds: [id],
+          createdAt: 1,
+          updatedAt: 1,
+          clientReceivedAt: 1,
+        })),
+      nextBlockOrdinal: nextOrdinal + ids.length,
+      encounteredRecordIds: ids,
+    };
+  };
+  const searchPage = (index: number): DaemonSessionTranscriptPage => ({
+    v: 1,
+    sessionId: 'session',
+    targetRecordId: 'turn-1',
+    events: [
+      {
+        v: 1,
+        type: 'test',
+        data: { recordId: index === 0 ? 'turn-1' : `assistant-${index}` },
+      },
+    ],
+    hasMore: index < 6,
+    ...(index < 6 ? { nextCursor: String(index + 1) } : {}),
+  });
+  getTranscriptPage.mockImplementation(async (options) => {
+    const index = options.cursor ? Number(options.cursor) : 0;
+    return index === 6 ? request.promise : searchPage(index);
+  });
+  let current = true;
+  let navigation: Promise<boolean> | undefined;
+  await act(async () => {
+    navigation = ref.current!.scrollToSearchHit!(
+      {
+        sessionId: 'session',
+        snapshot: 'snapshot',
+        revision: store.getViewportSnapshot().revision,
+        recordId: 'assistant-6',
+        turnId: 'turn-1',
+        turnOrdinal: 1,
+        role: 'assistant',
+        snippet: 'target',
+        matchStart: 0,
+        matchEnd: 6,
+      },
+      () => current,
+    );
+  });
+  await vi.waitFor(() =>
+    expect(getTranscriptPage).toHaveBeenCalledWith({ cursor: '6', limit: 200 }),
+  );
+  current = false;
+  await act(async () => {
+    request.resolve(searchPage(6));
+    await navigation;
+  });
+  settle();
+  expect(await navigation).toBe(false);
+  expect
+    .soft(
+      store
+        .getViewportSnapshot()
+        .ranges.some((range) => range.id === originalRange.id),
+    )
+    .toBe(true);
+  expect(mode()).toBe('historical');
+});

@@ -9,7 +9,7 @@ import { ConversationSearch } from './ConversationSearch';
 const mocks = vi.hoisted(() => ({
   transcript: { blocks: [] as DaemonTranscriptBlock[] },
   navigation: { mode: 'idle', sessionId: 'session' },
-  viewport: { revision: 0 },
+  viewport: { revision: 0, connected: true },
   scan: vi.fn(),
   subscribe: () => () => {},
   t: (key: string) => key,
@@ -105,7 +105,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   mocks.transcript = { blocks: blocks(11) };
   mocks.navigation = { mode: 'idle', sessionId: 'session' };
-  mocks.viewport = { revision: 0 };
+  mocks.viewport = { revision: 0, connected: true };
   mocks.scan.mockReset().mockResolvedValue(result());
   scrollToMessage.mockClear();
   scrollToSearchHit.mockClear();
@@ -337,7 +337,7 @@ it('invalidates search and reprobes visibility when the history revision changes
   await render();
   expect(trigger()).not.toBeNull();
   mocks.scan.mockResolvedValue(result({ messageCount: 2 }));
-  mocks.viewport = { revision: 1 };
+  mocks.viewport = { revision: 1, connected: true };
   await render();
   expect(trigger()).toBeNull();
   expect(mocks.scan).toHaveBeenCalledTimes(2);
@@ -395,4 +395,95 @@ it('retains progressive matches when a later history page fails', async () => {
   expect(document.querySelector('[role="status"]')?.textContent).not.toContain(
     'chat.searchNoResults',
   );
+});
+
+it('restores focus through the host when the timeline trigger disappears', async () => {
+  const fallback = document.createElement('button');
+  document.body.append(fallback);
+  const onRestoreFocus = vi.fn(() => fallback.focus());
+  try {
+    await render({ onRestoreFocus, children: (entry) => <div>{entry}</div> });
+    await open();
+    await render({ onRestoreFocus, children: () => <div /> });
+    expect(trigger()).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(onRestoreFocus).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(fallback);
+  } finally {
+    fallback.remove();
+  }
+});
+
+it('does not select a result on a WebKit IME committing Enter', async () => {
+  await render();
+  await open();
+  await type('Message 0');
+  expect(document.querySelector('ol button')).not.toBeNull();
+  await act(async () => {
+    document
+      .querySelector<HTMLInputElement>('input[type="search"]')!
+      .dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 229,
+          isComposing: false,
+          bubbles: true,
+        }),
+      );
+  });
+  expect(scrollToMessage).not.toHaveBeenCalled();
+  expect(scrollToSearchHit).not.toHaveBeenCalled();
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+});
+
+it('preserves the established threshold after an incomplete search and reprobes on reconnect', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.transcript = { blocks: blocks(2) };
+  mocks.scan.mockResolvedValue(result({ messageCount: 11, complete: false }));
+  await render();
+  expect(trigger()).not.toBeNull();
+  await open();
+  mocks.scan.mockResolvedValue(result({ messageCount: 0, complete: false }));
+  await type('offline query');
+  await debounce();
+  await act(async () =>
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    ),
+  );
+  expect(trigger()).not.toBeNull();
+  mocks.viewport = { ...mocks.viewport, connected: false };
+  await render();
+  mocks.scan.mockClear();
+  mocks.scan.mockResolvedValue(result({ messageCount: 11, complete: false }));
+  mocks.viewport = { ...mocks.viewport, connected: true };
+  await render();
+  expect(mocks.scan).toHaveBeenCalledWith(
+    '',
+    expect.objectContaining({ stopAfterMessages: 11 }),
+  );
+});
+
+it('keeps the established entry when a disconnected live update would trigger a probe', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.transcript = { blocks: blocks(2) };
+  mocks.scan.mockResolvedValue(result({ messageCount: 11, complete: false }));
+  await render();
+  expect(trigger()).not.toBeNull();
+  mocks.scan.mockClear();
+  mocks.scan.mockResolvedValue(result({ messageCount: 0, complete: false }));
+  mocks.viewport = { ...mocks.viewport, connected: false };
+  mocks.transcript = { blocks: blocks(3) };
+  await render();
+  expect(trigger()).not.toBeNull();
+  expect(mocks.scan).not.toHaveBeenCalled();
 });
