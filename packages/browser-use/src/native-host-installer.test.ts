@@ -4,21 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import {
+  describeChromeProfiles,
+  ensureChromeNativeHost,
   installChromeNativeHost,
-  isChromeExtensionInstalled,
+  NativeHostNewerError,
   nativeHostInstallHome,
   statusChromeNativeHost,
   uninstallChromeNativeHost,
 } from './native-host-installer.js';
 import {
+  CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
   CHROME_NATIVE_HOST_NAME,
+  CHROME_NATIVE_HOST_REVISION,
 } from './bridge/protocol.js';
 
 const roots: string[] = [];
@@ -29,149 +34,95 @@ afterEach(() => {
   }
 });
 
-describe('Chrome extension installation detection', () => {
-  it.each(['darwin', 'linux'] as const)(
-    'finds packaged extensions in a secondary profile on %s',
-    async (platform) => {
-      const fixture = createFixture();
-      const browserRoot = createBrowserProfile(
-        fixture.homeDir,
-        platform,
-        'chrome',
-      );
-      const profile = path.join(browserRoot, 'Profile 2');
-      const extensionPath = path.join(CHROME_EXTENSION_ID, '1.0.0_0');
-      writeExtensionPreferences(profile, 'Secure Preferences', extensionPath);
-      const installedPath = path.join(profile, 'Extensions', extensionPath);
-      fs.mkdirSync(installedPath, { recursive: true });
-      fs.writeFileSync(path.join(installedPath, 'manifest.json'), '{}');
-
-      await expect(
-        isChromeExtensionInstalled({ ...fixture, platform }),
-      ).resolves.toBe(true);
-      expect(fs.existsSync(path.join(fixture.homeDir, '.qwen'))).toBe(false);
-      expect(
-        fs.existsSync(path.join(browserRoot, 'NativeMessagingHosts')),
-      ).toBe(false);
-    },
-  );
-
-  it.each(['chrome', 'chrome-for-testing', 'chromium'] as const)(
-    'finds an unpacked extension through %s preferences',
-    async (browser) => {
-      const fixture = createFixture();
-      const browserRoot = createBrowserProfile(
-        fixture.homeDir,
-        'darwin',
-        browser,
-      );
-      const extensionPath = path.join(fixture.homeDir, 'unpacked extension');
-      fs.mkdirSync(extensionPath, { recursive: true });
-      fs.writeFileSync(path.join(extensionPath, 'manifest.json'), '{}');
-      writeExtensionPreferences(
-        path.join(browserRoot, 'Default'),
-        'Preferences',
-        extensionPath,
-      );
-
-      await expect(
-        isChromeExtensionInstalled({ ...fixture, platform: 'darwin' }),
-      ).resolves.toBe(true);
-    },
-  );
-
-  it.each([
-    'no profile',
-    'no extension',
-    'other extension',
-    'leftover files',
-    'missing files',
-    'invalid preferences',
-  ])('does not confirm installation with %s', async (scenario) => {
-    const fixture = createFixture();
-    if (scenario !== 'no profile') {
-      const browserRoot = createBrowserProfile(
-        fixture.homeDir,
-        'darwin',
-        'chrome',
-      );
-      const profile = path.join(browserRoot, 'Default');
-      const extensionPath = path.join(fixture.homeDir, 'unpacked extension');
-      fs.mkdirSync(extensionPath, { recursive: true });
-      if (scenario !== 'missing files') {
-        fs.writeFileSync(path.join(extensionPath, 'manifest.json'), '{}');
-      }
-      writeExtensionPreferences(profile, 'Preferences', extensionPath);
-      if (scenario === 'no extension' || scenario === 'leftover files') {
-        fs.writeFileSync(path.join(profile, 'Preferences'), '{}');
-      }
-      if (scenario === 'leftover files') {
-        const leftover = path.join(
-          profile,
-          'Extensions',
-          CHROME_EXTENSION_ID,
-          '1.0.0_0',
-        );
-        fs.mkdirSync(leftover, { recursive: true });
-        fs.writeFileSync(path.join(leftover, 'manifest.json'), '{}');
-      }
-      if (scenario === 'other extension') {
-        fs.writeFileSync(
-          path.join(profile, 'Preferences'),
-          JSON.stringify({
-            extensions: { settings: { other: { path: extensionPath } } },
-          }),
-        );
-      }
-      if (scenario === 'invalid preferences') {
-        fs.writeFileSync(path.join(profile, 'Preferences'), '{');
-      }
-    }
-
-    await expect(
-      isChromeExtensionInstalled({ ...fixture, platform: 'darwin' }),
-    ).resolves.toBe(false);
-  });
-
-  it('uses Secure Preferences ahead of an older Preferences entry', async () => {
-    const fixture = createFixture();
-    const profile = path.join(
-      createBrowserProfile(fixture.homeDir, 'darwin', 'chrome'),
-      'Default',
-    );
-    const extensionPath = path.join(fixture.homeDir, 'old extension');
-    fs.mkdirSync(extensionPath, { recursive: true });
-    fs.writeFileSync(path.join(extensionPath, 'manifest.json'), '{}');
-    writeExtensionPreferences(profile, 'Preferences', extensionPath);
-    writeExtensionPreferences(
-      profile,
-      'Secure Preferences',
-      '/missing/extension',
-    );
-
-    await expect(
-      isChromeExtensionInstalled({ ...fixture, platform: 'darwin' }),
-    ).resolves.toBe(false);
-  });
-});
-
-function writeExtensionPreferences(
-  profile: string,
-  file: string,
-  extensionPath: string,
-): void {
-  fs.mkdirSync(profile, { recursive: true });
-  fs.writeFileSync(
-    path.join(profile, file),
-    JSON.stringify({
-      extensions: {
-        settings: { [CHROME_EXTENSION_ID]: { path: extensionPath } },
-      },
-    }),
-  );
-}
+const LEGACY_LAUNCHER =
+  '#!/bin/sh\n# qwen-browser-use native host\nexec /old/node /old/host.js\n';
 
 describe('Chrome Native Host installer', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps installed and running Hosts independent of CLI files and updates',
+    async () => {
+      const fixture = createFixture();
+      createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+      const options = {
+        ...fixture,
+        nodePath: process.execPath,
+        platform: 'linux' as const,
+      };
+      const host = (version: string) =>
+        `import process from 'node:process'; console.log('${version}'); process.stdin.on('data', () => console.log('${version}'));`;
+      fs.writeFileSync(fixture.nativeHostPath, host('first'));
+      const first = await installChromeNativeHost(options);
+      const launch = (launcherPath: string) => {
+        const child = spawn(launcherPath);
+        onTestFinished(async () => {
+          const exited = once(child, 'exit');
+          child.kill();
+          await exited;
+        });
+        return child;
+      };
+      const running = launch(first.launcherPath);
+      expect(String((await once(running.stdout, 'data'))[0]).trim()).toBe(
+        'first',
+      );
+      fs.writeFileSync(fixture.nativeHostPath, host('second'));
+      const second = await installChromeNativeHost(options);
+      expect(second.nativeHostPath).not.toBe(first.nativeHostPath);
+      fs.rmSync(path.dirname(fixture.nativeHostPath), { recursive: true });
+      expect(fs.existsSync(first.nativeHostPath!)).toBe(true);
+      expect((await statusChromeNativeHost(options)).ready).toBe(true);
+      const oldReply = once(running.stdout, 'data');
+      running.stdin.write('still alive\n');
+      expect(String((await oldReply)[0]).trim()).toBe('first');
+      const fresh = launch(second.launcherPath);
+      expect(String((await once(fresh.stdout, 'data'))[0]).trim()).toBe(
+        'second',
+      );
+    },
+  );
+
+  it('reports legacy, missing and incompatible installation metadata without rewriting files', async () => {
+    const fixture = createFixture();
+    createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+    const options = { ...fixture, platform: 'linux' as const };
+    const installed = await installChromeNativeHost(options);
+    const launcher = fs.readFileSync(installed.launcherPath, 'utf8');
+    fs.writeFileSync(
+      installed.launcherPath,
+      launcher.replace(
+        `"protocolVersion":${CHROME_BRIDGE_PROTOCOL_VERSION}`,
+        '"protocolVersion":1',
+      ),
+    );
+    expect((await statusChromeNativeHost(options)).protocolVersion).toBe(1);
+    fs.writeFileSync(installed.launcherPath, LEGACY_LAUNCHER);
+    const before = fs.statSync(installed.launcherPath);
+    expect(await statusChromeNativeHost(options)).toMatchObject({
+      ready: false,
+      protocolVersion: null,
+    });
+    expect(fs.statSync(installed.launcherPath).mtimeMs).toBe(before.mtimeMs);
+    fs.writeFileSync(installed.launcherPath, launcher);
+    fs.rmSync(installed.nativeHostPath!);
+    expect((await statusChromeNativeHost(options)).ready).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'requires an executable launcher and the installed Node interpreter',
+    async () => {
+      const fixture = createFixture();
+      createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+      const options = { ...fixture, platform: 'linux' as const };
+      const installed = await installChromeNativeHost(options);
+      fs.chmodSync(installed.launcherPath, 0o600);
+      expect((await statusChromeNativeHost(options)).ready).toBe(false);
+      fs.chmodSync(installed.launcherPath, 0o700);
+      expect((await statusChromeNativeHost(options)).ready).toBe(true);
+      fs.rmSync(fixture.nodePath);
+      expect((await statusChromeNativeHost(options)).ready).toBe(false);
+    },
+  );
+
   it('installs the manifest for an existing macOS Chrome profile', async () => {
     const fixture = createFixture();
     createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
@@ -183,7 +134,7 @@ describe('Chrome Native Host installer', () => {
     expect(result.manifestPaths).toContain(
       path.join(
         fixture.homeDir,
-        'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.qwen.browser.json',
+        'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.qwen.browser_use.json',
       ),
     );
     const manifest = JSON.parse(
@@ -201,7 +152,14 @@ describe('Chrome Native Host installer', () => {
     }
     const launcher = fs.readFileSync(result.launcherPath, 'utf8');
     expect(launcher.startsWith('#!/bin/sh\n')).toBe(true);
-    expect(launcher).toContain("'" + fixture.nativeHostPath + "'");
+    expect(launcher).toContain(
+      "'" + result.nativeHostPath!.replaceAll("'", "'\\''") + "'",
+    );
+    expect(result.nativeHostPath).toMatch(
+      /hosts[\\/][a-f0-9]{64}[\\/]native-host\.mjs$/,
+    );
+    expect(fs.readFileSync(result.nativeHostPath!, 'utf8')).toBe('# host');
+    expect(result.protocolVersion).toBe(CHROME_BRIDGE_PROTOCOL_VERSION);
   });
 
   it('registers the documented macOS Chrome for Testing profile', async () => {
@@ -212,7 +170,7 @@ describe('Chrome Native Host installer', () => {
     expect((await statusChromeNativeHost(options)).installedPaths).toContain(
       path.join(
         fixture.homeDir,
-        'Library/Application Support/Google/Chrome for Testing/NativeMessagingHosts/com.qwen.browser.json',
+        'Library/Application Support/Google/Chrome for Testing/NativeMessagingHosts/com.qwen.browser_use.json',
       ),
     );
   });
@@ -278,15 +236,15 @@ describe('Chrome Native Host installer', () => {
       expect.arrayContaining([
         path.join(
           fixture.homeDir,
-          '.config/google-chrome/NativeMessagingHosts/com.qwen.browser.json',
+          '.config/google-chrome/NativeMessagingHosts/com.qwen.browser_use.json',
         ),
         path.join(
           fixture.homeDir,
-          '.config/google-chrome-for-testing/NativeMessagingHosts/com.qwen.browser.json',
+          '.config/google-chrome-for-testing/NativeMessagingHosts/com.qwen.browser_use.json',
         ),
         path.join(
           fixture.homeDir,
-          '.config/chromium/NativeMessagingHosts/com.qwen.browser.json',
+          '.config/chromium/NativeMessagingHosts/com.qwen.browser_use.json',
         ),
       ]),
     );
@@ -360,7 +318,12 @@ describe('Chrome Native Host installer', () => {
       const options = { ...fixture, platform: 'darwin' as const };
       const installed = await installChromeNativeHost(options);
       const before = fs.readFileSync(installed.launcherPath, 'utf8');
-      const updated = { ...options, nodePath: '/updated/node' };
+      const updatedNode = path.join(
+        path.dirname(fixture.nodePath),
+        'updated-node',
+      );
+      fs.copyFileSync(fixture.nodePath, updatedNode);
+      const updated = { ...options, nodePath: updatedNode };
       const directory = path.dirname(installed.launcherPath);
       fs.chmodSync(directory, 0o500);
       try {
@@ -375,7 +338,7 @@ describe('Chrome Native Host installer', () => {
       await installChromeNativeHost(updated);
 
       expect(fs.readFileSync(installed.launcherPath, 'utf8')).toContain(
-        "exec '/updated/node'",
+        "exec '" + updatedNode + "'",
       );
     },
   );
@@ -405,7 +368,7 @@ describe('Chrome Native Host installer', () => {
     const fixture = createFixture();
     const manifestPath = path.join(
       fixture.homeDir,
-      'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.qwen.browser.json',
+      'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.qwen.browser_use.json',
     );
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.writeFileSync(manifestPath, JSON.stringify({ name: 'foreign.host' }));
@@ -421,7 +384,7 @@ describe('Chrome Native Host installer', () => {
     const fixture = createFixture();
     const manifestPath = path.join(
       fixture.homeDir,
-      'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.qwen.browser.json',
+      'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.qwen.browser_use.json',
     );
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.writeFileSync(
@@ -502,7 +465,7 @@ describe('Chrome Native Host installer', () => {
     const options = { ...fixture, platform: 'darwin' as const };
     const launcherPath = path.join(
       fixture.homeDir,
-      '.qwen/browser-use/native-host.sh',
+      '.qwen/browser-use/host.sh',
     );
     // A different program's launcher: a shell script without the owned marker.
     const foreign = '#!/bin/sh\nexec /other/tool "$@"\n';
@@ -546,6 +509,23 @@ describe('Chrome Native Host installer', () => {
       expect(fs.existsSync(file)).toBe(false);
     }
     expect((await statusChromeNativeHost(options)).installedPaths).toEqual([]);
+    expect(fs.existsSync(path.dirname(installed.nativeHostPath!))).toBe(false);
+  });
+
+  it('removes every installed Host copy on uninstall', async () => {
+    const fixture = createFixture();
+    createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+    const options = { ...fixture, platform: 'linux' as const };
+    const first = await installChromeNativeHost(options);
+    fs.appendFileSync(fixture.nativeHostPath, '\n// a later build\n');
+    const second = await installChromeNativeHost(options);
+    expect(second.nativeHostPath).not.toBe(first.nativeHostPath);
+    const store = path.join(path.dirname(first.launcherPath), 'hosts');
+    expect(fs.readdirSync(store)).toHaveLength(2);
+
+    await uninstallChromeNativeHost(options);
+
+    expect(fs.existsSync(store)).toBe(false);
   });
 
   it('keeps a same-name manifest for another launcher on uninstall', async () => {
@@ -597,15 +577,248 @@ describe('Chrome Native Host installer', () => {
         "exec '" +
           fixture.nodePath +
           "' '" +
-          nativeHostPath.replace("'", "'\\''") +
+          installed.nativeHostPath!.replace("'", "'\\''") +
           '\' "$@"',
       );
       const output = execFileSync(installed.launcherPath, ['--stdio'], {
         encoding: 'utf8',
       });
-      expect(output.split('\n')).toEqual([nativeHostPath, '--stdio', '']);
+      expect(output.split('\n')).toEqual([
+        installed.nativeHostPath,
+        '--stdio',
+        '',
+      ]);
     },
   );
+});
+
+describe('first-use Native Host setup', () => {
+  it('installs once, then reuses a same-protocol Host without repointing it', async () => {
+    const fixture = createFixture();
+    createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+    const options = { ...fixture, platform: 'linux' as const };
+
+    const first = await ensureChromeNativeHost(options);
+    expect(first).toMatchObject({ action: 'installed', ready: true });
+    const launcher = fs.readFileSync(first.launcherPath, 'utf8');
+
+    // Another checkout of the same protocol bundles a different Host build,
+    // and a second browser appeared since.
+    fs.writeFileSync(fixture.nativeHostPath, '# another checkout');
+    const chromium = path.join(
+      createBrowserProfile(fixture.homeDir, 'linux', 'chromium'),
+      'NativeMessagingHosts',
+      CHROME_NATIVE_HOST_NAME + '.json',
+    );
+    const second = await ensureChromeNativeHost(options);
+    expect(second).toMatchObject({
+      action: 'reused',
+      ready: true,
+      nativeHostPath: first.nativeHostPath,
+    });
+    expect(second.installedPaths).toContain(chromium);
+    expect(fs.readFileSync(first.launcherPath, 'utf8')).toBe(launcher);
+  });
+
+  const bump = (field: 'protocolVersion' | 'revision', delta: number) => {
+    const current =
+      field === 'revision'
+        ? CHROME_NATIVE_HOST_REVISION
+        : CHROME_BRIDGE_PROTOCOL_VERSION;
+    return (launcher: string) =>
+      launcher.replace(
+        `"${field}":${current}`,
+        `"${field}":${current + delta}`,
+      );
+  };
+  it.each([
+    ['upgrades an older protocol', bump('protocolVersion', -1), 'installed'],
+    ['upgrades a lower Host revision', bump('revision', -1), 'installed'],
+    [
+      'upgrades a launcher without an installation record',
+      () => LEGACY_LAUNCHER,
+      'installed',
+    ],
+    ['reuses a higher Host revision', bump('revision', 1), 'reused'],
+    [
+      'never downgrades a newer protocol',
+      bump('protocolVersion', 1),
+      'refused',
+    ],
+  ] as const)('%s', async (_label, edit, outcome) => {
+    const fixture = createFixture();
+    createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+    const options = { ...fixture, platform: 'linux' as const };
+    const installed = await installChromeNativeHost(options);
+    const launcher = fs.readFileSync(installed.launcherPath, 'utf8');
+    const edited = edit(launcher);
+    expect(edited).not.toBe(launcher);
+    fs.writeFileSync(installed.launcherPath, edited);
+
+    const result = await ensureChromeNativeHost(options).catch(
+      (error: unknown) => error,
+    );
+
+    if (outcome === 'refused') {
+      expect(result).toBeInstanceOf(NativeHostNewerError);
+      expect(result).toMatchObject({
+        installedProtocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION + 1,
+        message: expect.stringContaining('Update Qwen Code'),
+      });
+    } else {
+      expect(result).toMatchObject({
+        action: outcome,
+        ready: true,
+        protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+      });
+    }
+    expect(fs.readFileSync(installed.launcherPath, 'utf8') === edited).toBe(
+      outcome !== 'installed',
+    );
+  });
+
+  it('is unaffected by the protocol 2 registration older Qwen Code rewrites', async () => {
+    const fixture = createFixture();
+    const browserRoot = createBrowserProfile(
+      fixture.homeDir,
+      'linux',
+      'chrome',
+    );
+    const options = { ...fixture, platform: 'linux' as const };
+    // What a protocol 2 CLI writes on every first use.
+    const legacyLauncher = path.join(
+      fixture.homeDir,
+      '.qwen/browser-use/native-host.sh',
+    );
+    const legacyManifest = path.join(
+      browserRoot,
+      'NativeMessagingHosts',
+      'com.qwen.browser.json',
+    );
+    const writeLegacy = (host: string) => {
+      fs.mkdirSync(path.dirname(legacyLauncher), { recursive: true });
+      fs.writeFileSync(
+        legacyLauncher,
+        `#!/bin/sh\n# qwen-browser-use native host\nexec /old/node ${host} "$@"\n`,
+        { mode: 0o700 },
+      );
+      fs.mkdirSync(path.dirname(legacyManifest), { recursive: true });
+      fs.writeFileSync(
+        legacyManifest,
+        JSON.stringify({
+          name: 'com.qwen.browser',
+          description: 'Qwen Browser Use',
+          path: legacyLauncher,
+          type: 'stdio',
+          allowed_origins: [`chrome-extension://${CHROME_EXTENSION_ID}/`],
+        }),
+      );
+    };
+    writeLegacy('/old/checkout-a/native-host.js');
+
+    const installed = await ensureChromeNativeHost(options);
+    expect(CHROME_NATIVE_HOST_NAME).not.toBe('com.qwen.browser');
+    expect(installed.launcherPath).not.toBe(legacyLauncher);
+    expect(installed.installedPaths).not.toContain(legacyManifest);
+    const launcher = fs.readFileSync(installed.launcherPath, 'utf8');
+
+    // An older CLI runs again and repoints its own registration.
+    writeLegacy('/old/checkout-b/native-host.js');
+
+    await expect(statusChromeNativeHost(options)).resolves.toMatchObject({
+      ready: true,
+      protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+      skippedForeignPaths: [],
+    });
+    expect(fs.readFileSync(installed.launcherPath, 'utf8')).toBe(launcher);
+    await expect(ensureChromeNativeHost(options)).resolves.toMatchObject({
+      action: 'reused',
+    });
+    expect(fs.readFileSync(legacyLauncher, 'utf8')).toContain('checkout-b');
+  });
+});
+
+describe('Chrome profile descriptions', () => {
+  function seedProfile(
+    browserRoot: string,
+    directory: string,
+    storedId: string | undefined,
+    file = '000003.log',
+  ) {
+    const storage = path.join(
+      browserRoot,
+      directory,
+      'Local Extension Settings',
+      CHROME_EXTENSION_ID,
+    );
+    fs.mkdirSync(storage, { recursive: true });
+    if (storedId !== undefined)
+      fs.writeFileSync(
+        path.join(storage, file),
+        Buffer.concat([
+          Buffer.from([1, 0, 0, 0, 0x1a]),
+          Buffer.from('browserUseInstanceId"' + storedId + '"'),
+        ]),
+      );
+  }
+
+  it('names profiles from Local State and marks the last used one', async () => {
+    const fixture = createFixture();
+    const chrome = createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+    const chromium = createBrowserProfile(fixture.homeDir, 'linux', 'chromium');
+    fs.writeFileSync(
+      path.join(chrome, 'Local State'),
+      JSON.stringify({
+        profile: {
+          last_used: 'Profile 1',
+          info_cache: { Default: { name: 'Work' }, 'Profile 1': { name: '' } },
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(chromium, 'Local State'),
+      JSON.stringify({
+        profile: {
+          last_used: 'Default',
+          info_cache: { Default: { name: 'Lab' } },
+        },
+      }),
+    );
+    seedProfile(chrome, 'Default', 'id-work');
+    seedProfile(chrome, 'Profile 1', 'id-personal', '000005.ldb');
+    seedProfile(chromium, 'Default', 'id-lab');
+
+    const described = await describeChromeProfiles(
+      { homeDir: fixture.homeDir, platform: 'linux' },
+      ['id-work', 'id-personal', 'id-lab', 'id-unknown'],
+    );
+
+    expect(Object.fromEntries(described)).toEqual({
+      'id-work': { name: 'Chrome · Work', lastUsed: false },
+      'id-personal': { name: 'Chrome · Profile 1', lastUsed: true },
+      'id-lab': { name: 'Chromium · Lab', lastUsed: true },
+    });
+  });
+
+  it('describes nothing without Local State or extension storage', async () => {
+    const fixture = createFixture();
+    const chrome = createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
+    seedProfile(chrome, 'Default', 'id-a');
+    await expect(
+      describeChromeProfiles({ homeDir: fixture.homeDir, platform: 'darwin' }, [
+        'id-a',
+      ]),
+    ).resolves.toEqual(new Map());
+    fs.writeFileSync(
+      path.join(chrome, 'Local State'),
+      JSON.stringify({ profile: { info_cache: { Default: { name: 'A' } } } }),
+    );
+    await expect(
+      describeChromeProfiles({ homeDir: fixture.homeDir, platform: 'darwin' }, [
+        'id-b',
+      ]),
+    ).resolves.toEqual(new Map());
+  });
 });
 
 describe('nativeHostInstallHome', () => {
@@ -636,18 +849,16 @@ function createFixture(): {
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-install-'));
   roots.push(root);
-  const homeDir = path.join(root, 'home');
+  const homeDir = path.join(root, "user's home");
   const nativeHostPath = path.join(
     root,
     'extension with spaces/native-host.js',
   );
   fs.mkdirSync(path.dirname(nativeHostPath), { recursive: true });
   fs.writeFileSync(nativeHostPath, '# host');
-  return {
-    homeDir,
-    nativeHostPath,
-    nodePath: path.join(root, 'node with spaces'),
-  };
+  const nodePath = path.join(root, 'node with spaces');
+  fs.writeFileSync(nodePath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  return { homeDir, nativeHostPath, nodePath };
 }
 
 function createBrowserProfile(
