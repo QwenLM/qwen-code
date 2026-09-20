@@ -326,7 +326,8 @@ const useResultDisplayRenderer = (
       typeof resultDisplay === 'object' &&
       resultDisplay !== null &&
       'type' in resultDisplay &&
-      resultDisplay.type === 'ask_user_question_answers' &&
+      (resultDisplay.type === 'ask_user_question_answers' ||
+        resultDisplay.type === 'shell_result') &&
       'text' in resultDisplay &&
       typeof resultDisplay.text === 'string'
     ) {

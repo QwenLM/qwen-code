@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ShellResultDisplay } from '../shellResult.js';
 import type {
   DaemonAuthDeviceFlowSdkErrorKind,
   DaemonAuthProviderId,
@@ -937,6 +938,7 @@ export type DaemonToolPreview =
     };
 
 export type DaemonToolResultPreview =
+  | { kind: 'shell_result'; result: ShellResultDisplay }
   | DaemonTodoListPreview
   | {
       kind: 'question_answers';

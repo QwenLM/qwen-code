@@ -13150,6 +13150,59 @@ describe('CoreToolScheduler telemetry spans', () => {
     }
   });
 
+  it('preserves failure hook context in structured shell display text', async () => {
+    const display = {
+      type: 'shell_result',
+      version: 1,
+      text: 'before',
+      output: 'before',
+      directory: '/tmp',
+      exitCode: 7,
+      signal: null,
+      pid: null,
+      error: null,
+      outcome: 'failed',
+      notices: [],
+      truncated: false,
+      outputFiles: [],
+    };
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  additionalContext: 'Inspect failure report',
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'Exit Code: 7',
+        returnDisplay: display,
+        error: {
+          message: 'Exit Code: 7',
+          type: ToolErrorType.SHELL_EXECUTE_ERROR,
+        },
+      }),
+    });
+    const call = completedCalls[0];
+    expect(call.status).toBe('error');
+    if (call.status !== 'error') throw new Error('Expected failure');
+    expect(call.response.resultDisplay).toEqual({
+      ...display,
+      text: 'Exit Code: 7\n\nInspect failure report',
+    });
+    expect(display.text).toBe('before');
+  });
+
   it('preserves successful execution when cancellation arrives during PostToolUse', async () => {
     const abortController = new AbortController();
     const messageBus = {
