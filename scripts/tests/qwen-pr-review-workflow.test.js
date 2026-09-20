@@ -7741,6 +7741,66 @@ describe('qwen pr review unchanged-diff anchor', () => {
     ).toBe('CHANGES_REQUESTED');
   });
 
+  // R9-2. The marker rides every composed body, but it only names a sha for a
+  // round that could certify one: compose-review withholds the sha from a
+  // fail-closed round, and the ledger grafts an EARLIER own round's sha onto a
+  // later marker. Neither shape is a verdict about THIS head, and the status
+  // this stamp writes is what the next unchanged push skips on — so a marker
+  // has to name the stamped sha, while a body with no marker at all (the
+  // carry-forward body this pipeline posts) still stamps.
+  it('anchors only on a marker that names this head', () => {
+    const program = stampProgram();
+    const marked = (payload) => `Findings.\n\n${FOOTER}\n\n${payload}`;
+    const ledger = (fields) =>
+      `<!-- qwen-review-ledger ${JSON.stringify(fields).replace(/--/g, '-\\u002d')} -->`;
+
+    // A marker naming this head certifies it...
+    expect(
+      selectStamp(program, [
+        headReview(
+          1,
+          'CHANGES_REQUESTED',
+          RUN_CREATED,
+          marked(ledger({ v: 1, round: 3, findings: [], sha: 'head' })),
+        ),
+      ]),
+    ).toBe('CHANGES_REQUESTED');
+    // ...a marker with no sha cannot: that round was fail-closed...
+    expect(
+      selectStamp(program, [
+        headReview(
+          2,
+          'CHANGES_REQUESTED',
+          RUN_CREATED,
+          marked(ledger({ v: 1, round: 3, findings: [] })),
+        ),
+      ]),
+    ).toBe('');
+    // ...and neither can one naming an earlier round's head, the graft.
+    expect(
+      selectStamp(program, [
+        headReview(
+          3,
+          'CHANGES_REQUESTED',
+          RUN_CREATED,
+          marked(ledger({ v: 1, round: 2, findings: [], sha: 'earlier' })),
+        ),
+      ]),
+    ).toBe('');
+    // The marker-less carry-forward body still stamps, or a chain of
+    // unchanged pushes dies after one hop.
+    expect(
+      selectStamp(program, [
+        headReview(
+          4,
+          'COMMENTED',
+          RUN_CREATED,
+          'Diff byte-identical to reviewed deadbeef; verdict carried forward. — via Qwen Code /review',
+        ),
+      ]),
+    ).toBe('COMMENTED');
+  });
+
   it('fails closed when it cannot bind the witness to this run', () => {
     const [step] = anchorDoc.jobs['record-reviewed'].steps;
     // Through the PAT already in this step's env: GITHUB_TOKEN here has no
@@ -7773,9 +7833,15 @@ describe('qwen pr review unchanged-diff anchor', () => {
     ).run;
     const program =
       run.match(
-        /carried_state="\$\(gh api[\s\S]*?--arg sha "\$reviewed_anchor" '([\s\S]*?)' 2>\/dev\/null\)"/,
+        /carried_state="\$\(gh api[\s\S]*?--arg who "\$bot_login" --arg sha "\$reviewed_anchor" '([\s\S]*?)' 2>\/dev\/null\)"/,
       )?.[1] ?? '';
     expect(program).not.toBe('');
+    // The author is bound here too (R7-2) and resolved from the credential
+    // this step posts under, exactly as the stamp and every sibling lookup
+    // resolve it. An unreadable login leaves `$who` empty, which selects
+    // nothing — a dropped carry, never a granted one.
+    expect(run).toContain("bot_login=\"$(gh api user --jq '.login'");
+    expect(program).toContain('.user.login == $who');
     const anchorReview = (id, state, submittedAt, body = FOOTER) => ({
       id,
       commit_id: 'anchor',
@@ -7784,11 +7850,16 @@ describe('qwen pr review unchanged-diff anchor', () => {
       state,
       user: { login: 'review-bot' },
     });
-    const live = (reviews) =>
-      execFileSync('jq', ['-r', '--arg', 'sha', 'anchor', program], {
-        input: JSON.stringify([reviews]),
-        encoding: 'utf8',
-      }).trim();
+    const liveAs = (who, reviews) =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'sha', 'anchor', '--arg', 'who', who, program],
+        {
+          input: JSON.stringify([reviews]),
+          encoding: 'utf8',
+        },
+      ).trim();
+    const live = (reviews) => liveAs('review-bot', reviews);
 
     // A verdict the anchor still reports is carried...
     expect(live([anchorReview(1, 'APPROVED', '2026-01-01T00:00:00Z')])).toBe(
@@ -7820,6 +7891,18 @@ describe('qwen pr review unchanged-diff anchor', () => {
       ]),
     ).toBe('');
     expect(live([])).toBe('');
+    // A footer-bearing verdict under ANOTHER login is not this pipeline's
+    // either — CI_BOT_PAT posts other workflows' approvals under the same
+    // credential — and a login that cannot be resolved binds nobody. Both
+    // drop the carry rather than grant it.
+    expect(
+      liveAs('someone-else', [
+        anchorReview(1, 'APPROVED', '2026-01-01T00:00:00Z'),
+      ]),
+    ).toBe('');
+    expect(
+      liveAs('', [anchorReview(1, 'APPROVED', '2026-01-01T00:00:00Z')]),
+    ).toBe('');
 
     // And a disagreement has to DROP the carry, not merely log one: the POST
     // stays gated on carry_event, which the comparison clears.

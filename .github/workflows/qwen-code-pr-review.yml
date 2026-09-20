@@ -1597,8 +1597,15 @@ jobs:
                 # drop the carry into a full review. DISMISSED is compared
                 # rather than filtered out, so it cannot fall through to the
                 # older verdict a maintainer just overruled.
+                # R7-2: "a review on the anchor" is not "a review this
+                # pipeline posted" — CI_BOT_PAT also posts other workflows'
+                # approvals — so the author is bound here the way the stamp
+                # and every sibling lookup bind it. An unresolvable login
+                # selects nothing, and nothing drops the carry instead of
+                # granting it.
+                bot_login="$(gh api user --jq '.login' 2>/dev/null || true)"
                 carried_state="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate --slurp 2>/dev/null \
-                  | jq -r --arg sha "$reviewed_anchor" '[.[][]? | select(.commit_id == $sha and ((.body // "") | contains("via Qwen Code /review") or contains("qwen-review-ledger")))] | sort_by(.submitted_at, .id) | last | .state // ""' 2>/dev/null)" || carried_state=''
+                  | jq -r --arg who "$bot_login" --arg sha "$reviewed_anchor" '[.[][]? | select(.commit_id == $sha and .user.login == $who and ((.body // "") | contains("via Qwen Code /review") or contains("qwen-review-ledger")))] | sort_by(.submitted_at, .id) | last | .state // ""' 2>/dev/null)" || carried_state=''
                 if [ "$carried_state" != "$anchor_state" ]; then
                   echo "::warning::Reviewed anchor ${reviewed_anchor} now reports ${carried_state:-no attributable review}, not the stamped ${anchor_state}; not carrying its verdict."
                   carry_event=''
@@ -3237,8 +3244,24 @@ jobs:
           # The window alone does not bind the producer — an in-run review by
           # the same credential is inside it by construction — so the
           # attribution footer every composed review carries is required too.
+          # R9-2. A marker is not by itself a verdict about THIS sha.
+          # compose-review withholds the sha from a fail-closed round
+          # (whiffed lens, Uncoverable, truncated finding list) precisely
+          # because that round cannot certify the head, and the ledger can
+          # graft an EARLIER own round's sha onto a later marker. Either shape
+          # would let a round that only ever certified some other head anchor
+          # this one and hand the next unchanged push a skip off it, so a
+          # marker must name the stamped sha; a body with no marker at all —
+          # the carry-forward body this pipeline itself posts — still stamps,
+          # or a chain of unchanged pushes dies after one hop. A grafted sha
+          # is refused on purpose: that field scopes the next round's
+          # incremental range, and this status hands out skips instead.
           review_state="$(printf '%s' "$reviews" | jq -r --arg sha "$HEAD_SHA" --arg who "$bot_login" --arg run_created "$run_created" '
-            [.[][]? | select(.commit_id == $sha and .user.login == $who and .submitted_at >= $run_created and ((.body // "") | contains("via Qwen Code /review") or contains("qwen-review-ledger")))] as $all |
+            [.[][]? | select(.commit_id == $sha and .user.login == $who and
+              .submitted_at >= $run_created and
+              ((.body // "") | contains("via Qwen Code /review") or contains("qwen-review-ledger")) and
+              ((((.body // "") | contains("qwen-review-ledger")) | not) or
+               ((.body // "") | contains("\"sha\":\"" + $sha + "\""))))] as $all |
             (([$all[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")] | sort_by(.submitted_at, .id) | last | .state) //
              ([$all[] | select(.state == "COMMENTED" and ((.body // "") | length) > 0)] | sort_by(.submitted_at, .id) | last | .state) // empty)' 2>/dev/null || true)"
           case "$review_state" in
