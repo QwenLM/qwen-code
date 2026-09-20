@@ -88,8 +88,36 @@ type Processor = ReturnType<typeof node> & {
   onaudioprocess: ((event: AudioProcessingEvent) => void) | null;
 };
 
+class MockWorkletNode {
+  static instances: MockWorkletNode[] = [];
+  static failConstruction = false;
+  connect = vi.fn();
+  disconnect = vi.fn();
+  port: {
+    onmessage: ((event: MessageEvent) => void) | null;
+    close: ReturnType<typeof vi.fn>;
+  } = { onmessage: null, close: vi.fn() };
+
+  constructor(
+    readonly context: unknown,
+    readonly name: string,
+    readonly options: Record<string, unknown>,
+  ) {
+    if (MockWorkletNode.failConstruction) throw new Error('not registered');
+    MockWorkletNode.instances.push(this);
+  }
+
+  /** A frame as the audio thread posts it. */
+  post(samples: number[], level: number): void {
+    const pcm = Int16Array.from(samples).buffer;
+    this.port.onmessage?.({ data: { pcm, level } } as MessageEvent);
+  }
+}
+
 class MockAudioContext {
   static instances: MockAudioContext[] = [];
+  /** `undefined`: the browser has no AudioWorklet (the default here). */
+  static addModule: ((url: string) => Promise<void>) | undefined;
   static processor: Processor | undefined;
   static sources: Array<{
     start: ReturnType<typeof vi.fn>;
@@ -100,6 +128,13 @@ class MockAudioContext {
   currentTime = 0;
   readonly sampleRate: number;
   readonly destination = {};
+  get audioWorklet():
+    | { addModule: (url: string) => Promise<void> }
+    | undefined {
+    return MockAudioContext.addModule
+      ? { addModule: MockAudioContext.addModule }
+      : undefined;
+  }
   createMediaStreamSource = vi.fn(() => node());
   createScriptProcessor = vi.fn((size: number) => {
     const processor = { ...node(), onaudioprocess: null, size };
@@ -201,6 +236,13 @@ beforeEach(() => {
   MockAudioContext.instances = [];
   MockAudioContext.processor = undefined;
   MockAudioContext.sources = [];
+  MockAudioContext.addModule = undefined;
+  MockWorkletNode.instances = [];
+  MockWorkletNode.failConstruction = false;
+  Object.defineProperty(globalThis, 'AudioWorkletNode', {
+    value: MockWorkletNode,
+    configurable: true,
+  });
   Object.defineProperty(globalThis, 'WebSocket', {
     value: MockWebSocket,
     configurable: true,
@@ -590,5 +632,137 @@ describe('useLiveBrowserHost', () => {
     expect(MockWebSocket.instances).toHaveLength(0);
     expect(track.stop).toHaveBeenCalled();
     expect(host!.phase).toBe('idle');
+  });
+
+  describe('capture path', () => {
+    it('captures on the audio thread when the worklet module loads', async () => {
+      const addModule = vi.fn(async () => {});
+      MockAudioContext.addModule = addModule;
+      await render();
+      const ws = await connected();
+
+      expect(host!.captureMode).toBe('worklet');
+      expect(addModule).toHaveBeenCalledOnce();
+      // A same-origin asset URL: the CSP refuses blob: and data: modules.
+      expect(addModule.mock.calls[0]![0]).toMatch(/capture-worklet/);
+      const [node] = MockWorkletNode.instances;
+      expect(node!.name).toBe('qwen-live-capture');
+      expect(node!.options).toMatchObject({
+        processorOptions: { frameSize: 1024 },
+      });
+      // No main-thread capture node alongside it.
+      expect(
+        MockAudioContext.instances[0]!.createScriptProcessor,
+      ).not.toHaveBeenCalled();
+
+      await act(async () => {
+        ws.receive({
+          type: 'host.state',
+          epoch: 7,
+          status: status('listening'),
+        });
+      });
+      node!.post([100, -200], 0.25);
+      const [frame] = ws.audio();
+      const view = new DataView(frame!);
+      expect(Number(view.getBigUint64(0))).toBe(7);
+      expect(view.getInt16(8, true)).toBe(100);
+      expect(view.getInt16(10, true)).toBe(-200);
+      expect(host!.inputLevel.current.level).toBe(0.25);
+    });
+
+    it('applies the same gates to worklet frames: not before the call, not while muted', async () => {
+      MockAudioContext.addModule = async () => {};
+      await render();
+      const ws = await connected();
+      const [node] = MockWorkletNode.instances;
+
+      node!.post([1, 2], 0.5);
+      expect(ws.audio()).toHaveLength(0);
+      expect(host!.inputLevel.current.level).toBe(0.5);
+
+      await act(async () => {
+        ws.receive({
+          type: 'host.state',
+          epoch: 1,
+          status: status('listening', { inputMuted: true }),
+        });
+      });
+      node!.post([1, 2], 0.5);
+      expect(ws.audio()).toHaveLength(0);
+      expect(host!.inputLevel.current.level).toBe(0);
+    });
+
+    it.each([
+      ['the browser has no AudioWorklet', undefined, false],
+      [
+        'the module cannot be loaded (a data: URL under the CSP)',
+        async () => {
+          throw new Error('Refused to load the script');
+        },
+        false,
+      ],
+      ['the processor cannot be constructed', async () => {}, true],
+    ] as const)(
+      'falls back to the main-thread node when %s',
+      async (_label, addModule, failConstruction) => {
+        MockAudioContext.addModule = addModule;
+        MockWorkletNode.failConstruction = failConstruction;
+        await render();
+        const ws = await connected();
+
+        expect(host!.captureMode).toBe('script-processor');
+        expect(host!.phase).toBe('connected');
+        await act(async () => {
+          ws.receive({
+            type: 'host.state',
+            epoch: 1,
+            status: status('listening'),
+          });
+        });
+        speak([1, -1]);
+        expect(ws.audio()).toHaveLength(1);
+      },
+    );
+
+    it('shuts the worklet down with the connection', async () => {
+      MockAudioContext.addModule = async () => {};
+      await render();
+      await connected();
+      const [node] = MockWorkletNode.instances;
+      await act(async () => {
+        host!.disconnect();
+      });
+
+      expect(node!.port.onmessage).toBeNull();
+      expect(node!.port.close).toHaveBeenCalledOnce();
+      expect(node!.disconnect).toHaveBeenCalled();
+      expect(host!.captureMode).toBeUndefined();
+    });
+
+    it('builds nothing for a connect abandoned while the module was loading', async () => {
+      let loaded: () => void = () => {};
+      MockAudioContext.addModule = () =>
+        new Promise<void>((resolve) => {
+          loaded = resolve;
+        });
+      await render();
+      await act(async () => {
+        host!.connect();
+      });
+      await act(async () => {
+        host!.disconnect();
+      });
+      await act(async () => {
+        loaded();
+      });
+
+      // A node parked in the shared resources now would belong to the next
+      // connect, and nothing would ever release it.
+      expect(MockWorkletNode.instances).toHaveLength(0);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(host!.phase).toBe('idle');
+      expect(host!.captureMode).toBeUndefined();
+    });
   });
 });

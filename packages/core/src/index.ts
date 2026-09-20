@@ -301,6 +301,16 @@ export type {
 } from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+export {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  resolveDeferredToolCall,
+} from './tools/tool-call.js';
+export type {
+  DeferredToolCallResolution,
+  ToolCallTool,
+  ToolCallParams,
+} from './tools/tool-call.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export type {
   TeamPlanApprovalTool,
