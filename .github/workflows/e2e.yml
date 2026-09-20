@@ -58,9 +58,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -74,7 +77,7 @@ jobs:
           # The install must not build; the two steps below do it explicitly.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Build project'
         run: |-
@@ -230,9 +233,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -262,14 +268,39 @@ jobs:
           # so it keeps building during install.)
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       # The bundle and workspace dist/ trees come from the `build` job.
+      # One bounded retry, same transient runner-to-blobstore contract as
+      # the build job's upload retry (#11364): run 35250857883's macOS
+      # shard 2/2 died in this step with the build job green behind it
+      # (#12125). A deterministic failure — the artifact missing — fails
+      # both attempts and keeps the leg red.
+      # The first attempt is time-boxed: an absorbed stall otherwise burns
+      # the whole job budget before the retry ever runs.
       - name: 'Download build artifact'
+        id: 'download-build'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          name: 'e2e-build'
+          path: '${{ runner.temp }}/e2e-build'
+
+      - name: 'Download build artifact (retry)'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # An absorbed download stall leaves the leg green, so the main-CI
+      # failure tracker never records it — the warning annotation keeps the
+      # recurrence countable, mirroring the build job's upload announce.
+      - name: 'Announce absorbed download failure'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: |-
+          echo "::warning::Download build artifact failed its first attempt and the retry absorbed it — count this toward the #12125 download-stall recurrence watch."
 
       - name: 'Unpack build artifact'
         run: 'bash .github/scripts/e2e-build-unpack.sh "${RUNNER_TEMP}/e2e-build/e2e-build.tar.gz"'
@@ -394,9 +425,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -411,14 +445,39 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       # The bundle and workspace dist/ trees come from the `build` job.
+      # One bounded retry, same transient runner-to-blobstore contract as
+      # the build job's upload retry (#11364): run 35250857883's macOS
+      # shard 2/2 died in this step with the build job green behind it
+      # (#12125). A deterministic failure — the artifact missing — fails
+      # both attempts and keeps the leg red.
+      # The first attempt is time-boxed: an absorbed stall otherwise burns
+      # the whole job budget before the retry ever runs.
       - name: 'Download build artifact'
+        id: 'download-build'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          name: 'e2e-build'
+          path: '${{ runner.temp }}/e2e-build'
+
+      - name: 'Download build artifact (retry)'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # An absorbed download stall leaves the leg green, so the main-CI
+      # failure tracker never records it — the warning annotation keeps the
+      # recurrence countable, mirroring the build job's upload announce.
+      - name: 'Announce absorbed download failure'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: |-
+          echo "::warning::Download build artifact failed its first attempt and the retry absorbed it — count this toward the #12125 download-stall recurrence watch."
 
       - name: 'Unpack build artifact'
         run: 'bash .github/scripts/e2e-build-unpack.sh "${RUNNER_TEMP}/e2e-build/e2e-build.tar.gz"'
@@ -448,9 +507,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       # The opentui renderer leg runs the CLI bundle under bun: the locked
       # @opentui/core loads its native renderer through bun:ffi, and the CI
@@ -479,14 +541,39 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       # The bundle and workspace dist/ trees come from the `build` job.
+      # One bounded retry, same transient runner-to-blobstore contract as
+      # the build job's upload retry (#11364): run 35250857883's macOS
+      # shard 2/2 died in this step with the build job green behind it
+      # (#12125). A deterministic failure — the artifact missing — fails
+      # both attempts and keeps the leg red.
+      # The first attempt is time-boxed: an absorbed stall otherwise burns
+      # the whole job budget before the retry ever runs.
       - name: 'Download build artifact'
+        id: 'download-build'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          name: 'e2e-build'
+          path: '${{ runner.temp }}/e2e-build'
+
+      - name: 'Download build artifact (retry)'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # An absorbed download stall leaves the leg green, so the main-CI
+      # failure tracker never records it — the warning annotation keeps the
+      # recurrence countable, mirroring the build job's upload announce.
+      - name: 'Announce absorbed download failure'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: |-
+          echo "::warning::Download build artifact failed its first attempt and the retry absorbed it — count this toward the #12125 download-stall recurrence watch."
 
       - name: 'Unpack build artifact'
         run: 'bash .github/scripts/e2e-build-unpack.sh "${RUNNER_TEMP}/e2e-build/e2e-build.tar.gz"'
@@ -525,9 +612,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -542,14 +632,41 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       # The bundle and workspace dist/ trees come from the `build` job.
+      # One bounded retry, same transient runner-to-blobstore contract as
+      # the build job's upload retry (#11364): run 35250857883's macOS
+      # shard 2/2 died in this step with the build job green behind it
+      # (#12125). A deterministic failure — the artifact missing — fails
+      # both attempts; this leg's deliberate job-level continue-on-error
+      # keeps its conclusion green regardless, so the retry exists to run
+      # the tests, not to keep the leg red.
+      # The first attempt is time-boxed: an absorbed stall otherwise burns
+      # the whole job budget before the retry ever runs.
       - name: 'Download build artifact'
+        id: 'download-build'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          name: 'e2e-build'
+          path: '${{ runner.temp }}/e2e-build'
+
+      - name: 'Download build artifact (retry)'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # An absorbed download stall leaves the leg green, so the main-CI
+      # failure tracker never records it — the warning annotation keeps the
+      # recurrence countable, mirroring the build job's upload announce.
+      - name: 'Announce absorbed download failure'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: |-
+          echo "::warning::Download build artifact failed its first attempt and the retry absorbed it — count this toward the #12125 download-stall recurrence watch."
 
       - name: 'Unpack build artifact'
         run: 'bash .github/scripts/e2e-build-unpack.sh "${RUNNER_TEMP}/e2e-build/e2e-build.tar.gz"'
@@ -576,9 +693,12 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -589,7 +709,7 @@ jobs:
 
       - name: 'Install dependencies'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Install Playwright Chromium'
         run: |-
