@@ -172,6 +172,23 @@ return x;`;
     const { meta } = compileWorkflowScript(src);
     expect(meta).toBeNull();
   });
+
+  it('does not false-match a brace inside a leading line comment (#12217 review)', () => {
+    // Old regex-anchored approach would call `source.indexOf('{', exportIdx)`
+    // with exportIdx === 0 and latch onto the brace inside the comment,
+    // then the brace-walker would consume `'fake'` and throw
+    // "unbalanced braces" — the return-null behavior is what we want
+    // for an anchor that doesn't really start with `export const meta = `.
+    const src = `// { what: 'fake' }\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toEqual({ name: 'real', description: 'real' });
+  });
+
+  it('does not false-match a meta-looking line inside a leading block comment (#12217 × T33)', () => {
+    const src = `/* header with export const meta = { name: 'fake' } inside */\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toEqual({ name: 'real', description: 'real' });
+  });
 });
 
 describe('extractAndStripMeta', () => {

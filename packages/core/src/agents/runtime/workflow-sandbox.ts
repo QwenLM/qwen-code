@@ -39,6 +39,38 @@ export function stripExportMeta(source: string): string {
  * Returns null when no meta declaration is present at the file start —
  * callers treat this as "no meta", not an error.
  */
+/**
+ * Walk past leading whitespace and comments in `source` starting at
+ * `from`, and return the resulting offset. Used by `findMetaBlockBounds`
+ * to position the meta anchor.
+ *
+ * Why a walk, not a regex: a single-pass regex that skips leading
+ * whitespace, line and block comments in one expression either lets the
+ * inner quantifiers compete over trailing whitespace (K+1^N backtrack
+ * paths on K-space × N-comment input — a ReDoS vector), or silently
+ * extends a leading block comment past the comment terminator that lives
+ * inside a template literal (the T33-class false match). A walk consumes
+ * characters only from where it stands, so neither hazard is reachable.
+ */
+function skipTrivia(source: string, from: number): number {
+  let i = from;
+  for (;;) {
+    while (i < source.length && /\s/.test(source[i]!)) i++;
+    if (source.startsWith('//', i)) {
+      i += 2;
+      while (i < source.length && source[i] !== '\n') i++;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i + 2);
+      if (end === -1) return source.length; // unterminated — let the anchor check fail
+      i = end + 2;
+      continue;
+    }
+    return i;
+  }
+}
+
 function findMetaBlockBounds(source: string): {
   /** Start offset of the `export const meta` match. */
   exportIdx: number;
@@ -49,27 +81,25 @@ function findMetaBlockBounds(source: string): {
   /** Offset past meta + any trailing whitespace + optional `;`. */
   afterMeta: number;
 } | null {
-  // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
-  // doc, `export const meta = {...}` must be the script's first statement
-  // once comments are skipped. With `/m`, the regex matched every
-  // line-start occurrence — including inside template literals — and the
-  // brace-walker then ripped content out of the string body, silently
-  // corrupting the script. Leading line and block comments are tolerated,
-  // because model-authored scripts commonly start with an explanatory
-  // header that the user did not strip by hand (issue #12217).
-  //
-  // The comment-skipping loop is deliberately ambiguity-free: `\s`,
-  // `//...\n` and `/*...*/` are prefix-disjoint, and `[^\n]*` is bounded
-  // by the literal `\n` that follows it. A looser form like
-  // `\/\/[^\n]*\s*` lets `[^\n]*` and `\s*` compete over trailing
-  // whitespace, giving (K+1)^N backtrack paths on K-space × N-comment
-  // input — a ReDoS vector.
-  const re =
-    /^(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*export\s+const\s+meta\s*=\s*\{/;
-  const match = re.exec(source);
-  if (!match) return null;
-  const exportIdx = match.index;
-  const startBrace = source.indexOf('{', exportIdx);
+  // T33 (PR #4732 R4): the meta declaration must be the first
+  // non-trivia token of the script. Walk past leading whitespace and
+  // comments rather than regex-matching the whole shape — see `skipTrivia`
+  // for the rationale. Once we are at the first non-trivia character,
+  // the anchor is an *exact* `startsWith` check with no whitespace
+  // tolerance, so:
+  //  - A `{` inside a leading comment cannot be confused with the meta
+  //    `{` (issue #12217 review: `source.indexOf('{', exportIdx)` was
+  //    structurally wrong because `^` anchors always match at index 0,
+  //    so the brace-walker could latch onto a `{` earlier in the
+  //    source — e.g. a JSDoc `// {string}` header).
+  //  - A template literal inside a leading block comment cannot
+  //    contribute to a false match: the walk consumes the comment
+  //    wholesale, including any `export const meta = {...}` it
+  //    contains, then continues.
+  const exportIdx = skipTrivia(source, 0);
+  const ANCHOR = 'export const meta = ';
+  if (!source.startsWith(ANCHOR, exportIdx)) return null;
+  const startBrace = exportIdx + ANCHOR.length;
   let depth = 1;
   let i = startBrace + 1;
   while (i < source.length && depth > 0) {
