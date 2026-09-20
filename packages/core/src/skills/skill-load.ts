@@ -81,6 +81,11 @@ class CountdownGate {
   peak(): number {
     return this.peakActive;
   }
+
+  /** Debug-only snapshot for deadlock forensics. */
+  snapshot(): { active: number; queued: number } {
+    return { active: this.active, queued: this.queue.length };
+  }
 }
 
 const descriptorGate = new CountdownGate(SKILL_LOAD_CONCURRENCY);
@@ -97,10 +102,13 @@ export function peakDescriptorGateInFlight(): number {
 /**
  * Order-preserving map whose per-item work is admitted through the shared
  * descriptor gate, so nesting `mapWithConcurrency` at multiple levels still
- * keeps the total in-flight reads ≤ SKILL_LOAD_CONCURRENCY. Per-item
- * rejections propagate (callers that skip invalid entries handle their own
- * errors and resolve to null instead). The `limit` parameter is retained for
- * call-site readability but only bounds batch scheduling, not descriptors.
+ * keeps the total in-flight reads ≤ SKILL_LOAD_CONCURRENCY. The batch always
+ * settles before rejecting (allSettled, then rethrow the first original
+ * rejection reason): a failing item must not abandon its siblings while they
+ * still hold gate permits — an abandoned permit holder that is itself waiting
+ * on the gate can never be admitted, and repeated failed scans would
+ * permanently drain the module-wide pool. The `limit` parameter only bounds
+ * batch scheduling, not descriptors.
  */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -112,7 +120,7 @@ export async function mapWithConcurrency<T, R>(
   const results: R[] = new Array(items.length);
   for (let i = 0; i < items.length; i += effective) {
     const slice = items.slice(i, i + effective);
-    const batch = Promise.all(
+    const settled = await Promise.allSettled(
       slice.map(async (item, j) => {
         await descriptorGate.acquire();
         try {
@@ -122,7 +130,49 @@ export async function mapWithConcurrency<T, R>(
         }
       }),
     );
-    await batch;
+    const firstRejection = settled.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (firstRejection) {
+      // Preserve the original reason — callers match on messages like
+      // "ENOENT" to convert a failed load into a fail-closed status.
+      throw firstRejection.reason;
+    }
+  }
+  return results;
+}
+
+/**
+ * Scheduling-only variant for fan-out levels that open no descriptors
+ * themselves (e.g. the top-level extensions scan, which merely starts the
+ * per-extension loaders). Items here must NOT hold gate permits while their
+ * nested gated work runs: a level that holds a permit across nested gated
+ * acquisitions stacks orphans when a sibling fails, draining the shared pool
+ * one failed scan at a time. Per-item rejections do not abort the remaining
+ * items in flight — the whole pass settles, then the first original rejection
+ * reason is rethrown (same contract as `mapWithConcurrency`).
+ */
+export async function scheduleWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const effective = Math.max(1, limit);
+  const results: R[] = new Array(items.length);
+  for (let i = 0; i < items.length; i += effective) {
+    const slice = items.slice(i, i + effective);
+    const settled = await Promise.allSettled(
+      slice.map(async (item, j) => {
+        results[i + j] = await fn(item);
+      }),
+    );
+    const firstRejection = settled.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (firstRejection) {
+      throw firstRejection.reason;
+    }
   }
   return results;
 }

@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -15,6 +16,7 @@ import {
 import { ExtensionStorage } from './storage.js';
 import { QWEN_DIR } from '../config/storage.js';
 import {
+  EXTENSION_SCAN_CONCURRENCY,
   SKILL_LOAD_CONCURRENCY,
   peakDescriptorGateInFlight,
 } from '../skills/skill-load.js';
@@ -3611,6 +3613,64 @@ describe('extension tests', () => {
       // test proves nothing.
       expect(peakDescriptorGateInFlight()).toBeGreaterThan(1);
     });
+
+    it(
+      'does not wedge the descriptor gate across repeated failed scans',
+      // The failing generations do real work (each waits for its in-flight
+      // siblings to finish loading ~1200 skills before the batch settles), so
+      // this test carries its own generous timeout. The assertion that
+      // matters is that it settles at all: on the pre-fix code this exact
+      // fixture hangs past any timeout because the gate pool is exhausted.
+      { timeout: 240_000 },
+      async () => {
+        // A dangling symlink makes every refresh reject (its statSync throw
+        // propagates). The rejection must not leak gate permits held by
+        // in-flight siblings: repeated failed scans previously stacked
+        // orphaned permit holders until the module-wide pool was exhausted
+        // and every subsequent load in the process hung forever.
+        // ceil(64 / (8 - 1)) + 1 failing scans is past the old wedge point.
+        const FAILING_SCANS =
+          Math.ceil(SKILL_LOAD_CONCURRENCY / (EXTENSION_SCAN_CONCURRENCY - 1)) +
+          1;
+        await fsp.symlink(
+          path.join(tempHomeDir, 'missing'),
+          path.join(userExtensionsDir, 'aaa-dangling'),
+        );
+        for (let i = 0; i < EXTENSION_SCAN_CONCURRENCY - 1; i += 1) {
+          const extDir = createExtension({
+            extensionsDir: userExtensionsDir,
+            name: `wedge-ext-${i}`,
+            version: '1.0.0',
+          });
+          // Enough per-extension work that abandoned siblings of a failed
+          // batch still hold gate permits when the next refresh starts — the
+          // wedge needs retry traffic to outpace orphan reclamation (the
+          // review's witness used ~3000 skills per extension).
+          for (let s = 0; s < 1200; s += 1) {
+            const skillDir = path.join(extDir, 'skills', `skill-${s}`);
+            fs.mkdirSync(skillDir, { recursive: true });
+            fs.writeFileSync(
+              path.join(skillDir, 'SKILL.md'),
+              `---\nname: skill-${s}\ndescription: Skill ${s}\n---\nBody`,
+            );
+          }
+        }
+
+        const manager = createExtensionManager();
+        for (let i = 0; i < FAILING_SCANS; i += 1) {
+          await expect(manager.refreshCache()).rejects.toThrow(/aaa-dangling/);
+        }
+        // The pool must still admit work: a fresh manager over the same store
+        // (still failing on the symlink) settles, and removing the symlink
+        // makes loads succeed again.
+        const recovered = createExtensionManager();
+        fs.unlinkSync(path.join(userExtensionsDir, 'aaa-dangling'));
+        await recovered.refreshCache();
+        expect(recovered.getLoadedExtensions()).toHaveLength(
+          EXTENSION_SCAN_CONCURRENCY - 1,
+        );
+      },
+    );
   });
 
   describe('enableExtension / disableExtension', () => {

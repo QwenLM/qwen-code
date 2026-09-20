@@ -101,7 +101,7 @@ import {
 import {
   EXTENSION_SCAN_CONCURRENCY,
   loadSkillsFromDir,
-  mapWithConcurrency,
+  scheduleWithConcurrency,
 } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import {
@@ -1688,15 +1688,16 @@ export class ExtensionManager {
       return [];
     }
 
-    // Promise.all semantics, not allSettled: loadExtension converts its own
-    // per-extension errors to null, but an entry whose stat itself throws
-    // (e.g. a dangling symlink at the extensions root) must propagate and
-    // fail the whole load — read-only consumers rely on that fail-closed
-    // signal. The outer bound is deliberately small: it only schedules
-    // extensions into their per-extension phase, while every descriptor opened
-    // underneath (skills/commands/agents reads) is admitted through the shared
-    // gate inside mapWithConcurrency, keeping total in-flight reads global.
-    const extensions = await mapWithConcurrency(
+    // Scheduling-only fan-out: this level opens no descriptors itself, so its
+    // items must not hold gate permits while the nested loaders run — a level
+    // that holds a permit across nested gated acquisitions stacks orphans when
+    // a sibling fails (e.g. the dangling-symlink statSync below), permanently
+    // draining the shared pool. Promise.allSettled semantics here: the whole
+    // batch settles before the first original rejection reason is rethrown, so
+    // a failing scan never abandons siblings mid-flight. An entry whose stat
+    // itself throws (dangling symlink) still propagates and fails the whole
+    // load — read-only consumers rely on that fail-closed signal.
+    const extensions = await scheduleWithConcurrency(
       subdirs,
       EXTENSION_SCAN_CONCURRENCY,
       (subdir) =>
