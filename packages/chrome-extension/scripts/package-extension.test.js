@@ -52,7 +52,12 @@ describe.skipIf(!zipAvailable())('packageExtension', () => {
         JSON.stringify(manifest),
       );
 
-      await packageExtension({ source, archive, store: true });
+      await packageExtension({
+        source,
+        archive,
+        store: true,
+        staged: path.join(root, 'store-extension'),
+      });
       const stored = await readZipEntries(archive);
       const storeManifest = JSON.parse(
         String(stored.find((entry) => entry.name === 'manifest.json').content),

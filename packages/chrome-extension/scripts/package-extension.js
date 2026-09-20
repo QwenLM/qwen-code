@@ -19,9 +19,11 @@ const packageRoot = path.resolve(
  * Stages a copy of the built extension without the manifest's `key`. The key
  * pins the id of a build loaded from source; the Chrome Web Store rejects an
  * upload that carries one and identifies the item by its own key instead.
+ * It lands next to the build it copies, so the release scan can read it the
+ * same way it reads dist/extension; a caller packaging from elsewhere passes
+ * its own path rather than writing into the package's build tree.
  */
-async function stageStoreBuild(source) {
-  const staged = path.join(packageRoot, 'dist/store-extension');
+async function stageStoreBuild(source, staged) {
   await rm(staged, { recursive: true, force: true });
   await cp(source, staged, { recursive: true });
   const manifestPath = path.join(staged, 'manifest.json');
@@ -35,8 +37,9 @@ export async function packageExtension({
   source = path.join(packageRoot, 'dist/extension'),
   archive = path.join(packageRoot, 'chrome-extension.zip'),
   store = false,
+  staged = path.join(packageRoot, 'dist/store-extension'),
 } = {}) {
-  if (store) source = await stageStoreBuild(source);
+  if (store) source = await stageStoreBuild(source, staged);
   await rm(archive, { force: true });
   await new Promise((resolve, reject) => {
     const child = spawn('zip', ['-r', archive, '.'], {
