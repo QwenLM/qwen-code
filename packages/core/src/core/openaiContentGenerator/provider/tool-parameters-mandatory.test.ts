@@ -42,6 +42,12 @@ const CUSTOM_TOOL = {
   custom: { name: 'code', format: { type: 'text' } },
 } as unknown as OpenAI.Chat.ChatCompletionTool;
 
+// A hand-written extra_body entry in the flat Responses wire shape: it claims
+// `type: 'function'` but carries no `function` object to dereference.
+const FLAT_FUNCTION_TOOL = {
+  type: 'function',
+} as unknown as OpenAI.Chat.ChatCompletionTool;
+
 function createConfig(
   model: string,
   baseUrl: string,
@@ -262,16 +268,58 @@ describe('generationConfig.toolParametersMandatory', () => {
       ]);
     });
 
-    it('passes it through on an opted-in route that merges extra_body', () => {
+    it('passes a tool that claims function but carries no function object through when the helper is called directly', () => {
+      const request = withEmptyToolParameters({
+        model: 'local-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+        tools: [CONVERTER_SHAPE, FLAT_FUNCTION_TOOL],
+      });
+
+      expect(request.tools).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'cron_list',
+            description: 'desc',
+            parameters: EMPTY_PARAMETERS,
+          },
+        },
+        FLAT_FUNCTION_TOOL,
+      ]);
+    });
+
+    it('repairs a tool merged from extra_body and leaves a custom tool intact', () => {
       const config: ContentGeneratorConfig = {
         ...createConfig('local-model', 'http://localhost:5000/v1', true),
-        extra_body: { tools: [CUSTOM_TOOL] },
+        extra_body: { tools: [CONVERTER_SHAPE, CUSTOM_TOOL] },
       };
       const provider = determineProvider(config, mockCliConfig);
 
       const request = outboundRequest(config, provider);
 
-      expect(request.tools).toEqual([CUSTOM_TOOL]);
+      expect(request.tools).toEqual([
+        {
+          ...CONVERTER_SHAPE,
+          function: {
+            ...CONVERTER_SHAPE.function,
+            parameters: EMPTY_PARAMETERS,
+          },
+        },
+        CUSTOM_TOOL,
+      ]);
+      expect(request.max_tokens).toBe(32_000);
+    });
+
+    it('passes a flat function tool through on an opted-in route that merges extra_body', () => {
+      const config: ContentGeneratorConfig = {
+        ...createConfig('local-model', 'http://localhost:5000/v1', true),
+        extra_body: { tools: [FLAT_FUNCTION_TOOL] },
+      };
+      const provider = determineProvider(config, mockCliConfig);
+
+      const request = outboundRequest(config, provider);
+
+      expect(request.tools).toEqual([FLAT_FUNCTION_TOOL]);
       expect(request.max_tokens).toBe(32_000);
     });
   });
