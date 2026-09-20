@@ -376,11 +376,14 @@ function findRawCharCol(
   return currentCol;
 }
 
-/** Column of the first non-whitespace character, or the line length when blank. */
+/**
+ * Column of the first non-whitespace character. A blank line has none, and the
+ * landing column there is its last character, not one past the end.
+ */
 function firstNonBlankCol(line: string): number {
   const cps = [...line];
   const index = cps.findIndex((ch) => !/\s/.test(ch));
-  return index < 0 ? cps.length : index;
+  return index < 0 ? Math.max(0, cps.length - 1) : index;
 }
 
 /**
@@ -560,12 +563,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       const line = bufferRef.current.lines[row] ?? '';
       const foundCol = findRawCharCol(line, findType, char, col, count);
       const range = findMotionRange(col, findType, foundCol);
-      return applyCharOperator(
-        operator,
-        row,
-        range?.[0] ?? col,
-        range?.[1] ?? col,
-      );
+      // A find that misses aborts the operator, so this must not fall through
+      // to the empty-range change that enters INSERT.
+      if (!range) {
+        return false;
+      }
+      return applyCharOperator(operator, row, range[0], range[1]);
     },
     [applyCharOperator],
   );
@@ -2098,7 +2101,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                 buffer.setText('');
                 onSubmit(submittedValue);
               }
-              dispatch({ type: 'CLEAR_COUNT' });
+              // Submitting closes the motion's context; an operator left armed
+              // here fires on the next prompt's first line motion.
+              dispatch({ type: 'CLEAR_PENDING_STATES' });
               return true;
             }
 

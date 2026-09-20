@@ -2612,8 +2612,9 @@ describe('useVim hook', () => {
         }),
         vimMoveToFirstNonWhitespace: vi.fn(() => {
           const [row] = cursorState.pos;
-          const idx = [...(lines[row] ?? '')].findIndex((ch) => !/\s/.test(ch));
-          cursorState.pos = [row, idx < 0 ? 0 : idx];
+          const cps = [...(lines[row] ?? '')];
+          const idx = cps.findIndex((ch) => !/\s/.test(ch));
+          cursorState.pos = [row, idx < 0 ? Math.max(0, cps.length - 1) : idx];
         }),
         vimMoveRight: vi.fn((count = 1) => {
           const [row, col] = cursorState.pos;
@@ -2705,6 +2706,45 @@ describe('useVim hook', () => {
       press(result, 'd$');
       expect(buffer.lines).toEqual(['first line', '']);
       expect(buffer.cursor).toEqual([1, 0]);
+    });
+
+    it('aborts a change whose find character is not on the line', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 0]);
+
+      press(result, 'ctz');
+
+      // A missed find cancels the operator. Dropping into insert instead would
+      // type the next normal-mode command into the buffer.
+      expect(buffer.lines).toEqual(['hello world']);
+      expect(result.current.mode).toBe('NORMAL');
+
+      buffer.replaceRange.mockClear();
+      press(result, 'd$');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(0, 0, 0, 11, '');
+    });
+
+    it('keeps d^ from eating the last character of a whitespace-only line', () => {
+      const { buffer, result } = renderApplying('   ', [0, 0]);
+
+      press(result, '$d^');
+
+      expect(buffer.lines).toEqual(['   ']);
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+    });
+
+    it('drops the pending operator when Enter submits', () => {
+      const { buffer, result } = renderApplying('keep me', [0, 0]);
+
+      press(result, 'd');
+      act(() => result.current.handleInput(makeKey('\r', 'return')));
+      expect(mockHandleFinalSubmit).toHaveBeenCalledWith('keep me');
+      buffer.replaceRange.mockClear();
+
+      press(result, '$');
+
+      // A line motion after a submit belongs to the next prompt, not the one
+      // that was just sent.
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
     });
 
     it('leaves the yank register alone when d$ deletes nothing', () => {
