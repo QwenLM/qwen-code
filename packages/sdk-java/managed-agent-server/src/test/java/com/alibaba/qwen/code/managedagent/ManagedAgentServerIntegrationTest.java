@@ -204,6 +204,14 @@ class ManagedAgentServerIntegrationTest {
                         .andExpect(jsonPath("$.events[?(@.type =="
                                 + " 'turn.completed')]").isNotEmpty()));
 
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + sessionId + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.activeTurn.status")
+                        .value("completed"));
+
         MvcResult newest = mvc.perform(post(
                         "/api/agent/web-shell/v1/transcript/query")
                         .header(TenantContextFilter.HEADER, tenant)

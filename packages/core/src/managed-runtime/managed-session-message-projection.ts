@@ -67,28 +67,26 @@ export class ManagedSessionMessageProjection {
             epoch: actor.activation.epoch,
           }
         : undefined;
-    const receipt = await this.authority.appendExecution(
+    const receipt = await this.authority.appendExecutionEvent(
       command,
-      [
-        {
-          v: MANAGED_SESSION_FORMAT_VERSION,
-          sequence: this.authority.committedSequence + 1,
-          eventId: `message:${record.uuid}`,
-          sessionKey: command.sessionKey,
-          kind: 'message.committed',
-          occurredAt: Date.parse(record.timestamp) || Date.now(),
-          ...(subject === undefined ? {} : { subject }),
-          payload: {
-            messageId: record.uuid,
-            role: record.type,
-            contentRef,
-            parentMessageId: record.parentUuid,
-            ...(input.modelAttemptId === undefined
-              ? {}
-              : { modelAttemptId: input.modelAttemptId }),
-          },
+      (sequence) => ({
+        v: MANAGED_SESSION_FORMAT_VERSION,
+        sequence,
+        eventId: `message:${record.uuid}`,
+        sessionKey: command.sessionKey,
+        kind: 'message.committed',
+        occurredAt: Date.parse(record.timestamp) || Date.now(),
+        ...(subject === undefined ? {} : { subject }),
+        payload: {
+          messageId: record.uuid,
+          role: record.type,
+          contentRef,
+          parentMessageId: record.parentUuid,
+          ...(input.modelAttemptId === undefined
+            ? {}
+            : { modelAttemptId: input.modelAttemptId }),
         },
-      ],
+      }),
       actor,
     );
     return { receipt, messageId: record.uuid };

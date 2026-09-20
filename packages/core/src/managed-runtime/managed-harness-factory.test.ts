@@ -645,6 +645,35 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('keeps Runtime ordinals unique across sequential calls in one turn', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const first = await runtimeCommit(session);
+    await handle.commitAwaitRuntime(first);
+    const firstOutcome = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"outcome":"completed"}', 'utf8'),
+    );
+    await handle.resolveAwaitRuntime(firstOutcome);
+    await handle.consumeRuntimeResults();
+
+    await handle.commitAwaitRuntime({
+      ...first,
+      functionCallId: 'fc-2',
+      executionCallId: 'ex-2',
+      invocationBindingId: 'bind-2',
+      modelMessageId: 'msg-2',
+      inputDigest: '8'.repeat(64),
+    });
+
+    const checkpoint = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.tools?.items.map((item) => item.ordinal)).toEqual([0, 1]);
+    await session.close();
+  });
+
   it('keeps await_runtime across a cold reopen until results are settled', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);

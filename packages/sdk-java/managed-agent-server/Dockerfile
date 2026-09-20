@@ -22,6 +22,6 @@ COPY --from=build \
   /workspace/packages/sdk-java/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
   /app/qwen-managed-agent-server.jar
 
-EXPOSE 8080 4190
+EXPOSE 8080 4182
 USER 10001
 ENTRYPOINT ["java", "-jar", "/app/qwen-managed-agent-server.jar"]

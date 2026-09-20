@@ -343,36 +343,34 @@ export class ManagedSessionRecordSink {
         return;
       }
     }
-    await this.authority.appendExecution(
+    await this.authority.appendExecutionEvent(
       command,
-      [
-        {
-          v: 1,
-          sequence: this.authority.committedSequence + 1,
-          eventId: turn.eventId,
-          sessionKey: this.authority.sessionHeader.sessionKey,
-          kind: 'turn.settled',
-          occurredAt: turn.occurredAt,
-          ...(actor.class === 'harness' && held !== undefined
-            ? {
-                subject: {
-                  type: 'activation',
-                  scopeId: held.activationId,
-                  activationId: held.activationId,
-                  epoch: held.epoch,
-                },
-              }
-            : {}),
-          payload: {
-            turnId: turn.turnId,
-            outcome: turn.outcome,
-            stopReason: turn.stopReason,
-            resultRef,
-            usageRef: null,
-            pendingOwnersRef: null,
-          },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: turn.eventId,
+        sessionKey: this.authority.sessionHeader.sessionKey,
+        kind: 'turn.settled',
+        occurredAt: turn.occurredAt,
+        ...(actor.class === 'harness' && held !== undefined
+          ? {
+              subject: {
+                type: 'activation',
+                scopeId: held.activationId,
+                activationId: held.activationId,
+                epoch: held.epoch,
+              },
+            }
+          : {}),
+        payload: {
+          turnId: turn.turnId,
+          outcome: turn.outcome,
+          stopReason: turn.stopReason,
+          resultRef,
+          usageRef: null,
+          pendingOwnersRef: null,
         },
-      ],
+      }),
       actor,
     );
   }

@@ -18,6 +18,12 @@ import org.junit.jupiter.api.Test;
 
 class EmbeddedRuntimeBrokerTest {
     @Test
+    void usesFetchCompatibleDefaultBrokerPort() {
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
+                .isEqualTo(4182);
+    }
+
+    @Test
     void startsPrivateListenerAndResolvesTenantFromTheSessionStore()
             throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);

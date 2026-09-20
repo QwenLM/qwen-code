@@ -50,6 +50,23 @@ The public listener intentionally ignores end-user `Authorization`. The
 optional Runtime Broker listener still requires a separate machine bearer and
 must remain private.
 
+## WebShell development entry
+
+After the Spring service is running, start the repository-owned Managed Agent
+WebShell entry from the repository root:
+
+```bash
+QWEN_MANAGED_AGENT_JAVA_URL=http://127.0.0.1:8080 \
+  npm run dev:managed-agent-web
+```
+
+Open `http://127.0.0.1:5174/?tenant=local-java-demo`. The page renders the
+exported `ManagedAgentWebShell` directly and proxies only
+`/api/agent/web-shell/v1/**` to the Java service. It does not connect to a Qwen
+daemon and never receives the private Harness or Runtime Broker credentials.
+Use `managedSession=<sessionId>` to deep-link a Session. The `tenant` query
+parameter is a local-development convenience, not an authentication mechanism.
+
 ## Embedded Runtime Broker
 
 The Broker starts before the first Hosted Harness connection, so the supported
@@ -74,7 +91,7 @@ workspace path. An explicitly configured ID must match that value or startup
 fails before traffic is accepted.
 
 Point `qwen serve --profile hosted-harness` at
-`http://127.0.0.1:4190` with the same Broker bearer. This first embedded path
+`http://127.0.0.1:4182` with the same Broker bearer. This first embedded path
 uses the Runtime Broker's in-memory repositories and is therefore a
 single-control-plane-node development topology. MySQL-backed Broker
 repositories and a tenant-authorized environment registry remain production

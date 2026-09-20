@@ -233,12 +233,12 @@ public class ManagedAgentService {
     }
 
     private WebShellSession webShellSession(SessionRecord session) {
-        TurnRecord activeTurn = store.findActiveTurn(session.tenantId(),
+        TurnRecord latestTurn = store.findLatestTurn(session.tenantId(),
                 session.sessionId()).orElse(null);
         return new WebShellSession(session.sessionId(), session.title(),
                 session.agentId(), session.status().toLowerCase(),
                 session.createdAt(), session.updatedAt(),
-                activeTurn == null ? null : webShellTurn(activeTurn), null,
+                latestTurn == null ? null : webShellTurn(latestTurn), null,
                 session.lastSequence());
     }
 

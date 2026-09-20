@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import {
@@ -216,6 +216,110 @@ const branchRecord: ChatRecord = {
 };
 
 describe('managed session message projection', () => {
+  it('assigns the message sequence after earlier queued commits', async () => {
+    const harness = await createHarness();
+    const publish = harness.store.publish.bind(harness.store);
+    let releaseCheckpoint!: () => void;
+    const checkpointReleased = new Promise<void>((resolve) => {
+      releaseCheckpoint = resolve;
+    });
+    let checkpointPublishStarted!: () => void;
+    const checkpointPublishing = new Promise<void>((resolve) => {
+      checkpointPublishStarted = resolve;
+    });
+    vi.spyOn(harness.store, 'publish').mockImplementation(
+      async (kind, body) => {
+        if (kind === 'managed-checkpoint') {
+          checkpointPublishStarted();
+          await checkpointReleased;
+        }
+        return publish(kind, body);
+      },
+    );
+    const appendEvent = vi.spyOn(harness.authority, 'appendExecutionEvent');
+
+    try {
+      const checkpoint = harness.authority.commitCheckpoint(
+        command('commitCheckpoint', 'queued-checkpoint'),
+        { state: Buffer.from('checkpoint'), boundary: null },
+        HOLDS,
+      );
+      await checkpointPublishing;
+      const message = harness.projection.commit(
+        command('commitMessage', 'queued-message'),
+        { record: records[0] },
+        HOLDS,
+      );
+      await vi.waitFor(() => expect(appendEvent).toHaveBeenCalledOnce());
+
+      releaseCheckpoint();
+      await expect(Promise.all([checkpoint, message])).resolves.toHaveLength(2);
+      expect(harness.authority.committedSequence).toBe(3);
+      await expect(harness.projection.project()).resolves.toEqual([records[0]]);
+    } finally {
+      releaseCheckpoint();
+      await harness.close();
+    }
+  });
+
+  it('assigns an activation transition after earlier queued commits', async () => {
+    const harness = await createHarness();
+    const publish = harness.store.publish.bind(harness.store);
+    let releaseCheckpoint!: () => void;
+    const checkpointReleased = new Promise<void>((resolve) => {
+      releaseCheckpoint = resolve;
+    });
+    let checkpointPublishStarted!: () => void;
+    const checkpointPublishing = new Promise<void>((resolve) => {
+      checkpointPublishStarted = resolve;
+    });
+    vi.spyOn(harness.store, 'publish').mockImplementation(
+      async (kind, body) => {
+        if (kind === 'managed-checkpoint') {
+          checkpointPublishStarted();
+          await checkpointReleased;
+        }
+        return publish(kind, body);
+      },
+    );
+    const appendEvent = vi.spyOn(harness.authority, 'appendExecutionEvent');
+
+    try {
+      const checkpoint = harness.authority.commitCheckpoint(
+        command('commitCheckpoint', 'queued-checkpoint'),
+        { state: Buffer.from('checkpoint'), boundary: null },
+        HOLDS,
+      );
+      await checkpointPublishing;
+      const message = harness.projection.commit(
+        command('commitMessage', 'queued-message'),
+        { record: records[0] },
+        HOLDS,
+      );
+      await vi.waitFor(() => expect(appendEvent).toHaveBeenCalledOnce());
+      const release = harness.authority.releaseActivation();
+      await vi.waitFor(() => expect(appendEvent).toHaveBeenCalledTimes(2));
+
+      releaseCheckpoint();
+      await expect(
+        Promise.all([checkpoint, message, release]),
+      ).resolves.toHaveLength(3);
+      expect(
+        harness.authority
+          .readEvents()
+          .map((event) => [event.sequence, event.kind]),
+      ).toEqual([
+        [1, 'activation.changed'],
+        [2, 'checkpoint.committed'],
+        [3, 'message.committed'],
+        [4, 'activation.changed'],
+      ]);
+    } finally {
+      releaseCheckpoint();
+      await harness.close();
+    }
+  });
+
   it.each([
     [
       'JSON',

@@ -471,6 +471,11 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     gate.claim(request.executionCallId);
     try {
       const identity = this.nextCheckpointIdentity();
+      const priorItems = previous.tools?.items ?? [];
+      const ordinal = priorItems.reduce(
+        (next, item) => Math.max(next, item.ordinal + 1),
+        request.ordinal,
+      );
       const checkpoint = createAwaitRuntimeHarnessCheckpoint({
         previous,
         ...identity,
@@ -486,15 +491,13 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         tools: {
           batchId: previous.tools?.batchId ?? `batch-${request.functionCallId}`,
           items: [
-            ...(previous.tools?.items ?? []).filter(
-              (item) => item.state === 'settled',
-            ),
+            ...priorItems.filter((item) => item.state === 'settled'),
             {
               functionCallId: request.functionCallId,
               executionCallId: request.executionCallId,
               modelMessageId: request.modelMessageId,
               partIndex: request.partIndex,
-              ordinal: request.ordinal,
+              ordinal,
               inputDigest: request.inputDigest,
               outcomeSource: 'runtime',
               state: 'in_progress',

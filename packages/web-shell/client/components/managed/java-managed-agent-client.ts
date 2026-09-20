@@ -95,7 +95,7 @@ export class JavaManagedAgentClient {
     base.search = '';
     base.hash = '';
     this.baseUrl = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.credentials = options.credentials ?? 'include';
   }
 

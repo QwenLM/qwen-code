@@ -47,7 +47,7 @@ public class ManagedEventStreamService {
         return emitter;
     }
 
-    private SseEmitter emitter() {
+    SseEmitter emitter() {
         return new SseEmitter(streamTimeout.toMillis());
     }
 
@@ -70,7 +70,7 @@ public class ManagedEventStreamService {
                 heartbeatAt = idle(emitter, events.isEmpty(), heartbeatAt);
             }
         } catch (IOException error) {
-            completeWithError(emitter, closed, error);
+            closed.set(true);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             completeWithError(emitter, closed, error);
@@ -98,7 +98,7 @@ public class ManagedEventStreamService {
                 heartbeatAt = idle(emitter, events.isEmpty(), heartbeatAt);
             }
         } catch (IOException error) {
-            completeWithError(emitter, closed, error);
+            closed.set(true);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             completeWithError(emitter, closed, error);

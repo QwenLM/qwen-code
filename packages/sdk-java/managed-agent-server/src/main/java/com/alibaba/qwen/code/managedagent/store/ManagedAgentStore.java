@@ -284,6 +284,16 @@ public class ManagedAgentStore {
         return rows.stream().findFirst();
     }
 
+    public Optional<TurnRecord> findLatestTurn(String tenantId,
+            String sessionId) {
+        List<TurnRecord> rows = jdbc.query(
+                "SELECT * FROM managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? ORDER BY created_at DESC,"
+                        + " turn_id DESC LIMIT 1",
+                turnMapper, tenantId, sessionId);
+        return rows.stream().findFirst();
+    }
+
     public List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit) {
         requireSession(tenantId, sessionId);

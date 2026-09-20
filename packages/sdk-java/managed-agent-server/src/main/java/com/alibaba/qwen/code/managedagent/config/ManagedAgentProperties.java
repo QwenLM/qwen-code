@@ -166,7 +166,7 @@ public class ManagedAgentProperties {
     public static class RuntimeBroker {
         private boolean enabled;
         private String host = "127.0.0.1";
-        private int port = 4190;
+        private int port = 4182;
         private String token = "";
         private String provisioner = "local-process";
         private String workspaceId = "";

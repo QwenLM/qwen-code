@@ -637,6 +637,16 @@ export class LocalManagedSessionAuthority {
     );
   }
 
+  appendExecutionEvent(
+    command: ManagedSessionCommand,
+    event: (sequence: number) => unknown,
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionCommitReceipt> {
+    return this.runSerial(() =>
+      this.commit(command, [event(this.committed + 1)], [actor]),
+    );
+  }
+
   /** The latest committed action for this request, if any. */
   action(requestId: string): ManagedSessionAction | undefined {
     return this.actions.get(requestId);
@@ -1480,38 +1490,37 @@ export class LocalManagedSessionAuthority {
     readonly boundaryRef: ManagedSessionDurableRef | null;
     readonly operation: string;
   }): Promise<void> {
-    const event = {
-      v: MANAGED_SESSION_FORMAT_VERSION,
-      sequence: this.committed + 1,
-      eventId: `activation:${input.activationId}:${input.phase}`,
-      sessionKey: this.sessionKey,
-      kind: 'activation.changed',
-      occurredAt: this.now(),
-      payload: {
-        activationId: input.activationId,
-        epoch: input.epoch,
-        workerId: input.workerId,
-        subject: {
-          type: 'activation',
-          scopeId: input.activationId,
-          activationId: input.activationId,
-          epoch: input.epoch,
-        },
-        phase: input.phase,
-        leaseDurationMs: input.leaseDurationMs,
-        expiresAt: input.expiresAt,
-        installRef: input.installRef,
-        boundaryRef: input.boundaryRef,
-      },
-    };
-    await this.appendExecution(
+    await this.appendExecutionEvent(
       {
         operation: input.operation,
         commandId: `${input.activationId}:${input.phase}`,
         sessionKey: this.sessionKey,
         contentDigest: this.header.definitionRef.digest,
       },
-      [event],
+      (sequence) => ({
+        v: MANAGED_SESSION_FORMAT_VERSION,
+        sequence,
+        eventId: `activation:${input.activationId}:${input.phase}`,
+        sessionKey: this.sessionKey,
+        kind: 'activation.changed',
+        occurredAt: this.now(),
+        payload: {
+          activationId: input.activationId,
+          epoch: input.epoch,
+          workerId: input.workerId,
+          subject: {
+            type: 'activation',
+            scopeId: input.activationId,
+            activationId: input.activationId,
+            epoch: input.epoch,
+          },
+          phase: input.phase,
+          leaseDurationMs: input.leaseDurationMs,
+          expiresAt: input.expiresAt,
+          installRef: input.installRef,
+          boundaryRef: input.boundaryRef,
+        },
+      }),
       { class: 'coordinator' },
     );
   }

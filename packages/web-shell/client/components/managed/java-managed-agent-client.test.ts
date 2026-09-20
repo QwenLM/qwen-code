@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JavaManagedAgentClient } from './java-managed-agent-client';
 import type { JavaManagedAgentHttpError } from './java-managed-agent-client';
 
@@ -9,7 +9,26 @@ function jsonResponse(value: unknown, status = 200): Response {
   });
 }
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('JavaManagedAgentClient', () => {
+  it('binds the default browser fetch to the global object', async () => {
+    const fetchImpl = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation');
+      return Promise.resolve(jsonResponse({ data: [], hasMore: false }));
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+    });
+
+    await client.listSessions({ limit: 20 });
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it('uses the private gateway with product credentials and headers', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

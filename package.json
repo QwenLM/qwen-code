@@ -35,6 +35,7 @@
     "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
     "dev:daemon": "node scripts/daemon-dev.js",
+    "dev:managed-agent-web": "vite --config packages/sdk-java/managed-agent-server/examples/web-shell/vite.config.ts",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
