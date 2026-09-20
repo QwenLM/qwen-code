@@ -2,7 +2,7 @@
 
 [English](2026-09-20-agent-delegation-reference.md) | [简体中文](2026-09-20-agent-delegation-reference.zh-CN.md)
 
-**状态：** [#12054](https://github.com/QwenLM/qwen-code/issues/12054) 的实现，属于 [#12028](https://github.com/QwenLM/qwen-code/issues/12028)。叠在 [#12142](https://github.com/QwenLM/qwen-code/issues/12142) 的 Agent/Shell 体积预算之上，并把那些预算下调。
+**状态：** [#12054](https://github.com/QwenLM/qwen-code/issues/12054) 的实现，属于 [#12028](https://github.com/QwenLM/qwen-code/issues/12028)。建立在 [#12142](https://github.com/QwenLM/qwen-code/pull/12142) 的 Agent/Shell 体积预算之上（已合入，`36887c49`），并把其中几条预算下调。
 
 下文所有数字都来自对描述模板的静态渲染（代入 `ToolNames`、两个 subagent 条目、team 关、todo 开），不是运行 CLI 得到的。本地没有构建、没有跑测试；新增的仓库测试交由 CI 执行。token 数按字符数 ÷ 4 折算，与 issue 中的口径一致。
 

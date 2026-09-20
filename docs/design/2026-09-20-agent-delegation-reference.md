@@ -2,7 +2,7 @@
 
 [English](2026-09-20-agent-delegation-reference.md) | [简体中文](2026-09-20-agent-delegation-reference.zh-CN.md)
 
-**Status:** implemented for [#12054](https://github.com/QwenLM/qwen-code/issues/12054), part of [#12028](https://github.com/QwenLM/qwen-code/issues/12028). Stacked on the Agent/Shell size budgets from [#12142](https://github.com/QwenLM/qwen-code/issues/12142), which this change lowers.
+**Status:** implemented for [#12054](https://github.com/QwenLM/qwen-code/issues/12054), part of [#12028](https://github.com/QwenLM/qwen-code/issues/12028). Builds on the Agent/Shell size budgets from [#12142](https://github.com/QwenLM/qwen-code/pull/12142) — landed as `36887c49` — whose rows this change lowers.
 
 Every figure below was produced by rendering the description template statically — substituting `ToolNames`, two subagent entries, team off, todo on — not by running the CLI. Nothing was built or tested locally; the repo tests added here are CI's to run. Token counts are characters ÷ 4, the same rough conversion the issue uses.
 
