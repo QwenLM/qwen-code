@@ -1092,8 +1092,10 @@ export class InboundGate {
     try {
       return this.pinValidNow(frame) ? 'here' : 'gone';
     } catch (error) {
+      // Either reader can be the one that threw, depending on the shape
+      // this gate was wired in.
       debugLogger.debug(
-        `ownsSessionId threw (leaving the message parked): ${
+        `the pin check threw (leaving the message parked): ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

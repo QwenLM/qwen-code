@@ -474,7 +474,7 @@ export const peersCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content:
-          'The session could not take the message just now — its input queue is full. It is still waiting; try again in a moment.',
+          'The session could not take the message just now — its input queue is full, or it could not confirm it still holds the session. It is still waiting; try again in a moment.',
       };
     }
 
