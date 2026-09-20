@@ -2964,6 +2964,7 @@ export class DingtalkChannel extends ChannelBase {
       shell: 'Shell',
       monitor: 'Monitor',
       workflow: 'Workflow',
+      peer: 'Cross-session message',
     }[delivery.kind];
     return `## ${icon} ${kind} · ${label}${delivery.partial ? `${chinese ? '' : ' '}${partialLabel}` : ''}`;
   }

@@ -36,6 +36,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
+import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
 
 /**
  * Classify a token count against the three-tier compaction ladder. Mirrors
@@ -54,12 +55,43 @@ function currentTier(
 }
 
 /**
+ * Absolute context-file path → its extension-attributed display label.
+ *
+ * An extension's context file is resident in every request of every session it
+ * is active in, and its marker path alone does not say which extension is
+ * paying for it (#12030). Built from the live extension list so a row can name
+ * the owner instead of an opaque path.
+ */
+function extensionContextFileOwners(
+  config: import('@qwen-code/qwen-code-core').Config,
+  workingDir: string,
+): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const extension of config.getActiveExtensions?.() ?? []) {
+    const displayName = getSanitizedExtensionDisplayName(extension);
+    for (const contextFile of extension.contextFiles ?? []) {
+      const absolutePath = path.resolve(workingDir, contextFile);
+      const fileLabel = formatContextFileDisplayPath(
+        absolutePath,
+        extension.path,
+      );
+      owners.set(
+        absolutePath,
+        `${t('Extension')}: ${displayName} · ${fileLabel}`,
+      );
+    }
+  }
+  return owners;
+}
+
+/**
  * Parse concatenated memory content into individual file entries.
  * Memory content format: "--- Context from: <path> ---\n<content>\n--- End of Context from: <path> ---"
  */
 function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
+  extensionOwners: ReadonlyMap<string, string> = new Map(),
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
@@ -72,15 +104,17 @@ function parseMemoryFiles(
   while ((match = regex.exec(memoryContent)) !== null) {
     const filePath = match[1]!;
     const content = match[2]!;
+    // Marker paths are relative to the session working directory (where
+    // memory discovery ran, which may differ from process.cwd() in
+    // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
+    // global memory files don't render as `../../..` chains.
+    const absolutePath = path.resolve(workingDir, filePath);
+    const owner = extensionOwners.get(absolutePath);
     results.push({
-      // Marker paths are relative to the session working directory (where
-      // memory discovery ran, which may differ from process.cwd() in
-      // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
-      // global memory files don't render as `../../..` chains.
-      path: formatContextFileDisplayPath(
-        path.resolve(workingDir, filePath),
-        workingDir,
-      ),
+      // An extension's file is named by its extension rather than by a path
+      // under the install directory, which is what makes the row actionable:
+      // the reader can disable or migrate that extension.
+      path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
     });
   }
@@ -378,7 +412,7 @@ export async function collectContextData(
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
   // Match what's actually sent to the model: deferred tools — MCP tools and
   // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
-  // from the prompt unless ToolSearch has revealed them this session. See
+  // from the prompt unless session setup has revealed them. See
   // client.ts which calls getFunctionDeclarations() with no args. The
   // per-tool loop below applies the same filter so allToolsTokens stays
   // aligned with the breakdown sum.
@@ -417,7 +451,11 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent, config.getWorkingDir());
+  const memoryFiles = parseMemoryFiles(
+    memoryContent,
+    config.getWorkingDir(),
+    extensionContextFileOwners(config, config.getWorkingDir()),
+  );
   const autoMemoryPrompt = config.getAutoMemoryPrompt();
   if (autoMemoryPrompt) {
     memoryFiles.push({
