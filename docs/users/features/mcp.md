@@ -502,7 +502,7 @@ headroom in `settings.json`:
     "amplitude": {
       "httpUrl": "https://mcp.amplitude.com/mcp",
       "appResourceMaxBytes": 4194304,
-      "appResourceTimeoutMs": 30000
+      "appResourceTimeoutMs": 120000
     }
   }
 }
