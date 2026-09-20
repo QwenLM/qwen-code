@@ -9,7 +9,6 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
@@ -21,6 +20,7 @@ import {
   AuthType,
   Storage,
   SessionIdCaseConflictError,
+  FatalConfigError,
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
@@ -102,9 +102,7 @@ const createNativeLspServiceInstance = () => ({
 });
 
 vi.mock('./trustedFolders.js', () => ({
-  isWorkspaceTrusted: vi
-    .fn()
-    .mockReturnValue({ isTrusted: true, source: 'file' }), // Default to trusted
+  isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -1236,6 +1234,27 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([undefined, '1'])(
+    'propagates the operator requirement independently of daemon factory availability: %s',
+    async (serve) => {
+      vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
+      vi.stubEnv('QWEN_CODE_SERVE', serve);
+      vi.stubEnv('SANDBOX', undefined);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentExecutionBackend: 'container',
+          executionEnvironmentFactory:
+            serve || process.platform === 'win32'
+              ? undefined
+              : expect.any(Function),
+        }),
+      );
+    },
+  );
+
   it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1249,6 +1268,158 @@ describe('loadCliConfig', () => {
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
+  });
+
+  it('passes the effective model API to Config at startup', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('RESPONSES_KEY', 'responses-key');
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        model: { name: 'gpt-model' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'gpt-model',
+              wireApi: 'responses',
+              envKey: 'RESPONSES_KEY',
+              baseUrl: 'https://example.test/v1',
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        generationConfig: expect.objectContaining({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          apiKey: 'responses-key',
+        }),
+      }),
+    );
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+  });
+
+  it.each<[Settings, AuthType | undefined]>([
+    [
+      { modelProviders: { 'openai-responses': [{ id: 'old' }] } },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ modelProviders: { 'openai-responses': [] } }, undefined],
+    [
+      {
+        modelProviders: { gateway: [{ id: 'old' }] },
+        providerProtocol: { gateway: 'openai-responses' },
+      },
+      AuthType.USE_OPENAI_RESPONSES,
+    ],
+    [{ providerProtocol: { unused: 'openai-responses' } }, undefined],
+    [
+      {
+        modelProviders: { 'openai-responses': [{ id: 'old' }] },
+        providerProtocol: { 'openai-responses': 'openai' },
+      },
+      AuthType.USE_OPENAI,
+    ],
+  ])(
+    'loads released provider configuration without changing its declared route: %j',
+    async (settings, expectedProtocol) => {
+      process.argv = ['node', 'script.js'];
+      const before = structuredClone(settings);
+      const argv = await parseArguments();
+      const config = await loadCliConfig(settings, argv);
+      for (const authType of [
+        AuthType.USE_OPENAI,
+        AuthType.USE_OPENAI_RESPONSES,
+      ]) {
+        const oldModels = config
+          .getModelsConfig()
+          .getAvailableModelsForAuthType(authType)
+          .filter((model) => model.id === 'old');
+        expect(oldModels).toHaveLength(authType === expectedProtocol ? 1 : 0);
+      }
+      expect(settings).toEqual(before);
+    },
+  );
+
+  it('reports an invalid model api as a config error, not an unexpected crash', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'gpt-model' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            // A hand-editable typo. This resolves before the TUI starts, so an
+            // unwrapped throw leaves the user a stack trace and no way back.
+            wireApi: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid wireApi "resposnes" for provider "openai"/,
+    );
+  });
+
+  it('reports an invalid model api as a config error even with no model selected', async () => {
+    process.argv = ['node', 'script.js'];
+    // Clear every auth env var getAuthTypeFromEnv can read so no selectedType
+    // is inferred from the runner environment.
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    const argv = await parseArguments();
+    const settings: Settings = {
+      // No security.auth.selectedType and no model.name: generation-config
+      // resolution never touches the model, so the invalid `wireApi` is caught by
+      // the up-front validation loop in loadCliConfig — still a config error,
+      // not an unexpected crash with a stack trace.
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            wireApi: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+    vi.unstubAllEnvs();
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid wireApi "resposnes" for provider "openai"/,
+    );
   });
 
   it('registers the external agent executor factory so executor definitions dispatch (R1-7)', async () => {
@@ -1502,41 +1673,23 @@ describe('loadCliConfig', () => {
   });
 
   describe('model.goalCheckpointTimeoutSeconds', () => {
-    it('carries the setting into the checkpoint verifier timeout', async () => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
+    it.each([45, 0, -1, 1.5, 901, '30' as unknown as number])(
+      'loads with the deprecated setting at %s and ignores it',
+      async (value) => {
+        // Goals no longer run evidence checkpoints, so nothing reads the
+        // value. A settings file that still carries it, valid or not, must
+        // not stop the CLI from starting.
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
 
-      const config = await loadCliConfig(
-        { model: { goalCheckpointTimeoutSeconds: 45 } },
-        argv,
-      );
-
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
-    });
-
-    it.each([
-      0,
-      -1,
-      1.5,
-      GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-      '30' as unknown as number,
-    ])('rejects invalid settings value %s at startup', async (value) => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
-
-      await expect(
-        loadCliConfig({ model: { goalCheckpointTimeoutSeconds: value } }, argv),
-      ).rejects.toThrow(/settings\.json: model\.goalCheckpointTimeoutSeconds/);
-    });
-
-    it('uses the built-in default when the setting is unset', async () => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
-
-      const config = await loadCliConfig({}, argv);
-
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(180_000);
-    });
+        await expect(
+          loadCliConfig(
+            { model: { goalCheckpointTimeoutSeconds: value } },
+            argv,
+          ),
+        ).resolves.toBeDefined();
+      },
+    );
   });
 
   it('should use configured context file name when settings.context.fileName is set', async () => {
@@ -3558,7 +3711,7 @@ describe('mergeExcludeTools', () => {
     expect(config.getPermissionsDeny()).toHaveLength(2);
   });
 
-  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+  it('should disable both deferred-tool bridges when tools.toolSearch.enabled is false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -3566,25 +3719,28 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v4 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v3 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+  it('should keep the stable bridge enabled for prefixed deepseek-chat models', async () => {
     process.argv = [
       'node',
       'script.js',
@@ -3594,18 +3750,20 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should not auto-disable tool_search for non-deepseek models', async () => {
+  it('should keep the stable bridge enabled for non-deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'qwen-max'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should respect explicit enabled:true override for deepseek models', async () => {
+  it('should accept explicit enabled:true for deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -3613,6 +3771,7 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
   it('should pass tools.toolSearch.threshold through to the config', async () => {
@@ -3625,11 +3784,11 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolSearchThreshold()).toBe(25);
   });
 
-  it('should default tools.toolSearch.threshold to 10', async () => {
+  it('should default tools.toolSearch.threshold to 0', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getToolSearchThreshold()).toBe(10);
+    expect(config.getToolSearchThreshold()).toBe(0);
   });
 
   it('should enable CodeModeOnly only when explicitly configured', async () => {
@@ -5674,6 +5833,55 @@ describe('loadCliConfig approval mode', () => {
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
     });
+
+    it('should not claim an override when no privileged mode was requested', async () => {
+      mockWriteStderrLine.mockClear();
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, undefined, []);
+      // AUTO is the built-in fall-through, not a caller request, so the
+      // downgrade still happens but must not be reported as an override.
+      expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+      expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Approval mode overridden'),
+      );
+    });
+
+    it('should still warn when a privileged mode was requested', async () => {
+      mockWriteStderrLine.mockClear();
+      process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, undefined, []);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Approval mode overridden'),
+      );
+    });
+  });
+
+  it('should treat an undecided folder as untrusted', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+  });
+
+  it('should stay quiet for an undecided folder that requested nothing', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    mockWriteStderrLine.mockClear();
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Approval mode overridden'),
+    );
   });
 });
 

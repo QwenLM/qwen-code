@@ -73,6 +73,11 @@ const artifacts = {};
 for (const name of await readdir(output)) {
   artifacts[name] = await hash(path.join(output, name));
 }
+const dirty =
+  execFileSync('git', ['status', '--porcelain'], {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim() !== '';
 await writeFile(
   path.join(output, 'manifest.json'),
   JSON.stringify(
@@ -81,6 +86,7 @@ await writeFile(
         cwd: root,
         encoding: 'utf8',
       }).trim(),
+      dirty,
       inputs,
       artifacts,
     },
@@ -88,4 +94,5 @@ await writeFile(
     2,
   ) + '\n',
 );
+if (dirty) console.warn('WARNING: prototype built from a dirty worktree.');
 console.log(`Prototype installed at ${output}`);

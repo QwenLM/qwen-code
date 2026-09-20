@@ -105,12 +105,15 @@ import type {
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
+  DaemonGitRemotesResult,
+  DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestList,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
@@ -127,6 +130,9 @@ import type {
   DaemonWorkspaceAcpStatusResult,
   DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceRuntimeStatus,
+  DaemonRuntimeStopRequest,
+  DaemonRuntimeStopOptions,
+  DaemonWorkspaceRuntimeStopResult,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -1497,11 +1503,14 @@ export class DaemonClient {
     limit?: number,
     skip?: number,
     range?: string,
+    options?: DaemonGitLogOptions,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (range) params.set('range', range);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -1667,6 +1676,14 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceAcpStatusResult>(
       '/workspace/acp/status',
       'GET /workspace/acp/status',
+      { mode: 'rest' },
+    );
+  }
+
+  runtimeStopOptions(): Promise<DaemonRuntimeStopOptions> {
+    return this.jsonRequest<DaemonRuntimeStopOptions>(
+      '/workspaces/runtime-stop-options',
+      'GET /workspaces/runtime-stop-options',
       { mode: 'rest' },
     );
   }
@@ -6579,6 +6596,22 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  stopRuntime(
+    confirmation: DaemonRuntimeStopRequest,
+  ): Promise<DaemonWorkspaceRuntimeStopResult> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStopResult>(
+      this.workspaceSelector,
+      '/runtime/stop',
+      'POST /workspaces/:workspace/runtime/stop',
+      {
+        method: 'POST',
+        body: confirmation,
+        timeoutMs: WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
     return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStatus>(
       this.workspaceSelector,
@@ -6967,12 +7000,15 @@ export class WorkspaceDaemonClient {
     skip?: number,
     cwd?: string,
     range?: string,
+    options?: DaemonGitLogOptions,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (cwd != null) params.set('cwd', cwd);
     if (range) params.set('range', range);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
@@ -7089,6 +7125,50 @@ export class WorkspaceDaemonClient {
       suffix,
       'POST /workspaces/:workspace/git/commit',
       { method: 'POST', body: { message, ...opts }, mode: 'rest' },
+    );
+  }
+
+  workspaceGitRemotes(cwd?: string): Promise<DaemonGitRemotesResult> {
+    const suffix =
+      cwd != null ? `/git/remotes?cwd=${urlEncode(cwd)}` : '/git/remotes';
+    return this.client.workspaceJsonRequest<DaemonGitRemotesResult>(
+      this.workspaceSelector,
+      suffix,
+      'GET /workspaces/:workspace/git/remotes',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitRemoteAdd(
+    name: string,
+    url: string,
+    cwd?: string,
+    timeoutMs?: number,
+  ): Promise<DaemonGitRemoteMutationResult> {
+    const suffix =
+      cwd != null ? `/git/remote?cwd=${urlEncode(cwd)}` : '/git/remote';
+    return this.client.workspaceJsonRequest<DaemonGitRemoteMutationResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/remote',
+      { method: 'POST', body: { name, url }, mode: 'rest', timeoutMs },
+    );
+  }
+
+  workspaceGitRemoteRemove(
+    name: string,
+    cwd?: string,
+    timeoutMs?: number,
+  ): Promise<DaemonGitRemoteMutationResult> {
+    const suffix =
+      cwd != null
+        ? `/git/remote/remove?cwd=${urlEncode(cwd)}`
+        : '/git/remote/remove';
+    return this.client.workspaceJsonRequest<DaemonGitRemoteMutationResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/remote/remove',
+      { method: 'POST', body: { name }, mode: 'rest', timeoutMs },
     );
   }
 

@@ -35,6 +35,7 @@ import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import { toOriginalKey } from './key-map.js';
 import { t } from '../../i18n/index.js';
+import type { HistoryItemInfo } from '../types.js';
 import { MessageType } from '../types.js';
 import { HelpOverlay } from './help-overlay.js';
 import {
@@ -605,8 +606,18 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       // ink writes all three model outcomes to the transcript — a pick, an
       // escape, an auxiliary pick — so the row outlives the dialog. The shell's
       // notify slot is transient and closes with it.
-      const reportModel = (text: string) =>
-        host.addItem({ type: MessageType.INFO, text }, Date.now());
+      const reportModel = (text: string) => {
+        const item: HistoryItemInfo = { type: MessageType.INFO, text };
+        host.addItem(item, Date.now());
+        // ink ModelDialog records the same row it adds: the dispatcher's result
+        // phase closes while the dialog is still open, so nothing else here
+        // would replay on resume.
+        config.getChatRecordingService?.()?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: '/model',
+          outputHistoryItems: [{ ...item }],
+        });
+      };
       return (
         <OpenTuiModelDialog
           entries={entries}

@@ -182,7 +182,22 @@ export async function executeBwrap(
     }
   };
   try {
-    scratch = directory(await mkdtemp(path.join(os.tmpdir(), 'qwen-sandbox-')));
+    const requestedScratchRoot = os.tmpdir();
+    const scratchRoot =
+      path.isAbsolute(requestedScratchRoot) && existsSync(requestedScratchRoot)
+        ? realpathSync(requestedScratchRoot)
+        : realpathSync('/tmp');
+    if (
+      contains(workspace, scratchRoot) ||
+      protectedRoots.some((protectedRoot) =>
+        contains(protectedRoot, scratchRoot),
+      )
+    )
+      throw new Error(
+        `Temporary root ${scratchRoot} overlaps the workspace or a protected root.`,
+      );
+    scratch = await mkdtemp(path.join(scratchRoot, 'qwen-sandbox-'));
+    scratch = directory(scratch);
     checkWritable(scratch);
     if (overlaps(workspace, scratch))
       throw new Error('Workspace and scratch must be disjoint.');
@@ -204,6 +219,11 @@ export async function executeBwrap(
       TMPDIR: scratch,
       TMP: scratch,
       TEMP: scratch,
+      // `--clearenv` wipes everything before these --setenv apply, so a
+      // payload env without TERM would run with TERM unset (ncurses:
+      // "unknown terminal type"). The relay bootstrap TERM default never
+      // reaches the payload; the default belongs here.
+      TERM: env['TERM'] || 'xterm-256color',
     })) {
       if (
         !key ||
@@ -233,13 +253,20 @@ export async function executeBwrap(
     }) =>
       (finalizing ??= (async () => {
         let status: BwrapStatus = { state: 'unconfirmed' };
+        // The relay creates the receipt file (O_EXCL) before spawning bwrap,
+        // so its existence attests the relay got as far as the spawn call.
+        let receiptExisted = false;
+        let receiptParsed = false;
         if (info.aborted || isSignalTermination(info.signal))
           status = { state: 'interrupted' };
         else {
           try {
-            const record = JSON.parse(
-              await readFile(statusPath, 'utf8'),
-            ) as Record<string, unknown>;
+            const text = await readFile(statusPath, 'utf8');
+            // The file existing at all attests the relay got past its
+            // O_EXCL create — i.e. as far as the bwrap spawn call.
+            receiptExisted = true;
+            const record = JSON.parse(text) as Record<string, unknown>;
+            receiptParsed = true;
             if (
               !info.error &&
               record['state'] === 'confirmed' &&
@@ -252,11 +279,44 @@ export async function executeBwrap(
               status = { state: 'confirmed', exitCode: record['exitCode'] };
             else if (record['state'] === 'interrupted')
               status = { state: 'interrupted' };
+            else {
+              // Preserve the attestation exactly as written: an absent or
+              // non-boolean field means "unknown", never "did not run"
+              // (PR #12067 review, round 2).
+              const attested = record['payloadExitObserved'];
+              status = {
+                state: 'unconfirmed',
+                ...(typeof attested === 'boolean'
+                  ? { payloadExitObserved: attested }
+                  : {}),
+              };
+            }
           } catch {
             /* Missing/partial receipt never proves that the payload did not run. */
           }
         }
-        if (info.error && info.exitCode === null) {
+        // Retain the dirs unless the payload provably did not run. Two
+        // positive proofs allow cleanup: the receipt attests no payload
+        // exit record (spawn failure, or a wire showing the payload never
+        // got past exec — missing bwrap or payload binary), or the receipt
+        // file is absent, which means the relay died before its O_EXCL
+        // create and therefore before spawning bwrap. Everything else —
+        // an attested exit record, an unreadable receipt, or an
+        // unattested unconfirmed — is unknown and retains (PR #12067
+        // review: the coarse key leaked a dir pair per pre-exec failure,
+        // while collapsing "unknown" into "did not run" inverts the
+        // fail-safe for a retry-deciding caller).
+        const attestedNoExec =
+          receiptExisted &&
+          receiptParsed &&
+          status.state === 'unconfirmed' &&
+          status.payloadExitObserved === false;
+        const relayDiedBeforeSpawn = !receiptExisted;
+        const retain =
+          status.state === 'unconfirmed' &&
+          !attestedNoExec &&
+          !relayDiedBeforeSpawn;
+        if (retain) {
           debugLogger.warn(
             'Sandbox termination is unconfirmed; retaining temporary directories',
             { control, scratch },
@@ -291,10 +351,21 @@ export async function executeBwrap(
           onSettle: (info: ShellPostPromoteSettleInfo) => {
             void finalize(info)
               .then((status) => {
-                const error = sandboxStatusError(status) ?? info.error;
+                // The specific transport/spawn error outranks the generic
+                // status-derived one: an unconfirmed run caused by a relay
+                // spawn failure should surface the spawn error, not the
+                // catch-all "could not be confirmed" (PR #12067 review).
+                const error = info.error ?? sandboxStatusError(status);
                 options.postPromote?.onSettle?.({ ...info, error });
               })
-              .catch(() => {});
+              .catch((settleError: unknown) => {
+                // The caller's postPromote.onSettle throws here, one await
+                // past the service's own try/catch guard — log instead of
+                // discarding (PR #12067 review).
+                debugLogger.warn(
+                  `post-promote settle chain failed: ${settleError instanceof Error ? settleError.message : String(settleError)}`,
+                );
+              });
           },
         },
       },
@@ -309,7 +380,7 @@ export async function executeBwrap(
             : await finalize(result);
           return {
             ...result,
-            error: sandboxStatusError(sandboxStatus) ?? result.error,
+            error: result.error ?? sandboxStatusError(sandboxStatus) ?? null,
             sandboxStatus,
           };
         },

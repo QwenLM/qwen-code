@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import postcss from 'postcss';
 import { describe, expect, it } from 'vitest';
 
 // jsdom does not compute the CSS cascade, so pin the stylesheet's source
@@ -15,23 +16,45 @@ const sidebarCss = readFileSync(
   'utf8',
 ).replace(/\/\*[\s\S]*?\*\//g, '');
 
-// Top-level @media blocks close with `}` at column 0, so a lazy match up to
-// the first such brace captures exactly one block.
-function mediaBlock(query: string): string {
-  const match = sidebarCss.match(
-    new RegExp(`@media ${query} \\{([\\s\\S]*?)\\n\\}`),
-  );
-  return match?.[1] ?? '';
+/**
+ * The :has() rules live inside @supports blocks with nested @media, so the
+ * stylesheet is parsed instead of sliced with regex. `media(query)` returns
+ * the text of the top-level @media blocks matching the query (nested blocks
+ * belong to capability-guarded rule groups, not to the row-action layout
+ * contract this test pins); `withoutAll(query)` is the stylesheet with every
+ * @media block matching the query removed, nested ones included.
+ */
+function parseOnce() {
+  return postcss.parse(sidebarCss);
 }
 
-const hoverMedia = mediaBlock('\\(hover: hover\\)');
-const nonHoverCss = sidebarCss.replace(
-  /@media \(hover: hover\) \{[\s\S]*?\n\}/,
-  '',
-);
+function mediaBlocks(query: RegExp): string[] {
+  const blocks: string[] = [];
+  parseOnce().walkAtRules('media', (rule) => {
+    if (!query.test(rule.params)) return;
+    if (rule.parent?.type !== 'root') return;
+    blocks.push(rule.toString());
+  });
+  return blocks;
+}
+
+function withoutMedia(query: RegExp): string {
+  const root = parseOnce();
+  root.walkAtRules('media', (rule) => {
+    if (query.test(rule.params)) rule.remove();
+  });
+  return root.toString();
+}
+
+function mediaText(query: RegExp): string {
+  return mediaBlocks(query).join('\n');
+}
+
+const hoverMedia = mediaText(/hover: hover/);
+const nonHoverCss = withoutMedia(/hover: hover/);
 // The repo's touch query, matching TOUCH_COMPOSER_QUERY in
 // client/hooks/useIsTouchComposer.ts.
-const touchMedia = mediaBlock('\\(hover: none\\) and \\(pointer: coarse\\)');
+const touchMedia = mediaText(/hover: none/);
 
 describe('WebShellSidebar session row actions stylesheet', () => {
   it('keeps the hidden actions overlay inert until revealed', () => {

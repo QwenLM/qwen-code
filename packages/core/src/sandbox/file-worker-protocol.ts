@@ -27,6 +27,7 @@ export function encodeSandboxWriteRequest(
       operation: request.operation,
       destination: request.destination,
       expected: request.expected,
+      contentLength: request.content.length,
     }) + '\n',
   );
   if (header.length > MAX_FILE_HEADER_BYTES)
@@ -63,13 +64,21 @@ export async function readSandboxWriteRequest(
     record['operation'] !== 'write' ||
     typeof record['destination'] !== 'string' ||
     !path.isAbsolute(record['destination']) ||
-    !(record['expected'] === null || isSandboxFileVersion(record['expected']))
+    !(
+      record['expected'] === null || isSandboxFileVersion(record['expected'])
+    ) ||
+    typeof record['contentLength'] !== 'number' ||
+    !Number.isSafeInteger(record['contentLength']) ||
+    record['contentLength'] < 0
   )
     throw new Error('Invalid write request.');
+  const content = wire.subarray(headerEnd + 1);
+  if (content.length !== record['contentLength'])
+    throw new Error('Truncated file worker body.');
   return {
     operation: 'write',
     destination: record['destination'],
     expected: record['expected'],
-    content: wire.subarray(headerEnd + 1),
+    content,
   };
 }

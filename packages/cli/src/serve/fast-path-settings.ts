@@ -32,6 +32,7 @@ import {
   type TrustPrecedenceRule,
 } from '../config/trust-precedence.js';
 import { publishPendingCompileCache } from '../config/compile-cache.js';
+import { captureEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 
@@ -162,14 +163,24 @@ function findEnvFilesFastPath(
   const found: string[] = [];
   const seen = new Set<string>();
 
+  // Mirror findEnvFiles() in config/environment.ts: decide trust once for the
+  // workspace, then only reject an ancestor that carries its own explicit
+  // untrusted rule. Re-resolving per ancestor would drop every .env above a
+  // TRUST_FOLDER rule — and on this path the value would also never reach the
+  // daemon's frozen base environment.
+  const workspaceIsTrusted =
+    isWorkspaceTrustedFastPath(settings, realStartDir) === true;
+
   const canUseEnvFile = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (userLevelPaths.has(normalized)) return true;
+    if (!workspaceIsTrusted) return false;
     const dirPath = path.dirname(normalized);
     const workspaceDir =
       path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
         ? path.dirname(dirPath)
         : dirPath;
+    if (workspaceDir === realStartDir) return true;
     return isWorkspaceTrustedFastPath(settings, workspaceDir) !== false;
   };
 
@@ -263,6 +274,7 @@ export function loadServeFastPathEnvironment(
   settings: ServeFastPathSettings,
   startDir: string = process.cwd(),
 ): void {
+  captureEnvironmentBeforeLoad();
   const userLevelPaths = getUserLevelEnvPathsFastPath();
   const envFilePaths = findEnvFilesFastPath(settings, startDir, userLevelPaths);
   const rejectedLoaderKeys: string[] = [];
@@ -732,12 +744,20 @@ export function loadServeFastPathSettings(
   const user = readSettingsSummary(
     path.join(getGlobalQwenDirLite(), 'settings.json'),
   );
-  const initialTrustCheckSettings = mergeFastPathSettings(system, user);
+  // `system-defaults` participates so an operator enabling
+  // `security.folderTrust` there reaches the same answer the merged settings
+  // use; the workspace scope stays out, since a workspace file that only a
+  // trusted workspace may contribute cannot decide its own trust.
+  const initialTrustCheckSettings = mergeFastPathSettings(
+    systemDefaults,
+    user,
+    system,
+  );
   const trustDecision = isWorkspaceTrustedFastPath(
     initialTrustCheckSettings,
     realWorkspaceDir,
   );
-  const isTrusted = trustDecision ?? true;
+  const isTrusted = trustDecision ?? false;
   const startupChannelsTrusted =
     isWorkspaceTrustedFastPath(
       mergeFastPathSettings(systemDefaults, user, system),

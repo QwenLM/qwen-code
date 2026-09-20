@@ -10,6 +10,9 @@ import { UrlValidator } from './urlValidator.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { lookup as dnsLookup } from 'dns';
+import { HookAbortError, HookTimeoutError } from './hook-errors.js';
+import { DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS } from './hook-timeout.js';
+import { isBlockingHookOutput } from './types.js';
 import type {
   HttpHookConfig,
   HookInput,
@@ -19,11 +22,6 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('HTTP_HOOK_RUNNER');
-
-/**
- * Default timeout for HTTP hook execution
- */
-const DEFAULT_HTTP_TIMEOUT = 10 * 60 * 1000;
 
 /**
  * Maximum output length (10,000 characters as per Qwen Code spec)
@@ -132,6 +130,7 @@ export class HttpHookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'cancelled',
         error: new Error(`HTTP hook execution cancelled (aborted): ${hookId}`),
         duration: 0,
       };
@@ -148,6 +147,7 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: true,
+          outcome: 'success',
           duration: 0,
           output: { continue: true },
         };
@@ -169,6 +169,7 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error: new Error(`URL validation failed: ${validation.reason}`),
           duration: Date.now() - startTime,
         };
@@ -186,6 +187,7 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error: new Error(hostValidation.error),
           duration: Date.now() - startTime,
         };
@@ -208,7 +210,7 @@ export class HttpHookRunner {
       // Set up combined abort signal (external signal + timeout)
       const timeout = hookConfig.timeout
         ? hookConfig.timeout * 1000
-        : DEFAULT_HTTP_TIMEOUT;
+        : DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS * 1000;
       const { signal: combinedSignal, cleanup } = combineAbortSignals(
         [signal],
         { timeoutMs: timeout },
@@ -242,11 +244,14 @@ export class HttpHookRunner {
           debugLogger.warn(
             `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
           );
-          // Return success: true with continue: true for non-blocking error
+          // `success` stays true so the aggregate treats this as non-blocking;
+          // `outcome` and `error` report what actually happened.
           return {
             hookConfig,
             eventName,
             success: true,
+            outcome: 'non_blocking_error',
+            error: new Error(`HTTP hook returned ${response.status}`),
             output: { continue: true },
             duration,
           };
@@ -259,10 +264,15 @@ export class HttpHookRunner {
           `HTTP hook ${hookId} completed successfully in ${duration}ms`,
         );
 
+        // `success` stays true even for a deny: callers only read the output
+        // of a successful hook, so false here would let the call through.
         return {
           hookConfig,
           eventName,
           success: true,
+          outcome: isBlockingHookOutput(eventName, output)
+            ? 'blocking'
+            : 'success',
           output,
           duration,
         };
@@ -275,14 +285,21 @@ export class HttpHookRunner {
           fetchError instanceof Error &&
           (fetchError.name === 'AbortError' || combinedSignal.aborted)
         ) {
-          // Timeout or abort is a non-blocking error per Qwen Code spec
+          // Timeout or abort is a non-blocking error per Qwen Code spec.
+          // The combined signal fires for both, so the caller's own signal
+          // tells them apart.
+          const cancelled = signal?.aborted === true;
           debugLogger.warn(
-            `HTTP hook ${hookId} timed out or was aborted after ${timeout}ms (non-blocking)`,
+            `HTTP hook ${hookId} ${cancelled ? 'was aborted' : `timed out after ${timeout}ms`} (non-blocking)`,
           );
           return {
             hookConfig,
             eventName,
             success: true,
+            outcome: cancelled ? 'cancelled' : 'timeout',
+            error: cancelled
+              ? new HookAbortError('HTTP hook execution aborted')
+              : new HookTimeoutError(`HTTP hook timed out after ${timeout}ms`),
             output: { continue: true },
             duration,
           };
@@ -296,6 +313,11 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: true,
+          outcome: 'non_blocking_error',
+          error:
+            fetchError instanceof Error
+              ? fetchError
+              : new Error(String(fetchError)),
           output: { continue: true },
           duration,
         };
@@ -311,6 +333,7 @@ export class HttpHookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };

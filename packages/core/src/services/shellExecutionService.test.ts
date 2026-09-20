@@ -462,6 +462,8 @@ describe('ShellExecutionService', () => {
     );
 
     it('never replays a launch after PTY initialization fails after spawn', async () => {
+      const activeBefore = ShellExecutionService['activePtys'].size;
+      const disposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       mockPtyProcess.onData.mockImplementationOnce(() => {
         throw new Error('posix_spawnp failed after spawn');
       });
@@ -474,9 +476,15 @@ describe('ShellExecutionService', () => {
       );
       await expect(handle.result).rejects.toThrow('after spawn');
       expect(mockCpSpawn).not.toHaveBeenCalled();
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGKILL',
+      );
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+      expect(ShellExecutionService['activePtys'].size).toBe(activeBefore);
     });
 
-    it('ends stdin and retains an early-close error without replay', async () => {
+    it('ends stdin without reporting an early-close error when the exit status is known', async () => {
       const child = pipe();
       const input = { ...launch(), stdin: Buffer.from('request') };
       const handle = await ShellExecutionService.executeLaunch(
@@ -494,9 +502,53 @@ describe('ShellExecutionService', () => {
       ]);
       const error = Object.assign(new Error('closed'), { code: 'EPIPE' });
       child.stdin.emit('error', error);
-      child.emit('exit', 1, null);
+      child.emit('exit', 0, null);
+      const result = await handle.result;
+      // The process's own exit status is authoritative: a transport EPIPE
+      // (the child closed stdin early) must not occupy the error slot that
+      // downstream gates read as a veto on receipt confirmation or as the
+      // evidence-retention trigger (PR #12067 review).
+      expect(result.exitCode).toBe(0);
+      expect(result.error).toBeNull();
+      expect(mockCpSpawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces a stdin error only when the process leaves no exit information', async () => {
+      const child = pipe();
+      const input = { ...launch(), stdin: Buffer.from('request') };
+      const handle = await ShellExecutionService.executeLaunch(
+        input,
+        onOutputEventMock,
+        new AbortController().signal,
+        false,
+        shellExecutionConfig,
+      );
+      const error = Object.assign(new Error('closed'), { code: 'EPIPE' });
+      child.stdin.emit('error', error);
+      child.emit('exit', null, null);
       expect((await handle.result).error).toBe(error);
       expect(mockCpSpawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('snapshots caller-owned stdin bytes before the asynchronous write', async () => {
+      const child = pipe();
+      const input = { ...launch(), stdin: Buffer.from('request') };
+      const pending = ShellExecutionService.executeLaunch(
+        input,
+        onOutputEventMock,
+        new AbortController().signal,
+        false,
+        shellExecutionConfig,
+      );
+      // Mutate the caller's buffer after the call but before the write:
+      // the design contract is that input bytes are caller-owned, so the
+      // service must have taken its copy synchronously at snapshot time
+      // (PR #12067 review).
+      input.stdin.fill(0);
+      const handle = await pending;
+      expect(child.stdin.end).toHaveBeenCalledWith(Buffer.from('request'));
+      child.emit('exit', 0, null);
+      await handle.result;
     });
 
     it('rejects PTY stdin and invalid launch paths before spawning', async () => {
@@ -3178,6 +3230,52 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
 
+    it('emits live snapshots before exit while retaining the buffered final result', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'live-buffered-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('ready\n'));
+          expect(onOutputEventMock).toHaveBeenCalledWith({
+            type: 'data',
+            chunk: 'ready\n',
+          });
+          cp.stdout?.emit('data', Buffer.from('done\n'));
+          expect(onOutputEventMock).toHaveBeenLastCalledWith({
+            type: 'data',
+            chunk: 'ready\ndone\n',
+          });
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, streamBufferedOutput: true },
+      );
+      expect(result.output).toBe('ready\ndone');
+    });
+
+    it('bounds cumulative previews while preserving complete stdout and stderr', async () => {
+      const stdout = 'x'.repeat(200000);
+      const { result } = await simulateExecutionWithConfig(
+        'bounded-preview',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from(stdout));
+          cp.stderr?.emit('data', Buffer.from('\u001b[31merror\u001b[0m'));
+          expect(onOutputEventMock).toHaveBeenLastCalledWith({
+            type: 'data',
+            chunk: 'x'.repeat(65530) + '\nerror',
+          });
+          cp.stdout?.emit('data', Buffer.from('end'));
+          expect(onOutputEventMock).toHaveBeenLastCalledWith({
+            type: 'data',
+            chunk: 'x'.repeat(65527) + 'end\nerror',
+          });
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, streamBufferedOutput: true },
+      );
+      expect(result.output).toBe(stdout + 'end\nerror');
+    });
+
     it('keeps streaming both pipes after exit until stdio closes', async () => {
       await simulateExecutionWithConfig(
         'monitor',
@@ -3196,6 +3294,90 @@ describe('ShellExecutionService child_process fallback', () => {
         { type: 'data', chunk: 'stderr after exit', stream: 'stderr' },
         { type: 'data', chunk: 'stdout after exit', stream: 'stdout' },
       ]);
+    });
+
+    it('flushes a trailing partial character for streaming text', async () => {
+      await simulateExecutionWithConfig(
+        'partial-character',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from([0xe2]));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        shellExecutionConfig,
+        { streamStdout: true },
+      );
+      expect(onOutputEventMock).toHaveBeenLastCalledWith({
+        type: 'data',
+        chunk: '\ufffd',
+        stream: 'stdout',
+      });
+    });
+
+    it('does not settle a streaming execution at exit while stdio is still draining', async () => {
+      // The trailing-output fix: settling at 'exit' would race the
+      // consumer's own settle (a background task closes its output file
+      // when the result resolves) and drop chunks that arrive between
+      // 'exit' and 'close'. Settlement must wait for 'close'. Reverting
+      // to plain 'exit' settlement turns this red.
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'monitor',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        shellExecutionConfig,
+        { streamStdout: true },
+      );
+      await new Promise((resolve) => process.nextTick(resolve));
+      mockChildProcess.stdout?.emit('data', Buffer.from('before'));
+      mockChildProcess.emit('exit', 0, null);
+      let settledEarly = false;
+      void handle.result.then(() => {
+        settledEarly = true;
+      });
+      // Flush the microtask queue: had the result promise resolved during
+      // the synchronous 'exit' emit, the .then callback would run here.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settledEarly).toBe(false);
+      mockChildProcess.stdout?.emit('data', Buffer.from('after'));
+      mockChildProcess.emit('close', 0, null);
+      const result = await handle.result;
+      expect(settledEarly).toBe(true);
+      expect(result.exitCode).toBe(0);
+      expect(onOutputEventMock).toHaveBeenCalledWith({
+        type: 'data',
+        chunk: 'after',
+        stream: 'stdout',
+      });
+    });
+
+    it('settles a streaming execution within a bounded drain when stdio never closes', async () => {
+      // A grandchild inheriting the stdout pipe (`sleep 10 &`, `nohup … &`)
+      // defers 'close' indefinitely; the result promise must still settle
+      // on the recorded exit info after the bounded post-exit drain
+      // (PR #12067 review — wedging here hangs background shells and the
+      // ACP channel). Red when settlement is bound to 'close' alone: the
+      // result promise never resolves.
+      const { result } = await simulateExecutionWithConfig(
+        'daemonize',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('before'));
+          cp.emit('exit', 0, null);
+          // No 'close': the grandchild holds the pipe forever.
+        },
+        shellExecutionConfig,
+        { streamStdout: true },
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.aborted).toBe(false);
+      expect(onOutputEventMock).toHaveBeenCalledWith({
+        type: 'data',
+        chunk: 'before',
+        stream: 'stdout',
+      });
     });
 
     it('reports capture-limit notice for streaming child_process output', async () => {
@@ -3929,17 +4111,23 @@ describe('ShellExecutionService child_process fallback', () => {
     it('should not emit data events after binary is detected', async () => {
       mockIsBinary.mockImplementation((buffer) => buffer.includes(0x00));
 
-      await simulateExecution('cat mixed_file', (cp) => {
-        cp.stdout?.emit('data', Buffer.from('some text'));
-        cp.stdout?.emit('data', Buffer.from([0x00, 0x01, 0x02]));
-        cp.stdout?.emit('data', Buffer.from('more text'));
-        cp.emit('exit', 0, null);
-      });
+      await simulateExecution(
+        'cat mixed_file',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from([0xe2]));
+          cp.stdout?.emit('data', Buffer.from([0x00, 0x01, 0x02]));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { streamStdout: true },
+      );
 
       const eventTypes = onOutputEventMock.mock.calls.map(
         (call: [ShellOutputEvent]) => call[0].type,
       );
-      expect(eventTypes).toEqual(['binary_detected']);
+      const binaryIndex = eventTypes.indexOf('binary_detected');
+      expect(binaryIndex).toBeGreaterThanOrEqual(0);
+      expect(eventTypes.slice(binaryIndex + 1)).not.toContain('data');
     });
   });
 

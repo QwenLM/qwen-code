@@ -26,7 +26,11 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import { SPINNER_FRAMES, SPINNER_INTERVAL_MS } from '../constants.js';
+import {
+  SPINNER_FRAMES,
+  SPINNER_INTERVAL_MS,
+  WAITING_SPINNER_FRAME,
+} from '../constants.js';
 import { usePhraseCycler } from '../hooks/usePhraseCycler.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useTimer } from '../hooks/useTimer.js';
@@ -46,17 +50,24 @@ import { C } from './theme.js';
 
 /**
  * Owns its frame timer so the high-frequency tick re-renders ONLY this 1-cell
- * component, not the whole transcript tree.
+ * component, not the whole transcript tree. ink's `RespondingSpinner` animates
+ * while responding and draws one static frame while a call is parked on a
+ * confirmation, so that row emits no bytes at all until the user answers.
  */
-function Spinner() {
+function Spinner({ waiting }: { waiting: boolean }) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
+    if (waiting) return;
     const spin = setInterval(() => setFrame((f) => f + 1), SPINNER_INTERVAL_MS);
     return () => clearInterval(spin);
-  }, []);
+  }, [waiting]);
   return (
     <box width={2}>
-      <text fg={C.dim}>{SPINNER_FRAMES[frame % SPINNER_FRAMES.length]}</text>
+      <text fg={C.dim}>
+        {waiting
+          ? WAITING_SPINNER_FRAME
+          : SPINNER_FRAMES[frame % SPINNER_FRAMES.length]}
+      </text>
     </box>
   );
 }
@@ -64,31 +75,48 @@ function Spinner() {
 export interface OpenTuiLoadingIndicatorProps {
   streaming: boolean;
   /**
+   * A tool call is parked on a confirmation. ink swaps the phrase for its
+   * waiting text and drops the timer/token/cancel suffix in this state — there
+   * is no in-flight request to cancel and no tokens to count.
+   */
+  waiting?: boolean;
+  /**
    * Live streaming-character count. Animated locally (ink `LoadingIndicator`
    * parity) so the 100ms tick re-renders only this row, never the transcript.
    */
   streamingCharsRef?: RefObject<number>;
   /** False while waiting on the API (↑), true once content arrives (↓). */
   isReceivingContent?: boolean;
+  /**
+   * False when `ui.accessibility.enableLoadingPhrases` is off. ink's `Composer`
+   * passes no phrase in that case and the row still renders, so the row is not
+   * what the setting removes — only its text.
+   */
+  showPhrase?: boolean;
 }
 
 /** Spinner + witty phrase + elapsed time + token estimate, above the composer. */
 export function OpenTuiLoadingIndicator({
   streaming,
+  waiting = false,
   streamingCharsRef,
   isReceivingContent = false,
+  showPhrase = true,
 }: OpenTuiLoadingIndicatorProps) {
   const { width } = useTerminalDimensions();
   // The shared cycler resolves the phrase list for all nine locales and owns
   // the 15s rotation, so this renderer cannot drift from ink's.
-  const phrase = usePhraseCycler(streaming, false);
-  const elapsedTime = useTimer(streaming, 0);
+  const phrase = usePhraseCycler(streaming, waiting);
+  // Paused rather than deactivated while a call is parked: useTimer zeroes its
+  // accumulated elapsed on a false-to-true edge, so dropping `waiting` out of
+  // `isActive` would restart the counter when the parked call resumes.
+  const elapsedTime = useTimer(streaming, 0, waiting);
   const fallbackRef = useRef(0);
   const animatedChars = useAnimationFrame(
     streamingCharsRef ?? fallbackRef,
     streamingCharsRef && streaming ? 100 : null,
   );
-  if (!streaming) return null;
+  if (!streaming && !waiting) return null;
 
   const isNarrow = isNarrowWidth(width);
   const outputTokens = Math.round(animatedChars / 4);
@@ -99,14 +127,16 @@ export function OpenTuiLoadingIndicator({
     elapsedTime < 60
       ? `${Math.floor(Math.max(0, elapsedTime))}s`
       : formatDuration(elapsedTime * 1000);
-  const suffix = t('({{time}}{{tokens}} · esc to cancel)', {
-    time: timeStr,
-    tokens: showTokens
-      ? ` · ${isReceivingContent ? '↓' : '↑'} ${formatTokenCount(
-          outputTokens,
-        )} tokens`
-      : '',
-  });
+  const suffix = waiting
+    ? ''
+    : t('({{time}}{{tokens}} · esc to cancel)', {
+        time: timeStr,
+        tokens: showTokens
+          ? ` · ${isReceivingContent ? '↓' : '↑'} ${formatTokenCount(
+              outputTokens,
+            )} tokens`
+          : '',
+      });
   // ink truncates the phrase (`wrap="truncate-end"`) rather than letting it wrap,
   // so the cancel hint survives a narrow terminal. Budget = width − 2 padding −
   // 2 spinner cells − 1 separating space − the suffix (which moves to its own
@@ -115,16 +145,16 @@ export function OpenTuiLoadingIndicator({
     0,
     width - 5 - (isNarrow ? 0 : getCachedStringWidth(suffix)),
   );
-  const phraseText = truncateToWidth(phrase, phraseBudget);
+  const phraseText = showPhrase ? truncateToWidth(phrase, phraseBudget) : '';
   return (
     <box paddingLeft={2} flexDirection={isNarrow ? 'column' : 'row'}>
       <box flexDirection="row">
-        <Spinner />
+        <Spinner waiting={waiting} />
         <text fg={C.dim}>
-          {isNarrow ? phraseText : `${phraseText} ${suffix}`}
+          {isNarrow || !suffix ? phraseText : `${phraseText} ${suffix}`}
         </text>
       </box>
-      {isNarrow && <text fg={C.dim}>{suffix}</text>}
+      {isNarrow && suffix ? <text fg={C.dim}>{suffix}</text> : null}
     </box>
   );
 }

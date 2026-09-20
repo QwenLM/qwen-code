@@ -24,6 +24,7 @@ export {
 } from './config/models.js';
 export {
   type AvailableModel,
+  type ModelWireApi,
   type ModelCapabilities,
   type ModelConfig as ProviderModelConfig,
   type ModelConfigCliInput,
@@ -35,6 +36,10 @@ export {
   isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  validateModelProvidersConfig,
+  resolveModelSelectionAuthType,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
@@ -296,6 +301,16 @@ export type {
 } from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+export {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  resolveDeferredToolCall,
+} from './tools/tool-call.js';
+export type {
+  DeferredToolCallResolution,
+  ToolCallTool,
+  ToolCallParams,
+} from './tools/tool-call.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export type {
   TeamPlanApprovalTool,
@@ -486,6 +501,8 @@ export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
+export * from './agents/workflow-checkpoint.js';
+export { WorkflowJournalUnavailableError } from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -496,6 +513,7 @@ export {
   EXTENSION_WORKFLOW_NAME_PATTERN,
   qualifyExtensionWorkflowName,
   parseExtensionWorkflowName,
+  isWorkflowRunId,
   type SavedWorkflowEntry,
   type SavedWorkflowScope,
   type SavedWorkflowSource,
@@ -757,7 +775,7 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './tools/tool-utils.js';
 export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
-export * from './utils/yaml-parser.js';
+export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
@@ -816,6 +834,7 @@ export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export { buildHooksListing } from './hooks/hooks-listing.js';
 export type {
   HooksListing,
+  HooksListingDisabledReason,
   HooksListingOrigin,
   HooksListingRow,
 } from './hooks/hooks-listing.js';
@@ -827,6 +846,24 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export type { StopFailureErrorType } from './hooks/types.js';
+export {
+  HOOK_EVENT_DISPLAY,
+  hookEventDisplay,
+} from './hooks/hook-event-display.js';
+export type { HookEventDisplayMeta } from './hooks/hook-event-display.js';
+export {
+  DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_FUNCTION_HOOK_TIMEOUT_MS,
+  describeHookTimeout,
+  isLegacyMillisecondHookTimeout,
+  resolveCommandHookTimeoutMs,
+} from './hooks/hook-timeout.js';
+export type {
+  HookTimeoutDescription,
+  HookTimeoutSource,
+} from './hooks/hook-timeout.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,

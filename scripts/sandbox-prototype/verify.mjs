@@ -44,10 +44,12 @@ const cleanEnv = {
 if (process.platform !== 'linux')
   throw new Error('Real Linux is required; no skip.');
 if (!['--clean', '--parent-driver'].includes(process.argv[2])) {
+  if (process.env.QWEN_SANDBOX_TEST_REPORT)
+    rmSync(process.env.QWEN_SANDBOX_TEST_REPORT, { force: true });
   const child = spawnSync(process.execPath, [self, '--clean'], {
     env: cleanEnv,
     stdio: 'inherit',
-    timeout: 120_000,
+    timeout: 180_000,
   });
   if (child.error) throw child.error;
   process.exit(child.status ?? 1);
@@ -81,6 +83,25 @@ const until = async (predicate, label) => {
     if (Date.now() >= deadline) throw new Error(`Timeout: ${label}`);
     await delay(25);
   }
+};
+const waitForFile = async (
+  file,
+  label,
+  predicate = (value) => value !== '',
+) => {
+  let content = '';
+  await until(() => {
+    try {
+      const candidate = readFileSync(file, 'utf8');
+      if (!predicate(candidate)) return false;
+      content = candidate;
+      return true;
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+  }, label);
+  return content;
 };
 const identity = (pid) => {
   try {
@@ -162,18 +183,28 @@ async function verify() {
   const manifest = JSON.parse(
     readFileSync(path.join(installation, 'manifest.json'), 'utf8'),
   );
+  const hashArtifacts = () => {
+    const hashes = {};
+    const errors = [];
+    for (const file of Object.keys(manifest.artifacts)) {
+      try {
+        hashes[file] = createHash('sha256')
+          .update(readFileSync(path.join(installation, file)))
+          .digest('hex');
+      } catch (error) {
+        errors.push(`${file}: ${error.message}`);
+      }
+    }
+    return { hashes, errors };
+  };
+  const artifactsBefore = hashArtifacts();
   for (const [file, hash] of Object.entries(manifest.artifacts)) {
-    assert.equal(
-      createHash('sha256')
-        .update(readFileSync(path.join(installation, file)))
-        .digest('hex'),
-      hash,
-      file,
-    );
+    assert.equal(artifactsBefore.hashes[file], hash, file);
   }
   const results = [];
   const owned = new Map();
   const ownedScratch = new Set();
+  let artifactsAfter = { hashes: {}, errors: [] };
   const remember = (pid) => {
     if (pid) {
       const start = identity(pid);
@@ -280,17 +311,21 @@ async function verify() {
       await check(`${transport}: namespaces and filesystem`, async () => {
         const hostNs = readlinkSync('/proc/self/ns/pid');
         const target = path.join(workspace, `write-${transport}`);
-        const command = `set -e; readlink /proc/self/ns/pid; readlink /proc/1/ns/pid; test ! -e /proc/${process.pid}/root; printf allowed > ${quote(target)}; if printf changed > ${quote(outside)}; then exit 42; fi`;
+        const command = `set -e; readlink /proc/self/ns/pid; readlink /proc/1/ns/pid; printf 'SCRATCH:%s\\n' "$TMPDIR"; test ! -e /proc/${process.pid}/root; printf allowed > ${quote(target)}; if printf changed > ${quote(outside)}; then exit 42; fi`;
         const result = await run(command, pty);
         const namespaces = result.output.match(/pid:\[\d+\]/g);
+        const scratch = result.output.match(/SCRATCH:([^\r\n]+)/)?.[1];
         assert.equal(namespaces?.length, 2, result.output);
+        assert.ok(scratch, result.output);
         assert.notEqual(namespaces[0], hostNs);
         assert.equal(namespaces[0], namespaces[1]);
         assert.equal(readFileSync(target, 'utf8'), 'allowed');
         assert.equal(readFileSync(outside, 'utf8'), 'original');
+        assert.equal(existsSync(scratch), false, scratch);
         return {
           hostNs,
           namespace: namespaces[0],
+          scratch,
           executionMethod: result.executionMethod,
         };
       });
@@ -320,8 +355,11 @@ async function verify() {
               pty,
               mode === 'timeout' ? { signal: AbortSignal.timeout(1000) } : {},
             );
-            await until(() => existsSync(nsFile), 'payload ready');
-            const namespace = readFileSync(nsFile, 'utf8');
+            const namespace = await waitForFile(
+              nsFile,
+              'payload ready',
+              (value) => /^pid:\[\d+\]$/.test(value),
+            );
             let members;
             await until(() => {
               members = rememberNamespace(namespace);
@@ -440,6 +478,76 @@ async function verify() {
         },
       );
     }
+    await check(
+      'pipes: shared promotion waits for inherited stdio to close',
+      async () => {
+        const gate = path.join(workspace, 'promoted-drain-gate');
+        const exiting = path.join(workspace, 'promoted-parent-exiting');
+        const controller = new AbortController();
+        let settle;
+        let settleCount = 0;
+        let settledEarly = false;
+        const settled = new Promise((resolve) => {
+          settle = resolve;
+        }).then((value) => {
+          settledEarly = true;
+          return value;
+        });
+        const command = makeCommand(`
+          const fs=require('node:fs'), cp=require('node:child_process');
+          const timer=setInterval(()=>{
+            if(!fs.existsSync(${JSON.stringify(gate)})) return;
+            clearInterval(timer);
+            cp.spawn('/bin/sleep',['2'],{stdio:'inherit',detached:true}).unref();
+            fs.writeFileSync(${JSON.stringify(exiting)},'exiting');
+            process.exit(0);
+          },25);
+        `);
+        const task = await service.executeLaunch(
+          {
+            executable: '/bin/bash',
+            args: ['-c', command],
+            cwd: workspace,
+            env: cleanEnv,
+          },
+          () => {},
+          controller.signal,
+          false,
+          {},
+          {
+            streamStdout: true,
+            postPromote: {
+              onSettle: (value) => {
+                settleCount++;
+                settle(value);
+              },
+            },
+          },
+        );
+        remember(task.pid);
+        const parentStart = identity(task.pid);
+        assert.ok(parentStart);
+        controller.abort({
+          kind: 'background',
+          shellId: 'prototype-drain',
+        });
+        const promoted = await finish(task, false, null);
+        assert.equal(promoted.promoted, true);
+        writeFileSync(gate, 'continue');
+        await waitForFile(exiting, 'promoted parent exit');
+        await until(
+          () => identity(task.pid) !== parentStart,
+          'promoted parent reaped',
+        );
+        await delay(100);
+        assert.equal(settledEarly, false);
+        const final = await bounded(settled, 'inherited stdio settlement');
+        assert.equal(final.exitCode, 0);
+        assert.equal(final.signal, null);
+        assert.equal(final.error, undefined);
+        assert.equal(settleCount, 1);
+      },
+    );
     for (const pty of [false, true]) {
       await check(
         `${pty ? 'PTY' : 'pipes'}: trusted receipt resists stdout, file and FD spoofing`,
@@ -603,6 +711,10 @@ async function verify() {
         assert.notEqual(result.exitCode, 0);
         assert.deepEqual(JSON.parse(readFileSync(statusPath, 'utf8')), {
           state: 'unconfirmed',
+          // bwrap forked (child-pid on the wire) but the mount setup failed
+          // before exec, so there is no exit-code record — a positive
+          // no-exec attestation (PR #12067 review, round 2).
+          payloadExitObserved: false,
         });
         assert.ok(!existsSync(marker));
         rmSync(control, { recursive: true });
@@ -613,8 +725,16 @@ async function verify() {
       async () => {
         const nsFile = path.join(workspace, 'killed-supervisor-ns');
         const task = await start(longPayload(nsFile));
-        await until(() => existsSync(nsFile), 'executed payload');
-        const members = rememberNamespace(readFileSync(nsFile, 'utf8'));
+        const namespace = await waitForFile(
+          nsFile,
+          'executed payload',
+          (value) => /^pid:\[\d+\]$/.test(value),
+        );
+        let members;
+        await until(() => {
+          members = rememberNamespace(namespace);
+          return members.size >= 3;
+        }, 'supervisor descendants ready');
         const children = readFileSync(
           `/proc/${task.pid}/task/${task.pid}/children`,
           'utf8',
@@ -632,6 +752,7 @@ async function verify() {
           () => [...members].every(([pid, stamp]) => identity(pid) !== stamp),
           'supervisor death cleanup',
         );
+        return { namespace, hostPids: [...members.keys()], supervisor };
       },
     );
     await check('PTY: input and resize', async () => {
@@ -653,8 +774,9 @@ async function verify() {
       async () => {
         const nsFile = path.join(workspace, 'ctrl-c-ns');
         const task = await start(longPayload(nsFile), true);
-        await until(() => existsSync(nsFile), 'Ctrl+C ready');
-        const namespace = readFileSync(nsFile, 'utf8');
+        const namespace = await waitForFile(nsFile, 'Ctrl+C ready', (value) =>
+          /^pid:\[\d+\]$/.test(value),
+        );
         let members;
         await until(() => {
           members = rememberNamespace(namespace);
@@ -755,8 +877,7 @@ async function verify() {
       assert.equal(result.sandboxStatus.state, 'confirmed');
       return {
         code: result.exitCode,
-        stdout: result.output,
-        stderr: result.output,
+        output: result.output,
       };
     };
     await check(
@@ -788,7 +909,7 @@ async function verify() {
           expected: firstVersion,
         });
         assert.equal(conflict.code, 1);
-        assert.match(conflict.stderr, /File changed since/);
+        assert.match(conflict.output, /File changed since/);
         assert.equal(readFileSync(destination, 'utf8'), 'second');
         assert.deepEqual(readdirSync(path.dirname(destination)), ['note.txt']);
       },
@@ -807,7 +928,7 @@ async function verify() {
           content: Buffer.alloc(0),
           expected: getSandboxFileVersion(link),
         });
-        assert.equal(result.code, 0, result.stdout);
+        assert.equal(result.code, 0, result.output);
         assert.equal(readFileSync(destination).length, 0);
         assert.equal(statSync(destination).mode & 0o7777, 0o751);
         assert.equal(readlinkSync(link), 'worker-mode.txt');
@@ -834,8 +955,8 @@ async function verify() {
             content: Buffer.from('bad'),
             expected,
           });
-          assert.equal(result.code, 1, result.stdout);
-          assert.equal(JSON.parse(result.stdout).code, 'ESTALE');
+          assert.equal(result.code, 1, result.output);
+          assert.equal(JSON.parse(result.output).code, 'ESTALE');
           assert.deepEqual(
             readdirSync(directory),
             change === 'removed' ? [] : ['file'],
@@ -856,8 +977,8 @@ async function verify() {
           content: Buffer.from('bad'),
           expected: null,
         });
-        assert.equal(result.code, 1, result.stdout);
-        assert.equal(JSON.parse(result.stdout).code, 'EINVAL');
+        assert.equal(result.code, 1, result.output);
+        assert.equal(JSON.parse(result.output).code, 'EINVAL');
         assert.ok(statSync(destination).isFIFO());
         assert.ok(
           !readdirSync(workspace).some(
@@ -886,13 +1007,15 @@ async function verify() {
       );
       assert.equal(readFileSync(outside, 'utf8'), 'original');
       assert.ok(
-        !readdirSync(fixture).some((name) => name.startsWith('.qwen-write-')),
+        !readdirSync(fixture).some(
+          (name) => name.startsWith('outside.txt.') && name.endsWith('.tmp'),
+        ),
       );
     });
     await check('file worker: bounded metadata header', async () => {
       const result = await worker('x'.repeat(16 * 1024 + 1));
       assert.equal(result.code, 1);
-      assert.match(result.stderr, /exceeds 16 KiB/);
+      assert.match(result.output, /exceeds 16 KiB/);
     });
     await check('parent death terminates the private namespace', async () => {
       const namespaceFile = path.join(workspace, 'parent-death-ns');
@@ -904,20 +1027,34 @@ async function verify() {
           '--parent-driver',
           JSON.stringify({ workspace, state, namespaceFile, scratchRecord }),
         ],
-        { env: cleanEnv, stdio: 'ignore' },
+        { env: cleanEnv, stdio: ['ignore', 'ignore', 'pipe'] },
       );
       remember(driver.pid);
-      const exit = new Promise((resolve) => driver.on('exit', resolve));
-      await until(
-        () => existsSync(scratchRecord) && existsSync(namespaceFile),
-        'driver payload ready',
+      let driverStderr = '';
+      driver.stderr.on('data', (chunk) => {
+        driverStderr = (driverStderr + chunk.toString('utf8')).slice(-16384);
+      });
+      const exit = new Promise((resolve) =>
+        driver.on('exit', (code, signal) => resolve({ code, signal })),
       );
-      const scratch = readFileSync(scratchRecord, 'utf8');
+      const ready = Promise.all([
+        waitForFile(scratchRecord, 'driver scratch ready', path.isAbsolute),
+        waitForFile(namespaceFile, 'driver namespace ready', (value) =>
+          /^pid:\[\d+\]$/.test(value),
+        ),
+      ]);
+      const [scratch, namespace] = await Promise.race([
+        ready,
+        exit.then(({ code, signal }) => {
+          throw new Error(
+            `Parent driver exited before readiness (code=${code}, signal=${signal}): ${driverStderr || 'no stderr'}`,
+          );
+        }),
+      ]);
       assert.equal(path.dirname(scratch), realpathSync(os.tmpdir()));
       assert.match(path.basename(scratch), /^qwen-sandbox-[A-Za-z0-9]+$/);
       assert.equal(realpathSync(scratch), scratch);
       ownedScratch.add(scratch);
-      const namespace = readFileSync(namespaceFile, 'utf8');
       let members;
       await until(() => {
         members = rememberNamespace(namespace);
@@ -978,17 +1115,40 @@ async function verify() {
       passed: cleanupErrors.length === 0,
       errors: cleanupErrors,
     });
+    artifactsAfter = hashArtifacts();
+    const artifactErrors = [...artifactsAfter.errors];
+    for (const [file, expected] of Object.entries(manifest.artifacts)) {
+      if (artifactsAfter.hashes[file] !== expected)
+        artifactErrors.push(`${file}: hash changed during verification`);
+    }
+    results.push({
+      name: 'artifact integrity after verification',
+      passed: artifactErrors.length === 0,
+      errors: artifactErrors,
+    });
+  }
+  let bwrapVersion;
+  try {
+    bwrapVersion = execFileSync('/usr/bin/bwrap', ['--version'], {
+      encoding: 'utf8',
+    }).trim();
+  } catch (error) {
+    bwrapVersion = `unavailable: ${error.code ?? error.message}`;
   }
   const report = {
     revision: manifest.revision,
-    artifacts: manifest.artifacts,
+    dirty: manifest.dirty,
+    inputs: manifest.inputs,
+    artifacts: {
+      expected: manifest.artifacts,
+      before: artifactsBefore.hashes,
+      after: artifactsAfter.hashes,
+    },
     environment: {
       kernel: os.release(),
       arch: os.arch(),
       node: process.version,
-      bwrap: execFileSync('/usr/bin/bwrap', ['--version'], {
-        encoding: 'utf8',
-      }).trim(),
+      bwrap: bwrapVersion,
     },
     fixture,
     results,
@@ -1000,12 +1160,12 @@ async function verify() {
       'No full encoding/binary compatibility',
     ],
   };
+  console.log(JSON.stringify(report, null, 2));
   if (process.env.QWEN_SANDBOX_TEST_REPORT)
     writeFileSync(
       process.env.QWEN_SANDBOX_TEST_REPORT,
       JSON.stringify(report, null, 2),
     );
-  console.log(JSON.stringify(report, null, 2));
-  assert.equal(results.length, 34, 'Unexpected adapter case count');
+  assert.equal(results.length, 36, 'Unexpected adapter case count');
   process.exitCode = results.every((result) => result.passed) ? 0 : 1;
 }

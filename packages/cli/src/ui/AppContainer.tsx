@@ -1716,7 +1716,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     openApprovalModeDialog,
     handleApprovalModeSelect,
-  } = useApprovalModeCommand(settings, config);
+  } = useApprovalModeCommand(settings, config, historyManager.addItem);
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
@@ -1905,6 +1905,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
+    logger,
   });
 
   const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
@@ -2359,6 +2360,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getContextRuleExcludes(),
         {
           loadReason: 'refresh',
+          extensionRuleSources: config.getExtensionRuleSources(),
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),

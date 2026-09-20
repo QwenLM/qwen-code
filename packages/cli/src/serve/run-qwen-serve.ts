@@ -59,6 +59,7 @@ import type {
 } from '@qwen-code/acp-bridge/ndJsonStream';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
+import { getEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
@@ -2062,6 +2063,7 @@ function buildProviderSetupInputs(
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
+    ...(req.wireApi ? { wireApi: req.wireApi } : {}),
     baseUrl,
     apiKey: req.apiKey.trim(),
     modelIds: normalizeInstallModelIds(
@@ -7857,6 +7859,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      modelSelectionBaseEnv: getEnvironmentBeforeLoad() ?? daemonRuntimeBaseEnv,
       runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
@@ -7970,9 +7973,16 @@ async function runQwenServeImpl(
             const plan = core.buildInstallPlan(
               provider,
               inputs,
-              fresh.merged.modelProviders?.[
-                inputs.protocol ?? provider.protocol
-              ],
+              core.getModelsForProviderProtocol(
+                fresh.merged.modelProviders,
+                inputs.protocol ?? provider.protocol,
+                fresh.merged.providerProtocol,
+              ),
+              {
+                authType: fresh.merged.security?.auth?.selectedType,
+                id: fresh.merged.model?.name,
+                baseUrl: fresh.merged.model?.baseUrl,
+              },
             );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(

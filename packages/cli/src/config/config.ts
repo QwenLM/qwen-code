@@ -53,8 +53,13 @@ import {
   loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
+  validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import {
+  agentExecutionBackend,
+  agentExecutionFactory,
+} from './agent-execution.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
@@ -111,7 +116,6 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
-  validateGoalCheckpointTimeoutSeconds,
   validateGoalMaxActiveMinutes,
   validateGoalMaxTurns,
   validateGoalTokenBudget,
@@ -1180,18 +1184,6 @@ function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
   }
 }
 
-function resolveGoalCheckpointTimeoutSeconds(
-  settings: Settings,
-): number | undefined {
-  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
-  if (fromSettings === undefined) return undefined;
-  try {
-    return validateGoalCheckpointTimeoutSeconds(fromSettings);
-  } catch (err) {
-    throw new Error(`settings.json: ${(err as Error).message}`);
-  }
-}
-
 /**
  * Resolves the tool-call budget for a run. Returns the validated count
  * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
@@ -1601,6 +1593,7 @@ export async function loadCliConfig(
    * If provided, these override settings.hooks for hook loading.
    */
   hooksConfig?: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
@@ -1742,7 +1735,7 @@ export async function loadCliConfig(
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
+  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1821,12 +1814,19 @@ export async function loadCliConfig(
 
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
+  // Whether a privileged mode was actually asked for (flag or setting). The
+  // AUTO fall-through below is a built-in default, not a request, so an
+  // untrusted folder must not claim it overrode something the caller never set.
+  let approvalModeRequested = false;
   if (argv.approvalMode) {
     approvalMode = parseApprovalModeValue(argv.approvalMode);
+    approvalModeRequested = true;
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
+    approvalModeRequested = true;
   } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
+    approvalModeRequested = true;
   } else if (bareMode || safeMode) {
     // Restricted modes strip permissions/allowlists and are meant to be
     // maximally restrictive, so they keep manual approval rather than the
@@ -1842,9 +1842,11 @@ export async function loadCliConfig(
     approvalMode !== ApprovalMode.DEFAULT &&
     approvalMode !== ApprovalMode.PLAN
   ) {
-    writeStderrLine(
-      `Approval mode overridden to "default" because the current folder is not trusted.`,
-    );
+    if (approvalModeRequested) {
+      writeStderrLine(
+        `Approval mode overridden to "default" because the current folder is not trusted.`,
+      );
+    }
     approvalMode = ApprovalMode.DEFAULT;
   }
 
@@ -2115,7 +2117,27 @@ export async function loadCliConfig(
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
-  // Unified resolution of generation config with source attribution
+  // Validate provider protocols and per-model `wireApi` fields up front. The
+  // registry resolver throws a bare Error, and every startup shape passes
+  // through here, even without a selected model/auth type — classify it as a
+  // FatalConfigError so the user gets the message and the "please fix the
+  // configuration file(s)" hint instead of a stack trace before the TUI
+  // starts.
+  try {
+    validateModelProvidersConfig(
+      settings.modelProviders,
+      settings.providerProtocol,
+    );
+  } catch (err) {
+    throw new FatalConfigError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Unified resolution of generation config with source attribution. Note the
+  // up-front provider validation above is what classifies invalid configuration;
+  // this call's own settings reads must not re-wrap a resolver
+  // defect as a user config error, so it stays unwrapped.
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {
       model: argv.model,
@@ -2131,24 +2153,17 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
-  // Disable ToolSearch when explicitly configured or for models that benefit
-  // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)
-  // all use prefix-based disk KV caching with heavily discounted cached
-  // token pricing (up to 1/120 for v4). When tool_search is in the deny
-  // list, client.ts eagerly reveals all deferred tools so every MCP tool
-  // schema is in the initial declaration list, keeping the prompt prefix
-  // stable and maximizing cache hit rates.
-  // Note: no `^` anchor — model names may include a provider prefix
-  // (e.g. "openrouter/deepseek/deepseek-v4-flash").
-  const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
-  const shouldDisableToolSearch =
-    toolSearchExplicitlyEnabled === false ||
-    (toolSearchExplicitlyEnabled === undefined &&
-      resolvedModel !== undefined &&
-      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+  // The ToolSearch + ToolCall bridge keeps the model-facing declaration list
+  // stable, including for prefix-cache-sensitive models. Only an explicit
+  // opt-out disables both halves of the bridge and eagerly reveals deferred
+  // schemas through client.ts.
+  const shouldDisableToolSearch = settings.tools?.toolSearch?.enabled === false;
   if (shouldDisableToolSearch) {
     if (!mergedDeny.includes('tool_search')) {
       mergedDeny.push('tool_search');
+    }
+    if (!mergedDeny.includes('tool_call')) {
+      mergedDeny.push('tool_call');
     }
   }
 
@@ -2497,7 +2512,6 @@ export async function loadCliConfig(
     goalTokenBudget: resolveGoalTokenBudget(settings),
     goalMaxTurns: resolveGoalMaxTurns(settings),
     goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
-    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2572,7 +2586,7 @@ export async function loadCliConfig(
     locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType: selectedAuthType,
+    authType: resolvedCliConfig.authType,
     inputFormat,
     outputFormat,
     includePartialMessages,
@@ -2603,6 +2617,7 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
+    workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
@@ -2721,6 +2736,8 @@ export async function loadCliConfig(
         }
       : undefined,
     settingsWatcher,
+    agentExecutionBackend: agentExecutionBackend(),
+    executionEnvironmentFactory: agentExecutionFactory(),
   };
 
   const config = new Config(configParams);
