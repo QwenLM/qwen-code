@@ -15,8 +15,10 @@ import {
   listGitWorktrees,
   lockGitWorktree,
   pruneGitWorktrees,
+  realpathOrSelf,
   removeGitWorktree,
   unlockGitWorktree,
+  worktreeAdminHoldsModules,
   worktreeHoldsSubmodules,
   type GitWorktreeEntry,
 } from '@qwen-code/qwen-code-core/utils/git-worktrees.js';
@@ -37,20 +39,13 @@ import {
   sendGitError,
 } from './workspace-git-branches.js';
 
-function realpathOrSelf(target: string): string {
-  try {
-    return fs.realpathSync(target);
-  } catch {
-    return path.resolve(target);
-  }
-}
-
 /**
  * The reason written on the locks that shield other stale registrations for
  * the duration of a prune. Recognisable, because a crash between the lock and
  * the unlock leaves it on screen.
  */
-const PRUNE_GUARD_REASON = 'qwen-code: held while pruning another worktree';
+export const PRUNE_GUARD_REASON =
+  'qwen-code: held while pruning another worktree';
 
 /**
  * A shield lock this route left behind, which is not a user's lock.
@@ -75,11 +70,17 @@ function isOwnGuardLock(entry: GitWorktreeEntry): boolean {
 const pruneTurns = new Map<string, Promise<unknown>>();
 
 function takePruneTurn<T>(repo: string, work: () => Promise<T>): Promise<T> {
-  const queued = (pruneTurns.get(repo) ?? Promise.resolve()).then(work, work);
-  pruneTurns.set(
-    repo,
-    queued.catch(() => {}),
-  );
+  // Chained onto `settled`, never onto `queued`: a turn that threw — a prune
+  // the dry run refused to authorise is the ordinary way one does — must not
+  // take the removals waiting behind it with it.
+  const queued = (pruneTurns.get(repo) ?? Promise.resolve()).then(work);
+  const settled = queued.catch(() => {});
+  pruneTurns.set(repo, settled);
+  // Dropped once nothing is waiting behind it: a daemon that outlives many
+  // repositories should not keep a row per repository it ever touched.
+  void settled.then(() => {
+    if (pruneTurns.get(repo) === settled) pruneTurns.delete(repo);
+  });
   return queued;
 }
 
@@ -276,6 +277,22 @@ async function findWorktree(
 }
 
 /**
+ * What two removals have to agree on to be serialised against each other.
+ *
+ * Not the workspace: two registered workspaces can be two checkouts of one
+ * repository, and a prune in either reaches the same registrations. git lists
+ * the main worktree first and it is the same entry from anywhere inside, so
+ * it names the repository without another git process.
+ */
+async function repositoryKey(runtime: WorkspaceRuntime): Promise<string> {
+  const entries = await listGitWorktrees(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+  );
+  return realpathOrSelf(entries[0]?.path ?? runtime.workspaceCwd);
+}
+
+/**
  * Workspace-scoped: every route resolves inside the selected runtime and
  * lists, inspects, or removes worktrees of that workspace's repository only.
  * The single exception is the removal refusal, which counts live sessions
@@ -408,12 +425,8 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
         deps.sendBridgeError(res, err, { route });
         return;
       }
-      const body = safeBody(req);
-      const force = body['force'] === true;
-      let entry: GitWorktreeEntry | null | undefined;
-      try {
-        entry = await findWorktree(runtime, body['path']);
-      } catch (err) {
+      const failWithGitError = (err: unknown): void => {
+        if (sendGenerationClosedError(res, err)) return;
         sendGitError(
           res,
           err,
@@ -421,6 +434,14 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
           deps.sendBridgeError,
           runtime.workspaceCwd,
         );
+      };
+      const body = safeBody(req);
+      const force = body['force'] === true;
+      let entry: GitWorktreeEntry | null | undefined;
+      try {
+        entry = await findWorktree(runtime, body['path']);
+      } catch (err) {
+        failWithGitError(err);
         return;
       }
       if (entry === undefined) {
@@ -435,6 +456,42 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
           'No worktree of this repository has that path',
         );
         return;
+      }
+      // A shield lock this route left behind is not a user's lock, and git
+      // refuses a locked worktree at every force level while prune skips it.
+      // Releasing it is the only way back, so it happens whether or not the
+      // request forces — and the mark it suppressed is re-read, because the
+      // fallback that clears such an entry is keyed on it.
+      //
+      // Inside the repository's turn: a release that ran outside one would
+      // take a shield another removal is relying on right now, and widen its
+      // prune to the bystander that shield is protecting.
+      //
+      // Keyed lazily: the key costs a listing of its own, and the two paths
+      // that serialise are the rare ones. Its failure is a git failure like
+      // any other on this route, so it goes out redacted rather than as
+      // whatever the framework makes of an unhandled rejection.
+      let repoTurnKeyOnce: Promise<string> | undefined;
+      const repoTurnKey = (): Promise<string> =>
+        (repoTurnKeyOnce ??= repositoryKey(runtime));
+      let prunable = entry.prunable;
+      if (isOwnGuardLock(entry)) {
+        try {
+          await takePruneTurn(await repoTurnKey(), async () => {
+            await unlockGitWorktree(
+              runtime.workspaceCwd,
+              entry.path,
+              runtime.env.effectiveEnv,
+            ).catch(() => {});
+            const refreshed = await findWorktree(runtime, entry.path).catch(
+              () => null,
+            );
+            if (refreshed) prunable = refreshed.prunable;
+          });
+        } catch (err) {
+          failWithGitError(err);
+          return;
+        }
       }
       // `bare` is redundancy, not a second way in: git prints the bare
       // entry first, which is what makes it main. Cheap to keep on a
@@ -461,35 +518,21 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
           (!relative.startsWith('..') && !path.isAbsolute(relative))
         );
       };
-      if (
-        deps.workspaceRegistry
-          .listAllEntries()
-          .some((registered) => containsWorkspace(registered.workspaceCwd))
-      ) {
+      const blockingWorkspace = deps.workspaceRegistry
+        .listAllEntries()
+        .find((registered) => containsWorkspace(registered.workspaceCwd));
+      if (blockingWorkspace) {
         sendError(
           res,
           409,
           'worktree_is_workspace',
-          'This worktree is the root of a registered workspace and cannot be removed here',
+          'A registered workspace lives here and cannot be removed from this tab',
+          // Named, because the blocking workspace may be rooted below the
+          // worktree the request asked about, and then it is not something
+          // the caller can work back to from what it sent.
+          { workspaceCwd: blockingWorkspace.workspaceCwd },
         );
         return;
-      }
-      // A shield lock this route left behind is not a user's lock, and git
-      // refuses a locked worktree at every force level while prune skips it.
-      // Releasing it is the only way back, so it happens whether or not the
-      // request forces — and the mark it suppressed is re-read, because the
-      // fallback that clears such an entry is keyed on it.
-      let prunable = entry.prunable;
-      if (isOwnGuardLock(entry)) {
-        await unlockGitWorktree(
-          runtime.workspaceCwd,
-          entry.path,
-          runtime.env.effectiveEnv,
-        ).catch(() => {});
-        const refreshed = await findWorktree(runtime, entry.path).catch(
-          () => null,
-        );
-        if (refreshed) prunable = refreshed.prunable;
       }
       const stillRegistered = async (): Promise<boolean> =>
         (
@@ -558,27 +601,43 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
             ...(operation ? { operation } : {}),
             ...(unmergedHead ? { unmergedHead } : {}),
           };
+          // A nested repository goes with the removal whether or not there
+          // is a checkout left to ask, and the shape with none is the one
+          // git leaves unguarded: it refuses a removal whose
+          // `<admin>/<id>/modules` exists only while the checkout is still
+          // there, and deletes that directory without a word once it is not.
+          // So the admin side is asked first — it is the side the repository
+          // is on, and the only one left to ask when the checkout is gone —
+          // and `git submodule status` after it, for a submodule that keeps
+          // its repository inside its own working directory instead.
+          const nestedRepository =
+            (await worktreeAdminHoldsModules(
+              runtime.workspaceCwd,
+              entry.path,
+              runtime.env.effectiveEnv,
+            ).catch(() => false)) ||
+            (isReadableCheckout(entry)
+              ? await worktreeHoldsSubmodules(
+                  entry.path,
+                  runtime.env.effectiveEnv,
+                ).catch(() => false)
+              : false);
           // One exit for every refusal, because the invariant is that
           // whichever one answers names everything the second click takes —
           // and a per-branch payload is how a branch comes to forget one.
-          // The submodule probe hangs off it rather than off the git call
-          // that refuses: a worktree stopped by any gate above never reaches
-          // git, and its nested repository goes just the same.
+          // The nested repository is gathered before any of them rather than
+          // asked for by the one that wins: a worktree stopped by any gate
+          // above never reaches git, and its nested repository goes just the
+          // same.
           const refuse = async (
             code: string,
             message: string,
             extra: Record<string, unknown> = {},
           ): Promise<void> => {
-            const submodules = isReadableCheckout(entry)
-              ? await worktreeHoldsSubmodules(
-                  entry.path,
-                  runtime.env.effectiveEnv,
-                ).catch(() => false)
-              : false;
             sendError(res, 409, code, message, {
               ...extra,
               ...alsoDiscards,
-              ...(submodules ? { submodules: true } : {}),
+              ...(nestedRepository ? { submodules: true } : {}),
             });
           };
           // Reads every registered workspace's bridge, so a forced removal
@@ -653,6 +712,15 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
             );
             return;
           }
+          if (nestedRepository) {
+            // Nothing above refused, so without this the only warning about
+            // a repository that is about to be deleted would never render.
+            await refuse(
+              'worktree_nested_repository',
+              'A nested repository would be deleted with this worktree',
+            );
+            return;
+          }
         }
         try {
           await removeGitWorktree(
@@ -694,13 +762,11 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
               // repository, which is offered a force that fails.
               if (!force && isReadableCheckout(entry)) {
                 // git's usual reason for refusing a checkout it can reach is
-                // a submodule, and what it does not say is that forcing takes
-                // the submodule's own repository too — leaving the branch it
-                // kept naming a commit nothing can fetch.
-                const submodules = await worktreeHoldsSubmodules(
-                  entry.path,
-                  runtime.env.effectiveEnv,
-                ).catch(() => false);
+                // a submodule — and the gathering above now asks git's own
+                // trigger for that, so reaching here means it answered no and
+                // re-asking would only spend another subprocess on a `false`.
+                // What is left is a refusal the daemon did not predict, which
+                // it can only quote.
                 sendError(
                   res,
                   409,
@@ -709,19 +775,16 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
                   {
                     detail: gitErrorText(removeError, runtime.workspaceCwd)
                       .message,
-                    ...(submodules ? { submodules: true } : {}),
                   },
                 );
                 return;
-                // (This arm is outside the `!force` gathering above, so it
-                // asks for itself.)
               }
               throw removeError;
             }
             // One removal at a time per repository: the shield and the
             // dry run that proves it only hold if nothing else is
             // locking, pruning or unlocking underneath them.
-            await takePruneTurn(runtime.workspaceCwd, async () => {
+            await takePruneTurn(await repoTurnKey(), async () => {
               // `git worktree prune` has no per-path form: it drops every
               // registration git has marked stale, and with each one the admin
               // directory holding that worktree's HEAD and reflog — the last
@@ -834,14 +897,7 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
           ...(somethingRemainsAt(entry.path) ? { directoryRemains: true } : {}),
         });
       } catch (err) {
-        if (sendGenerationClosedError(res, err)) return;
-        sendGitError(
-          res,
-          err,
-          route,
-          deps.sendBridgeError,
-          runtime.workspaceCwd,
-        );
+        failWithGitError(err);
       }
     },
   );

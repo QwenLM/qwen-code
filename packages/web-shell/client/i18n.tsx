@@ -283,7 +283,7 @@ const EN: Messages = {
   'gitWorktrees.confirm':
     'Remove this worktree? Its directory is deleted from disk; the branch is kept.',
   'gitWorktrees.confirmStale':
-    'Remove this stale entry? Git stops tracking worktrees it can no longer find; no files are deleted.',
+    'Remove this stale entry? Git stops tracking worktrees it can no longer find. Whatever is left in its directory stays; the bookkeeping git keeps for it does not.',
   'gitWorktrees.confirmDetached':
     'Remove this worktree? Its directory is deleted from disk. It is on a detached HEAD, so there is no branch to keep.',
   'gitWorktrees.blockedDirty': (v) =>
@@ -301,14 +301,20 @@ const EN: Messages = {
       ? `This worktree is locked: ${v.reason}`
       : 'This worktree is locked.',
   'gitWorktrees.blockedRefused': 'Git refused to remove this worktree.',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `The workspace ${v.name} lives in this worktree, so removing it would take the workspace too. Remove the workspace first.`
+      : 'A registered workspace lives in this worktree, so removing it would take the workspace too. Remove the workspace first.',
   'gitWorktrees.blockedSubmodules':
-    'A submodule checked out here keeps its own repository, and forcing deletes that too.',
+    'A submodule of this worktree keeps a repository of its own, and removing the worktree deletes that repository too.',
   'gitWorktrees.removeAnyway': 'Remove anyway',
   'gitWorktrees.removeFailed': 'Failed to remove the worktree',
   'gitWorktrees.keptDirectory': (v) =>
     `Git no longer tracks ${v?.name ?? ''}, but its directory is still on disk.`,
   'gitWorktrees.refusedElsewhere': (v) =>
-    `Removing ${v?.name ?? ''} was refused while you were looking elsewhere.`,
+    v?.reason
+      ? `Removing ${v?.name ?? ''} was refused while you were looking elsewhere: ${v.reason}`
+      : `Removing ${v?.name ?? ''} was refused while you were looking elsewhere.`,
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -4297,7 +4303,7 @@ const ZH: Messages = {
   'gitWorktrees.cancel': '取消',
   'gitWorktrees.confirm': '删除这个 worktree？其目录会从磁盘删除，分支保留。',
   'gitWorktrees.confirmStale':
-    '删除这个已失效条目？Git 将不再跟踪它已经找不到的 worktree，不会删除任何文件。',
+    '删除这个已失效条目？Git 将不再跟踪它已经找不到的 worktree。目录里剩下的东西会保留，但 git 为它保存的记录不会。',
   'gitWorktrees.confirmDetached':
     '删除这个 worktree？其目录会从磁盘删除。它处于游离 HEAD，因此没有分支可留。',
   'gitWorktrees.blockedDirty': (v) => `${v?.count ?? 0} 处未提交改动将被丢弃。`,
@@ -4312,14 +4318,20 @@ const ZH: Messages = {
   'gitWorktrees.blockedLocked': (v) =>
     v?.reason ? `该 worktree 已加锁：${v.reason}` : '该 worktree 已加锁。',
   'gitWorktrees.blockedRefused': 'Git 拒绝删除这个 worktree。',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `工作区 ${v.name} 就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。`
+      : '有已注册的工作区就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。',
   'gitWorktrees.blockedSubmodules':
-    '这里检出的子模块有自己的仓库，强制删除会把它一并删掉。',
+    '该 worktree 的子模块有自己的仓库，删除这个 worktree 会把那个仓库一并删掉。',
   'gitWorktrees.removeAnyway': '仍然删除',
   'gitWorktrees.removeFailed': '删除 worktree 失败',
   'gitWorktrees.keptDirectory': (v) =>
     `Git 已不再跟踪 ${v?.name ?? ''}，但它的目录仍在磁盘上。`,
   'gitWorktrees.refusedElsewhere': (v) =>
-    `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了。`,
+    v?.reason
+      ? `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了：${v.reason}`
+      : `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了。`,
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',

@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { runGit, runGitCapture } from './git-branches.js';
 import { NO_EXEC_CONFIG } from './gitUtils.js';
@@ -26,6 +27,76 @@ export interface GitWorktreeEntry {
   prunable?: string;
   /** The repository's main worktree, which git lists first and never removes. */
   isMain: boolean;
+}
+
+/** How much of a repository-written pointer file is worth reading. */
+const GITDIR_POINTER_MAX_BYTES = 8192;
+
+/**
+ * `target` with every symlink resolved, or `target` if it cannot be.
+ *
+ * git records the back-pointer with symlinks already resolved, so comparing
+ * it against a path a caller holds — `/tmp/x` where git wrote `/private/tmp/x`
+ * — would answer "different worktree" about the same directory.
+ *
+ * Exported because the daemon compares the same pair of paths: two spellings
+ * of "the same directory" have to mean the same thing on both sides of that
+ * comparison, and a second copy of this is how they come to disagree.
+ * Deliberately not `realpathSync.native`, which asks the platform and gets
+ * the on-disk spelling back: on a case-insensitive volume that answers with
+ * a case git never recorded, and the comparison fails on a worktree that
+ * merely changed case.
+ */
+export function realpathOrSelf(target: string): string {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+/**
+ * The worktree `<admin>/<id>/gitdir` points at, or `null`.
+ *
+ * Read whole rather than by line: git writes the path verbatim, and a path
+ * may contain a newline — which is why the listing asks for `-z`. Opened
+ * without following a symlink and without blocking on a FIFO, because the
+ * repository chooses what is there. A relative pointer is resolved against
+ * the directory holding it, which is what git writes it relative to.
+ */
+async function readGitdirPointer(
+  adminEntryDir: string,
+): Promise<string | null> {
+  let handle: fsPromises.FileHandle | undefined;
+  try {
+    handle = await fsPromises.open(
+      path.join(adminEntryDir, 'gitdir'),
+      fs.constants.O_RDONLY |
+        (fs.constants.O_NOFOLLOW ?? 0) |
+        (fs.constants.O_NONBLOCK ?? 0),
+    );
+    const stat = await handle.stat();
+    // Whole or nothing. A pointer longer than any path git writes is not one
+    // this should read a prefix of: `path.dirname` of a cut-off path names a
+    // real directory that was never meant, and the caller would authorise a
+    // prune against it. Answer "cannot tell" instead.
+    if (!stat.isFile() || stat.size > GITDIR_POINTER_MAX_BYTES) return null;
+    const buffer = Buffer.alloc(stat.size);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const raw = buffer.toString('utf8', 0, bytesRead).replace(/\s+$/, '');
+    if (!raw) return null;
+    // Against the real directory holding it, not the spelling the caller
+    // happened to use: a relative pointer resolved against `/tmp/x` answers
+    // with a path git never wrote, and the worktree it names is usually gone
+    // — so nothing further can resolve it back.
+    return realpathOrSelf(
+      path.dirname(path.resolve(realpathOrSelf(adminEntryDir), raw)),
+    );
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 function attribute(line: string, key: string): string | undefined {
@@ -153,12 +224,19 @@ export async function commitIsReachable(
 }
 
 /**
- * Whether this worktree holds initialised submodules.
+ * Whether this worktree's checkout holds a repository of its own.
  *
- * A submodule checked out inside a worktree keeps its own repository under
- * the worktree's admin directory, and a forced removal deletes that with
- * everything else — including commits made in the submodule that the
- * superproject's branch still names.
+ * A submodule checked out inside a worktree keeps its own repository — under
+ * the worktree's admin directory once git has absorbed it, inside its own
+ * working directory before that — and a forced removal deletes it with
+ * everything else, including commits the superproject's branch still names.
+ *
+ * Asked the way git asks it: the index names gitlinks, and a gitlink whose
+ * path holds a repository is what `git worktree remove` refuses on. Not
+ * `git submodule status`, which answers from `.gitmodules` rather than the
+ * index — it says nothing about a gitlink with no mapping, and exits 128 on
+ * one, which would take every properly mapped submodule beside it down with
+ * the error.
  */
 export async function worktreeHoldsSubmodules(
   worktreePath: string,
@@ -166,14 +244,20 @@ export async function worktreeHoldsSubmodules(
 ): Promise<boolean> {
   const out = await runGit(
     worktreePath,
-    [...NO_EXEC_CONFIG, 'submodule', 'status'],
+    [...NO_EXEC_CONFIG, 'ls-files', '--stage', '-z'],
     env,
   );
-  // git prefixes an uninitialised submodule with `-`; anything else is one
-  // with a repository of its own on disk.
-  return out
-    .split('\n')
-    .some((line) => line.trim().length > 0 && !line.startsWith('-'));
+  for (const entry of out.split('\0')) {
+    // `<mode> <sha> <stage>\t<path>`; gitlinks are mode 160000.
+    if (!entry.startsWith('160000 ')) continue;
+    const tab = entry.indexOf('\t');
+    if (tab === -1) continue;
+    const at = path.resolve(worktreePath, entry.slice(tab + 1));
+    // A gitlink with nothing at its path — never checked out, or
+    // deinitialised — has no repository here to lose.
+    if (fs.existsSync(path.join(at, '.git'))) return true;
+  }
+  return false;
 }
 
 /**
@@ -188,17 +272,27 @@ export async function worktreeHoldsSubmodules(
 export async function dryRunGitWorktreePrune(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<Array<{ id: string; worktreePath: string | null }>> {
+): Promise<Array<{ id: string | null; worktreePath: string | null }>> {
   // `-v` reports on stderr, so reading stdout alone would answer "nothing".
   const { stdout, stderr } = await runGitCapture(
     cwd,
     [...NO_EXEC_CONFIG, 'worktree', 'prune', '-n', '-v'],
     env,
   );
-  const named = `${stdout}\n${stderr}`
+  const report = `${stdout}\n${stderr}`;
+  const named: Array<string | null> = report
     .split('\n')
-    .map((line) => /^Removing worktrees\/([^:]+):/.exec(line.trim())?.[1])
+    .map((line) => /^Removing worktrees\/(.+): /.exec(line.trim())?.[1])
     .filter((id): id is string => id !== undefined);
+  // git announces one registration per line and writes the admin directory's
+  // name into it verbatim — and that name belongs to the repository, which
+  // may put a newline in it. A line parser then loses the announcement
+  // entirely. Count the announcements instead of trusting the lines, and
+  // stand in for every one that could not be read: a registration nobody can
+  // name is still a registration prune would take, and the caller has to see
+  // it to refuse rather than be told the coast is clear.
+  const announcements = report.split('Removing worktrees/').length - 1;
+  while (named.length < announcements) named.push(null);
   if (named.length === 0) return [];
   // Anything in that directory which is not a directory is a stray file —
   // a `.DS_Store`, a half-written temporary — and prune names it too. It
@@ -208,8 +302,12 @@ export async function dryRunGitWorktreePrune(
     await runGit(cwd, [...NO_EXEC_CONFIG, 'rev-parse', '--git-common-dir'], env)
   ).trim();
   const admin = path.resolve(cwd, commonDir, 'worktrees');
-  const entries: Array<{ id: string; worktreePath: string | null }> = [];
+  const entries: Array<{ id: string | null; worktreePath: string | null }> = [];
   for (const id of named) {
+    if (id === null) {
+      entries.push({ id: null, worktreePath: null });
+      continue;
+    }
     let dir;
     try {
       dir = fs.statSync(path.join(admin, id));
@@ -231,17 +329,108 @@ export async function dryRunGitWorktreePrune(
     // this fallback exists for. A caller can therefore tell whether the one
     // entry prune would drop is the one it asked about, rather than trusting
     // that a count of one means the right one.
-    let worktreePath: string | null = null;
-    try {
-      const back = fs.readFileSync(path.join(admin, id, 'gitdir'), 'utf8');
-      const gitfile = back.trim();
-      if (gitfile) worktreePath = path.dirname(path.resolve(cwd, gitfile));
-    } catch {
-      // No back-pointer to read; the caller treats that as "not mine".
-    }
-    entries.push({ id, worktreePath });
+    entries.push({
+      id,
+      worktreePath: await readGitdirPointer(path.join(admin, id)),
+    });
   }
   return entries;
+}
+
+/** Whether `<admin>/<id>/modules` holds a repository, not merely exists. */
+function adminEntryHoldsModules(adminEntryDir: string): boolean {
+  try {
+    const modules = path.join(adminEntryDir, 'modules');
+    if (!fs.statSync(modules).isDirectory()) return false;
+    // git refuses a removal on the directory's mere existence, but an empty
+    // one holds nothing to lose, and warning about it would name a loss that
+    // cannot happen.
+    return fs.readdirSync(modules).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the admin side of this worktree holds a submodule's own repository.
+ *
+ * Removing a registration takes `<admin>/<id>/` with it, and a submodule
+ * checked out in that worktree keeps its own repository under
+ * `<admin>/<id>/modules/<name>`. `git submodule status` needs a checkout to
+ * answer, so for the shapes that have none this reads the admin side
+ * instead — and those are the shapes that need it most: git refuses to
+ * remove a worktree whose `<admin>/<id>/modules` exists only while the
+ * checkout is still there, and deletes the admin directory without a word
+ * once it is gone.
+ *
+ * The worktree's own gitfile names its admin directory, so where there is
+ * one this is a single stat. Only where there is none does it fall back to
+ * reading the back-pointer of every registration, which is what ties an
+ * admin entry to a worktree when the worktree can no longer say.
+ */
+export async function worktreeAdminHoldsModules(
+  cwd: string,
+  worktreePath: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const commonDir = (
+    await runGit(cwd, [...NO_EXEC_CONFIG, 'rev-parse', '--git-common-dir'], env)
+  ).trim();
+  const admin = realpathOrSelf(path.resolve(cwd, commonDir, 'worktrees'));
+  const named = readGitfileTarget(worktreePath);
+  if (named !== null && path.dirname(named) === admin) {
+    return adminEntryHoldsModules(named);
+  }
+  const wanted = realpathOrSelf(worktreePath);
+  let ids: string[];
+  try {
+    ids = fs.readdirSync(admin);
+  } catch {
+    return false;
+  }
+  for (const id of ids) {
+    const back = await readGitdirPointer(path.join(admin, id));
+    if (back === null || back !== wanted) continue;
+    // Any of them may be the one holding it: a first match without `modules`
+    // answering for the rest would miss the repository behind it.
+    if (adminEntryHoldsModules(path.join(admin, id))) return true;
+  }
+  return false;
+}
+
+/**
+ * Where `<worktree>/.git` points, or `null` when it is not a gitfile.
+ *
+ * Bounded and symlink-free for the same reason the back-pointer is: the
+ * worktree is somewhere a repository can write.
+ */
+function readGitfileTarget(worktreePath: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      path.join(worktreePath, '.git'),
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+    );
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > GITDIR_POINTER_MAX_BYTES) return null;
+    const buffer = Buffer.alloc(stat.size);
+    const read = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const raw = buffer.toString('utf8', 0, read).replace(/\s+$/, '');
+    if (!raw.startsWith('gitdir: ')) return null;
+    return realpathOrSelf(
+      path.resolve(realpathOrSelf(worktreePath), raw.slice('gitdir: '.length)),
+    );
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Already gone.
+      }
+    }
+  }
 }
 
 /** Take git's own lock on a worktree, which prune then skips. */

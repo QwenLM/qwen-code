@@ -41,6 +41,7 @@ const BLOCKING_CODES = new Set([
   'worktree_dirty',
   'worktree_in_use',
   'worktree_locked',
+  'worktree_nested_repository',
   'worktree_operation_in_progress',
   'worktree_remove_refused',
   'worktree_unmerged_commits',
@@ -96,6 +97,52 @@ function changeCount(status: DaemonGitWorktreeStatus): number {
   );
 }
 
+/**
+ * How a refusal or a failure explains itself, or `null` when the removal is
+ * neither and the wording depends on the row instead.
+ *
+ * Lifted out of the row because the same answer has to be said in two places:
+ * in the row's panel, and — when that row is not on screen to carry it — in
+ * the notice above the list. A refusal reported without its reason is the
+ * one thing a refusal exists to avoid.
+ */
+function refusalSentence(
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  removal: RemoveState,
+): string | null {
+  if (removal.error) return removal.error;
+  const blocked = removal.blocked;
+  if (!blocked) return null;
+  if (blocked.code === 'worktree_dirty') {
+    return t('gitWorktrees.blockedDirty', { count: blocked.count });
+  }
+  if (blocked.code === 'worktree_in_use') {
+    return t('gitWorktrees.blockedInUse', { count: blocked.count });
+  }
+  if (blocked.code === 'worktree_locked') {
+    return t('gitWorktrees.blockedLocked', { reason: blocked.detail ?? '' });
+  }
+  if (blocked.code === 'worktree_nested_repository') {
+    return t('gitWorktrees.blockedSubmodules');
+  }
+  if (blocked.code === 'worktree_unmerged_commits') {
+    return t('gitWorktrees.blockedUnmerged', {
+      head: blocked.unmergedHead ?? '',
+    });
+  }
+  if (blocked.code === 'worktree_operation_in_progress') {
+    return t('gitWorktrees.blockedOperation', {
+      operation: blocked.operation ?? '',
+    });
+  }
+  if (blocked.code === 'worktree_remove_refused') {
+    // git's own sentence says more than any wording here could, and it
+    // names the override. Fall back only when the daemon sent none.
+    return blocked.detail || t('gitWorktrees.blockedRefused');
+  }
+  return t('gitWorktrees.blockedUnknown');
+}
+
 const WorktreeRow = memo(function WorktreeRow({
   worktree,
   status,
@@ -125,10 +172,16 @@ const WorktreeRow = memo(function WorktreeRow({
     removal === null
       ? null
       : (removal.error ?? removal.blocked?.code ?? 'confirm');
+  // On a change of shape, not on arrival: filtering a row out unmounts it
+  // while the removal state lives on in the parent, so clearing the filter
+  // mounts it again with the panel already open — and focusing then would
+  // take the keyboard out of the filter box the user is still typing in.
+  const focusedShape = useRef(confirmShape);
   useEffect(() => {
-    if (confirmShape !== null) {
+    if (confirmShape !== null && focusedShape.current !== confirmShape) {
       confirmRef.current?.querySelector('button')?.focus();
     }
+    focusedShape.current = confirmShape;
   }, [confirmShape]);
   const removable = !worktree.isMain && !worktree.bare && !worktree.isWorkspace;
   const skipStatus = worktree.prunable !== undefined || worktree.bare;
@@ -164,38 +217,16 @@ const WorktreeRow = memo(function WorktreeRow({
 
   let confirmNode: ReactNode = null;
   if (removal) {
+    const refusal = refusalSentence(t, removal);
     let text: string;
-    if (removal.error) {
-      text = removal.error;
-    } else if (removal.blocked?.code === 'worktree_dirty') {
-      text = t('gitWorktrees.blockedDirty', { count: removal.blocked.count });
-    } else if (removal.blocked?.code === 'worktree_in_use') {
-      text = t('gitWorktrees.blockedInUse', { count: removal.blocked.count });
-    } else if (removal.blocked?.code === 'worktree_locked') {
-      text = t('gitWorktrees.blockedLocked', {
-        reason: removal.blocked.detail ?? '',
-      });
-    } else if (removal.blocked?.code === 'worktree_unmerged_commits') {
-      text = t('gitWorktrees.blockedUnmerged', {
-        head: removal.blocked.unmergedHead ?? '',
-      });
-    } else if (removal.blocked?.code === 'worktree_operation_in_progress') {
-      text = t('gitWorktrees.blockedOperation', {
-        operation: removal.blocked.operation ?? '',
-      });
-    } else if (removal.blocked?.code === 'worktree_remove_refused') {
-      // git's own sentence says more than any wording here could, and it
-      // names the override. Fall back only when the daemon sent none.
-      text = removal.blocked.detail || t('gitWorktrees.blockedRefused');
-    } else if (removal.blocked) {
-      text = t('gitWorktrees.blockedUnknown');
+    if (refusal !== null) {
+      text = refusal;
     } else if (worktree.prunable !== undefined) {
       // Git has already lost this worktree, so clearing the entry is
       // bookkeeping: promising to delete a directory would be wrong either
       // way — it is usually gone already, and where it survives its files are
-      // left alone. The wording stays plural because the daemon may have to
-      // fall back to a repository-wide prune, which clears every registration
-      // git has already lost, not only this one.
+      // left alone. What does go is the bookkeeping git kept for it, which is
+      // what the wording says.
       text = t('gitWorktrees.confirmStale');
     } else if (worktree.branch === null && worktree.detached) {
       // No branch to keep, so the ordinary wording would promise one. What
@@ -225,7 +256,7 @@ const WorktreeRow = memo(function WorktreeRow({
           t('gitWorktrees.blockedUnmerged', { head: blocked.unmergedHead }),
         );
       }
-      if (blocked.submodules) {
+      if (blocked.submodules && blocked.code !== 'worktree_nested_repository') {
         also.push(t('gitWorktrees.blockedSubmodules'));
       }
       if (
@@ -389,8 +420,11 @@ export function GitWorktreesContent({
 }) {
   const { client } = useWorkspace();
   const { t } = useI18n();
-  // Kept through a failed refresh only while a removal's explanation is on
-  // screen, which is what the placeholder would otherwise replace. With no
+  // Kept through a failed refresh only while a removal's *explanation* is on
+  // screen, which is what the placeholder would otherwise replace. An
+  // unanswered confirmation is not one: it would hold a list that may already
+  // be missing the row a successful removal took, with its button still
+  // armed. With no
   // explanation to protect, a stale list is worse than saying nothing: the
   // rows would still show a worktree the removal just took away.
   const [list, setList] = useState<DaemonGitWorktreesResult | null>(null);
@@ -529,12 +563,20 @@ export function GitWorktreesContent({
         // with nothing said about it.
         if (next?.blocked || next?.error) {
           setNotice(
-            t('gitWorktrees.refusedElsewhere', { name: baseName(path) }),
+            t('gitWorktrees.refusedElsewhere', {
+              name: baseName(path),
+              reason: refusalSentence(t, next) ?? '',
+            }),
           );
         }
       };
-      const finish = () =>
+      // Guarded like every other write here: two workspaces of one
+      // repository list the same worktree paths, so an answer arriving after
+      // a switch could clear the in-flight mark of a removal it is not about.
+      const finish = () => {
+        if (shownWorkspaceRef.current !== workspaceCwd) return;
         setRemoving((prev) => prev.filter((inFlight) => inFlight !== path));
+      };
       client
         .workspaceByCwd(workspaceCwd)
         .workspaceGitRemoveWorktree(path, { force })
@@ -556,9 +598,10 @@ export function GitWorktreesContent({
           finish();
           if (shownWorkspaceRef.current !== workspaceCwd) return;
           // Even a refusal can leave the repository changed — the daemon's
-          // last resort for a stale entry clears every stale registration
-          // before it can discover this one survived — so re-read the list
-          // rather than leaving rows on screen that git no longer has.
+          // last resort for a stale entry takes and releases git's own locks
+          // across the repository, and can prune an entry and then report the
+          // refusal it found afterwards — so re-read the list rather than
+          // leaving rows on screen that git no longer has.
           setGeneration((g) => g + 1);
           const body = errorBody(err);
           const code = typeof body?.['code'] === 'string' ? body['code'] : '';
@@ -600,6 +643,20 @@ export function GitWorktreesContent({
                 ...(unmergedHead ? { unmergedHead } : {}),
                 ...(submodules ? { submodules: true } : {}),
               },
+              busy: false,
+            });
+            return;
+          }
+          // The daemon names which workspace blocks the removal, because the
+          // one that does may be rooted below the worktree — and then the
+          // sentence alone leaves the user with nothing to go and remove.
+          if (code === 'worktree_is_workspace') {
+            const root = body?.['workspaceCwd'];
+            settle({
+              path,
+              error: t('gitWorktrees.blockedWorkspaceHere', {
+                name: typeof root === 'string' ? baseName(root) : '',
+              }),
               busy: false,
             });
             return;
@@ -649,13 +706,18 @@ export function GitWorktreesContent({
     setRemoval(null);
   }, []);
 
-  // A refusal belongs to a row; if the filter has hidden that row, the panel
-  // it would have opened in is not on screen and the answer would be lost.
+  // A refusal belongs to a row; if that row is not on screen — filtered out,
+  // or dropped by a refresh that arrived while the request was in flight —
+  // the panel it would have opened in is not there and the answer would be
+  // lost. Not being on screen is the whole condition: the sentence says the
+  // removal was refused while the user was looking elsewhere, which is true
+  // either way, and a refusal with nowhere to land is the one case that must
+  // not go unsaid.
   const strandedRemoval =
-    removal && (removal.blocked || removal.error)
-      ? visible.some((w) => w.path === removal.path)
-        ? null
-        : removal.path
+    removal &&
+    (removal.blocked || removal.error) &&
+    !visible.some((w) => w.path === removal.path)
+      ? removal.path
       : null;
 
   let body: ReactNode;
@@ -663,7 +725,7 @@ export function GitWorktreesContent({
     body = (
       <div className={styles.placeholder}>{t('gitWorktrees.loading')}</div>
     );
-  } else if (error && (!list || !removal)) {
+  } else if (error && (!list || !(removal?.blocked || removal?.error))) {
     body = <div className={styles.placeholder}>{t('gitWorktrees.error')}</div>;
   } else if (!list || !list.available) {
     body = (
@@ -724,6 +786,7 @@ export function GitWorktreesContent({
         <div className={styles.notice} role="status">
           {t('gitWorktrees.refusedElsewhere', {
             name: baseName(strandedRemoval),
+            reason: removal === null ? '' : (refusalSentence(t, removal) ?? ''),
           })}
         </div>
       )}

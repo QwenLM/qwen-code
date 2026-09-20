@@ -266,7 +266,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // session-hosting worktree unless the body carries `force: true` (409
   // `worktree_dirty` / `worktree_in_use` / `worktree_locked` /
   // `worktree_operation_in_progress` / `worktree_unmerged_commits` /
-  // `worktree_status_unknown`). Any
+  // `worktree_status_unknown` / `worktree_nested_repository`, the last for a
+  // submodule whose own repository the removal would delete — which git
+  // itself only refuses while the checkout is still there). The
+  // `worktree_is_workspace` refusal names the blocking workspace in
+  // `workspaceCwd`, since it may be rooted below the worktree. Any
   // other refusal git makes on a non-forced removal that changed nothing,
   // for a checkout git can still reach, comes back as 409
   // `worktree_remove_refused` with git's own sentence in `detail`, so a
@@ -277,7 +281,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // worktree holding another workspace's session is refused too. A success
   // carries `directoryRemains` when the registration went and the directory
   // did not — an unfinished deletion, or the prune fallback, which deletes
-  // no files.
+  // no file in the working tree, though it does delete the registration's
+  // admin directory and with it that worktree's HEAD, reflog and any
+  // submodule repository.
   workspace_git_worktrees: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)

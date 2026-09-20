@@ -18,6 +18,7 @@ import {
   pruneGitWorktrees,
   removeGitWorktree,
   unlockGitWorktree,
+  worktreeAdminHoldsModules,
   worktreeHoldsSubmodules,
 } from '@qwen-code/qwen-code-core/utils/git-worktrees.js';
 import { getGitWorkingTreeStatus } from '@qwen-code/qwen-code-core/utils/gitDiff.js';
@@ -28,9 +29,18 @@ import {
   type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { registerWorkspaceQualifiedGitWorktreeRoutes } from './workspace-git-worktrees.js';
+import {
+  PRUNE_GUARD_REASON,
+  registerWorkspaceQualifiedGitWorktreeRoutes,
+} from './workspace-git-worktrees.js';
 
-vi.mock('@qwen-code/qwen-code-core/utils/git-worktrees.js', () => ({
+// Spread over the real module rather than replacing it: `realpathOrSelf` is
+// a pure path helper the route compares paths with, and a stub for it would
+// make every comparison here agree with itself for the wrong reason.
+vi.mock('@qwen-code/qwen-code-core/utils/git-worktrees.js', async (real) => ({
+  ...(await real<
+    typeof import('@qwen-code/qwen-code-core/utils/git-worktrees.js')
+  >()),
   commitIsReachable: vi.fn(),
   listGitWorktrees: vi.fn(),
   lockGitWorktree: vi.fn(),
@@ -38,6 +48,7 @@ vi.mock('@qwen-code/qwen-code-core/utils/git-worktrees.js', () => ({
   dryRunGitWorktreePrune: vi.fn(),
   removeGitWorktree: vi.fn(),
   unlockGitWorktree: vi.fn(),
+  worktreeAdminHoldsModules: vi.fn(),
   worktreeHoldsSubmodules: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core/utils/gitDiff.js', () => ({
@@ -51,6 +62,7 @@ const lockMock = vi.mocked(lockGitWorktree);
 const unlockMock = vi.mocked(unlockGitWorktree);
 const reachableMock = vi.mocked(commitIsReachable);
 const submodulesMock = vi.mocked(worktreeHoldsSubmodules);
+const adminModulesMock = vi.mocked(worktreeAdminHoldsModules);
 const dryRunMock = vi.mocked(dryRunGitWorktreePrune);
 const statusMock = vi.mocked(getGitWorkingTreeStatus);
 
@@ -184,6 +196,7 @@ describe('workspace git worktree routes', () => {
     // Detached entries are the exception, so the default is "some ref has it".
     reachableMock.mockResolvedValue(true);
     submodulesMock.mockResolvedValue(false);
+    adminModulesMock.mockResolvedValue(false);
     // Shielded, so git says it would drop only the entry that was asked for,
     // and names it as that entry rather than merely counting one.
     dryRunMock.mockResolvedValue([
@@ -572,6 +585,7 @@ describe('workspace git worktree routes', () => {
       .mockResolvedValueOnce([MAIN, stale])
       .mockResolvedValueOnce([MAIN, stale])
       .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN, stale])
       .mockResolvedValueOnce([MAIN]);
     // git rejects a registration whose directory outlived its gitfile at every
     // force level; prune is the only command that clears it.
@@ -644,6 +658,11 @@ describe('workspace git worktree routes', () => {
       // second pass, where locking it has taken away its prunable mark; and
       // the listing after the prune.
       .mockResolvedValueOnce([MAIN, stale])
+      // The request's listing; the re-list after git refuses; the first
+      // shield pass, where a second registration has gone stale since; the
+      // second pass, where locking it has taken away its prunable mark; and
+      // the listing after the prune.
+      .mockResolvedValueOnce([MAIN, stale])
       .mockResolvedValueOnce([MAIN, stale])
       .mockResolvedValueOnce([MAIN, stale, latecomer])
       .mockResolvedValueOnce([MAIN, stale])
@@ -700,6 +719,7 @@ describe('workspace git worktree routes', () => {
     fs.rmSync(path.join(LINKED_PATH, '.git'));
     listMock
       .mockResolvedValueOnce([MAIN, guarded])
+      .mockResolvedValueOnce([MAIN, guarded])
       .mockResolvedValueOnce([MAIN, stale])
       .mockResolvedValueOnce([MAIN, stale])
       .mockResolvedValueOnce([MAIN, stale])
@@ -716,12 +736,41 @@ describe('workspace git worktree routes', () => {
     expect(response.status).toBe(200);
   });
 
+  it('asks git what the prune would take before letting it run', async () => {
+    const stale = {
+      ...LINKED,
+      prunable: 'gitdir file points to non-existent location',
+    };
+    fs.rmSync(path.join(LINKED_PATH, '.git'));
+    listMock
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN, stale])
+      .mockResolvedValueOnce([MAIN]);
+    removeMock.mockRejectedValue(new Error('fatal: validation failed'));
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    // The listing is not the set prune drops, so the authorisation has to
+    // come from git rather than from what the route can see.
+    expect(dryRunMock).toHaveBeenCalledWith(ROOT, {});
+    expect(dryRunMock.mock.invocationCallOrder[0]).toBeLessThan(
+      pruneMock.mock.invocationCallOrder[0],
+    );
+    expect(response.status).toBe(200);
+  });
+
   it('releases its own shield lock on a forced removal too', async () => {
     const guarded = {
       ...LINKED,
       locked: 'qwen-code: held while pruning another worktree',
     };
     listMock
+      .mockResolvedValueOnce([MAIN, guarded])
       .mockResolvedValueOnce([MAIN, guarded])
       .mockResolvedValueOnce([MAIN, LINKED]);
     const app = mount([runtime('primary', ROOT, true)]);
@@ -1115,6 +1164,10 @@ describe('workspace git worktree routes', () => {
 
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('worktree_is_workspace');
+    // Which workspace: the request named the worktree, and a workspace
+    // rooted somewhere below it is not something the caller can work back to
+    // from that.
+    expect(refused.body.workspaceCwd).toBe(inside);
     expect(removeMock).not.toHaveBeenCalled();
   });
 
@@ -1156,6 +1209,7 @@ describe('workspace git worktree routes', () => {
     };
     fs.rmSync(path.join(LINKED_PATH, '.git'));
     listMock
+      .mockResolvedValueOnce([MAIN, stale, bystander])
       .mockResolvedValueOnce([MAIN, stale, bystander])
       .mockResolvedValueOnce([MAIN, stale, bystander])
       .mockResolvedValueOnce([MAIN, stale, bystander])
@@ -1244,25 +1298,44 @@ describe('workspace git worktree routes', () => {
     });
   });
 
-  it('says a nested repository goes with a forced removal', async () => {
+  it('says a nested repository goes with the removal it is refusing', async () => {
     listMock.mockResolvedValue([MAIN, LINKED]);
     submodulesMock.mockResolvedValue(true);
-    removeMock.mockRejectedValue(
-      Object.assign(new Error('Command failed'), {
-        stderr:
-          'fatal: working trees containing submodules cannot be moved or removed\n',
-      }),
-    );
     const app = mount([runtime('primary', ROOT, true)]);
 
     const refused = await request(app)
       .post('/workspaces/primary/git/worktrees/remove')
       .send({ path: LINKED.path });
 
+    // Refused before git is asked: its own sentence names submodules without
+    // saying what forcing past it takes, and this one does.
+    expect(refused.status).toBe(409);
     expect(refused.body).toMatchObject({
-      code: 'worktree_remove_refused',
+      code: 'worktree_nested_repository',
       submodules: true,
     });
+    expect(removeMock).not.toHaveBeenCalled();
+  });
+
+  it('warns about a nested repository no checkout is left to ask about', async () => {
+    // With no gitfile there is nothing to run `git submodule status` in, so
+    // the admin side is the only thing left that can answer — and it is the
+    // side the repository is on.
+    fs.rmSync(path.join(LINKED_PATH, '.git'));
+    listMock.mockResolvedValue([
+      MAIN,
+      { ...LINKED, prunable: 'gitdir file points to non-existent location' },
+    ]);
+    adminModulesMock.mockResolvedValue(true);
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const refused = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('worktree_nested_repository');
+    expect(submodulesMock).not.toHaveBeenCalled();
   });
 
   it('counts staged and conflicted work, not only what is unstaged', async () => {
@@ -1476,5 +1549,252 @@ describe('workspace git worktree routes', () => {
       .send({});
     expect(missing.status).toBe(400);
     expect(removeMock).not.toHaveBeenCalled();
+  });
+
+  it('names a nested repository the checkout no longer shows', async () => {
+    // A deinitialised submodule keeps its repository under the worktree's
+    // admin directory while `git submodule status` stops reporting it, so
+    // asking the checkout alone answers that there is nothing to lose — and
+    // git removes it without a word on the second click.
+    submodulesMock.mockResolvedValue(false);
+    adminModulesMock.mockResolvedValue(true);
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const refused = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH });
+
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({
+      code: 'worktree_nested_repository',
+      submodules: true,
+    });
+    expect(removeMock).not.toHaveBeenCalled();
+    // Asked about the worktree the request named, in the repository the
+    // route is serving.
+    expect(adminModulesMock).toHaveBeenCalledWith(ROOT, LINKED_PATH, {});
+  });
+
+  it('does not invent a nested repository when the probe fails', async () => {
+    // The probe is a stat of somebody else's directory and can fail on its
+    // own. Reading that as "there is a nested repository" would refuse a
+    // removal over something nobody saw — so a failure is not evidence, and
+    // the gates that did answer are what decide.
+    adminModulesMock.mockRejectedValue(new Error('EACCES: permission denied'));
+    submodulesMock.mockRejectedValue(new Error('EACCES: permission denied'));
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED_PATH });
+
+    expect(response.status).toBe(200);
+    expect(removeMock).toHaveBeenCalled();
+  });
+
+  it('never asks a stranded worktree about its submodules', async () => {
+    // `git submodule status` resolves the repository by walking up, so in a
+    // worktree whose gitfile is gone it answers about the main worktree —
+    // and this entry would be refused over somebody else's repository.
+    fs.rmSync(path.join(LINKED_PATH, '.git'));
+    listMock.mockResolvedValue([
+      MAIN,
+      { ...LINKED, prunable: 'gitdir file points to non-existent location' },
+    ]);
+    adminModulesMock.mockResolvedValue(false);
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    expect(response.status).toBe(200);
+    expect(submodulesMock).not.toHaveBeenCalled();
+  });
+
+  it('answers a git failure it meets before the removal, redacted', async () => {
+    // The shield lock this route left behind is released inside the
+    // repository's turn, and computing that turn's key costs a listing of
+    // its own. Its failure is a git failure like any other here — not
+    // whatever the framework makes of an unhandled rejection.
+    listMock
+      .mockResolvedValueOnce([MAIN, { ...LINKED, locked: PRUNE_GUARD_REASON }])
+      .mockRejectedValue(
+        new Error(`fatal: not a git repository: '${ROOT}/.git'`),
+      );
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.body.code ?? response.body.error).toBeTruthy();
+    expect(JSON.stringify(response.body)).not.toContain('at Object.');
+    expect(removeMock).not.toHaveBeenCalled();
+  });
+
+  it('prunes one repository one removal at a time, across its workspaces', async () => {
+    // `git worktree prune` is repository-wide, and the shield that narrows it
+    // to one path only holds while nothing else is locking or unlocking
+    // underneath it. Two workspaces of one repository are two different
+    // `workspaceCwd`s and one prune, so the turn has to be keyed on the
+    // repository — and the map that holds those turns has to keep the newest
+    // one rather than the one that happened to finish.
+    const SECOND = path.join(ROOT, 'second-workspace');
+    const THIRD = path.join(ROOT, 'third-workspace');
+    const stale = [
+      { cwd: ROOT, entry: { ...LINKED, path: path.join(ROOT, 'stale-a') } },
+      { cwd: SECOND, entry: { ...LINKED, path: path.join(ROOT, 'stale-b') } },
+      { cwd: THIRD, entry: { ...LINKED, path: path.join(ROOT, 'stale-c') } },
+    ];
+    const gone = new Set<string>();
+    const mineFor = (cwd: string) =>
+      stale.find((one) => one.cwd === cwd)!.entry;
+    // Every workspace lists the same repository — git names the main worktree
+    // first from any of them — and each sees only its own stale entry, so no
+    // shield is needed and the prune is the only shared thing left.
+    listMock.mockImplementation(async (cwd: string) => {
+      const mine = mineFor(cwd);
+      return gone.has(mine.path)
+        ? [MAIN]
+        : [MAIN, { ...mine, prunable: 'gitdir file points to non-existent' }];
+    });
+    dryRunMock.mockImplementation(async (cwd: string) => [
+      { id: 'stale', worktreePath: mineFor(cwd).path },
+    ]);
+    removeMock.mockRejectedValue(
+      new Error('fatal: validation failed, cannot remove working tree'),
+    );
+    let running = 0;
+    let peak = 0;
+    pruneMock.mockImplementation(async (cwd: string) => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      gone.add(mineFor(cwd).path);
+      running -= 1;
+    });
+    const app = mount([
+      runtime('primary', ROOT, true),
+      runtime('second', SECOND, true),
+      runtime('third', THIRD, true),
+    ]);
+
+    const answers = await Promise.all(
+      stale.map((one, index) =>
+        request(app)
+          .post(
+            `/workspaces/${['primary', 'second', 'third'][index]}/git/worktrees/remove`,
+          )
+          .send({ path: one.entry.path }),
+      ),
+    );
+
+    expect(answers.map((answer) => answer.status)).toEqual([200, 200, 200]);
+    expect(pruneMock).toHaveBeenCalledTimes(3);
+    expect(peak).toBe(1);
+  });
+
+  it('keeps the turn that is waiting, not the one that finished', async () => {
+    const waitUntil = async (done: () => boolean) => {
+      for (let tries = 0; tries < 200 && !done(); tries += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(done()).toBe(true);
+    };
+    // The turn map drops a repository's row once nothing is queued behind
+    // it. "Nothing is queued" has to mean the row is still the one this turn
+    // put there: a removal that settles while another is running would
+    // otherwise drop that one's row, and the next arrival starts a second
+    // prune of the same repository beside it.
+    const SECOND = path.join(ROOT, 'second-workspace');
+    const THIRD = path.join(ROOT, 'third-workspace');
+    const ids = ['primary', 'second', 'third'] as const;
+    const cwds = [ROOT, SECOND, THIRD];
+    const stale = cwds.map((cwd, index) => ({
+      cwd,
+      entry: { ...LINKED, path: path.join(ROOT, `stale-${index}`) },
+    }));
+    const gone = new Set<string>();
+    const mineFor = (cwd: string) =>
+      stale.find((one) => one.cwd === cwd)!.entry;
+    listMock.mockImplementation(async (cwd: string) => {
+      const mine = mineFor(cwd);
+      return gone.has(mine.path)
+        ? [MAIN]
+        : [MAIN, { ...mine, prunable: 'gitdir file does not exist' }];
+    });
+    dryRunMock.mockImplementation(async (cwd: string) => [
+      { id: 'stale', worktreePath: mineFor(cwd).path },
+    ]);
+    removeMock.mockRejectedValue(new Error('fatal: validation failed'));
+
+    // Registered before anything runs: a gate created after its prune has
+    // already entered would never be opened.
+    const entered = new Map<string, () => void>();
+    const enteredAt = new Map<string, Promise<void>>();
+    const release = new Map<string, () => void>();
+    for (const cwd of cwds) {
+      enteredAt.set(
+        cwd,
+        new Promise<void>((resolve) => entered.set(cwd, resolve)),
+      );
+    }
+    let running = 0;
+    let peak = 0;
+    const trace: string[] = [];
+    pruneMock.mockImplementation(async (cwd: string) => {
+      running += 1;
+      peak = Math.max(peak, running);
+      trace.push(`enter:${cwd}`);
+      await new Promise<void>((resolve) => {
+        release.set(cwd, resolve);
+        entered.get(cwd)?.();
+      });
+      gone.add(mineFor(cwd).path);
+      trace.push(`exit:${cwd}`);
+      running -= 1;
+    });
+    const app = mount(ids.map((id, index) => runtime(id, cwds[index], true)));
+    // `.then` is what sends a supertest request; holding the builder would
+    // leave it unsent and every gate below waiting on it.
+    const remove = (index: number) =>
+      request(app)
+        .post(`/workspaces/${ids[index]}/git/worktrees/remove`)
+        .send({ path: stale[index].entry.path })
+        .then((answer) => answer);
+
+    const first = remove(0);
+    await enteredAt.get(ROOT);
+    // Queued behind the first, and — this is the point — still queued when
+    // the first settles. `removeGitWorktree` is the last thing the route
+    // does before taking its turn, so waiting for that call is how the test
+    // knows the second removal has reached the queue rather than merely
+    // been sent.
+    const second = remove(1);
+    await waitUntil(() =>
+      removeMock.mock.calls.some((call) => call[1] === stale[1].entry.path),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    release.get(ROOT)!();
+    expect((await first).status).toBe(200);
+    await enteredAt.get(SECOND);
+
+    // Arrives while the second is still pruning: with the row dropped by the
+    // first's settle, this one starts its own prune beside it.
+    const third = remove(2);
+    await waitUntil(() =>
+      removeMock.mock.calls.some((call) => call[1] === stale[2].entry.path),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release.get(SECOND)!();
+    expect((await second).status).toBe(200);
+    await enteredAt.get(THIRD);
+    release.get(THIRD)!();
+    expect((await third).status).toBe(200);
+
+    expect(pruneMock).toHaveBeenCalledTimes(3);
+    expect([peak, trace.length]).toEqual([1, 6]);
   });
 });

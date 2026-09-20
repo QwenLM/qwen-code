@@ -750,8 +750,12 @@ describe('workspace git worktree routes against real git', () => {
       .send({ path: listed });
 
     expect(refused.status).toBe(409);
-    expect(refused.body.code).toBe('worktree_remove_refused');
-    expect(refused.body.detail).toContain('submodules');
+    // Named before git is asked, because forcing past git's own sentence
+    // takes the submodule's repository with it and git never says so.
+    expect(refused.body).toMatchObject({
+      code: 'worktree_nested_repository',
+      submodules: true,
+    });
     expect(fs.existsSync(target)).toBe(true);
 
     const forced = await request(app)
@@ -760,6 +764,80 @@ describe('workspace git worktree routes against real git', () => {
 
     expect(forced.status).toBe(200);
     expect(fs.existsSync(target)).toBe(false);
+  }, 30_000);
+
+  it('names a submodule repository nobody has checked out', async () => {
+    const { repo } = makeRepo();
+    const inner = makeRepo().repo;
+    git(
+      repo,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      inner,
+      'sub',
+    );
+    git(repo, 'commit', '-q', '-m', 'add submodule');
+    const target = path.join(repo, '.qwen', 'worktrees', 'swift-fox');
+    git(repo, 'worktree', 'add', '-q', target, '-b', 'qwen/swift-fox');
+    git(
+      target,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'update',
+      '--init',
+      '-q',
+    );
+    // A commit that exists only inside the submodule's own repository, which
+    // is what a removal would take with it.
+    fs.writeFileSync(path.join(target, 'sub', 'only-here.txt'), 'x\n');
+    git(path.join(target, 'sub'), 'add', '.');
+    git(path.join(target, 'sub'), 'commit', '-q', '-m', 'only here');
+    // Deinitialising empties the submodule's working directory. git stops
+    // reporting it — `git submodule status` marks it `-` — while the
+    // repository it built stays under the admin directory, so asking the
+    // checkout alone answers that there is nothing to lose.
+    git(target, 'submodule', 'deinit', '-f', 'sub');
+    const modules = path.join(
+      repo,
+      '.git',
+      'worktrees',
+      'swift-fox',
+      'modules',
+      'sub',
+    );
+    expect(fs.existsSync(modules)).toBe(true);
+
+    const app = mount([runtime(repo)]);
+    const listed = (await registeredPaths(app))[1];
+
+    // Clean, so no other gate refuses either.
+    const state = await request(app).get(
+      `/workspaces/primary/git/worktrees/status?path=${encodeURIComponent(listed)}`,
+    );
+    expect(state.body).toMatchObject({ staged: 0, unstaged: 0, untracked: 0 });
+
+    const refused = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: listed });
+
+    expect(refused.body).toMatchObject({
+      code: 'worktree_nested_repository',
+      submodules: true,
+    });
+    expect(fs.existsSync(modules)).toBe(true);
+
+    const forced = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: listed, force: true });
+
+    // Which is the point of naming it: the second click really does take the
+    // repository, and the commit only it held goes with it.
+    expect(forced.status).toBe(200);
+    expect(fs.existsSync(modules)).toBe(false);
   }, 30_000);
 
   it('refuses to remove the main worktree of a real repository', async () => {
