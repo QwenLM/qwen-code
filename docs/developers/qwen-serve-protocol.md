@@ -2323,7 +2323,7 @@ unknown `action`, a `run-script` with no `script`, a `sourceRef` that is not
 because of invalid syntax or a determinism violation. Workflow start input
 errors carry `workflow_invalid_params` and retain the rejection message.
 
-Two refusals come from the run's stored state rather than the request, and
+Three refusals come from the run's stored state rather than the request, and
 are a `409` (`-32602` over ACP, with `data.httpStatus: 409`):
 
 | `code` / `errorKind`           | When                                                                                                                                                          | What to do                                                     |

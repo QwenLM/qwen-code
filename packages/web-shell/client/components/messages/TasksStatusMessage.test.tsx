@@ -927,6 +927,53 @@ describe('TasksStatusMessage workflow details', () => {
   // An older daemon answers `retry` / `rerun` for history with
   // `{changed: false}`. Without reading the capability the panel would offer
   // a button that cannot work.
+  // A refusal the daemon explains — the run is live in another process, its
+  // args were not kept — says what to do instead. The generic message threw
+  // that away.
+  it('shows the daemon reason for a refused restart, and keeps the generic message for anything else', async () => {
+    const refusal = Object.assign(new Error('Conflict'), {
+      status: 409,
+      body: {
+        code: 'workflow_run_live_elsewhere',
+        error:
+          'Workflow run wf_1234abcd is recorded as running in another process (host builder-07, pid 4242). Rerun it instead.',
+      },
+    });
+    const historical = () =>
+      workflowTask({
+        id: 'wf_1234abcd',
+        isHistorical: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      });
+    const clickRetry = async (container: HTMLElement) => {
+      const row = Array.from(container.querySelectorAll('span')).find((node) =>
+        node.textContent?.includes('review-and-fix'),
+      )?.parentElement;
+      act(() => row?.click());
+      const retry = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Retry failed path',
+      );
+      await act(async () => retry?.click());
+    };
+
+    controlWorkflowTaskMock.mockRejectedValue(refusal);
+    const explained = renderPanel([historical()]);
+    await clickRetry(explained);
+    expect(explained.textContent).toContain('host builder-07, pid 4242');
+    expect(explained.textContent).not.toContain(
+      'Could not update the workflow',
+    );
+
+    controlWorkflowTaskMock.mockRejectedValue(new Error('socket hang up'));
+    const generic = renderPanel([historical()]);
+    await clickRetry(generic);
+    expect(generic.textContent).toContain('Could not update the workflow');
+    expect(generic.textContent).not.toContain('socket hang up');
+  });
+
   it('offers no restart for a restored run when the daemon does not take history restarts', () => {
     retryHistorical = undefined;
     const container = renderPanel([

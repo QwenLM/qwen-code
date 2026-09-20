@@ -316,6 +316,31 @@ function formatActivityLabel(
   return sanitizeControlChars(label);
 }
 
+/**
+ * The daemon's own sentence for a refused workflow action, when it sent one.
+ *
+ * Some refusals rest on state only the daemon can see — the run is recorded
+ * as live in another process, its history could not keep the args it was
+ * launched with, its journal is gone — and each says what to do instead.
+ * They arrive as a `400`/`409` whose body carries `{code: 'workflow_…',
+ * error}`. Every other failure keeps the generic message: an unexpected
+ * error's text is not written for a reader.
+ */
+function workflowRefusalMessage(error: unknown): string | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (status !== 400 && status !== 409) return undefined;
+  const body = (error as { body?: unknown }).body;
+  if (typeof body !== 'object' || body === null) return undefined;
+  const { code, error: message } = body as { code?: unknown; error?: unknown };
+  if (typeof code !== 'string' || !code.startsWith('workflow_')) {
+    return undefined;
+  }
+  if (typeof message !== 'string' || message.trim().length === 0) {
+    return undefined;
+  }
+  return sanitizeControlChars(message.trim());
+}
+
 export function TasksStatusMessage({
   message,
   embedded = false,
@@ -603,7 +628,9 @@ export function TasksStatusMessage({
       } catch (error: unknown) {
         if (expectedSessionIdRef.current !== sessionId) return;
         console.warn('[web-shell] failed to control workflow:', error);
-        setActionError(t('workflow.action.failed'));
+        setActionError(
+          workflowRefusalMessage(error) ?? t('workflow.action.failed'),
+        );
       } finally {
         if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
