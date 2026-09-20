@@ -441,6 +441,7 @@ export function createSpawnChannelFactory(
       'ACP admission requires an explicit shared process registry.',
     );
   }
+  const sourceEnv = options.sourceEnv ?? process.env;
   const enforcedCeiling =
     policy?.mode === 'enforce' ? policy.perChildCeilingMb : undefined;
   if (enforcedCeiling !== undefined) {
@@ -453,11 +454,7 @@ export function createSpawnChannelFactory(
         'ACP heap enforcement requires a positive heap ceiling.',
       );
     }
-    applyChildHeapLimit(
-      process.execArgv,
-      { ...(options.sourceEnv ?? process.env) },
-      enforcedCeiling,
-    );
+    applyChildHeapLimit(process.execArgv, { ...sourceEnv }, enforcedCeiling);
   }
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
   const factory: ChannelFactory = async (
@@ -471,7 +468,6 @@ export function createSpawnChannelFactory(
         ? signal.reason
         : new Error('ACP channel spawn was aborted');
     }
-    const sourceEnv = options.sourceEnv ?? process.env;
     const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
     if (!cliEntry) {
       throw new MissingCliEntryError();
