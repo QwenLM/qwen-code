@@ -249,21 +249,29 @@ describe('describeBatch', () => {
 
   it('reports terminal statuses as terminal, never as running/queued', () => {
     // A failed job with a start timestamp must not read as still running.
-    expect(
-      describeBatch(
-        { id: 'b', status: 'failed', created_at: 100, in_progress_at: 130 },
-        4000,
-      ),
-    ).toContain('\tfailed\t');
-    expect(
-      describeBatch({ id: 'b', status: 'expired', created_at: 100 }, 4000),
-    ).toContain('\texpired\t');
-    expect(
-      describeBatch(
-        { id: 'b', status: 'cancelled', created_at: 100, in_progress_at: 130 },
-        4000,
-      ),
-    ).toContain('\tcancelled\t');
+    // Pin the *phase* column (the one before `expires`), not a bare
+    // `\tfailed\t`: describeBatch emits the status column unconditionally, so
+    // that substring still passes with the SETTLED phase branch deleted.
+    const failed = describeBatch(
+      { id: 'b', status: 'failed', created_at: 100, in_progress_at: 130 },
+      4000,
+    );
+    expect(failed).toContain('\tfailed\texpires');
+    expect(failed).not.toMatch(/running|queued/);
+
+    const expired = describeBatch(
+      { id: 'b', status: 'expired', created_at: 100 },
+      4000,
+    );
+    expect(expired).toContain('\texpired\texpires');
+    expect(expired).not.toMatch(/running|queued/);
+
+    const cancelled = describeBatch(
+      { id: 'b', status: 'cancelled', created_at: 100, in_progress_at: 130 },
+      4000,
+    );
+    expect(cancelled).toContain('\tcancelled\texpires');
+    expect(cancelled).not.toMatch(/running|queued/);
   });
 });
 
