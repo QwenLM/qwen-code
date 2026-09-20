@@ -254,6 +254,10 @@ async function closeSession(session, reason) {
     session.active = false;
     session.reason = reason;
   }
+  // A pending retry would otherwise outlive the session and repeat its
+  // original mode, closing a page this reason no longer permits.
+  for (const timer of session.retries.values()) clearTimeout(timer);
+  session.retries.clear();
   await settleWithin([cleanupSessionTabs(session)], DISCONNECT_DRAIN_MS);
 }
 

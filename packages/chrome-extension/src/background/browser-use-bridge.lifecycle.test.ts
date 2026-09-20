@@ -1145,6 +1145,24 @@ test('user cancellation turns a pending close retry into a release', async () =>
   expect(f.tabOwners.has(1)).toBe(false);
 });
 
+test('closing a session drops its pending close retry', async () => {
+  const f = await fixture();
+  await f.dispatch('tabs.attach', { tabId: 1 });
+  f.chromeApi.tabs.remove.mockRejectedValueOnce(
+    new Error('Tabs cannot be edited right now (user may be dragging a tab).'),
+  );
+  await expect(f.dispatch('tabs.close', { tabId: 1 })).rejects.toThrow(
+    'dragging',
+  );
+  await f.dispatch('session.close', { reason: 'disconnected' });
+  await vi.advanceTimersByTimeAsync(2000);
+  // The borrowed tab goes back to the user; a surviving retry would close it.
+  expect(f.chromeApi.tabs.remove).toHaveBeenCalledTimes(1);
+  expect(f.tabs.has(1)).toBe(true);
+  expect(f.tabOwners.has(1)).toBe(false);
+  expect(f.sessions.has('test-session')).toBe(false);
+});
+
 test('a close that Chrome never confirms releases the tab instead of wedging it', async () => {
   const f = await fixture();
   await f.dispatch('tabs.create');

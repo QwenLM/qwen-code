@@ -509,6 +509,23 @@ describe('Chrome Native Host installer', () => {
       expect(fs.existsSync(file)).toBe(false);
     }
     expect((await statusChromeNativeHost(options)).installedPaths).toEqual([]);
+    expect(fs.existsSync(path.dirname(installed.nativeHostPath!))).toBe(false);
+  });
+
+  it('removes every installed Host copy on uninstall', async () => {
+    const fixture = createFixture();
+    createBrowserProfile(fixture.homeDir, 'linux', 'chrome');
+    const options = { ...fixture, platform: 'linux' as const };
+    const first = await installChromeNativeHost(options);
+    fs.appendFileSync(fixture.nativeHostPath, '\n// a later build\n');
+    const second = await installChromeNativeHost(options);
+    expect(second.nativeHostPath).not.toBe(first.nativeHostPath);
+    const store = path.join(path.dirname(first.launcherPath), 'hosts');
+    expect(fs.readdirSync(store)).toHaveLength(2);
+
+    await uninstallChromeNativeHost(options);
+
+    expect(fs.existsSync(store)).toBe(false);
   });
 
   it('keeps a same-name manifest for another launcher on uninstall', async () => {

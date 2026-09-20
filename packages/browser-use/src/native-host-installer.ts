@@ -176,6 +176,13 @@ export async function uninstallChromeNativeHost(
   if (launcher !== null) {
     if (isOwnedLauncher(launcher)) {
       await rm(resolved.launcherPath, { force: true });
+      // The launcher is the only reference to the installed Host copies, so
+      // they are unreachable once it is gone. A running Host keeps working:
+      // its script is already loaded.
+      await rm(join(dirname(resolved.launcherPath), 'hosts'), {
+        recursive: true,
+        force: true,
+      });
     } else {
       skippedForeignPaths.push(resolved.launcherPath);
     }
