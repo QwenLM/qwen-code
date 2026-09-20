@@ -2709,6 +2709,97 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('workspaceProviders in-flight dedup', () => {
+    const providersBody: DaemonWorkspaceProvidersStatus = {
+      v: 1,
+      workspaceCwd: '/work/a',
+      initialized: true,
+      providers: [],
+    };
+
+    function deferredJson() {
+      let resolveBody!: (body: unknown) => void;
+      let rejectWith!: (reason?: unknown) => void;
+      const response = new Promise<Response>((resolve, reject) => {
+        resolveBody = (body) => resolve(jsonResponse(200, body));
+        rejectWith = reject;
+      });
+      return {
+        response,
+        resolveBody,
+        rejectWith,
+      };
+    }
+
+    it('shares one request between concurrent root callers', async () => {
+      const deferred = deferredJson();
+      const { fetch, calls } = recordingFetch(() => deferred.response);
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const first = client.workspaceProviders();
+      const second = client.workspaceProviders();
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/providers',
+      ]);
+
+      deferred.resolveBody(providersBody);
+      await expect(first).resolves.toEqual(providersBody);
+      await expect(second).resolves.toEqual(providersBody);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('issues a fresh request once the shared promise settles', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, providersBody),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceProviders();
+      await client.workspaceProviders();
+      expect(calls).toHaveLength(2);
+    });
+
+    it('never aliases root and workspace-scoped reads', async () => {
+      const { fetch, calls } = recordingFetch((req) =>
+        jsonResponse(200, { ...providersBody, workspaceCwd: req.url }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const [root, scoped] = await Promise.all([
+        client.workspaceProviders(),
+        client.workspaceByCwd('/repo/a').workspaceProviders(),
+      ]);
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/providers',
+        'http://daemon/workspaces/%2Frepo%2Fa/providers',
+      ]);
+      expect(root.workspaceCwd).toBe('http://daemon/workspace/providers');
+      expect(scoped.workspaceCwd).toBe(
+        'http://daemon/workspaces/%2Frepo%2Fa/providers',
+      );
+    });
+
+    it('propagates a rejection to every concurrent caller and recovers', async () => {
+      const deferred = deferredJson();
+      const { fetch, calls } = recordingFetch(() =>
+        calls.length === 1
+          ? deferred.response
+          : jsonResponse(200, providersBody),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const first = client.workspaceProviders();
+      const second = client.workspaceProviders();
+      deferred.rejectWith(new Error('boom'));
+
+      await expect(first).rejects.toThrow('boom');
+      await expect(second).rejects.toThrow('boom');
+      // The failed entry must be cleared so the next call is not poisoned.
+      await expect(client.workspaceProviders()).resolves.toEqual(providersBody);
+      expect(calls).toHaveLength(2);
+    });
+  });
+
   describe('exportSession', () => {
     it('GETs the default HTML export and parses attachment metadata', async () => {
       const { fetch, calls } = recordingFetch(() =>

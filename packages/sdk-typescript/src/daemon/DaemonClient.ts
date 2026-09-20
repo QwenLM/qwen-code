@@ -823,6 +823,15 @@ export class DaemonClient {
   private capabilitiesRequest?: Promise<DaemonCapabilities>;
   private capabilitiesGeneration = 0;
   private restoreBudgetGeneration = 0;
+  // In-flight dedup for workspace-providers reads, keyed on the
+  // fully-resolved request URL so root and per-workspace scopes never alias
+  // (#11604). Entries exist only while a request is pending: this is not a
+  // cache, and once the shared promise settles the next caller issues a
+  // fresh request — explicit reloads stay authoritative.
+  private readonly workspaceProvidersInFlight = new Map<
+    string,
+    Promise<DaemonWorkspaceProvidersStatus>
+  >();
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
@@ -1709,16 +1718,55 @@ export class DaemonClient {
   }
 
   async workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/providers`,
+    return await this.requestWorkspaceProviders(
+      '/workspace/providers',
+      'GET /workspace/providers',
+    );
+  }
+
+  /**
+   * @internal
+   * Idempotent workspace-providers GET deduped per resolved URL while a
+   * request is pending. Concurrent callers of the same resource share one
+   * request and observe the same value (or the same rejection); a caller
+   * arriving after the shared promise settles always triggers a fresh
+   * fetch, so consumer-side `reload()` stays authoritative.
+   */
+  requestWorkspaceProviders(
+    path: string,
+    label: string,
+  ): Promise<DaemonWorkspaceProvidersStatus> {
+    const url = `${this.baseUrl}${path}`;
+    const pending = this.workspaceProvidersInFlight.get(url);
+    if (pending) return pending;
+    const request = this.fetchWithTimeout(
+      url,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/providers');
+          throw await this.failOnError(res, label);
         }
         return (await res.json()) as DaemonWorkspaceProvidersStatus;
       },
     );
+    this.workspaceProvidersInFlight.set(url, request);
+    // Drop the entry on settle (single microtask, both outcomes) so a
+    // settled request never poisons or delays the next caller. The cleanup
+    // handler swallows the rejection for this chain only — every real
+    // caller still observes it.
+    request.then(
+      () => {
+        if (this.workspaceProvidersInFlight.get(url) === request) {
+          this.workspaceProvidersInFlight.delete(url);
+        }
+      },
+      () => {
+        if (this.workspaceProvidersInFlight.get(url) === request) {
+          this.workspaceProvidersInFlight.delete(url);
+        }
+      },
+    );
+    return request;
   }
 
   async workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
@@ -7275,7 +7323,10 @@ export class WorkspaceDaemonClient {
   }
 
   workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
-    return this.get('/providers', 'GET /workspaces/:workspace/providers');
+    return this.client.requestWorkspaceProviders(
+      `/workspaces/${this.workspaceSelector}/providers`,
+      'GET /workspaces/:workspace/providers',
+    );
   }
 
   workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
