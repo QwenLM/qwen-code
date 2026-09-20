@@ -31,6 +31,23 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => mocks.workspace,
 }));
 
+const browserHostMock = vi.hoisted(() => ({
+  onStatus: undefined as ((status: unknown) => void) | undefined,
+}));
+
+vi.mock('./useLiveBrowserHost', () => ({
+  useLiveBrowserHost: (options: { onStatus?: (status: unknown) => void }) => {
+    browserHostMock.onStatus = options.onStatus;
+    return {
+      phase: 'idle',
+      closeReason: undefined,
+      errorMessage: undefined,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  },
+}));
+
 afterEach(() => {
   document.body.replaceChildren();
   mocks.workspace.client = mocks.client;
@@ -233,5 +250,207 @@ describe('useLiveVoice', () => {
     expect(container.textContent).toBe('listening');
 
     act(() => root.unmount());
+  });
+
+  it('does not let a slow poll overwrite a fresher pushed status', async () => {
+    let resolvePoll: ((value: unknown) => void) | undefined;
+    mocks.liveStatus.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePoll = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function Harness() {
+      const live = useLiveVoice();
+      return (
+        <span>
+          {live.status?.state ?? 'pending'}|{String(live.loading)}
+        </span>
+      );
+    }
+    act(() => root.render(<Harness />));
+
+    // The daemon pushes "speaking" over the Host socket while the poll that
+    // was sent earlier is still in flight...
+    act(() => {
+      browserHostMock.onStatus?.({
+        v: 1,
+        available: true,
+        state: 'speaking',
+        shortcut: '',
+      });
+    });
+    expect(container.textContent).toBe('speaking|false');
+
+    // ...and that older answer finally arrives.
+    await act(async () => {
+      resolvePoll?.({ v: 1, available: true, state: 'idle', shortcut: '' });
+      await Promise.resolve();
+    });
+    expect(container.textContent).toBe('speaking|false');
+    act(() => root.unmount());
+  });
+
+  it('keeps the mutation error when a push lands before the mutation settles', async () => {
+    mocks.liveStatus.mockResolvedValue({
+      v: 1,
+      available: true,
+      state: 'idle',
+      shortcut: 'Command+Q',
+    });
+    let rejectStart: ((error: Error) => void) | undefined;
+    mocks.workspace.client.startLive.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectStart = reject;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let live: UseLiveVoiceResult | undefined;
+
+    function Harness() {
+      live = useLiveVoice();
+      return (
+        <span>
+          {live.status?.state ?? 'pending'}|
+          {live.status?.message ?? 'no-message'}
+        </span>
+      );
+    }
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toBe('idle|no-message');
+
+    let startPromise: Promise<void> | undefined;
+    act(() => {
+      startPromise = live?.start('new');
+    });
+
+    // The daemon pushes the new Host state over the socket before the
+    // mutation's HTTP response finishes; the push must not discard the
+    // mutation's own outcome.
+    act(() => {
+      browserHostMock.onStatus?.({
+        v: 1,
+        available: true,
+        state: 'listening',
+        shortcut: '',
+      });
+    });
+    expect(container.textContent).toBe('listening|no-message');
+
+    await act(async () => {
+      rejectStart?.(new Error('provider validation failed'));
+      await startPromise;
+    });
+
+    expect(container.textContent).toBe('error|provider validation failed');
+    act(() => root.unmount());
+  });
+
+  it('does not start a status poll while a mutation is in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.liveStatus.mockResolvedValue({
+        v: 1,
+        available: true,
+        state: 'idle',
+        shortcut: 'Command+Q',
+      });
+      let resolveStart: ((value: unknown) => void) | undefined;
+      mocks.workspace.client.startLive.mockReturnValue(
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      let live: UseLiveVoiceResult | undefined;
+
+      function Harness() {
+        live = useLiveVoice();
+        return <span>{live.status?.state ?? 'pending'}</span>;
+      }
+
+      await act(async () => {
+        root.render(<Harness />);
+        await Promise.resolve();
+      });
+      expect(container.textContent).toBe('idle');
+
+      let startPromise: Promise<void> | undefined;
+      act(() => {
+        startPromise = live?.start('new');
+      });
+
+      // The 1 s poll interval fires while the mutation is still pending;
+      // polling now would race the mutation's own delivered status.
+      await act(async () => {
+        vi.advanceTimersByTime(1_100);
+      });
+
+      // The mutation settles only after that: its outcome must stand.
+      await act(async () => {
+        resolveStart?.({
+          v: 1,
+          available: true,
+          state: 'listening',
+          shortcut: 'Command+Q',
+        });
+        await startPromise;
+      });
+
+      expect(container.textContent).toBe('listening');
+      expect(mocks.liveStatus).toHaveBeenCalledTimes(1);
+      act(() => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not stack duplicate polls while pushes keep arriving', async () => {
+    vi.useFakeTimers();
+    try {
+      // A slow daemon: the poll never settles within the test.
+      mocks.liveStatus.mockReturnValue(new Promise(() => {}));
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      function Harness() {
+        const live = useLiveVoice();
+        return <span>{live.status?.state ?? 'pending'}</span>;
+      }
+      act(() => root.render(<Harness />));
+
+      // Each push bumps the poll generation to retire stale answers; the
+      // interval must not turn that into a new request while one is in
+      // flight (a Host call pushes several times per second).
+      for (let i = 0; i < 2; i++) {
+        act(() => {
+          browserHostMock.onStatus?.({
+            v: 1,
+            available: true,
+            state: 'speaking',
+            shortcut: '',
+          });
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(1_100);
+        });
+      }
+
+      expect(mocks.liveStatus).toHaveBeenCalledTimes(1);
+      act(() => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

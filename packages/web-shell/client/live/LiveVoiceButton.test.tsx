@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveVoiceButton } from './LiveVoiceButton';
@@ -45,11 +45,13 @@ vi.mock('./useLiveVoice', () => ({
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-function mount(): HTMLElement {
+function mount(
+  props: ComponentProps<typeof LiveVoiceButton> = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<LiveVoiceButton />));
+  act(() => root.render(<LiveVoiceButton {...props} />));
   mounted.push({ root, container });
   return container;
 }
@@ -379,5 +381,96 @@ describe('LiveVoiceButton as a browser Host', () => {
     // ...minus the claim that the browser microphone is never used.
     expect(document.body.textContent).not.toContain('live.noFallback');
     expect(buttonNamed('live.browser.connect')).toBeTruthy();
+  });
+});
+
+describe('mobile Live voice entry', () => {
+  it('opens from a controlled secondary entry while keeping the idle trigger hidden', () => {
+    const onSupportedChange = vi.fn();
+    const container = mount({
+      hideInactiveTrigger: true,
+      open: true,
+      onOpenChange: vi.fn(),
+      onSupportedChange,
+    });
+    expect(container.querySelector('button')).toBeNull();
+    expect(
+      document.querySelector('[data-web-shell-live-dialog]'),
+    ).not.toBeNull();
+    expect(onSupportedChange).toHaveBeenCalledWith(true);
+    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+  });
+  it('reports capability arrival and removal on the same mounted root', () => {
+    mocks.result.supported = false;
+    const onSupportedChange = vi.fn();
+    mount({ onSupportedChange });
+    expect(onSupportedChange).toHaveBeenLastCalledWith(false);
+    for (const supported of [true, false]) {
+      mocks.result.supported = supported;
+      act(() =>
+        mounted
+          .at(-1)!
+          .root.render(
+            <LiveVoiceButton onSupportedChange={onSupportedChange} />,
+          ),
+      );
+      expect(onSupportedChange).toHaveBeenLastCalledWith(supported);
+    }
+    expect(onSupportedChange).toHaveBeenCalledTimes(3);
+  });
+
+  it('forwards controlled trigger opening and closing through the parent', () => {
+    const onOpenChange = vi.fn();
+    const container = mount({ open: false, onOpenChange });
+    click(container.querySelector('button')!);
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    expect(document.querySelector('[data-web-shell-live-dialog]')).toBeNull();
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(<LiveVoiceButton open onOpenChange={onOpenChange} />),
+    );
+    expect(
+      document.querySelector('[data-web-shell-live-dialog]'),
+    ).not.toBeNull();
+    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+    click(
+      document.querySelector(
+        '[data-web-shell-live-dialog] [data-slot="dialog-close"]',
+      )!,
+    );
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('returns focus to the supplied mobile entry when the hidden-trigger dialog closes', async () => {
+    const fallback = document.createElement('button');
+    document.body.append(fallback);
+    const onRequestFocusFallback = () => fallback.focus();
+    mount({ hideInactiveTrigger: true, open: true, onRequestFocusFallback });
+    await act(async () => {
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceButton
+            hideInactiveTrigger
+            open={false}
+            onRequestFocusFallback={onRequestFocusFallback}
+          />,
+        );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(document.activeElement).toBe(fallback);
+  });
+
+  it('keeps the toolbar trigger available during an active call', () => {
+    mocks.result.status = {
+      ...mocks.result.status!,
+      available: true,
+      state: 'listening',
+    };
+    const container = mount({ hideInactiveTrigger: true });
+    expect(container.querySelector('[data-active="true"]')).not.toBeNull();
   });
 });

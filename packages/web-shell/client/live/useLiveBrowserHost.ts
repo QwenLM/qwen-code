@@ -243,6 +243,9 @@ export function useLiveBrowserHost({
           1,
           1,
         );
+        // ScriptProcessorNode (not AudioWorklet): the Web Shell CSP `script-src`
+        // omits `blob:`, which blocks a Blob-URL worklet module, and
+        // ScriptProcessor needs no module load. Dictation makes the same choice.
         // ScriptProcessor fires only while connected to a destination. A muted
         // gain node keeps the microphone out of the speakers.
         const sink = capture.createGain();
