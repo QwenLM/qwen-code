@@ -264,6 +264,16 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
 }
 
 /**
+ * Bash's lexer separates words on space, tab and newline only. JavaScript's
+ * `\s` also matches `\r`, `\v`, `\f` and `\u00a0`, which bash keeps as
+ * ordinary word characters, so scanning past one of them made a following `&`
+ * look like part of a redirection instead of a command separator (#12089).
+ */
+function isBashWordSeparator(char: string | undefined): boolean {
+  return char === ' ' || char === '\t' || char === '\n';
+}
+
+/**
  * Splits a shell command into a list of individual commands, respecting quotes.
  * This is used to separate chained commands (e.g., using &&, ||, ;).
  * @param command The shell command string to parse
@@ -285,7 +295,7 @@ export function splitCommands(command: string): string[] {
   const previousNonWhitespaceChar = (index: number): string | undefined => {
     for (let j = index - 1; j >= 0; j--) {
       const ch = command[j];
-      if (ch && !/\s/.test(ch)) {
+      if (ch && !isBashWordSeparator(ch)) {
         return ch;
       }
     }
@@ -366,18 +376,18 @@ export function splitCommands(command: string): string[] {
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the next character
       } else if (char === ';') {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
         if (prevChar === '>' || prevChar === '<') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '|') {
@@ -385,17 +395,17 @@ export function splitCommands(command: string): string[] {
         if (prevChar === '>') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the \n
       } else if (char === '\n') {
         // Unix-style \n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else {
         currentCommand += char;
@@ -406,8 +416,9 @@ export function splitCommands(command: string): string[] {
     i++;
   }
 
-  if (currentCommand.trim()) {
-    commands.push(currentCommand.trim());
+  const lastCommand = trimBashEdgeSeparators(currentCommand);
+  if (lastCommand) {
+    commands.push(lastCommand);
   }
 
   return commands.filter(Boolean); // Filter out any empty strings
@@ -469,7 +480,7 @@ function resolveLeadingParameterExpansion(command: string): string | undefined {
   const fields = resolved.split(/[ \t\n]+/).filter(Boolean);
   if (fields.length === 0) {
     // The empty expansion is removed; the command is whatever follows it.
-    const next = head.rest.trim();
+    const next = trimBashEdgeSeparators(head.rest);
     return next ? getCommandRoot(next) : undefined;
   }
   return fields[0];
@@ -481,7 +492,7 @@ function resolveLeadingParameterExpansion(command: string): string | undefined {
  * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
  */
 export function getCommandRoot(command: string): string | undefined {
-  const trimmedCommand = command.trim();
+  const trimmedCommand = trimBashEdgeSeparators(command);
   if (!trimmedCommand) {
     return undefined;
   }
@@ -1168,7 +1179,7 @@ export function hasNonFinalTopLevelBackgroundOperator(
   const previousNonWhitespace = (index: number): string | undefined => {
     for (let i = index - 1; i >= 0; i--) {
       const char = command[i];
-      if (char !== undefined && !/\s/.test(char)) return char;
+      if (char !== undefined && !isBashWordSeparator(char)) return char;
     }
     return undefined;
   };
@@ -1254,7 +1265,7 @@ export function hasNonFinalTopLevelBackgroundOperator(
       continue;
     }
 
-    return command.slice(i + 1).trim().length > 0;
+    return trimBashEdgeSeparators(command.slice(i + 1)).length > 0;
   }
 
   return false;
@@ -1277,7 +1288,7 @@ export interface NormalizedMonitorCommand {
 function takeLeadingToken(
   input: string,
 ): { token: string; rest: string } | null {
-  const trimmed = input.trimStart();
+  const trimmed = trimBashEdgeSeparators(input);
   if (!trimmed) {
     return null;
   }
@@ -1365,7 +1376,7 @@ function takeLeadingToken(
       continue;
     }
 
-    if (/\s/.test(char) && commandSubstitutionDepth === 0) {
+    if (isBashWordSeparator(char) && commandSubstitutionDepth === 0) {
       break;
     }
 
@@ -1392,7 +1403,7 @@ function stripSymmetricQuotes(command: string): {
   value: string;
   quote: '"' | "'" | '';
 } {
-  const trimmed = command.trim();
+  const trimmed = trimBashEdgeSeparators(command);
   if (
     (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
     (trimmed.startsWith("'") && trimmed.endsWith("'"))
@@ -1494,7 +1505,7 @@ function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
 }
 
 function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
-  const trimmed = command.trim();
+  const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
   const leadingEnvTokens: string[] = [];
 
@@ -2125,7 +2136,8 @@ export async function checkCommandPermissions(
     };
   }
 
-  const normalize = (cmd: string): string => cmd.trim().replace(/\s+/g, ' ');
+  const normalize = (cmd: string): string =>
+    trimBashEdgeSeparators(cmd).replace(/[ \t\n]+/g, ' ');
   const commandsToValidate = splitCommands(command).map(normalize);
   const invocation: AnyToolInvocation & { params: { command: string } } = {
     params: { command: '' },

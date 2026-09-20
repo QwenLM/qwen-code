@@ -1502,6 +1502,144 @@ describe('buildShellExecWarnings', () => {
   });
 });
 
+// JavaScript's `\s` also matches `\r`, `\v`, `\f` and `\u00a0`. Bash's default
+// IFS is space, tab and newline and it keeps the other four as ordinary word
+// characters, so wherever shell parsing scanned or trimmed with `\s`, a bare
+// `&` behind one of them read as part of the preceding redirection instead of
+// as a command separator — leaving the command behind it joined to the one
+// before it, and so out of every check that walks the segments (#12089).
+describe('bash word separators (#12089)', () => {
+  const NON_SEPARATORS = [
+    ['CR', '\r'],
+    ['VT', '\v'],
+    ['FF', '\f'],
+    ['NBSP', '\u00a0'],
+  ] as const;
+
+  const SEPARATORS = [
+    ['space', ' '],
+    ['tab', '\t'],
+  ] as const;
+
+  describe('splitCommands', () => {
+    it.each(NON_SEPARATORS)(
+      'splits at an & that a %s separates from the redirection',
+      (_name, char) => {
+        expect(splitCommands(`echo x >${char}& rm -rf /tmp/x`)).toEqual([
+          `echo x >${char}`,
+          'rm -rf /tmp/x',
+        ]);
+      },
+    );
+
+    // Guards the other direction: `>&` / `<&` really are fd duplication, so an
+    // `&` behind a genuine separator must keep the segment whole.
+    it.each(SEPARATORS)(
+      'keeps an & that a %s separates from the redirection in one segment',
+      (_name, char) => {
+        expect(splitCommands(`echo x >${char}& rm -rf /tmp/x`)).toEqual([
+          `echo x >${char}& rm -rf /tmp/x`,
+        ]);
+      },
+    );
+
+    it('keeps fd duplication targets intact', () => {
+      expect(splitCommands('echo x >&2')).toEqual(['echo x >&2']);
+      expect(splitCommands('echo x <&3')).toEqual(['echo x <&3']);
+      expect(splitCommands('npm run build 2>&1 | head -100')).toEqual([
+        'npm run build 2>&1',
+        'head -100',
+      ]);
+    });
+
+    it('splits on a plain newline', () => {
+      expect(splitCommands('echo a\necho b')).toEqual(['echo a', 'echo b']);
+    });
+
+    it('still splits on CRLF and drops the empty segment', () => {
+      expect(splitCommands('echo a\r\necho b')).toEqual(['echo a', 'echo b']);
+      expect(splitCommands('echo a\r\n\r\necho b')).toEqual([
+        'echo a',
+        'echo b',
+      ]);
+    });
+  });
+
+  describe('getCommandRoots', () => {
+    it.each(NON_SEPARATORS)(
+      'exposes the command hidden behind a %s',
+      (_name, char) => {
+        expect(getCommandRoots(`echo x >${char}& rm -rf /tmp/x`)).toEqual([
+          'echo',
+          'rm',
+        ]);
+      },
+    );
+  });
+
+  describe('hasNonFinalTopLevelBackgroundOperator', () => {
+    it.each(NON_SEPARATORS)('detects the & behind a %s', (_name, char) => {
+      expect(
+        hasNonFinalTopLevelBackgroundOperator(`echo x >${char}& rm -rf /tmp/x`),
+      ).toBe(true);
+    });
+
+    it.each(SEPARATORS)('still reads >%s& as a redirection', (_name, char) => {
+      expect(
+        hasNonFinalTopLevelBackgroundOperator(`echo x >${char}& rm -rf /tmp/x`),
+      ).toBe(false);
+    });
+  });
+
+  describe('hasUnsafeMonitorBackgroundOperator', () => {
+    it('detects a background operator hidden behind a non-separator', () => {
+      expect(
+        hasUnsafeMonitorBackgroundOperator(
+          "bash -c 'echo x >\u00a0& rm -rf /tmp/x'",
+        ),
+      ).toBe(true);
+    });
+  });
+
+  describe('stripShellWrapper', () => {
+    it('does not start a wrapper token at a non-separator', () => {
+      // `bash\u00a0-c` is one word to bash, so there is no wrapper to unwrap.
+      expect(stripShellWrapper("bash\u00a0-c 'rm -rf /tmp/x'")).toBe(
+        "bash\u00a0-c 'rm -rf /tmp/x'",
+      );
+      expect(stripShellWrapper("\u00a0bash -c 'rm -rf /tmp/x'")).toBe(
+        "\u00a0bash -c 'rm -rf /tmp/x'",
+      );
+    });
+
+    it('still unwraps a wrapper set off by real whitespace', () => {
+      expect(stripShellWrapper(" bash -c 'rm -rf /tmp/x' ")).toBe(
+        'rm -rf /tmp/x',
+      );
+    });
+  });
+
+  describe('checkCommandPermissions', () => {
+    it('normalizes only bash word separators', async () => {
+      config.getCoreTools = () => ['ShellTool(ls -l)'];
+
+      expect(await checkCommandPermissions('ls\t-l', config)).toEqual({
+        allAllowed: true,
+        disallowedCommands: [],
+      });
+
+      // `ls\u00a0-l` is a single word to bash and is not `ls -l`, so the rule
+      // that allows `ls -l` must not cover it.
+      expect(await checkCommandPermissions('ls\u00a0-l', config)).toEqual({
+        allAllowed: false,
+        disallowedCommands: ['ls\u00a0-l'],
+        blockReason: `Command(s) not in the allowed commands list. Disallowed commands: "ls\u00a0-l"`,
+        isHardDenial: false,
+      });
+    });
+  });
+});
+
 describe('splitCommands', () => {
   // The segments this returns decide which sub-commands the shell tool asks
   // about and which one it reads for git attribution, so a command that goes
