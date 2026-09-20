@@ -520,8 +520,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         return true;
       }
       // Both bounds are code-point columns, so the new length is arithmetic.
+      // At column zero the step-back crosses onto the previous row instead of
+      // clamping, so it applies only while the line still has content.
       const remaining = startCol + cpLen(line) - endCol;
-      if (startCol >= remaining) {
+      if (remaining > 0 && startCol >= remaining) {
         buffer.vimMoveLeft(1);
       }
       return true;

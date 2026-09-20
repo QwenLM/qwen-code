@@ -2628,8 +2628,17 @@ describe('useVim hook', () => {
         undo: vi.fn(),
         redo: vi.fn(),
         vimMoveLeft: vi.fn((count = 1) => {
-          const [row, col] = cursorState.pos;
-          cursorState.pos = [row, Math.max(0, col - count)];
+          let [row, col] = cursorState.pos;
+          for (let i = 0; i < count; i++) {
+            if (col > 0) {
+              col--;
+            } else if (row > 0) {
+              row--;
+              const prev = [...(lines[row] ?? '')];
+              col = prev.length === 0 ? 0 : prev.length - 1;
+            }
+          }
+          cursorState.pos = [row, col];
         }),
         vimMoveUp: vi.fn(),
         vimMoveDown: vi.fn(),
@@ -2689,6 +2698,13 @@ describe('useVim hook', () => {
       press(result, 'd$');
       expect(buffer.lines).toEqual(['']);
       expect(buffer.cursor).toEqual([0, 0]);
+    });
+
+    it('keeps the cursor on its own row when d$ eats a whole line below the first', () => {
+      const { buffer, result } = renderApplying('first line\nsecond', [1, 0]);
+      press(result, 'd$');
+      expect(buffer.lines).toEqual(['first line', '']);
+      expect(buffer.cursor).toEqual([1, 0]);
     });
 
     it('leaves the yank register alone when d$ deletes nothing', () => {
