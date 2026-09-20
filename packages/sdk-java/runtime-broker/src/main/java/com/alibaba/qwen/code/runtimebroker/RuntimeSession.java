@@ -18,6 +18,9 @@ public final class RuntimeSession {
             throw new IllegalArgumentException(
                     "turnKind must be bootstrap or continuation");
         }
+        if (scope == null) {
+            throw new IllegalArgumentException("scope is required");
+        }
         this.turnKind = turnKind;
         this.scope = scope;
     }

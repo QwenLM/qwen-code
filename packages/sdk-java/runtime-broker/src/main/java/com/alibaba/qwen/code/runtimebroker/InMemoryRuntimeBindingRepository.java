@@ -45,14 +45,26 @@ public final class InMemoryRuntimeBindingRepository
         if (existing != null) {
             return existing;
         }
+        if (request.getIsolationKey() != null && records.values().stream()
+                .map(RuntimeBindingRecord::getRequest)
+                .anyMatch(candidate -> !candidate.equals(request)
+                        && request.getIsolationKey().equals(
+                                candidate.getIsolationKey()))) {
+            throw new IllegalArgumentException(
+                    "isolationKey is bound to another Runtime scope");
+        }
+        String bindingId = BrokerValues.requireId(idSupplier.get(),
+                "bindingId");
+        if (records.containsKey(bindingId)) {
+            throw new IllegalStateException("bindingId must be unique");
+        }
         long generation = generations.getOrDefault(request, 0L) + 1;
-        generations.put(request, generation);
         Instant now = clock.instant();
         RuntimeBindingRecord created = new RuntimeBindingRecord(
-                BrokerValues.requireId(idSupplier.get(), "bindingId"),
-                request, generation,
+                bindingId, request, generation,
                 RuntimeBindingRecord.State.PROVISIONING, null, false, null,
                 null, 0, 0, null, now);
+        generations.put(request, generation);
         records.put(created.getBindingId(), created);
         active.put(request, created.getBindingId());
         return created;
@@ -103,6 +115,10 @@ public final class InMemoryRuntimeBindingRepository
                 || !current.sameIdentity(expected)
                 || current.getVersion() != expected.getVersion()) {
             return null;
+        }
+        if (!current.isActive() && replacement.isActive()) {
+            throw new IllegalArgumentException(
+                    "terminal binding cannot be reactivated");
         }
         RuntimeBindingRecord updated = replacement.withVersion(
                 expected.getVersion() + 1);

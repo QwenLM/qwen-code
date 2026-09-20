@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
@@ -79,6 +80,11 @@ class InMemoryRepositoryTest {
         RuntimeBindingRecord next = repository.findOrCreate(REQUEST);
         assertEquals(2, next.getGeneration());
         assertEquals("binding-2", next.getBindingId());
+        RuntimeBindingRecord forged = released.withState(
+                RuntimeBindingRecord.State.READY, LEASE, START);
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(forged,
+                        forged.withDrainRequested(true, START)));
     }
 
     @Test
@@ -105,6 +111,39 @@ class InMemoryRepositoryTest {
     }
 
     @Test
+    void runtimePlacementIsScopedAndGeneratedIdsRemainUnique() {
+        AtomicInteger ids = new AtomicInteger();
+        InMemoryRuntimeBindingRepository repository =
+                new InMemoryRuntimeBindingRepository(
+                        new MutableClock(START),
+                        () -> "binding-" + ids.incrementAndGet());
+        RuntimeScope otherScope = new RuntimeScope("other-tenant",
+                "workspace", "generation", "/workspace", "capability",
+                "session");
+
+        RuntimeBindingRecord first = repository.findOrCreate(REQUEST);
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.findOrCreate(
+                        new RuntimeProvisionRequest(otherScope, "harness")));
+        RuntimeBindingRecord other = repository.findOrCreate(
+                new RuntimeProvisionRequest(otherScope, "other-harness"));
+
+        assertEquals(List.of(first), repository.findActiveByIsolationKey(
+                "harness"));
+        assertEquals(List.of(other), repository.findActiveByIsolationKey(
+                "other-harness"));
+
+        InMemoryRuntimeBindingRepository duplicateIds =
+                new InMemoryRuntimeBindingRepository(
+                        new MutableClock(START), () -> "binding");
+        duplicateIds.findOrCreate(REQUEST);
+        assertThrows(IllegalStateException.class,
+                () -> duplicateIds.findOrCreate(
+                        new RuntimeProvisionRequest(otherScope,
+                                "other-harness")));
+    }
+
+    @Test
     void runtimeSessionIdentityIsStableAndActiveCountIsDerived() {
         InMemoryRuntimeSessionRepository repository =
                 new InMemoryRuntimeSessionRepository();
@@ -118,6 +157,16 @@ class InMemoryRepositoryTest {
         assertSame(candidate, repository.findOrCreate(new RuntimeSessionRecord(
                 session, "binding", 1,
                 RuntimeSessionRecord.State.ACQUIRING, 0, START)));
+        RuntimeScope otherScope = new RuntimeScope("other-tenant",
+                "workspace", "generation", "/workspace", "capability",
+                "session");
+        RuntimeSessionRecord conflicting = new RuntimeSessionRecord(
+                new RuntimeSession("other-harness", "session",
+                        "bootstrap", otherScope),
+                "other-binding", 1,
+                RuntimeSessionRecord.State.ACQUIRING, 0, START);
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.findOrCreate(conflicting));
         assertEquals(1, repository.countActiveByBinding("binding", 1));
 
         RuntimeSessionRecord released = repository.compareAndSet(candidate,
@@ -129,6 +178,20 @@ class InMemoryRepositoryTest {
                         START)));
         assertEquals(RuntimeSessionRecord.State.RELEASED,
                 released.getState());
+        RuntimeSessionRecord forged = released.withState(
+                RuntimeSessionRecord.State.READY, START);
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(forged,
+                        forged.withState(
+                                RuntimeSessionRecord.State.RELEASING,
+                                START)));
+    }
+
+    @Test
+    void runtimeSessionRequiresAnAuthoritativeScope() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new RuntimeSession("harness", "session",
+                        "bootstrap", null));
     }
 
     @Test

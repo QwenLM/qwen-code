@@ -20,6 +20,10 @@ public final class InMemoryRuntimeSessionRepository
         RuntimeSessionRecord existing = records.get(
                 candidate.getRuntimeSessionId());
         if (existing != null) {
+            if (!existing.sameIdentity(candidate)) {
+                throw new IllegalArgumentException(
+                        "runtimeSessionId is bound to another Session identity");
+            }
             return existing;
         }
         records.put(candidate.getRuntimeSessionId(), candidate);
@@ -44,6 +48,10 @@ public final class InMemoryRuntimeSessionRepository
                 || !current.sameIdentity(expected)
                 || current.getVersion() != expected.getVersion()) {
             return null;
+        }
+        if (!current.isActive() && replacement.isActive()) {
+            throw new IllegalArgumentException(
+                    "terminal Session cannot be reactivated");
         }
         RuntimeSessionRecord updated = replacement.withVersion(
                 expected.getVersion() + 1);
