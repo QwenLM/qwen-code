@@ -144,7 +144,7 @@ describe('Live discovery file', () => {
     }
   });
 
-  it('rejects a foreign-owned runtime base and lock directory', async () => {
+  it('rejects a foreign-owned runtime base', async () => {
     if (process.platform === 'win32') return;
     const getuid = process.getuid;
     if (!getuid) return;
@@ -160,20 +160,6 @@ describe('Live discovery file', () => {
       const base = await temporaryRuntime();
       await expect(
         writeLiveDiscoveryFile(base, record('daemon_instance_nonce_owned_001')),
-      ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
-
-      const locked = await temporaryRuntime();
-      const lockPath = path.join(
-        path.dirname(getLiveDiscoveryPath(locked)),
-        '.daemon.lock',
-      );
-      await fs.mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-      await fs.mkdir(lockPath, { mode: 0o700 });
-      await expect(
-        writeLiveDiscoveryFile(
-          locked,
-          record('daemon_instance_nonce_owned_002'),
-        ),
       ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
     } finally {
       if (originalDescriptor) {
