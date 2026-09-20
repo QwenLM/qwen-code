@@ -147,6 +147,12 @@ describe('managed session record envelope', () => {
     );
   });
 
+  it('rejects a negative event timestamp', () => {
+    expect(() =>
+      parseManagedSessionEvent(inputEvent({ occurredAt: -1 })),
+    ).toThrow(/UTC Unix milliseconds as a safe integer/);
+  });
+
   it('rejects a version other than 1', () => {
     expect(() => parseManagedSessionEvent(inputEvent({ v: 2 }))).toThrow(
       /event.v must be 1/,
@@ -380,6 +386,31 @@ describe('managed session per-kind rules', () => {
         domainEvent({ recordRef: ref('managed-schedule') }),
       ),
     ).toThrow(/recordRef.kind must be managed-session_metadata/);
+    expect(() => parseManagedSessionEvent(domainEvent({ version: 2 }))).toThrow(
+      /version must be 1/,
+    );
+  });
+
+  it('rejects a compaction range whose end precedes its start', () => {
+    expect(() =>
+      parseManagedSessionEvent({
+        v: 1,
+        sequence: 7,
+        eventId: 'evt-7',
+        sessionKey,
+        kind: 'context.compacted',
+        occurredAt: 1,
+        subject: activationSubject,
+        payload: {
+          compactionId: 'compaction-1',
+          fromSequence: 4,
+          toSequence: 3,
+          summaryRef: ref(),
+          replacedMessageIds: [],
+          tokenCountsRef: null,
+        },
+      }),
+    ).toThrow(/toSequence must not precede payload.fromSequence/);
   });
 
   it('registers exactly the thirty v1 domains without duplicates', () => {
@@ -621,6 +652,14 @@ describe('managed session commit marker', () => {
     ).toThrow(/must match commit.eventCount/);
   });
 
+  it('requires the committed range to start at sequence 1 or later', () => {
+    expect(() =>
+      parseManagedSessionCommitMarker(
+        marker({ firstSequence: 0, lastSequence: 1 }),
+      ),
+    ).toThrow(/firstSequence must start at 1/);
+  });
+
   it('rejects an empty or oversized transaction', () => {
     expect(() =>
       parseManagedSessionCommitMarker(
@@ -651,6 +690,19 @@ describe('managed session transactions', () => {
     expect(() =>
       assertManagedSessionTransaction([event(1), event(2)], 1024),
     ).not.toThrow();
+  });
+
+  it('rejects an empty transaction or one over the event-count limit', () => {
+    expect(() => assertManagedSessionTransaction([], 0)).toThrow(
+      /must contain at least one event/,
+    );
+    const events = Array.from(
+      { length: MANAGED_SESSION_LIMITS.maxTransactionEvents + 1 },
+      (_, index) => event(index + 1),
+    );
+    expect(() => assertManagedSessionTransaction(events, 1024)).toThrow(
+      /must not exceed 256 events/,
+    );
   });
 
   it('rejects a gap in the sequence range', () => {

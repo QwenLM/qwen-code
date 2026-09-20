@@ -70,7 +70,18 @@ transitions, and non-lowercase SHA-256 digests.
 
 `eventsDigest` is SHA-256 over canonical JSON containing only each committed
 event's `sequence`, `eventId`, and `kind`. Object keys are sorted and array order
-is preserved, making the result independent of property insertion order.
+is preserved, making the result independent of property insertion order. It is
+an ordered identity digest, not an integrity proof for `sessionKey`,
+`occurredAt`, or payload content.
+
+`contentDigest` is the idempotency digest of the complete immutable command
+content. An operation with one durable input uses that verified resource's
+digest; an operation with multiple inputs hashes a canonical JSON projection
+containing every field that can change its effect. It excludes retry and
+transport metadata. `previousCommitDigest` is `null` for the first transaction
+and otherwise hashes the complete previous commit marker using the same
+canonical JSON rules. This foundation validates their wire shape; the future
+authority and operation adapters own their computation and cross-checking.
 
 ## Integration boundary
 
@@ -79,6 +90,13 @@ transition checks, transaction checks, and digest helper. A future reader must
 pass the appropriate event or commit-marker byte limit to the raw parser before
 calling its typed parser. The existing `ChatRecord` type accepts the three
 reserved subtypes so later writers can use the standard transcript envelope.
+Transcript readers recognize them as private Session Authority journal records
+and exclude them from ordinary conversation projection.
+
+This private Harness-side Session Authority journal is distinct from the Java
+control plane's public Event/Item/Snapshot store and Runtime Broker state. A
+later integration may project committed facts across that boundary, but neither
+store replaces or aliases the other in this change.
 
 No caller writes these records in this change. Follow-up work must add the
 single-writer authority, durable resources, transaction recovery, projections,
@@ -104,6 +122,8 @@ and Harness checkpoints in separate changes.
 - Verify duplicate keys, unknown fields and kinds, invalid actor/subject pairs,
   invalid transitions, and non-contiguous transactions fail.
 - Verify the digest is stable and changes when event order changes.
+- Verify all reserved subtypes are known and excluded from ordinary
+  conversation projection.
 
 ## Acceptance criteria
 
@@ -111,8 +131,10 @@ and Harness checkpoints in separate changes.
 2. Raw record parsing enforces caller-selected byte and depth bounds, while
    typed header, event, and commit-marker parsing enforces the v1 schema.
 3. Transaction identity hashing is deterministic.
-4. No production caller writes a Managed Session record.
-5. Existing session behavior is unchanged.
+4. Reserved Managed Session subtypes are recognized without projecting them as
+   ordinary conversation records.
+5. No production caller writes a Managed Session record.
+6. Existing session behavior is unchanged.
 
 ## Follow-up work
 

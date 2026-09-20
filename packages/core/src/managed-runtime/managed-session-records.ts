@@ -1142,8 +1142,8 @@ export function parseManagedSessionCommitMarker(
 }
 
 /**
- * Digest over the committed event sequence. The marker carries it so a reader
- * can prove the transaction's events are the ones the writer committed.
+ * Digest over the ordered event identities. It does not cover session keys,
+ * timestamps, or payloads and must not be used as an event-content proof.
  */
 export function managedSessionEventsDigest(
   events: readonly ManagedSessionEvent[],

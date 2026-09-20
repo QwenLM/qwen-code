@@ -63,14 +63,27 @@ safe integer、非法状态转换，以及不是小写格式的 SHA-256 digest�
 
 `eventsDigest` 对每个已提交事件的 `sequence`、`eventId` 和 `kind` 组成的
 canonical JSON 计算 SHA-256。对象 key 排序，数组顺序保留，因此结果不依赖属性
-插入顺序。
+插入顺序。它只是有序身份摘要，不是 `sessionKey`、`occurredAt` 或 payload 内容的
+完整性证明。
+
+`contentDigest` 是完整不可变命令内容的幂等摘要。只有一个持久输入的操作使用该
+资源已校验的 digest；包含多个输入的操作，对涵盖所有会改变执行效果字段的
+canonical JSON 投影计算摘要；重试和传输元数据不在摘要范围内。
+`previousCommitDigest` 在第一笔事务中为 `null`，其后按相同 canonical JSON 规则
+对上一条完整 commit marker 计算摘要。本基础层只校验这些字段的 wire 格式；未来
+authority 和各 operation adapter 负责计算及交叉核验。
 
 ## 集成边界
 
 Core 包导出记录常量、类型、原始及类型解析器、转换校验、事务校验和 digest
 helper。未来 reader 必须先把 event 或 commit marker 对应的字节上限传给原始
 解析器，再调用类型解析器。现有 `ChatRecord` 类型接受三种预留 subtype，便于
-后续 writer 复用标准 transcript envelope。
+后续 writer 复用标准 transcript envelope。Transcript reader 会把它们识别为
+Session Authority 私有日志记录，并排除在普通会话投影之外。
+
+这份 Harness 侧私有 Session Authority 日志不同于 Java 管控面的公共
+Event/Item/Snapshot 存储和 Runtime Broker 状态。后续集成可以跨边界投影已提交
+事实，但本次变更不会让两套存储互相替代或共用同一数据模型。
 
 本次变更没有调用方写入这些记录。后续工作必须通过独立变更加入单 writer
 authority、持久资源、事务恢复、投影和 Harness checkpoint。
@@ -91,6 +104,7 @@ authority、持久资源、事务恢复、投影和 Harness checkpoint。
 - 验证恰好达到限额的记录可接受，超限记录失败。
 - 验证重复 key、未知字段和 kind、非法 actor/subject 组合、非法转换和不连续事务失败。
 - 验证 digest 稳定，并在事件顺序变化时改变。
+- 验证全部预留 subtype 已登记，且不会进入普通会话投影。
 
 ## 验收标准
 
@@ -98,8 +112,9 @@ authority、持久资源、事务恢复、投影和 Harness checkpoint。
 2. 原始记录解析执行调用方指定的字节和深度上限，类型解析对 header、event 和
    commit marker 执行 v1 schema 校验。
 3. 事务身份 hash 是确定性的。
-4. 没有生产调用方写入 Managed Session 记录。
-5. 现有 Session 行为不变。
+4. 预留 Managed Session subtype 可被识别，且不会被投影成普通会话记录。
+5. 没有生产调用方写入 Managed Session 记录。
+6. 现有 Session 行为不变。
 
 ## 后续工作
 
