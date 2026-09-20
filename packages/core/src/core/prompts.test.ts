@@ -168,6 +168,39 @@ describe('Core System Prompt (prompts.ts)', () => {
     ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
   });
 
+  it.each([
+    ['general', 'gpt-4', false],
+    ['qwen-coder', 'qwen3-coder', false],
+    ['qwen-vl', 'qwen3-vl', false],
+    ['gemma4', 'gemma4', false],
+    ['code mode', 'qwen3-coder', true],
+  ] as const)(
+    'keeps %s headless examples free of follow-up questions',
+    (_name, model, codeModeOnly) => {
+      vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'headless',
+        undefined,
+        false,
+        codeModeOnly,
+      );
+      const responses = [
+        ...prompt.matchAll(
+          /<example>\s*user:[\s\S]*?\nmodel:([\s\S]*?)<\/example>/g,
+        ),
+      ];
+
+      expect(responses.length).toBeGreaterThan(0);
+      expect(prompt).toContain('no reply can be received');
+      for (const response of responses) {
+        expect(response[1]).not.toContain('?');
+      }
+    },
+  );
+
   it('instructs the model to preserve unrelated existing work', () => {
     vi.stubEnv('SANDBOX', undefined);
     vi.mocked(isGitRepository).mockReturnValue(true);
@@ -1306,7 +1339,7 @@ describe('resident tool gating (#12032)', () => {
     expect(prompt).toContain('**Report outcomes faithfully:**');
   });
 
-  it('drops examples calling an undeclared tool, keeping prose-only ones', () => {
+  it('keeps only examples whose tools are all declared', () => {
     const prompt = promptFor(
       new Set([ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.SHELL]),
     );
@@ -1317,9 +1350,31 @@ describe('resident tool gating (#12032)', () => {
     // `edit` is called from the refactor example's later paragraphs, past a
     // blank line: the block has to be gated as one unit, not per paragraph.
     expect(prompt).not.toContain(`[tool_call: ${ToolNames.EDIT}`);
-    // An example that calls no tool at all is not about the tool surface.
-    expect(prompt).toContain('user: 1 + 2');
+    expect(prompt).toContain('user: Write tests for someFile.ts');
   });
+
+  it.each(['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4'])(
+    'omits the examples heading when no %s example tools are declared',
+    (model) => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        false,
+        { declaredTools: new Set([ToolNames.ASK_USER_QUESTION]) },
+      );
+
+      expect(prompt).not.toContain('# Examples');
+      expect(prompt).not.toContain('<example>');
+      expect(prompt).toContain('# Executing actions with care');
+      expect(prompt).toContain(
+        "Use 'ask_user_question' when you need clarification",
+      );
+    },
+  );
 
   // A `tools.eager` allowlist sized for file work, plus the tools that stay
   // declared whatever the allowlist says (they are exempt from eager demotion).
@@ -1394,12 +1449,11 @@ describe('resident tool gating (#12032)', () => {
     const full = promptFor();
     const trimmed = promptFor(narrow);
 
-    // 4,327 characters (~1,082 tokens) when this landed: the policy bullets
-    // plus the three examples that call edit / write_file / glob.
-    const saved = full.length - trimmed.length;
-    expect(saved).toBeGreaterThan(3_800);
-    expect(saved).toBeLessThan(5_000);
-    expect(countExamples(trimmed)).toBe(countExamples(full) - 3);
+    expect(trimmed.length).toBeLessThan(full.length);
+    expect(countExamples(trimmed)).toBe(countExamples(full) - 2);
+    expect(gatedParts(trimmed)[1]).toContain('node server.js');
+    expect(gatedParts(trimmed)[1]).not.toContain('Refactor the auth logic');
+    expect(gatedParts(trimmed)[1]).not.toContain('Write tests for someFile.ts');
   });
 
   it('gates the model-specific example notations, not just the bracket form', () => {
@@ -1428,7 +1482,7 @@ describe('resident tool gating (#12032)', () => {
     for (const model of ['qwen3-coder', 'qwen3-vl', 'gemma4']) {
       const full = modelPrompt(model);
       const trimmed = modelPrompt(model, narrow);
-      expect(countExamples(trimmed)).toBe(countExamples(full) - 3);
+      expect(countExamples(trimmed)).toBe(countExamples(full) - 2);
       // Checked on the examples section alone: `glob` also appears in prose
       // this change deliberately leaves untouched.
       expect(gatedParts(trimmed)[1]).not.toContain(ToolNames.GLOB);
@@ -1643,12 +1697,12 @@ describe('CodeModeOnly tool guidance', () => {
     );
   });
 
-  it('leaves Direct mode guidance and examples untouched', () => {
+  it('keeps direct calls and parallelism in Direct mode', () => {
     const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
 
     expect(prompt).toContain("To read files use 'read_file'");
     expect(prompt).toContain(
-      'You can call multiple tools in a single response',
+      'Call independent tools in parallel; run dependent calls sequentially',
     );
     expect(prompt).toContain('[tool_call: run_shell_command for');
     expect(prompt).not.toContain('tools.<name>(args)');
