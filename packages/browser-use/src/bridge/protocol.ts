@@ -17,7 +17,11 @@ export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser_use';
 // an installed Host of the same protocol, so without a higher revision a Host
 // fix would never reach a user who already installed one.
 export const CHROME_NATIVE_HOST_REVISION = 1;
+// The id an unpacked build keeps, pinned by the manifest key. The Chrome Web
+// Store rejects that key and assigns its own id, so a user's extension can
+// carry either one; add the store's id here once the listing exists.
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
+export const CHROME_EXTENSION_IDS: readonly string[] = [CHROME_EXTENSION_ID];
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
 
 // Operation deadlines (core/schemas.ts timeoutMs) may reach 120s, and every

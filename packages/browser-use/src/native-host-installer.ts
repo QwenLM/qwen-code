@@ -23,6 +23,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   CHROME_NATIVE_HOST_NAME,
   CHROME_NATIVE_HOST_REVISION,
 } from './bridge/protocol.js';
@@ -31,7 +32,9 @@ import type { ChromeProfileDescriber } from './bridge/discovery.js';
 const LAUNCHER_MARKER = '# qwen-browser-use native host';
 const INSTALLATION_MARKER = '# installation ';
 const MANIFEST_FILE = CHROME_NATIVE_HOST_NAME + '.json';
-const ALLOWED_ORIGIN = 'chrome-extension://' + CHROME_EXTENSION_ID + '/';
+const ALLOWED_ORIGINS = CHROME_EXTENSION_IDS.map(
+  (id) => 'chrome-extension://' + id + '/',
+);
 
 export interface NativeHostInstallOptions {
   nativeHostPath: string;
@@ -394,7 +397,7 @@ async function writeManifests(
         description: 'Qwen Browser Use',
         path: resolved.launcherPath,
         type: 'stdio',
-        allowed_origins: [ALLOWED_ORIGIN],
+        allowed_origins: ALLOWED_ORIGINS,
       },
       null,
       2,
@@ -420,8 +423,12 @@ function isOwnedManifest(contents: string, launcherPath: string): boolean {
       value['type'] === 'stdio' &&
       value['path'] === launcherPath &&
       Array.isArray(value['allowed_origins']) &&
-      value['allowed_origins'].length === 1 &&
-      value['allowed_origins'][0] === ALLOWED_ORIGIN
+      value['allowed_origins'].length > 0 &&
+      // A registration listing only some of our origins is an older install of
+      // ours to upgrade; one naming any other extension belongs to someone else.
+      value['allowed_origins'].every((origin) =>
+        ALLOWED_ORIGINS.includes(origin as string),
+      )
     );
   } catch {
     return false;

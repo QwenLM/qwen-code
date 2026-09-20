@@ -22,6 +22,7 @@ import {
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   CHROME_NATIVE_HOST_NAME,
   CHROME_NATIVE_HOST_REVISION,
 } from './bridge/protocol.js';
@@ -145,7 +146,9 @@ describe('Chrome Native Host installer', () => {
       description: 'Qwen Browser Use',
       path: result.launcherPath,
       type: 'stdio',
-      allowed_origins: ['chrome-extension://' + CHROME_EXTENSION_ID + '/'],
+      allowed_origins: CHROME_EXTENSION_IDS.map(
+        (id) => 'chrome-extension://' + id + '/',
+      ),
     });
     if (process.platform !== 'win32') {
       expect(fs.statSync(result.launcherPath).mode & 0o777).toBe(0o700);
@@ -403,6 +406,30 @@ describe('Chrome Native Host installer', () => {
     });
 
     expect(result.skippedForeignPaths).toContain(manifestPath);
+  });
+
+  it('leaves a registration naming another extension alone', async () => {
+    const fixture = createFixture();
+    createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
+    const options = { ...fixture, platform: 'darwin' as const };
+    const installed = await installChromeNativeHost(options);
+    const manifestPath = installed.manifestPaths[0]!;
+    const foreign = JSON.stringify({
+      name: CHROME_NATIVE_HOST_NAME,
+      description: 'Qwen Browser Use',
+      path: installed.launcherPath,
+      type: 'stdio',
+      allowed_origins: [
+        'chrome-extension://' + CHROME_EXTENSION_ID + '/',
+        'chrome-extension://' + 'c'.repeat(32) + '/',
+      ],
+    });
+    fs.writeFileSync(manifestPath, foreign);
+
+    const result = await ensureChromeNativeHost(options);
+
+    expect(result.skippedForeignPaths).toContain(manifestPath);
+    expect(fs.readFileSync(manifestPath, 'utf8')).toBe(foreign);
   });
 
   it('requires absolute executable paths', async () => {
