@@ -840,6 +840,97 @@ describe('SettingsMessage user-scope editing', () => {
     );
   });
 
+  it('allows only selected rows in both scopes and falls back from a hidden category', () => {
+    const state = makeState(
+      [boolSetting(), subDialogSetting(), themeSetting()],
+      vi.fn(),
+    );
+    const baseline = renderPanel(state, { initialCategory: 'General' });
+    expect(baseline.textContent).toContain('Test Flag');
+    const container = renderPanel(state, {
+      initialCategory: 'General',
+      modelManagement: makeModelManagement(),
+      presentation: { includeItems: ['setting:fast-model'] },
+    });
+    const check = () => {
+      expect(container.querySelectorAll('nav button')).toHaveLength(1);
+      expect(
+        container.querySelector('[aria-current="page"]')?.textContent,
+      ).toContain('Model');
+      expect(container.textContent).toContain('Fast Model');
+      expect(container.textContent).not.toContain('Test Flag');
+      expect(container.textContent).not.toContain('Theme');
+      expect(
+        container.querySelector('[data-testid="model-management"]'),
+      ).toBeNull();
+    };
+    check();
+    clickUserTab(container);
+    check();
+  });
+
+  it.each([
+    { includeItems: [] },
+    {
+      includeItems: ['setting:fast-model'],
+      excludeItems: ['setting:fast-model'],
+    },
+  ] satisfies WebShellSettingsOptions[])(
+    'shows the existing empty state in both scopes for %j',
+    (presentation) => {
+      const container = renderPanel(
+        makeState([boolSetting(), subDialogSetting()], vi.fn()),
+        {
+          modelManagement: makeModelManagement(),
+          presentation,
+        },
+      );
+      for (const userScope of [false, true]) {
+        if (userScope) clickUserTab(container);
+        expect(container.querySelectorAll('nav button')).toHaveLength(0);
+        expect(container.querySelector('[data-slot="empty"]')).toBeTruthy();
+        expect(container.textContent).not.toContain('Test Flag');
+        expect(container.textContent).not.toContain('Fast Model');
+      }
+    },
+  );
+
+  it('allows a builtin without showing its sibling or ordinary settings', () => {
+    browserNotificationsStub.current = {
+      enabled: true,
+      permission: 'granted',
+      pending: false,
+      persistent: true,
+      error: false,
+      setEnabled: vi.fn(async () => {}),
+      refreshPermission: vi.fn(),
+      syncLanguage: vi.fn(),
+    };
+    const state = makeState([themeSetting()], vi.fn());
+    const baseline = renderPanel(state);
+    expect(baseline.textContent).toContain('Browser task notifications');
+    const container = renderPanel(state, {
+      presentation: { includeItems: ['builtin:chat-width'] },
+    });
+    for (const userScope of [false, true]) {
+      if (userScope) clickUserTab(container);
+      expect(container.querySelectorAll('nav button')).toHaveLength(1);
+      expect(container.textContent).toContain('Chat width');
+      expect(container.textContent).not.toContain('Theme');
+      expect(container.textContent).not.toContain('Browser task notifications');
+    }
+  });
+
+  it('does not enable unsupported Live setup when allowlisted', () => {
+    const setup = { ...liveSetup(false), supported: false };
+    const container = renderPanel(makeState([], vi.fn(), setup), {
+      presentation: { includeItems: ['builtin:live-setup'] },
+    });
+    expect(container.querySelectorAll('nav button')).toHaveLength(0);
+    expect(container.querySelector('[data-slot="empty"]')).toBeTruthy();
+    expect(setup.update).not.toHaveBeenCalled();
+  });
+
   it('preserves default content and counts for an empty exclusion list', () => {
     const state = makeState([subDialogSetting()], vi.fn());
     const options = { modelManagement: makeModelManagement() };

@@ -79,26 +79,30 @@ export const WEB_SHELL_SETTING_ITEM_IDS: readonly WebShellSettingItemId[] = [
 ];
 
 export interface WebShellSettingsOptions {
-  /** Hide native settings items. Presentation only; other commands/APIs remain available. */
+  /** Show only these eligible native items; an empty list hides all. Presentation only. */
+  includeItems?: readonly WebShellSettingItemId[];
+  /** Hide native items, taking precedence over includeItems. Other commands/APIs remain available. */
   excludeItems?: readonly WebShellSettingItemId[];
 }
 
-export function isItemExcluded(
+export function isItemVisible(
   id: WebShellSettingItemId,
   options?: WebShellSettingsOptions,
 ): boolean {
-  return options?.excludeItems?.includes(id) ?? false;
+  return (
+    (options?.includeItems?.includes(id) ?? true) &&
+    !options?.excludeItems?.includes(id)
+  );
 }
 
-export function isSettingExcluded(
+export function isSettingVisible(
   key: string,
   options?: WebShellSettingsOptions,
 ): boolean {
-  return (
-    options?.excludeItems?.some(
-      (id) =>
-        Object.hasOwn(SETTING_KEYS, id) &&
-        SETTING_KEYS[id as keyof typeof SETTING_KEYS] === key,
-    ) ?? false
-  );
+  const id = (
+    Object.keys(SETTING_KEYS) as Array<keyof typeof SETTING_KEYS>
+  ).find((id) => SETTING_KEYS[id] === key);
+  return id === undefined
+    ? options?.includeItems === undefined
+    : isItemVisible(id, options);
 }
