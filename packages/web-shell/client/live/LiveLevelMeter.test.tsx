@@ -93,6 +93,25 @@ describe('LiveLevelMeter', () => {
     expect(level()).toBeLessThan(0.2);
   });
 
+  it('settles at zero and stops rewriting the same value', () => {
+    const value = { current: 0.1 };
+    const container = mount(
+      <LiveLevelMeter level={value} muted={false} label="mic" />,
+    );
+    paintFrames();
+    value.current = 0;
+    paintFrames(60);
+    expect(level()).toBe(0);
+
+    const bar = container.querySelector<HTMLElement>(
+      '[data-live-level-meter] > div',
+    )!;
+    const spy = vi.spyOn(bar.style, 'setProperty');
+    paintFrames(30);
+    // Silence must not repaint the property on every frame.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('clamps a loud frame to the top of the meter', () => {
     const value = { current: 1 };
     mount(<LiveLevelMeter level={value} muted={false} label="mic" />);

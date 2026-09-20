@@ -36,8 +36,13 @@ export function LiveLevelMeter({
   const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const paint = (value: number) =>
+    let painted = -1;
+    const paint = (value: number) => {
+      // Silence would otherwise rewrite the same property 60 times a second.
+      if (Math.abs(value - painted) < 0.005) return;
+      painted = value;
       barRef.current?.style.setProperty(LIVE_LEVEL_PROPERTY, value.toFixed(3));
+    };
     if (muted) {
       paint(0);
       return undefined;
@@ -46,6 +51,8 @@ export function LiveLevelMeter({
     let frame = requestAnimationFrame(function tick() {
       const raw = Math.min(1, Math.max(0, level.current * LEVEL_GAIN));
       shown = raw > shown ? raw : shown * DECAY_PER_FRAME;
+      // Settle at exactly zero instead of decaying forever towards it.
+      if (shown < 0.005) shown = 0;
       paint(shown);
       frame = requestAnimationFrame(tick);
     });
