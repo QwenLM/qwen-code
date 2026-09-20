@@ -492,6 +492,7 @@ export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export * from './agents/workflow-checkpoint.js';
+export { WorkflowJournalUnavailableError } from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -502,6 +503,7 @@ export {
   EXTENSION_WORKFLOW_NAME_PATTERN,
   qualifyExtensionWorkflowName,
   parseExtensionWorkflowName,
+  isWorkflowRunId,
   type SavedWorkflowEntry,
   type SavedWorkflowScope,
   type SavedWorkflowSource,
@@ -763,7 +765,7 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './tools/tool-utils.js';
 export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
-export * from './utils/yaml-parser.js';
+export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';

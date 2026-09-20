@@ -2062,7 +2062,6 @@
   }
 }
 
-/* Registered workspace count next to the Projects label. */
 .projectsHeaderCount {
   display: inline-flex;
   align-items: center;

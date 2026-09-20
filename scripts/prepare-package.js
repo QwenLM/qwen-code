@@ -68,6 +68,7 @@ function isDirectRun() {
 function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
+    path.join(distDir, 'execution-worker.js'),
     path.join(distDir, 'vendor'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
     // The Web Shell ships with the published package ("Web Shell out of the
@@ -278,28 +279,34 @@ function writeDistPackageJson(rootDir, distDir) {
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
-  let lockfile;
-  try {
-    lockfile = JSON.parse(
-      fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
-    );
-  } catch (error) {
-    throw new Error(`Cannot read package-lock.json: ${error.message}`);
-  }
   const coreManifest = JSON.parse(
     fs.readFileSync(
       path.join(rootDir, 'packages', 'core', 'package.json'),
       'utf-8',
     ),
   );
-  const sharpVersion =
-    lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
-    lockfile.packages?.['node_modules/sharp']?.version;
+  // Resolve sharp the way core does at runtime — the nearest
+  // node_modules/sharp above packages/core — so the published manifest pins
+  // the version this release was built against, whichever package manager
+  // installed the tree.
+  let sharpVersion;
+  for (
+    let dir = path.join(rootDir, 'packages', 'core');
+    ;
+    dir = path.dirname(dir)
+  ) {
+    const manifest = path.join(dir, 'node_modules', 'sharp', 'package.json');
+    if (fs.existsSync(manifest)) {
+      sharpVersion = JSON.parse(fs.readFileSync(manifest, 'utf-8')).version;
+      break;
+    }
+    if (dir === rootDir || path.dirname(dir) === dir) break;
+  }
   const declared = coreManifest.dependencies?.sharp;
   if (!sharpVersion || !declared || !semver.satisfies(sharpVersion, declared)) {
     throw new Error(
-      `sharp version is not locked in package-lock.json ` +
-        `(resolved ${sharpVersion ?? 'none'}, ` +
+      `sharp is not installed at a version packages/core accepts ` +
+        `(installed ${sharpVersion ?? 'none'}, ` +
         `packages/core declares ${declared ?? 'none'})`,
     );
   }
@@ -331,12 +338,15 @@ function writeDistPackageJson(rootDir, distDir) {
     files: [
       'cli-entry.js',
       'cli.js',
+      'execution-worker.js',
       // Worker thread entry loaded by FzfWorkerHandle at runtime via
       // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
       'codeModeHost.js',
+      'sandboxBwrapRelay.js',
+      'sandboxFileWorker.js',
       'chunks',
       'vendor',
       '*.sb',

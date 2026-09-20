@@ -18,7 +18,11 @@ Describe your browser task directly, for example:
 
 > Read my open dashboard and summarize today's orders.
 
-Qwen selects the Browser Use skill when appropriate. If a runtime dependency
+Qwen selects the Browser Use skill when appropriate. The first browser task
+automatically registers a small local connection program in your user directory;
+later tasks reuse it. Qwen confirms the connection with the extension before
+operating pages. If it cannot connect, open Chrome and check that the extension
+is enabled in the intended profile, then retry. If a runtime dependency
 needs configuration on first use, Qwen will guide you and may ask you to restart.
 No separate Browser Use Qwen extension or `qwen serve` process is needed.
 
