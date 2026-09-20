@@ -189,17 +189,17 @@ describe('relaunchAppInChildProcess', () => {
   it('replaces the current process when requested and supported', async () => {
     process.execArgv = ['--trace-warnings'];
     process.argv = ['/usr/bin/node', '/app/cli.js', '--model', 'test'];
-    const execveSpy = vi.fn((): never => {
-      throw new Error('EXECVE_CALLED');
-    });
+    const execveSpy = vi.fn(() => undefined as never);
     process.execve = execveSpy;
 
-    await expect(
-      relaunchAppInChildProcess(['--max-old-space-size=4096'], ['--debug'], {
+    await relaunchAppInChildProcess(
+      ['--max-old-space-size=4096'],
+      ['--debug'],
+      {
         childEnv: { QWEN_TEST_CHILD: '1' },
         replaceProcess: true,
-      }),
-    ).rejects.toThrow('EXECVE_CALLED');
+      },
+    );
 
     expect(execveSpy).toHaveBeenCalledWith(
       '/usr/bin/node',
@@ -218,6 +218,20 @@ describe('relaunchAppInChildProcess', () => {
       }),
     );
     expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
+  it('falls back to supervised spawn when process replacement fails', async () => {
+    process.argv = ['/usr/bin/node', '/app/cli.js'];
+    process.execve = vi.fn((): never => {
+      throw new Error('E2BIG');
+    });
+    const child = createMockChildProcess(0, false);
+    mockedSpawn.mockReturnValue(child);
+
+    const promise = relaunchAppInChildProcess([], [], { replaceProcess: true });
+    await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+    child.emit('close', 0);
+    await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
   });
 
   it('keeps the supervised spawn path when process replacement is unsupported', async () => {

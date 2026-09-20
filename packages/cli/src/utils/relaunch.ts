@@ -79,11 +79,15 @@ export async function relaunchAppInChildProcess(
     typeof process.execve === 'function' &&
     !['win32', 'os400'].includes(process.platform)
   ) {
-    process.execve(
-      process.execPath,
-      [process.execPath, ...nodeArgs],
-      createChildEnv(),
-    );
+    try {
+      return process.execve(
+        process.execPath,
+        [process.execPath, ...nodeArgs],
+        createChildEnv(),
+      );
+    } catch {
+      // Fall back when the runtime supports execve but the replacement fails.
+    }
   }
 
   const runner = () => {
