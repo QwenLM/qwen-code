@@ -124,6 +124,18 @@ docs 翻译流水线、weekly report、issue/PR 分类（`.github/workflows/auto
 
 ## 6. 追问：能不能"置换 API、不改交互、由 qwen-code 抹平差异"？
 
+> **结论（2026-09-20，实测后回填）：不做。** 本节末尾"三个必须先测的问题"里的
+> 第 2 条（batch 内能否命中 context cache）**实测不通**：隐式与显式 `cache_control`
+> 两条臂都是 `cached_tokens: 0`，而同一组 prompt 的实时对照命中率 0.647，
+> 算下来 `cost_vs_realtime = 1.03` —— 置换在主循环上不是省钱，是略微更贵。
+> 探针 README 的事前判定表对"1 通 / 2 不通"写的就是「**只做形态 A（扇出）**」。
+>
+> 据此，headless `--batch` 的 v1 实现已从 PR #11874 移出（保留在
+> `archive/headless-batch-mode-11874` 分支）。本节以下内容原样保留，作为
+> 「当时是怎么设计的、为什么按判据否掉」的记录；**不要把它当成待办**。
+> 若将来前提变了（见 §9.4 末），也不应原样搬回——缺的正是第 3 条
+> （`batch_id` 持久化 / resume）。
+
 ### 接口层面：能，缝很窄
 
 - `ContentGenerator` 是逐次调用的 `generateContent / generateContentStream`
@@ -285,13 +297,13 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 
 ### 9.1 现在有什么
 
-| 物件                            | 位置                                                                                                                                                                                                        | 状态                                                                                                    |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 本评估                          | `docs/plans/2026-09-14-batch-api-feasibility.md`                                                                                                                                                            | §1-§8 完成，§9 已按实测结果更新                                                                         |
-| 探测脚本 + README               | [#12297](https://github.com/QwenLM/qwen-code/pull/12297)（按 scope ruling 从本 PR 拆出）                                                                                                                    | **已对线上运行**（00/01/02/03/04），结果见上方两条 PR 评论                                              |
-| 草稿 PR                         | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`）                                                                                          | 等评审                                                                                                  |
-| `qwen batch` 命令（形态 A）     | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`）                                                                                                                               | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖；`submit/status/cancel` 已对线上验证 |
-| headless `--batch` 置换（§6）v1 | `core/openaiContentGenerator/batch.ts`（运行器）、`pipeline.ts` 两处分支、`contentGenerator.ts` 的 `executionMode`、`llm-chat.ts` 主循环设置、`Config.getBatchMode()`、CLI `--batch` flag + `.check()` 门禁 | 已实现 v1；01 探测（验收标准）**已通过**，但 `--batch` 本身尚未对线上端到端跑过                         |
+| 物件                            | 位置                                                                                                               | 状态                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| 本评估                          | `docs/plans/2026-09-14-batch-api-feasibility.md`                                                                   | §1-§8 完成，§9 已按实测结果更新                                                                         |
+| 探测脚本 + README               | [#12297](https://github.com/QwenLM/qwen-code/pull/12297)（按 scope ruling 从本 PR 拆出）                           | **已对线上运行**（00/01/02/03/04），结果见上方两条 PR 评论                                              |
+| 草稿 PR                         | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`） | 等评审                                                                                                  |
+| `qwen batch` 命令（形态 A）     | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`）                                      | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖；`submit/status/cancel` 已对线上验证 |
+| headless `--batch` 置换（§6）v1 | 已从本 PR 移出，完整保存在 `archive/headless-batch-mode-11874` 分支（`541f28a9`）                                  | **不 ship**：02 探测（事前判定表的第 2 条）实测不通，`cost_vs_realtime = 1.03`；见 §6 顶部的结论框      |
 
 ### 9.2 当时列的执行步骤（已完成，保留作复现说明）
 
@@ -330,7 +342,21 @@ nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
 
 03 不改变方向，只决定 §7 的经验 ETA 数值和产品文案里怎么描述等待。
 
-### 9.4 置换——v1 已实现，对照清单
+### 9.4 置换——v1 曾实现，已按判定表移出（对照清单保留）
+
+> **状态：已移出本 PR。** 代码完整保存在 `archive/headless-batch-mode-11874`
+> 分支（`541f28a9`），本 PR 里不再有 `--batch` flag、`batchMode`/`getBatchMode`、
+> `executionMode` 或 `core/openaiContentGenerator/batch.ts`。
+>
+> **要不要永久淘汰，是个产品判断，留给维护者。** 唯一还站得住的卖点是
+> "不占实时 TPM/RPM 配额"——这条对真实用户有多普遍，代码量回答不了。
+> 若将来决定重做：**不要原样搬回**。下面清单里的第 3 条
+> （`batch_id` 持久化 + session resume + Esc→cancel）才是真正的工程量，
+> 而 v1 恰恰缺它——文档当时写的 Limits 就是
+> `No batch-id persistence across processes beyond the stderr line`。
+> 也就是说，移出的不是一个完成品。
+
+以下记录 v1 当时落到了哪几条，供将来重做时对照：
 
 v1 落地了第 1、2、5（入口门禁 + OAuth 拒绝）、6 的前半（自动成立：side-call 不带 `executionMode`；
 后半的 256K 压缩阈值未做）、10 条；第 4 条落地为「重试整体禁止」（放弃的错误按类型不再重试，

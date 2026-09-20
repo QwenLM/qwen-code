@@ -99,9 +99,6 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { batchCommand } from '../commands/batch.js';
-import { DashScopeOpenAICompatibleProvider } from '@qwen-code/qwen-code-core/core/openaiContentGenerator/provider/dashscope.js';
-import { AuthType as AuthTypeValues } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
-import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -219,7 +216,6 @@ export interface CliArgs {
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
-  batch?: boolean;
   /**
    * If chat recording is disabled, the chat history would not be recorded,
    * so --continue and --resume would not take effect.
@@ -716,7 +712,6 @@ export async function parseArguments(): Promise<CliArgs> {
           'include-partial-messages',
           DEFAULT_COMMAND_OPTIONS['include-partial-messages'],
         )
-        .option('batch', DEFAULT_COMMAND_OPTIONS['batch'])
         .option('json-fd', DEFAULT_COMMAND_OPTIONS['json-fd'])
         .option('json-file', DEFAULT_COMMAND_OPTIONS['json-file'])
         .option('json-schema', DEFAULT_COMMAND_OPTIONS['json-schema'])
@@ -787,37 +782,6 @@ export async function parseArguments(): Promise<CliArgs> {
             argv['outputFormat'] !== OutputFormat.STREAM_JSON
           ) {
             return '--include-partial-messages requires --output-format stream-json';
-          }
-          if (argv['batch']) {
-            // The positional is variadic and gets joined further down, where
-            // an empty result is dropped. Testing the raw array here would
-            // let `qwen --batch ''` through: the normalizer unsets the prompt,
-            // the run goes interactive, and the first turn the user types in
-            // the TUI becomes a >=24h batch job.
-            const rawQuery = argv['query'];
-            const positional = (
-              Array.isArray(rawQuery)
-                ? rawQuery.join(' ')
-                : String(rawQuery ?? '')
-            ).trim();
-            if (
-              argv['promptInteractive'] ||
-              (!argv['prompt'] && !positional && process.stdin.isTTY)
-            ) {
-              return '--batch is only available in non-interactive runs: pass a prompt (-p or positional) or pipe stdin';
-            }
-          }
-          if (argv['batch'] && (argv['acp'] || argv['experimentalAcp'])) {
-            // ACP runs an editor-driven turn loop on piped stdin, so the TTY
-            // check above passes while every turn would still be deferred to
-            // a >=24h batch job. Both spellings: experimental-acp is only
-            // mapped onto acp after parsing.
-            return '--batch cannot be combined with --acp/--experimental-acp: batch mode is non-interactive only.';
-          }
-          if (argv['batch'] && argv['inputFormat'] === 'stream-json') {
-            // stream-json input is the long-lived headless protocol; every
-            // turn of it would become a separate batch job.
-            return '--batch cannot be combined with --input-format stream-json: batch mode is non-interactive only.';
           }
           if (
             argv['inputFormat'] === 'stream-json' &&
@@ -1605,26 +1569,6 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
-/**
- * A loopback base URL — a local proxy in front of DashScope, or the fake
- * server the batch regression harness runs against. Parsed, not regexed, so a
- * path like `https://evil.example/127.0.0.1/` cannot pass as local.
- */
-function isLoopbackEndpoint(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false;
-  try {
-    // WHATWG keeps the brackets on an IPv6 literal, so strip them.
-    const hostname = new URL(baseUrl).hostname.toLowerCase();
-    return (
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname.replace(/^\[|\]$/g, '') === '::1'
-    );
-  } catch {
-    return false;
-  }
-}
-
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -2161,46 +2105,6 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
-  // `--batch` exists only on the DashScope Batch API. `executionMode` is read
-  // by the OpenAI pipeline alone — the Responses, Anthropic, Gemini and
-  // Vertex generators ignore it — so without this gate the flag is a silent
-  // no-op: the run goes realtime at full price while the user believes the
-  // turn was deferred and discounted. Qwen OAuth has no `/batches` route at
-  // all, and a non-DashScope OpenAI-compatible host fails server-side with a
-  // 404 only after the first upload. Fail fast instead, before any request.
-  if (argv.batch) {
-    // `isDashScopeProvider` short-circuits to true on an empty baseUrl (a
-    // DashScope-compatible endpoint is its default assumption), but the
-    // runtime resolves that same empty value to a non-DashScope default —
-    // so the gate must require an explicitly configured DashScope host, with
-    // only the loopback allowance beside it.
-    //
-    // Test the *resolved* auth type — the one `Config` is built with below
-    // and the one `createContentGenerator` dispatches on — not the selected
-    // one. A model pinned to `wireApi: "responses"` resolves a
-    // `selectedType: "openai"` startup to `openai-responses`, and gating on
-    // the selected value would wave that combination straight through into
-    // the exact silent full-price no-op this gate exists to prevent.
-    const baseUrl = resolvedCliConfig.baseUrl;
-    const effectiveAuthType = resolvedCliConfig.authType;
-    const isDashScopeKeyAuth =
-      effectiveAuthType === AuthTypeValues.USE_OPENAI &&
-      ((!!baseUrl &&
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider({
-          authType: effectiveAuthType,
-          baseUrl,
-        } as ContentGeneratorConfig)) ||
-        isLoopbackEndpoint(baseUrl));
-    if (!isDashScopeKeyAuth) {
-      throw new FatalConfigError(
-        '--batch needs an OpenAI-compatible API key on a DashScope endpoint ' +
-          `(auth type "openai"); resolved auth type is "${effectiveAuthType ?? 'none'}"` +
-          `${baseUrl ? ` at ${baseUrl}` : ''}. ` +
-          'No other provider has a Batch API, so the run would silently go realtime at full price.',
-      );
-    }
-  }
-
   // Disable ToolSearch when explicitly configured or for models that benefit
   // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)
   // all use prefix-based disk KV caching with heavily discounted cached
@@ -2633,7 +2537,6 @@ export async function loadCliConfig(
     inputFormat,
     outputFormat,
     includePartialMessages,
-    batchMode: Boolean(argv.batch),
     modelProvidersConfig,
     providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,

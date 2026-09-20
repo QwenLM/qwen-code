@@ -45,16 +45,6 @@ import {
   withStreamGuards,
 } from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import {
-  expandDynamicHeaders,
-  hasDynamicPlaceholder,
-} from '../outbound-dynamic-headers.js';
-import { AuthType } from '../contentGenerator.js';
-import {
-  completionAsChunk,
-  runBatchCompletion,
-  singleChunkStream,
-} from './batch.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { markFlushedToolCallPark } from '../stream-transport-retry.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
@@ -438,53 +428,6 @@ export class ContentGenerationPipeline {
     );
   }
 
-  /**
-   * `customHeaders` for the batch upload, resolved the way every other
-   * request path resolves them. The upload goes through the global fetch
-   * (see batch.ts's `uploadInputFile`), so it never reaches the
-   * session-aware wrapper that expands `${...}` placeholders per request and
-   * *drops* an entry whose value cannot be resolved. Handing it the raw
-   * settings map would put literal placeholder text on the wire and bypass
-   * that fail-closed rule.
-   */
-  private resolveBatchHeaders(): Record<string, string> | undefined {
-    const customHeaders = this.contentGeneratorConfig.customHeaders;
-    if (!customHeaders) return customHeaders;
-    const expanded = expandDynamicHeaders(customHeaders, this.config.cliConfig);
-    const resolved: Record<string, string> = {};
-    for (const [key, value] of Object.entries(customHeaders)) {
-      if (!hasDynamicPlaceholder(value)) {
-        resolved[key] = value;
-      } else if (key in expanded) {
-        resolved[key] = expanded[key];
-      }
-    }
-    return resolved;
-  }
-
-  /**
-   * `--batch`: the same wire request, sent through the provider's Batch API
-   * (files → batches → poll → output file) instead of the realtime route.
-   * Only the main turn sets `executionMode`; see contentGenerator.ts.
-   */
-  private runBatch(
-    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
-    signal: AbortSignal | undefined,
-  ): Promise<OpenAI.Chat.ChatCompletion> {
-    if (this.contentGeneratorConfig.authType === AuthType.QWEN_OAUTH) {
-      throw new Error(
-        'Batch mode needs an API key: the Qwen OAuth endpoint has no Batch API.',
-      );
-    }
-    return runBatchCompletion(
-      this.client,
-      openaiRequest,
-      signal,
-      undefined,
-      this.resolveBatchHeaders(),
-    );
-  }
-
   async execute(
     request: PromptCacheSharingParameters,
     userPromptId: string,
@@ -503,12 +446,12 @@ export class ContentGenerationPipeline {
           ? createChildAbortController(parentSignal)
           : undefined;
         try {
-          const openaiResponse =
-            request.executionMode === 'batch'
-              ? await this.runBatch(openaiRequest, perRequestAc?.signal)
-              : ((await this.client.chat.completions.create(openaiRequest, {
-                  signal: perRequestAc?.signal,
-                })) as OpenAI.Chat.ChatCompletion);
+          const openaiResponse = (await this.client.chat.completions.create(
+            openaiRequest,
+            {
+              signal: perRequestAc?.signal,
+            },
+          )) as OpenAI.Chat.ChatCompletion;
           reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
           const llmResponse = OpenAIContentConverter.convertOpenAIResponseToLlm(
@@ -546,18 +489,10 @@ export class ContentGenerationPipeline {
           // Use withResponse() to access HTTP response headers — this allows
           // early detection of non-SSE responses (e.g. gateway block pages
           // returning text/html with HTTP 200).
-          // Batch mode resolves to a one-chunk iterable with no withResponse,
-          // so it takes the plain-await branch below and then flows through
-          // the same chunk processing as a realtime stream.
-          const createPromise =
-            request.executionMode === 'batch'
-              ? this.runBatch(openaiRequest, perRequestAc.signal).then(
-                  (completion) =>
-                    singleChunkStream(completionAsChunk(completion)),
-                )
-              : this.client.chat.completions.create(openaiRequest, {
-                  signal: perRequestAc.signal,
-                });
+          const createPromise = this.client.chat.completions.create(
+            openaiRequest,
+            { signal: perRequestAc.signal },
+          );
 
           // withResponse() is available on APIPromise (the OpenAI SDK's
           // extended Promise). If unavailable (e.g. a mock), fall back.
