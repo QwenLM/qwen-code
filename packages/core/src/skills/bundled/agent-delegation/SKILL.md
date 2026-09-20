@@ -25,15 +25,11 @@ Terse command-style prompts produce shallow, generic work.
 
 **Never delegate understanding.** Do not write prompts like "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood the task: include relevant file paths, constraints, what specifically needs to be learned or changed, and what is out of scope.
 
-After launching an agent, do not fabricate or predict what it found before it returns. If the user asks a follow-up before the result arrives, provide status rather than guessing.
-
 ## Writing a fork prompt
 
 With the default full history, the prompt is a _directive_ — what to do, not what the situation is. When `fork_turns` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
 
 ## Worked example
-
-Example usage:
 
 <example_agent_descriptions>
 "test-runner": use this agent after you are done writing code to run tests

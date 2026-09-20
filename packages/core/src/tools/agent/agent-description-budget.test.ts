@@ -156,11 +156,11 @@ describe('AgentTool per-turn size budgets', () => {
    * body is visible here rather than only in a session that has no skills.
    */
   it('keeps the description within its budget when the reference is inlined', async () => {
-    // Default shape, no route to any skill. Measured at 10,109 — 379 more
-    // than the description carried before the move, because the reference
-    // opens with a title and a framing paragraph the description did not need.
+    // Default shape, no route to any skill. Measured at 9,912 — 182 more than
+    // the description carried before the move, because the reference opens
+    // with a title and a framing paragraph the description did not need.
     const tool = await buildTool({ skills: false });
-    expect(tool.description.length).toBeLessThanOrEqual(10_500);
+    expect(tool.description.length).toBeLessThanOrEqual(10_250);
   });
 
   /**

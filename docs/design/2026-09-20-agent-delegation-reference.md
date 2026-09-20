@@ -36,16 +36,16 @@ The text moved verbatim rather than being rewritten. A general compression pass 
 
 Description rendered with the two subagent entries the budget test uses, team off, todo on:
 
-| Shape                                            | chars  | ≈tokens |
-| ------------------------------------------------ | ------ | ------- |
-| Before                                           | 9,730  | 2,433   |
-| After, pointer (a session that can load skills)  | 7,386  | 1,847   |
-| After, reference withheld by `skills.disabled`   | 7,192  | 1,798   |
-| After, reference inlined (no route to any skill) | 10,109 | 2,527   |
+| Shape                                            | chars | ≈tokens |
+| ------------------------------------------------ | ----- | ------- |
+| Before                                           | 9,730 | 2,433   |
+| After, pointer (a session that can load skills)  | 7,386 | 1,847   |
+| After, reference withheld by `skills.disabled`   | 7,192 | 1,798   |
+| After, reference inlined (no route to any skill) | 9,912 | 2,478   |
 
 So the normal case saves **2,344 characters ≈ 586 tokens per request**, against a 192-character pointer. The new skill costs one listing entry in the system prompt — its 247-character `description`, ≈62 tokens — so the net is **≈524 tokens per request**, recovered on every turn of every session including the ones that never delegate.
 
-The inline shape is 379 characters larger than today's description, because the skill body adds a heading and a framing paragraph that the description did not need. That is the deliberate price for sessions that cannot load a skill: a pointer there would name something the model cannot reach.
+The inline shape is 182 characters larger than today's description, because the skill body adds a title and a framing paragraph that the description did not need. That is the deliberate price for sessions that cannot load a skill: a pointer there would name something the model cannot reach.
 
 ## 4. How the route is decided
 
