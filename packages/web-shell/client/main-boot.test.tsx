@@ -56,7 +56,26 @@ describe('web shell boot', () => {
 
   afterEach(() => {
     document.body.innerHTML = '';
+    document.documentElement.removeAttribute(
+      'data-web-shell-unsupported-browser',
+    );
     window.history.replaceState(null, '', '/');
+  });
+
+  it('keeps the native HTML update message on unsupported browsers', async () => {
+    document.documentElement.setAttribute(
+      'data-web-shell-unsupported-browser',
+      'Update required',
+    );
+    document.body.innerHTML =
+      '<div id="root"><div data-boot-fallback>Update required</div></div>';
+    await import('./main');
+    expect(testState.containers).toHaveLength(0);
+    expect(testState.resolveToken).toBeUndefined();
+    expect(testState.removeToken).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-boot-fallback]')?.textContent).toBe(
+      'Update required',
+    );
   });
 
   it('keeps only the fragment token when the daemon target is invalid', async () => {

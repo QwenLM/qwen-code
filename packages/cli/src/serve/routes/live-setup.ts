@@ -79,6 +79,22 @@ function parseUpdate(body: Record<string, unknown>): LiveSetupUpdate {
   if (body['apiKey'] !== undefined) {
     update.apiKey = parseApiKeyMutation(body['apiKey']);
   }
+  for (const field of ['model', 'voice'] as const) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (
+      typeof value !== 'string' ||
+      value.trim().length === 0 ||
+      value.length > 256
+    ) {
+      throw new LiveSetupError(
+        `${field} must be a non-empty string.`,
+        'invalid_live_model',
+        400,
+      );
+    }
+    update[field] = value;
+  }
   if (Object.keys(update).length === 0) {
     throw new LiveSetupError(
       'At least one Live Voice setting is required.',

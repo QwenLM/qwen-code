@@ -7,7 +7,6 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
@@ -447,7 +446,8 @@ describe('SettingsSchema', () => {
       expect(timeout.category).toBe('Model');
       expect(timeout.default).toBeUndefined();
       expect(timeout.minimum).toBe(1);
-      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.maximum).toBe(900);
+      expect(timeout.description).toMatch(/^Deprecated\./);
       expect(timeout.requiresRestart).toBe(false);
       expect(timeout.showInDialog).toBe(false);
     });

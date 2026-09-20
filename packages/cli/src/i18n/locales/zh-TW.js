@@ -650,6 +650,11 @@ export default {
   active: '已啟用',
   disabled: '已禁用',
   enabled: '已啟用',
+  'disabled (bare mode)': '已禁用（精簡模式）',
+  'disabled (safe mode)': '已禁用（安全模式）',
+  'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (folder not trusted)': '已禁用（資料夾未受信任）',
+  'disabled (turned off for this session)': '已禁用（本工作階段中已關閉）',
   'View Details': '查看詳情',
   'Update failed:': '更新失敗：',
   'Updating {{name}}...': '正在更新 {{name}}...',
@@ -1986,6 +1991,9 @@ export default {
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '啟動上下文',
+  Unattributed: '未歸因',
+  'Cached prefix': '快取前綴',
   'Run /context detail for per-item breakdown.':
     '運行 /context detail 查看詳細分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':

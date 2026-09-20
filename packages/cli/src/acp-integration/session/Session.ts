@@ -349,10 +349,6 @@ import {
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../../ui/utils/restoreGoal.js';
-import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
 } from '../../ui/commands/types.js';
@@ -411,11 +407,19 @@ import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
-import { MessageEmitter } from './emitters/MessageEmitter.js';
-import type { HistoryItemGoalStatus } from '../../ui/types.js';
+import {
+  buildGoalStatusUpdate,
+  MessageEmitter,
+} from './emitters/MessageEmitter.js';
+import type {
+  ContextCompressionMeta,
+  ContextCompressionNotice,
+} from '../../ui/types.js';
 import {
   goalPublicationKey,
+  legacyGoalSupersession,
   renderPreparedGoalUpdate,
+  unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
@@ -2485,21 +2489,20 @@ export class Session implements SessionContext {
    *
    * Goal recovery runs from the `Config` constructor, long before this
    * Session exists, so `restore()`'s correction broadcast reaches zero
-   * listeners — and replay streams the pre-migration records, emitting the
-   * legacy `set` card. Clients that derive the live goal from goal cards
-   * (both web-shell and the daemon provider do) are therefore left showing a
-   * goal as running when the migrated goal is `paused` and nothing drives
-   * it; only a second reload self-corrected. Republishing here puts the
-   * authoritative state *after* the replayed card, which is the ordering
-   * that matters. `#publishGoalState` de-duplicates on `(cause, snapshot)`,
-   * so this is a no-op when the subscription already delivered it.
+   * listeners, and replay streams the transcript's records as they were
+   * written. Republishing here puts the authoritative state *after* the
+   * replayed cards, which is the ordering that matters. `#publishGoalState`
+   * de-duplicates on `(cause, snapshot)`, so this is a no-op when the
+   * subscription already delivered it.
    *
-   * When recovery failed outright — a malformed or future-schema
-   * `goal_state` record makes `recoverGoalFromRecords` return `unsupported`
-   * — there is no state to publish and no in-session command can correct the
-   * stream, because a degraded `/goal` answers without a cause. That case
-   * gets the same trailing `cleared` card the replay-time
-   * `supersedeUnrestorableGoal` used to emit.
+   * Two cases publish a trailing `cleared` card instead of state. When
+   * recovery failed outright (a malformed or future-schema `goal_state`
+   * record makes `recoverGoalFromRecords` return `unsupported`) there is no
+   * state to publish and no in-session command can correct the stream,
+   * because a degraded `/goal` answers without a cause. When nothing was
+   * recovered and the replay ended on a running card a build before #7895
+   * wrote, the card would otherwise be the last word on a Goal nothing
+   * drives; see `legacyGoalSupersession` for when that applies.
    */
   async publishRecoveredGoalState(
     replayedRecords?: readonly ChatRecord[],
@@ -2514,9 +2517,44 @@ export class Session implements SessionContext {
       return;
     }
     const cause = runtime.getRecoveryCause?.();
-    // Nothing was recovered, so the replay already told the whole story.
-    if (!cause) return;
+    if (!cause) {
+      const status = legacyGoalSupersession(
+        runtime.getSnapshot(),
+        replayedRecords,
+      );
+      if (status) await this.messageEmitter.emitGoalStatus(status);
+      return;
+    }
     await this.#queueGoalState(runtime.getSnapshot(), cause);
+  }
+
+  /**
+   * The trailing `cleared` card a live replay appends when the page ends on
+   * a running card a build before #7895 wrote and this session drives no
+   * Goal. Empty otherwise; see `legacyGoalSupersession`.
+   *
+   * Reads the runtime as it is rather than waiting for it: a live session's
+   * Goal is already published, and a restore still pending behind the
+   * session writer cannot recover anything from a page that ends on a
+   * legacy card.
+   */
+  renderLegacyGoalSupersession(
+    replayedRecords: readonly ChatRecord[],
+  ): SessionUpdate[] {
+    if (this.disposed || this.closing) return [];
+    let runtime;
+    try {
+      runtime = this.config.getGoalRuntime();
+    } catch (error) {
+      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+      return [];
+    }
+    if (runtime.getRecoveryCause?.()) return [];
+    const status = legacyGoalSupersession(
+      runtime.getSnapshot(),
+      replayedRecords,
+    );
+    return status ? [buildGoalStatusUpdate(status)] : [];
   }
 
   async renderRecoveredGoalUpdates(
@@ -2562,8 +2600,8 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Emit a trailing `cleared` card for an active legacy goal the runtime
-   * refused to recover.
+   * Emit a trailing `cleared` card for an active goal whose saved state the
+   * runtime could not read.
    *
    * Emitted, not recorded: the transcript keeps its `set` card, so a later
    * resume that can recover the goal still finds it.
@@ -2571,32 +2609,9 @@ export class Session implements SessionContext {
   async #supersedeUnrestorableGoal(
     replayedRecords?: readonly ChatRecord[],
   ): Promise<void> {
-    const status = this.#unrestorableGoalStatus(replayedRecords);
+    const status = unrestorableGoalStatus(replayedRecords);
     if (!status) return;
     await this.messageEmitter.emitGoalStatus(status);
-  }
-
-  /**
-   * The `cleared` card for an active legacy goal the runtime refused to
-   * recover, or `undefined` when there is nothing to supersede. Shared by the
-   * streaming and rendering recovery paths so they cannot drift.
-   */
-  #unrestorableGoalStatus(
-    replayedRecords?: readonly ChatRecord[],
-  ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
-    if (!replayedRecords?.length) return undefined;
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(replayedRecords),
-    );
-    if (!active) return undefined;
-    return {
-      kind: 'cleared',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-      lastReason:
-        'Goal not restored: its saved state could not be read, so this session is not driving it.',
-    };
   }
 
   async #publishGoalState(
@@ -5503,13 +5518,28 @@ export class Session implements SessionContext {
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
     const recoveryPlan = this.#getRecoveryPlan(false);
-    // A prompt (or an earlier continuation) is still in flight: there is no
-    // settled turn to continue. Reject rather than abort the live turn.
+    // A turn is still in flight, so there is no settled turn to continue.
+    // `pendingPrompt` alone misses the automatic turns: notification and cron
+    // turns run their own streaming loop under `notificationAbortController` /
+    // `cronAbortController` and never install it. Accepting there is not
+    // neutral — the bridge drives an accepted continuation through normal
+    // prompt admission, which aborts both controllers, so the recovery button
+    // would kill a healthy running turn.
+    //
+    // `closing` is checked alongside rather than by adopting `isTurnIdle()`:
+    // no `#hasActiveTurn()` member is set while a close gate is held
+    // (`beginClose()` / `dispose()`), yet `assertCanStartTurn()` rejects on it
+    // first — so accepting there is the same round trip this guard exists to
+    // prevent, just failing later. `isTurnIdle()` would also require
+    // `channelTaskCaptures.size === 0`, which `assertCanStartTurn()` does NOT
+    // reject, so taking it wholesale would suppress recovery while a channel
+    // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
       canContinue:
         recoveryPlan?.canContinue === true &&
-        !(this.pendingPrompt && !this.pendingPrompt.signal.aborted),
+        !this.closing &&
+        !this.#hasActiveTurn(),
     };
   }
 
@@ -5531,6 +5561,34 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
     const recovery = this.getRecoveryStatus();
+    if (!recovery.canContinue && recovery.kind !== 'clean') {
+      // Name the veto that fired. `canContinue` collapses `closing` plus the
+      // ten `#hasActiveTurn()` members into one boolean and the only UI
+      // consumer renders nothing for it, so without this a leaked flag —
+      // recovery disabled for the rest of the session — is indistinguishable
+      // from a healthy automatic turn in flight. Logged here rather than in
+      // `getRecoveryStatus()` to stay off the per-poll
+      // `buildSessionContextStatus` path, and gated on a non-clean kind so
+      // the ordinary "nothing to continue" no-op stays quiet.
+      debugLogger.debug('[Session] recovery canContinue vetoed', {
+        kind: recovery.kind,
+        closing: this.closing,
+        pendingPrompt: Boolean(this.pendingPrompt),
+        pendingPromptCompletion: Boolean(this.pendingPromptCompletion),
+        historyMutation: this.historyMutationActive,
+        notification: Boolean(
+          this.notificationProcessing ||
+            this.notificationAbortController ||
+            this.notificationCompletion,
+        ),
+        cron: Boolean(
+          this.cronProcessing ||
+            this.cronAbortController ||
+            this.cronCompletion,
+        ),
+        goal: this.goalProcessing,
+      });
+    }
     return {
       accepted: recovery.canContinue,
       interruption:
@@ -13398,6 +13456,7 @@ export class Session implements SessionContext {
                   invocation,
                   policyToolName,
                   toolParams,
+                  activeToolAbortSignal,
                 );
           const permissionFlowCancellation =
             cancelBeforeExecutionIfAborted(toolName);
@@ -15358,7 +15417,11 @@ export class Session implements SessionContext {
         // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
         // so Zed's Markdown renderer preserves the line structure.
         const rendered = (result.content || '').replace(/\n/g, '  \n');
-        await this.messageEmitter.emitSlashCommandOutput(rendered);
+        await this.messageEmitter.emitSlashCommandOutput(
+          rendered,
+          undefined,
+          result.artifacts,
+        );
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
@@ -15369,7 +15432,13 @@ export class Session implements SessionContext {
             .map((b) => (b.type === 'text' ? b.text : ''))
             .join(' '),
           outputHistoryItems: [
-            { type: 'assistant', text: result.content || '' },
+            {
+              type: 'assistant',
+              text: result.content || '',
+              ...(result.artifacts?.length
+                ? { sessionArtifacts: result.artifacts }
+                : {}),
+            },
           ],
         });
         return null;
@@ -15379,27 +15448,81 @@ export class Session implements SessionContext {
         // Command returns multiple messages via async generator (ACP-preferred)
         // Stream all messages to the client as agent message chunks.
         const chunks: string[] = [];
+        // The invocation note rides its own `_meta` key: the reducer folds this
+        // turn's text frames into one block and spreads `_meta` key by key, so a
+        // note sharing `contextCompression` would be overwritten by the result
+        // that follows. Its own key survives the fold, and a client that reads it
+        // renders the note as a row beside the compression it belongs to.
+        const standalone: Array<{
+          text: string;
+          contextCompressionNotice: ContextCompressionNotice;
+        }> = [];
+        let contextCompression: ContextCompressionMeta | undefined;
         for await (const msg of result.messages) {
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          const content = msg.content || '';
+          const notice = msg.contextCompressionNotice;
           await this.messageEmitter.emitSlashCommandOutput(
-            (msg.content || '').replace(/\n/g, '  \n'),
+            content.replace(/\n/g, '  \n'),
+            undefined,
+            undefined,
+            notice
+              ? { contextCompressionNotice: notice }
+              : msg.contextCompression
+                ? { contextCompression: msg.contextCompression }
+                : undefined,
           );
-          chunks.push(msg.content || '');
+          if (notice) {
+            // Recorded with a trailing newline so a replay's folded block still
+            // reads as two lines.
+            standalone.push({
+              text: `${content}\n`,
+              contextCompressionNotice: notice,
+            });
+            continue;
+          }
+          chunks.push(content);
+          // Both terminal phases are recorded: replay then rebuilds the row the
+          // live turn showed instead of falling back to the English sentence.
+          if (
+            msg.contextCompression?.phase === 'done' ||
+            msg.contextCompression?.phase === 'noop'
+          ) {
+            contextCompression = msg.contextCompression;
+          }
         }
         // Write a system/slash_command record for history replay (same reason as
         // 'message' case — system records are invisible to model history).
-        if (chunks.length > 0) {
+        // Standalone frames are recorded as their own items so replay rebuilds
+        // the same rows the live turn showed.
+        const outputHistoryItems: Array<Record<string, unknown>> = [
+          ...standalone.map((frame) => ({
+            type: 'assistant',
+            text: frame.text,
+            contextCompressionNotice: frame.contextCompressionNotice,
+          })),
+          ...(chunks.length > 0
+            ? [
+                {
+                  type: 'assistant',
+                  text: chunks.join('\n'),
+                  // Replayed alongside the joined text so a restarted session
+                  // re-renders the same localized line the live turn showed.
+                  ...(contextCompression ? { contextCompression } : {}),
+                },
+              ]
+            : []),
+        ];
+        if (outputHistoryItems.length > 0) {
           recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt
               .filter((b) => b.type === 'text')
               .map((b) => (b.type === 'text' ? b.text : ''))
               .join(' '),
-            outputHistoryItems: [
-              { type: 'assistant', text: chunks.join('\n') },
-            ],
+            outputHistoryItems,
           });
         }
 
