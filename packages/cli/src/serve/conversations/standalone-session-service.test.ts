@@ -70,6 +70,7 @@ interface Harness {
   bridge: {
     [K in keyof Pick<
       AcpSessionBridge,
+      | 'setSessionConfigOption'
       | 'spawnStandaloneSession'
       | 'restoreStandaloneSession'
       | 'getSessionSummary'
@@ -120,6 +121,7 @@ interface Harness {
 function createHarness(): Harness {
   let restoredSummary: BridgeSessionSummary | undefined;
   const bridge = {
+    setSessionConfigOption: vi.fn(),
     spawnStandaloneSession: vi.fn(async () => ({
       sessionId,
       workspaceCwd: root.canonicalRoot,
@@ -524,6 +526,119 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
     expect(harness.bridge.spawnStandaloneSession).toHaveBeenCalledOnce();
     expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('applies startup selection after commit and before release and initial prompt', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    const sequence: string[] = [];
+    harness.bridge.commitManagedConversationBinding.mockImplementation(
+      async () => {
+        sequence.push('commit');
+      },
+    );
+    harness.bridge.releaseManagedConversationBinding.mockImplementation(
+      async () => {
+        sequence.push('release');
+      },
+    );
+    harness.bridge.setSessionConfigOption.mockImplementation(
+      async (_id, request) => {
+        sequence.push(request.configId);
+        return {
+          configOptions: [
+            { id: 'model', currentValue: 'gpt-5.4(openai)' },
+            { id: 'reasoning_effort', currentValue: 'high' },
+          ],
+        };
+      },
+    );
+    harness.bridge.sendPrompt.mockImplementation(
+      (_id, _req, _signal, context) => {
+        sequence.push('prompt');
+        context?.onPromptAdmitted?.();
+        return Promise.resolve({ stopReason: 'end_turn' });
+      },
+    );
+    const created = await harness.service.createWithInitialPrompt(
+      {
+        sessionId,
+        startupConfig: {
+          modelServiceId: 'gpt-5.4(openai)',
+          reasoningEffort: 'high',
+        },
+      },
+      'hello',
+    );
+    expect(sequence).toEqual([
+      'commit',
+      'model',
+      'reasoning_effort',
+      'release',
+      'prompt',
+    ]);
+    expect(created.session).toMatchObject({
+      modelApplied: true,
+      startupConfigApplied: {
+        modelServiceId: 'gpt-5.4(openai)',
+        reasoningEffort: 'high',
+        effectiveReasoning: { state: 'enabled', effort: 'high' },
+      },
+    });
+  });
+
+  it('does not release or admit a prompt after startup selection fails', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    harness.bridge.setSessionConfigOption.mockRejectedValueOnce(
+      new Error('selection failed'),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt(
+        {
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        },
+        'hello',
+      ),
+    ).rejects.toThrow('selection failed');
+    expect(
+      harness.bridge.commitManagedConversationBinding,
+    ).toHaveBeenCalledOnce();
+    expect(
+      harness.bridge.releaseManagedConversationBinding,
+    ).not.toHaveBeenCalled();
+    expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
+    expect(harness.bridge.killSession).toHaveBeenCalled();
+  });
+
+  it('retains uncertain-outcome containment when startup cleanup fails', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    harness.bridge.setSessionConfigOption.mockRejectedValueOnce(
+      new Error('selection failed'),
+    );
+    harness.bridge.killSession.mockRejectedValueOnce(new Error('close failed'));
+    await expect(
+      harness.service.createWithInitialPrompt(
+        {
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        },
+        'hello',
+      ),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.quarantineRuntime).toHaveBeenCalled();
+    expect(
+      harness.bridge.releaseManagedConversationBinding,
+    ).not.toHaveBeenCalled();
+    expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('surfaces a failed spawn-time model apply as modelApplied false', async () => {

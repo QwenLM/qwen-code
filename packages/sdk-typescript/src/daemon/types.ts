@@ -1333,6 +1333,7 @@ export function parseDaemonBackgroundTurn(
 
 /** Returned from `POST /session`. */
 export interface DaemonSession {
+  startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /** Immutable runtime ownership root used for daemon routing. */
   workspaceCwd: string;
@@ -1364,7 +1365,8 @@ export interface DaemonSession {
   /** True iff supplied source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
   /**
-   * Present on a create response when the request carried `modelServiceId`.
+   * Present when creation carried `modelServiceId` or `startupConfig`.
+   * Always true for successful startupConfig preparation.
    * `false` means the spawn-time model switch failed and the session is
    * running on the agent default model (also surfaced via the
    * `model_switch_failed` session event).
@@ -3587,6 +3589,23 @@ export interface DaemonUsageDashboard {
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/** Creation-only selection; does not change shared defaults or later session behavior. */
+export interface SessionStartupConfig {
+  modelServiceId: string;
+  reasoningEffort: ReasoningSelection;
+}
+
+/** Confirmed state after startup preparation, not a lifetime policy. */
+export interface SessionStartupConfigApplied extends SessionStartupConfig {
+  effectiveReasoning:
+    | {
+        state: 'enabled';
+        effort?: Exclude<ReasoningSelection, 'default' | 'none'>;
+      }
+    | { state: 'disabled' }
+    | { state: 'provider-default' };
 }
 
 /** Returned from `POST /session/:id/config-option`. */

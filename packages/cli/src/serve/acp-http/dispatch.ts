@@ -5,6 +5,10 @@
  */
 
 import {
+  parseSessionStartupConfig,
+  SessionStartupConfigError,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
+import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
@@ -668,6 +672,19 @@ export function toRpcError(err: unknown): {
         httpStatus: 503,
         maxConcurrentChildren: capacityError.maxConcurrentChildren,
         committedAcpChildren: capacityError.committedAcpChildren,
+      },
+    };
+  }
+  if (err instanceof SessionStartupConfigError) {
+    return {
+      code:
+        err.code === 'invalid_startup_config'
+          ? RPC.INVALID_PARAMS
+          : RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: {
+        errorKind: err.code,
+        httpStatus: err.code === 'invalid_startup_config' ? 400 : 422,
       },
     };
   }
@@ -1763,6 +1780,10 @@ export class AcpDispatcher {
             );
             return;
           }
+          const startupConfig = parseSessionStartupConfig(
+            params['startupConfig'],
+            params,
+          );
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const parsedSessionId = parseCallerSuppliedSessionId(
             meta?.[REQUESTED_SESSION_ID_META_KEY],
@@ -1853,6 +1874,7 @@ export class AcpDispatcher {
               workspaceCwd: cwd,
               clientId: conn.clientId,
               sessionScope: 'thread',
+              ...(startupConfig ? { startupConfig } : {}),
               ...source,
               ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
             });
@@ -1898,6 +1920,12 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  ...(session.startupConfigApplied
+                    ? {
+                        modelApplied: true,
+                        startupConfigApplied: session.startupConfigApplied,
+                      }
+                    : {}),
                   ...(session.sourceType
                     ? { sourceType: session.sourceType }
                     : {}),

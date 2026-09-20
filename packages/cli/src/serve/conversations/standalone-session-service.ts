@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  applySessionStartupConfig,
+  parseSessionStartupConfig,
+  type SessionStartupConfig,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { randomUUID } from 'node:crypto';
 import {
   CdWhilePromptActiveError,
@@ -115,6 +120,7 @@ export class StandaloneSessionServiceError extends Error {
 }
 
 export interface CreateStandaloneSessionRequest {
+  startupConfig?: SessionStartupConfig;
   sessionId: string;
   modelServiceId?: string;
   approvalMode?: ApprovalMode;
@@ -2528,6 +2534,11 @@ export class StandaloneSessionService {
     parentSessionId?: string,
     promptId: string = randomUUID(),
   ): Promise<CreatedStandaloneSessionInternal> {
+    const startupConfig = parseSessionStartupConfig(
+      request.startupConfig,
+      request,
+    );
+    request = { ...request, ...(startupConfig ? { startupConfig } : {}) };
     const { sessionId } = parseRequiredSessionId(request.sessionId);
     let entry: CreatingEntry | undefined;
     try {
@@ -2754,8 +2765,32 @@ export class StandaloneSessionService {
     let initialPrompt:
       | CreatedStandaloneChildSession['initialPrompt']
       | undefined;
+    const startupConfig = request.startupConfig;
+    let startupPreparationFailed = false;
     try {
-      await this.bindAndRelease(runtime, sessionId, prepared.identity);
+      await this.bindAndRelease(
+        runtime,
+        sessionId,
+        prepared.identity,
+        startupConfig
+          ? async () => {
+              const startupConfigApplied = await applySessionStartupConfig(
+                runtime.bridge,
+                sessionId,
+                startupConfig,
+              ).catch((error: unknown) => {
+                startupPreparationFailed = true;
+                throw error;
+              });
+              this.assertRuntimeCurrentOrQuarantine(runtime);
+              session = {
+                ...session,
+                modelApplied: true,
+                startupConfigApplied,
+              };
+            }
+          : undefined,
+      );
       if (prompt !== undefined) {
         initialPrompt = await this.admitInitialPrompt(
           runtime.bridge,
@@ -2768,6 +2803,7 @@ export class StandaloneSessionService {
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
+      if (startupPreparationFailed) throw error;
       throw serviceError('standalone_creation_outcome_unknown', sessionId);
     }
 
@@ -2792,6 +2828,7 @@ export class StandaloneSessionService {
     runtime: WorkspaceRuntime,
     sessionId: string,
     pinned: ConversationDirectoryIdentity,
+    beforeRelease?: () => Promise<void>,
   ): Promise<void> {
     const expectation = toBridgeExpectation(sessionId, pinned);
     const changed = await runtime.bridge.changeSessionCwd(sessionId, {
@@ -2836,6 +2873,10 @@ export class StandaloneSessionService {
       pinned,
       agentBound: { eventEpoch, released: false },
     });
+    if (beforeRelease) {
+      await beforeRelease();
+      this.assertRuntimeCurrentOrQuarantine(runtime);
+    }
     try {
       this.assertRuntimeCurrentOrQuarantine(runtime);
       await runtime.bridge.releaseManagedConversationBinding(

@@ -6908,6 +6908,79 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
 
+  it('session/new forwards startup selection and returns its actual confirmation', async () => {
+    const startupConfig = {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high',
+    };
+    const startupConfigApplied = {
+      ...startupConfig,
+      effectiveReasoning: { state: 'enabled', effort: 'high' },
+    };
+    const session = {
+      sessionId: 'startup',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: false,
+      clientId: 'startup-client',
+      modelApplied: true,
+      startupConfigApplied,
+    };
+    const spawn = vi
+      .spyOn(bridge, 'spawnOrAttach')
+      .mockResolvedValueOnce(session);
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 430,
+      method: 'session/new',
+      params: { startupConfig },
+    });
+    const [frame] = (await got) as Array<{ result: Record<string, unknown> }>;
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ startupConfig, sessionScope: 'thread' }),
+    );
+    expect(frame.result).toMatchObject({
+      modelApplied: true,
+      startupConfigApplied,
+    });
+  });
+
+  it.each([
+    { startupConfig: {} },
+    {
+      startupConfig: { modelServiceId: 'x', reasoningEffort: 'high' },
+      sessionScope: 'single',
+    },
+    {
+      startupConfig: { modelServiceId: 'x', reasoningEffort: 'high' },
+      modelServiceId: 'legacy',
+    },
+  ])(
+    'session/new rejects invalid startup request without spawning %j',
+    async (params) => {
+      const spawn = vi.spyOn(bridge, 'spawnOrAttach');
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const got = takeFrames(stream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 431,
+        method: 'session/new',
+        params,
+      });
+      const [frame] = (await got) as Array<{
+        error: { data: Record<string, unknown> };
+      }>;
+      expect(frame.error.data).toMatchObject({
+        errorKind: 'invalid_startup_config',
+        httpStatus: 400,
+      });
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
   it('session/new always uses thread scope (ACP standard compliance)', async () => {
     // ACP standard: session/new MUST create a new isolated session.
     // sessionScope param is ignored; bridge always gets 'thread'.

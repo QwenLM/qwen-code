@@ -109,6 +109,32 @@ function createHarness({
 describe('standalone session routes', () => {
   beforeEach(() => vi.restoreAllMocks());
 
+  it('forwards startup selection and rejects malformed or conflicting selection before create', async () => {
+    const { app, service } = createHarness();
+    const startupConfig = {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high',
+    };
+    await request(app)
+      .post('/standalone/sessions')
+      .send({ sessionId, startupConfig })
+      .expect(200);
+    expect(service.create).toHaveBeenCalledWith({ sessionId, startupConfig });
+    service.create.mockClear();
+    for (const body of [
+      { sessionId, startupConfig: {} },
+      { sessionId, startupConfig, modelServiceId: 'legacy' },
+      { sessionId, startupConfig: { ...startupConfig, extra: true } },
+    ]) {
+      const response = await request(app)
+        .post('/standalone/sessions')
+        .send(body)
+        .expect(400);
+      expect(response.body.code).toBe('invalid_startup_config');
+    }
+    expect(service.create).not.toHaveBeenCalled();
+  });
+
   it('rejects invalid standalone compacted replay mode', async () => {
     const { app, service } = createHarness();
     const response = await request(app)

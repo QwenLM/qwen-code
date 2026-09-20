@@ -57,6 +57,20 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ model: 'gpt-4' });
   });
 
+  it('preserves startup configuration and explicit scope for daemon validation', () => {
+    const result = matchRoute('/session', 'POST')!;
+    const body = {
+      startupConfig: {
+        modelServiceId: 'gpt-5.4(openai)',
+        reasoningEffort: 'high',
+      },
+      sessionScope: 'single',
+    };
+    expect(result.mapping.extractParams(result.segments, body, 'POST')).toEqual(
+      body,
+    );
+  });
+
   it('POST /session maps sessionId into ACP metadata', () => {
     const result = matchRoute('/session', 'POST')!;
     const params = result.mapping.extractParams(

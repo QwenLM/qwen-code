@@ -213,6 +213,8 @@ export {
   type DaemonProtocolVersions,
   type DaemonRestoredSession,
   type DaemonSession,
+  type SessionStartupConfig,
+  type SessionStartupConfigApplied,
   type DaemonSessionClosedReason,
   type DaemonWorktreeInfo,
   type DaemonBranchInfo,

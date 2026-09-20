@@ -573,12 +573,16 @@ export class DaemonSessionClient {
   }
 
   /**
-   * Present when this client was created with a `modelServiceId`: `false`
-   * means the spawn-time model switch failed and the session is running on
+   * Present for `modelServiceId` or `startupConfig` creation. Startup
+   * preparation succeeds only with true; legacy false means the session uses
    * the agent default model.
    */
   get modelApplied(): DaemonSession['modelApplied'] {
     return this.session.modelApplied;
+  }
+
+  get startupConfigApplied(): DaemonSession['startupConfigApplied'] {
+    return this.session.startupConfigApplied;
   }
 
   get lastEventId(): number | undefined {
