@@ -47,6 +47,25 @@ const STREAMING_STATES: ReadonlySet<DaemonLiveStatus['state']> = new Set([
   'speaking',
 ]);
 
+/**
+ * What the capture callback last saw. `at` is the `performance.now()` of that
+ * frame: a meter that only kept the level would go on showing the last value
+ * after the callback stops firing (a suspended AudioContext, a device change),
+ * which is exactly when it is being looked at.
+ */
+export interface LiveInputLevel {
+  /** RMS of the frame, 0..1. Zero while input is muted. */
+  level: number;
+  at: number;
+  /**
+   * The call is running but this frame was not sent: the socket is backed up.
+   * The microphone is fine and the daemon is still not hearing it.
+   */
+  dropping: boolean;
+}
+
+const SILENT_INPUT: LiveInputLevel = { level: 0, at: 0, dropping: false };
+
 export type LiveBrowserHostPhase =
   | 'idle'
   | 'connecting'
@@ -77,12 +96,12 @@ export interface UseLiveBrowserHostResult {
   closeReason: LiveBrowserHostCloseReason | undefined;
   errorMessage: string | undefined;
   /**
-   * Most recent microphone RMS, 0..1, for a meter. A ref rather than state:
+   * Most recent microphone frame, for a meter. A ref rather than state:
    * at 64 ms frames this changes ~16 times a second, and re-rendering the
    * dialog that often would steal the main thread from the very
    * ScriptProcessor callback that produces the audio.
    */
-  inputLevel: RefObject<number>;
+  inputLevel: RefObject<LiveInputLevel>;
   /** Must run inside a user gesture: it asks for the microphone. */
   connect: (options?: { takeover?: boolean }) => void;
   disconnect: () => void;
@@ -131,7 +150,7 @@ export function useLiveBrowserHost({
   const resourcesRef = useRef<HostResources>({});
   const statusRef = useRef<DaemonLiveStatus | undefined>(undefined);
   const epochRef = useRef(0);
-  const inputLevelRef = useRef(0);
+  const inputLevelRef = useRef<LiveInputLevel>(SILENT_INPUT);
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
 
@@ -162,7 +181,7 @@ export function useLiveBrowserHost({
       }
     }
     statusRef.current = undefined;
-    inputLevelRef.current = 0;
+    inputLevelRef.current = SILENT_INPUT;
   }, []);
 
   const end = useCallback(
@@ -355,27 +374,32 @@ export function useLiveBrowserHost({
         };
 
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
-          if (!isCurrent() || ws.readyState !== WebSocket.OPEN) return;
+          if (!isCurrent()) return;
+          const at = performance.now();
           const status = statusRef.current;
-          if (!status || status.inputMuted === true) {
-            // Muted: the meter reads zero rather than freezing at the last
-            // level before the mute.
-            inputLevelRef.current = 0;
+          if (
+            ws.readyState !== WebSocket.OPEN ||
+            !status ||
+            status.inputMuted === true
+          ) {
+            // No socket, or muted: the meter reads zero rather than freezing
+            // at the last level it saw.
+            inputLevelRef.current = { level: 0, at, dropping: false };
             return;
           }
           const { pcm, level } = floatToPcm16(
             event.inputBuffer.getChannelData(0),
           );
+          const streaming = STREAMING_STATES.has(status.state);
+          const dropping =
+            streaming && ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES;
           // Measured whenever the microphone is open, including before the
           // call starts: "will it hear me?" is the question to answer while
-          // there is still a button to press.
-          inputLevelRef.current = level;
-          if (
-            !STREAMING_STATES.has(status.state) ||
-            ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES
-          ) {
-            return;
-          }
+          // there is still a button to press. During a call a dropped frame
+          // is flagged, so a moving bar never means "the daemon hears this"
+          // when it does not.
+          inputLevelRef.current = { level, at, dropping };
+          if (!streaming || dropping) return;
           const frame = new Uint8Array(INPUT_EPOCH_BYTES + pcm.byteLength);
           new DataView(frame.buffer).setBigUint64(0, BigInt(epochRef.current));
           frame.set(new Uint8Array(pcm), INPUT_EPOCH_BYTES);

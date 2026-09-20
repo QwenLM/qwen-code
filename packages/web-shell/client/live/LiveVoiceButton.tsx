@@ -276,6 +276,7 @@ export function LiveVoiceButton({
                     ? 'live.browser.levelMuted'
                     : 'live.browser.level',
                 )}
+                droppingLabel={t('live.browser.levelDropping')}
               />
             ) : null}
           </div>

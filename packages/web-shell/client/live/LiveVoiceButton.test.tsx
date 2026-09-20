@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
       phase: 'idle' as const,
       closeReason: undefined,
       errorMessage: undefined,
-      inputLevel: { current: 0 },
+      inputLevel: { current: { level: 0, at: 0, dropping: false } },
       connect: vi.fn(),
       disconnect: vi.fn(),
     },
@@ -223,7 +223,7 @@ describe('LiveVoiceButton as a browser Host', () => {
       phase: 'idle',
       closeReason: undefined,
       errorMessage: undefined,
-      inputLevel: { current: 0 },
+      inputLevel: { current: { level: 0, at: 0, dropping: false } },
       connect: vi.fn(),
       disconnect: vi.fn(),
     };

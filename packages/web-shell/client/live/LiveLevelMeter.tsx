@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useRef, type RefObject } from 'react';
+import type { LiveInputLevel } from './useLiveBrowserHost';
 import styles from './LiveVoiceButton.module.css';
 
 /**
@@ -20,19 +21,30 @@ export const LIVE_LEVEL_PROPERTY = '--live-input-level';
 // Raw speech RMS sits well under 0.2; the same gain dictation's meter uses.
 const LEVEL_GAIN = 8;
 // Peak-and-decay: rises instantly, falls smoothly, so the bar reads as a
-// voice rather than flickering once per frame.
-const DECAY_PER_FRAME = 0.85;
+// voice rather than flickering once per audio frame. Expressed per 60 Hz
+// frame and scaled by elapsed time: decaying once per animation frame would
+// fall 2.4x faster on a 144 Hz display and saw-tooth between audio frames.
+const DECAY_PER_60HZ_FRAME = 0.85;
+const FRAME_60HZ_MS = 1000 / 60;
+// Audio frames arrive every 64 ms. After a few missed ones the capture
+// callback has stopped (suspended AudioContext, device change) and the last
+// level is no longer a measurement.
+const STALE_AFTER_MS = 250;
 
 export function LiveLevelMeter({
   level,
   muted,
   label,
+  droppingLabel,
 }: {
-  level: RefObject<number>;
+  level: RefObject<LiveInputLevel>;
   /** Input is muted: hold the meter at zero instead of animating it. */
   muted: boolean;
   label: string;
+  /** Shown while frames are being dropped instead of sent. */
+  droppingLabel: string;
 }): React.JSX.Element {
+  const meterRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -43,26 +55,46 @@ export function LiveLevelMeter({
       painted = value;
       barRef.current?.style.setProperty(LIVE_LEVEL_PROPERTY, value.toFixed(3));
     };
+    let shownDropping: boolean | undefined;
+    const paintDropping = (dropping: boolean) => {
+      if (dropping === shownDropping) return;
+      shownDropping = dropping;
+      const meter = meterRef.current;
+      if (!meter) return;
+      meter.dataset['dropping'] = String(dropping);
+      meter.title = dropping ? droppingLabel : label;
+    };
     if (muted) {
       paint(0);
+      paintDropping(false);
       return undefined;
     }
     let shown = 0;
-    let frame = requestAnimationFrame(function tick() {
-      const raw = Math.min(1, Math.max(0, level.current * LEVEL_GAIN));
-      shown = raw > shown ? raw : shown * DECAY_PER_FRAME;
+    let previous: number | undefined;
+    let frame = requestAnimationFrame(function tick(now) {
+      const input = level.current;
+      const live = now - input.at <= STALE_AFTER_MS;
+      const raw = live ? Math.min(1, Math.max(0, input.level * LEVEL_GAIN)) : 0;
+      const elapsed = previous === undefined ? FRAME_60HZ_MS : now - previous;
+      previous = now;
+      const decayed =
+        shown * Math.pow(DECAY_PER_60HZ_FRAME, elapsed / FRAME_60HZ_MS);
+      shown = raw > decayed ? raw : decayed;
       // Settle at exactly zero instead of decaying forever towards it.
       if (shown < 0.005) shown = 0;
       paint(shown);
+      paintDropping(live && input.dropping);
       frame = requestAnimationFrame(tick);
     });
     return () => cancelAnimationFrame(frame);
-  }, [level, muted]);
+  }, [level, muted, label, droppingLabel]);
 
   return (
     <div
+      ref={meterRef}
       className={styles.levelMeter}
       data-muted={muted}
+      data-dropping="false"
       data-live-level-meter
       // Decorative: the call state beside it is the accessible information,
       // and a value changing 60 times a second is noise to a screen reader.

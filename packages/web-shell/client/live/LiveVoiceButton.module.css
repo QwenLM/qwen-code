@@ -193,3 +193,9 @@
 .levelMeter[data-muted='true'] .levelMeterFill {
   background: color-mix(in srgb, var(--foreground) 35%, transparent);
 }
+
+/* Frames are being dropped, not sent: the bar still follows the voice, in a
+   colour that does not read as "all good". */
+.levelMeter[data-dropping='true'] .levelMeterFill {
+  background: var(--destructive, #d9534f);
+}
