@@ -498,6 +498,7 @@ export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export * from './agents/workflow-checkpoint.js';
+export { WorkflowJournalUnavailableError } from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -508,6 +509,7 @@ export {
   EXTENSION_WORKFLOW_NAME_PATTERN,
   qualifyExtensionWorkflowName,
   parseExtensionWorkflowName,
+  isWorkflowRunId,
   type SavedWorkflowEntry,
   type SavedWorkflowScope,
   type SavedWorkflowSource,
