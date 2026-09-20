@@ -438,7 +438,8 @@ export interface NotificationRecordPayload {
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+    /** `peer`: a message from another session; `taskId` is the message id. */
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
     toolUseId?: string;
     sourceTurnId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */

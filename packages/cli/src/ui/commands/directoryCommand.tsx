@@ -256,7 +256,10 @@ export const directoryCommand: SlashCommand = {
                   context.services.settings.merged.context?.importFormat ||
                     'tree',
                   config.getContextRuleExcludes(),
-                  { extensionContextRoots: config.getExtensionContextRoots() },
+                  {
+                    extensionContextRoots: config.getExtensionContextRoots(),
+                    extensionRuleSources: config.getExtensionRuleSources(),
+                  },
                 );
                 config.setUserMemory(memoryContent);
                 config.setMemoryFileCount(fileCount);

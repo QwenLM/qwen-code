@@ -260,6 +260,10 @@ describe('directoryCommand', () => {
         projectRoot: '/test/dir',
       });
       mockConfig.shouldLoadMemoryFromIncludeDirectories = () => true;
+      const extensionRuleSources = [
+        { name: 'charts', dir: '/ext/charts/rules' },
+      ];
+      mockConfig.getExtensionRuleSources = () => extensionRuleSources;
       mockConfig.getFolderTrust = vi.fn().mockReturnValue(true);
       mockConfig.getContextRuleExcludes = vi.fn().mockReturnValue([]);
       mockConfig.setContextFilePaths = vi.fn();
@@ -282,7 +286,10 @@ describe('directoryCommand', () => {
         true,
         'tree',
         expect.anything(),
-        { extensionContextRoots: new Map() },
+        expect.objectContaining({
+          extensionContextRoots: new Map(),
+          extensionRuleSources,
+        }),
       );
       expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
       expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([

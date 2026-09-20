@@ -22,7 +22,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
-  CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   CHROME_NATIVE_HOST_NAME,
   CHROME_NATIVE_HOST_REVISION,
 } from './bridge/protocol.js';
@@ -31,7 +31,9 @@ import type { ChromeProfileDescriber } from './bridge/discovery.js';
 const LAUNCHER_MARKER = '# qwen-browser-use native host';
 const INSTALLATION_MARKER = '# installation ';
 const MANIFEST_FILE = CHROME_NATIVE_HOST_NAME + '.json';
-const ALLOWED_ORIGIN = 'chrome-extension://' + CHROME_EXTENSION_ID + '/';
+const ALLOWED_ORIGINS = CHROME_EXTENSION_IDS.map(
+  (id) => 'chrome-extension://' + id + '/',
+);
 
 export interface NativeHostInstallOptions {
   nativeHostPath: string;
@@ -297,16 +299,18 @@ export async function describeChromeProfiles(
     const infoCache = localState.profile?.info_cache ?? {};
     for (const profileDirectory of Object.keys(infoCache)) {
       if (!/^(Default|Profile \d+)$/.test(profileDirectory)) continue;
-      const storage = join(
-        browserRoot,
-        profileDirectory,
-        'Local Extension Settings',
-        CHROME_EXTENSION_ID,
+      // A store install and a build loaded from source store under their own
+      // extension id, so both directories are searched.
+      const storages = CHROME_EXTENSION_IDS.map((id) =>
+        join(browserRoot, profileDirectory, 'Local Extension Settings', id),
       );
-      const files = await readdir(storage).catch(() => [] as string[]);
-      for (const file of files) {
-        if (!/\.(log|ldb)$/.test(file)) continue;
-        const path = join(storage, file);
+      const files: string[] = [];
+      for (const storage of storages) {
+        for (const file of await readdir(storage).catch(() => [] as string[]))
+          files.push(join(storage, file));
+      }
+      for (const path of files) {
+        if (!/\.(log|ldb)$/.test(path)) continue;
         const info = await stat(path).catch(() => undefined);
         if (!info?.isFile() || info.size > MAX_STORAGE_FILE_BYTES) continue;
         const bytes = await readFile(path).catch(() => undefined);
@@ -394,7 +398,7 @@ async function writeManifests(
         description: 'Qwen Browser Use',
         path: resolved.launcherPath,
         type: 'stdio',
-        allowed_origins: [ALLOWED_ORIGIN],
+        allowed_origins: ALLOWED_ORIGINS,
       },
       null,
       2,
@@ -420,8 +424,12 @@ function isOwnedManifest(contents: string, launcherPath: string): boolean {
       value['type'] === 'stdio' &&
       value['path'] === launcherPath &&
       Array.isArray(value['allowed_origins']) &&
-      value['allowed_origins'].length === 1 &&
-      value['allowed_origins'][0] === ALLOWED_ORIGIN
+      value['allowed_origins'].length > 0 &&
+      // A registration listing only some of our origins is an older install of
+      // ours to upgrade; one naming any other extension belongs to someone else.
+      value['allowed_origins'].every((origin) =>
+        ALLOWED_ORIGINS.includes(origin as string),
+      )
     );
   } catch {
     return false;

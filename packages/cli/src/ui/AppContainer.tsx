@@ -2350,6 +2350,7 @@ export const AppContainer = (props: AppContainerProps) => {
         {
           loadReason: 'refresh',
           extensionContextRoots: config.getExtensionContextRoots(),
+          extensionRuleSources: config.getExtensionRuleSources(),
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),
