@@ -129,6 +129,21 @@ describe('toRpcError', () => {
     });
   });
 
+  // A kind that exists only up the prototype chain is not a workflow
+  // refusal: the mapping must not read inherited keys.
+  it.each(['constructor', '__proto__'] as const)(
+    'maps the inherited key %s like any unclassified error',
+    (errorKind) => {
+      expect(
+        toRpcError(RequestError.invalidParams({ errorKind }, 'odd kind')),
+      ).toEqual({
+        code: RPC.INTERNAL_ERROR,
+        message: 'Internal error',
+        data: { errorKind: 'internal' },
+      });
+    },
+  );
+
   it('maps sealed maintenance to a JSON-RPC server error', () => {
     expect(toRpcError(new DaemonDrainingError())).toEqual({
       code: RPC.INTERNAL_ERROR,

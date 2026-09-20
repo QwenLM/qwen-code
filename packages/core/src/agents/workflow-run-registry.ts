@@ -400,6 +400,13 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   /** Original structured arguments, retained so a failed run can resume the same journal prefix. */
   args?: unknown;
   /**
+   * The run this attempt resumed had `args` too large to keep, and this
+   * attempt did not restate them: carried forward so settling does not
+   * overwrite the marker with a positive `argsRecorded`. Set only by a
+   * resume; a run with `args` never carries it.
+   */
+  argsOmitted?: true;
+  /**
    * The loaded saved-workflow path or the persisted copy of an inline script.
    * `undefined` only when an inline script could not be persisted.
    */

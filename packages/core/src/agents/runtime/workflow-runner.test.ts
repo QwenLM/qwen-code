@@ -1936,6 +1936,104 @@ describe('WorkflowRunner', () => {
       await expect(resumed.completion).resolves.toMatchObject({ ok: true });
       expect(readWorkflowSnapshotMock).not.toHaveBeenCalled();
     });
+
+    // A resume call drops args whose JSON outgrows it, and a history retry
+    // reads them from the snapshot: the run continues with the args its
+    // previous attempt recorded, so the replay keys match and settling does
+    // not overwrite them with a positive `argsRecorded`.
+    it('carries the recorded args through an args-less resume', async () => {
+      const { config, registry } = configWithRegistry();
+      stubStorage(config, await makeStorageRoot());
+      const runId = 'wf_1234abcd';
+      const args = { prompt: 'finish the review' };
+      readWorkflowSnapshotMock.mockResolvedValue({
+        runId,
+        script: 'return await agent("work", { label: "scout" })',
+        args,
+        status: 'failed',
+      });
+      const key = deriveAgentKey(deriveArgsSeed(args), 'work', {
+        label: 'scout',
+      });
+      vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce({
+        kind: 'loaded',
+        replay: {
+          results: new Map([
+            [
+              key,
+              { type: 'result', key, agentId: 'agent-1', result: 'cached' },
+            ],
+          ]),
+          started: new Map(),
+          failed: new Set(),
+        },
+      });
+      const dispatch = vi.fn(async () => 'live');
+
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return await agent("work", { label: "scout" })',
+        args: undefined,
+        resumeFromRunId: runId,
+        dispatch,
+      });
+      await expect(handle.completion).resolves.toMatchObject({
+        ok: true,
+        outcome: { result: 'cached' },
+      });
+
+      // The carried args reached the replay (a cache hit — nothing was
+      // dispatched), the registry entry, the checkpoint, and the snapshot
+      // the settle wrote.
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.get(runId)?.args).toEqual(args);
+      expect(writeWorkflowCheckpointMock).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ args }),
+      );
+      expect(writeWorkflowSnapshotMock).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ args }),
+      );
+    });
+
+    // The predecessor's args were too large to keep; an args-less resume
+    // cannot supply them either, so the settled snapshot must keep saying so
+    // rather than vouching the run had none.
+    it('carries argsOmitted through an args-less resume', async () => {
+      const { config, registry } = configWithRegistry();
+      stubStorage(config, await makeStorageRoot());
+      const runId = 'wf_1234abcd';
+      readWorkflowSnapshotMock.mockResolvedValue({
+        runId,
+        script: 'return await agent("work")',
+        argsOmitted: true,
+        status: 'failed',
+      });
+      vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce(
+        EMPTY_LOADED_JOURNAL,
+      );
+      const dispatch = vi.fn(async () => 'live');
+
+      const handle = await WorkflowRunner.start({
+        ...resumeOptions(config, runId),
+        dispatch,
+      });
+      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+      const entry = registry.get(runId);
+      expect(entry?.args).toBeUndefined();
+      expect(entry?.argsOmitted).toBe(true);
+      expect(writeWorkflowCheckpointMock).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ argsOmitted: true }),
+      );
+      expect(writeWorkflowSnapshotMock).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ argsOmitted: true }),
+      );
+    });
   });
 
   describe('the run checkpoint', () => {
@@ -1977,8 +2075,89 @@ describe('WorkflowRunner', () => {
       await expect(fs.access(file)).rejects.toThrow();
     });
 
-    // The write is not awaited at start; settlement must wait for it, or a run
-    // that ends before the write lands removes nothing and leaves the file.
+    // The retry gate reads the checkpoint as its cross-process proof that
+    // the run is live, so the start must not be reported before the write
+    // lands.
+    it('does not report the start before the checkpoint write lands', async () => {
+      const { config } = configWithRegistry();
+      const root = await makeStorageRoot();
+      stubStorage(config, root);
+      let release: (() => void) | undefined;
+      writeWorkflowCheckpointMock.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            release = () => resolve(true);
+          }),
+      );
+
+      let started = false;
+      const start = WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return "done"',
+        args: undefined,
+        dispatch: async () => 'unused',
+      }).then((handle) => {
+        started = true;
+        return handle;
+      });
+      await vi.waitFor(() =>
+        expect(writeWorkflowCheckpointMock).toHaveBeenCalled(),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(started).toBe(false);
+
+      release!();
+      const handle = await start;
+      expect(started).toBe(true);
+      await handle.completion;
+    });
+
+    // A run with a journal but no checkpoint is exactly the invisible live
+    // run the gate cannot see, so the start fails instead of running
+    // invisibly.
+    it('fails the start when the checkpoint cannot be written but the journal persists', async () => {
+      const { config, registry } = configWithRegistry();
+      const root = await makeStorageRoot();
+      stubStorage(config, root);
+      writeWorkflowCheckpointMock.mockResolvedValueOnce(false);
+
+      await expect(
+        WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: 'return "done"',
+          args: undefined,
+          dispatch: async () => 'unused',
+        }),
+      ).rejects.toThrow(/could not write its checkpoint/);
+
+      // The registered entry settles as failed rather than holding the run
+      // id, and the journal of a run that never started is removed.
+      expect(registry.list().map((entry) => entry.status)).toEqual(['failed']);
+      expect(
+        (await fs.readdir(root)).filter((name) => name.startsWith('wf_')),
+      ).toEqual([]);
+    });
+
+    // Without storage nothing persists the run anywhere, so no other process
+    // could resume it either: a missing checkpoint cannot fail the start.
+    it('starts without a checkpoint when nothing persists the run', async () => {
+      const { config } = configWithRegistry();
+      writeWorkflowCheckpointMock.mockResolvedValueOnce(false);
+
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return "done"',
+        args: undefined,
+        dispatch: async () => 'unused',
+      });
+      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    });
+
+    // The start awaits the write; settlement removes what it wrote, however
+    // slow the write was.
     it('does not outlive a run that settles before its write lands', async () => {
       const { config } = configWithRegistry();
       const root = await makeStorageRoot();

@@ -65,6 +65,7 @@ import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import {
   deleteInlineWorkflowScript,
+  isWorkflowRunId,
   persistInlineWorkflowScript,
   resolveSavedWorkflowScript,
   type ResolvedSavedWorkflow,
@@ -318,10 +319,11 @@ export class WorkflowRunner {
     const previousEntry = registry?.get(runId);
     // The run as it was before this start: the registry entry while the
     // process still has one, else its snapshot (the registry does not outlive
-    // the process). Read once, for the sourceRef guard below and for putting
-    // back the inline script copy a resume that fails to start overwrote.
+    // the process). Read once, for the sourceRef guard below, for putting
+    // back the inline script copy a resume that fails to start overwrote, and
+    // for the args projection an args-less resume carries forward.
     let previousRun:
-      | Pick<WorkflowSnapshot, 'sourceRef' | 'script'>
+      | Pick<WorkflowSnapshot, 'sourceRef' | 'script' | 'args' | 'argsOmitted'>
       | undefined = previousEntry;
     let journalPath = storage
       ? storage.getWorkflowRunJournalPath(runId)
@@ -334,6 +336,9 @@ export class WorkflowRunner {
     let resumeReplay: JournalReplay | undefined;
     let sourceRef: WorkflowSourceRef | undefined;
     let persistedInlineScript = false;
+    let checkpointWritten = false;
+    let args: unknown;
+    let carriedArgsOmitted = false;
     let callerWasAbortedBeforeStart: boolean;
     let orchestrator: WorkflowOrchestrator;
     let reviewLimits: ReviewWorkflowLimits | undefined;
@@ -488,6 +493,21 @@ export class WorkflowRunner {
           ? await resolveResumeName(config, workflowName, scriptPath)
           : undefined;
       assertStartNotCancelled();
+      // A resume need not restate the args: the resume call drops them once
+      // their JSON outgrows it, and a history retry reads them from the
+      // snapshot. Carry the previous attempt's projection forward so the
+      // replay keys still match and the settled snapshot still vouches for
+      // the run's real args instead of recording that there were none.
+      args =
+        options.args !== undefined
+          ? options.args
+          : options.resumeFromRunId !== undefined
+            ? previousRun?.args
+            : undefined;
+      carriedArgsOmitted =
+        args === undefined &&
+        options.resumeFromRunId !== undefined &&
+        previousRun?.argsOmitted === true;
       const dispatch =
         options.dispatch ??
         createProductionDispatch(
@@ -533,7 +553,8 @@ export class WorkflowRunner {
             ? { authoringHint: options.authoringHint }
             : {}),
           ...(resumeName ? { resumeName } : {}),
-          args: options.args,
+          args,
+          ...(carriedArgsOmitted ? { argsOmitted: true as const } : {}),
           ...(options.resumeFromRunId
             ? {
                 sourceRunId: options.resumeFromRunId,
@@ -548,7 +569,32 @@ export class WorkflowRunner {
         },
         controller,
       );
+      // Lets a later process find this run if this one exits before it
+      // settles. Awaited before the start returns: the history retry gate
+      // reads the checkpoint as its cross-process proof that the run is
+      // live, so reporting the start ahead of the write — or starting at
+      // all when the write failed while the run's journal persists — would
+      // let a second process resume this live run.
+      if (entry) {
+        checkpointWritten = await writeWorkflowCheckpoint(
+          config,
+          checkpointFromTask(entry, {
+            sessionId: config.getSessionId?.() ?? '',
+            meta: scriptMeta,
+          }),
+        );
+        if (!checkpointWritten && journalPath && isWorkflowRunId(runId)) {
+          throw new Error(
+            `Workflow run ${runId} could not write its checkpoint, so it was not started: without it a retry from another process would resume this run while it is still live.`,
+          );
+        }
+      }
     } catch (error) {
+      // A start that fails after the run registered still settles the
+      // entry: left 'running' it would hold the run id forever.
+      if (entry) {
+        registry?.fail(runId, extractErrorMessage(error), Date.now());
+      }
       registry?.releaseStart(runId, controller);
       controller.abort();
       if (persistedInlineScript && options.resumeFromRunId === undefined) {
@@ -563,18 +609,6 @@ export class WorkflowRunner {
       releasePersistenceActivity();
       throw error;
     }
-    // Lets a later process find this run if this one exits before it
-    // settles. Not awaited: nothing about starting depends on it, and the
-    // settlement below waits for it before removing it.
-    const checkpointWrite = entry
-      ? writeWorkflowCheckpoint(
-          config,
-          checkpointFromTask(entry, {
-            sessionId: config.getSessionId?.() ?? '',
-            meta: scriptMeta,
-          }),
-        )
-      : undefined;
     const emitUpdate = (): void => {
       if (!entry || !options.onUpdate || !isCurrentEntry()) return;
       try {
@@ -700,7 +734,7 @@ export class WorkflowRunner {
         try {
           const outcome = await orchestrator.run({
             script,
-            args: options.args,
+            args,
             maxWallClockMs: reviewLimits?.maxWallClockMs,
             abortOnTimeout: controller,
             runId,
@@ -832,8 +866,7 @@ export class WorkflowRunner {
           // The run settled, so nothing is left for a later process to
           // claim — even when the snapshot write failed, since a claim would
           // then call a run interrupted that was not.
-          if (checkpointWrite) {
-            await checkpointWrite;
+          if (checkpointWritten) {
             await removeWorkflowCheckpoint(config, runId);
           }
           releasePersistenceActivity();

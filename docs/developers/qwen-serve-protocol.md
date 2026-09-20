@@ -2299,12 +2299,15 @@ falling back to the snapshot's recorded `script` (and no definition name) when
 that path no longer resolves — with the snapshot's `args` and `sourceRef`, and
 it registers in, and reports its completion to, the session that sent the
 action. A `retry` resumes the run's journal under the same run id and applies
-to a `failed` run no process on this machine is still running; a `rerun`
-starts a new run id from any finished run. A history entry carrying
-`argsOmitted` was launched with `args` too large to keep, so neither action
-applies to it. Snapshots written before `args` were kept carry neither field:
-a `rerun` starts them without `args`, but a `retry` cannot tell whether the
-run had args to replay and is refused with `workflow_args_unavailable`.
+to a `failed` run no process on this machine is still running — a checkpoint
+whose recorded writer is verified still running bars it with
+`workflow_run_in_progress`; a `rerun` starts a new run id from any finished
+run. A history entry carrying `argsOmitted` was launched with `args` too large
+to keep, so neither action applies to it. A snapshot that carries neither
+`args` nor `argsRecorded` — one written before `argsRecorded` existed, which
+includes every arg-less run snapshotted by the previous release — cannot vouch
+for what it was launched with: a `rerun` starts it without `args`, but a
+`retry` is refused with `workflow_args_unavailable`.
 `run-script` passes no definition name, so the run is labelled by the script's
 own `export const meta` — a compiled script should declare one, or the run
 shows only its id.
@@ -2314,9 +2317,10 @@ for a started run, `{"changed": true, "status": "<status>"}` for a control
 action that took effect, and `{"changed": false}` when nothing happened:
 Workflow is unavailable for the session (disabled, bare mode, untrusted
 folder), the workspace is untrusted, the saved workflow name is unknown, the
-run id is unknown, or another start is already in flight under the same
-`taskId`. Only overlapping starts are deduplicated: two concurrent
-`run-script` calls under one `taskId` start one run. Once that start returns,
+run id is unknown, the run is still live in another session of this daemon (a
+start of it already in flight there included), or another start is already in
+flight under the same `taskId`. Only overlapping starts are deduplicated: two
+concurrent `run-script` calls under one `taskId` start one run. Once that start returns,
 the key is released; submitting it again can start another run, even if the
 first run is still active. The key does not provide retry idempotency after
 a lost response.
@@ -2330,11 +2334,11 @@ errors carry `workflow_invalid_params` and retain the rejection message.
 These refusals come from the run's stored state rather than the request, and
 are a `409` (`-32602` over ACP, with `data.httpStatus: 409`):
 
-| `code` / `errorKind`           | When                                                                                          | What to do                                                     |
-| ------------------------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `workflow_journal_unavailable` | a `retry` whose run has no journal on disk, or one that cannot be read                        | `rerun` it, which starts it from the beginning                 |
-| `workflow_args_unavailable`    | a history entry that carries `argsOmitted`, or a `retry` of one saved before `args` were kept | start it again with `run-saved` or `run-script` and its `args` |
-| `workflow_run_in_progress`     | a `retry` whose run a still-running process holds a checkpoint for                            | wait for that process to settle the run                        |
+| `code` / `errorKind`           | When                                                                                                                           | What to do                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `workflow_journal_unavailable` | a `retry` whose run has no journal on disk, or one that cannot be read                                                         | `rerun` it, which starts it from the beginning                 |
+| `workflow_args_unavailable`    | a history entry that carries `argsOmitted`, or a `retry` of one whose snapshot records neither `args` nor `argsRecorded`       | start it again with `run-saved` or `run-script` and its `args` |
+| `workflow_run_in_progress`     | a `retry` of a run this daemon no longer tracks in any session, whose checkpoint a still-running process on this machine holds | wait for that process to settle the run                        |
 
 `workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
 `runSavedArgs` and `runScript`; a daemon without them accepts neither the start

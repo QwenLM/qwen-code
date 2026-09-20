@@ -21,7 +21,7 @@
  * after which the run is ordinary history.
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -42,7 +42,7 @@ import {
   isWorkflowMeta,
   persistWorkflowSnapshot,
   readWorkflowSnapshot,
-  snapshotArgs,
+  taskArgsProjection,
   type WorkflowSnapshot,
 } from './workflow-snapshot.js';
 import { WorkflowJournal } from './runtime/workflow-journal.js';
@@ -84,6 +84,14 @@ export interface WorkflowCheckpoint {
   argsOmitted?: true;
   /** The run had no `args`; carried so the claimed snapshot can say so. */
   argsRecorded?: true;
+  /**
+   * The writer process's start in clock ticks since boot (`/proc/<pid>/stat`
+   * field 22), when the platform reports it. A live process at `pid` whose
+   * start differs is not the writer — the pid was recycled — so comparing
+   * them keeps a recycled pid from barring the run's retry forever. Absent
+   * on checkpoints written before this field and on platforms without it.
+   */
+  writerStartTicks?: number;
 }
 
 /** A run a claim found interrupted, with what its notice needs. */
@@ -99,6 +107,7 @@ export function checkpointFromTask(
   task: WorkflowTask,
   context: { sessionId: string; meta: WorkflowMeta | null },
 ): WorkflowCheckpoint {
+  const writerStartTicks = ownProcessStartTicks();
   return {
     v: 1,
     runId: task.runId,
@@ -117,7 +126,8 @@ export function checkpointFromTask(
     ...(task.sourceRunId ? { sourceRunId: task.sourceRunId } : {}),
     ...(task.startMode ? { startMode: task.startMode } : {}),
     tokenBudgetTotal: task.tokenBudgetTotal ?? null,
-    ...snapshotArgs(task.args),
+    ...taskArgsProjection(task),
+    ...(writerStartTicks !== undefined ? { writerStartTicks } : {}),
   };
 }
 
@@ -142,9 +152,12 @@ async function isRunDirSymlinked(
 }
 
 /**
- * Write a run's checkpoint. Best-effort: without one an interrupted run is
- * only invisible, which is how every run behaved before checkpoints, so a
- * failed write must not fail the run.
+ * Write a run's checkpoint, reporting a failure rather than throwing it.
+ * Without one an interrupted run is only invisible, which is how every run
+ * behaved before checkpoints — but the history retry gate reads the
+ * checkpoint as its cross-process proof that the run is live, so a caller
+ * whose run is otherwise persisted (a journal exists) fails the start when
+ * this returns false instead of running invisibly.
  */
 export async function writeWorkflowCheckpoint(
   config: Config,
@@ -239,7 +252,10 @@ function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoint {
     (budget === null ||
       (typeof budget === 'number' && Number.isFinite(budget))) &&
     (value['argsOmitted'] === undefined || value['argsOmitted'] === true) &&
-    (value['argsRecorded'] === undefined || value['argsRecorded'] === true)
+    (value['argsRecorded'] === undefined || value['argsRecorded'] === true) &&
+    (value['writerStartTicks'] === undefined ||
+      (typeof value['writerStartTicks'] === 'number' &&
+        Number.isSafeInteger(value['writerStartTicks'])))
   );
 }
 
@@ -255,6 +271,58 @@ export function isProcessRunning(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * A process's start time in clock ticks since boot, read from
+ * `/proc/<pid>/stat` (field 22; the parenthesized comm may hold spaces, so
+ * the fields are counted from its closing paren). Comparable only against
+ * another read on the same host. `undefined` off Linux or when the file
+ * cannot be read — a caller stays conservative then.
+ */
+export function processStartTicks(pid: number): number | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const commEnd = stat.lastIndexOf(')');
+    if (commEnd < 0) return undefined;
+    const ticks = Number(
+      stat
+        .slice(commEnd + 1)
+        .trim()
+        .split(' ')[19],
+    );
+    return Number.isSafeInteger(ticks) && ticks > 0 ? ticks : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+let ownStartTicks: number | undefined;
+let ownStartTicksKnown = false;
+
+/** This process's {@link processStartTicks}, read once. */
+function ownProcessStartTicks(): number | undefined {
+  if (!ownStartTicksKnown) {
+    ownStartTicks = processStartTicks(process.pid);
+    ownStartTicksKnown = true;
+  }
+  return ownStartTicks;
+}
+
+/**
+ * Whether the process at a checkpoint's `pid` can still be its writer: the
+ * recorded writer start must match the running process's start. A checkpoint
+ * without a recorded start, or a process whose start cannot be read, cannot
+ * be disproved — both answer `true`, keeping the refusal.
+ */
+export function checkpointWriterIdentityMatches(
+  checkpoint: WorkflowCheckpoint,
+  readTicks: (pid: number) => number | undefined = processStartTicks,
+): boolean {
+  if (checkpoint.writerStartTicks === undefined) return true;
+  const current = readTicks(checkpoint.pid);
+  return current === undefined || current === checkpoint.writerStartTicks;
 }
 
 /**

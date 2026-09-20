@@ -125,6 +125,25 @@ describe('workflow parameter errors', () => {
       expect.objectContaining({ error: error.message }),
     );
   });
+
+  // A kind that exists only up the prototype chain is not a workflow
+  // refusal: the mapping must not read inherited keys.
+  it.each(['constructor', '__proto__'] as const)(
+    'does not answer the inherited key %s as a workflow refusal',
+    (errorKind) => {
+      const source = RequestError.invalidParams({ errorKind }, 'odd kind');
+      const { response, status, json } = responseMock();
+      const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+
+      sendBridgeError(response, source, undefined, daemonLog);
+
+      expect(status).not.toHaveBeenCalledWith(409);
+      expect(status).toHaveBeenCalledWith(500);
+      expect(json).not.toHaveBeenCalledWith(
+        expect.objectContaining({ code: errorKind }),
+      );
+    },
+  );
 });
 
 describe('child capacity errors', () => {

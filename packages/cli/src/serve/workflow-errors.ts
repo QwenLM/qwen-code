@@ -10,13 +10,16 @@
  * message instead of collapsing into an internal error:
  *
  * - `workflow_invalid_params`: the request's own input was rejected.
- * - `workflow_args_unavailable`: a run from history was launched with `args`
- *   too large for its snapshot to keep, so it cannot be started again as the
- *   same run.
+ * - `workflow_args_unavailable`: a history run whose snapshot cannot supply
+ *   its launch args — either `argsOmitted` (too large to keep; bars a rerun
+ *   as well as a retry) or one that records neither `args` nor `argsRecorded`
+ *   (bars a retry only) — so it cannot be started again from history.
  * - `workflow_journal_unavailable`: a retry has no journal to resume; a rerun
  *   starts the run from the beginning.
- * - `workflow_run_in_progress`: a checkpoint whose writer may still be alive
- *   says another process is running the run, so it cannot be retried yet.
+ * - `workflow_run_in_progress`: a same-machine checkpoint whose writer is
+ *   verified still running — a live process at its pid whose recorded start
+ *   identity matches — says the run is still running, so it cannot be
+ *   retried yet.
  */
 const WORKFLOW_REQUEST_ERROR_STATUS: Readonly<Record<string, number>> = {
   workflow_invalid_params: 400,

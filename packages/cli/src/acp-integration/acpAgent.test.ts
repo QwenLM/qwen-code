@@ -154,6 +154,11 @@ const {
   mockReadWorkflowCheckpoint: vi.fn().mockResolvedValue(undefined),
   mockClaimInterruptedWorkflowRun: vi.fn().mockResolvedValue(undefined),
 }));
+// Conservative default: a checkpoint whose writer cannot be disproved keeps
+// its refusal. Tests override per case.
+const { mockCheckpointWriterIdentityMatches } = vi.hoisted(() => ({
+  mockCheckpointWriterIdentityMatches: vi.fn().mockReturnValue(true),
+}));
 const { mockListSavedWorkflows } = vi.hoisted(() => ({
   mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
 }));
@@ -421,6 +426,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isProcessRunning: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isProcessRunning,
+  isWorkflowRunPersistenceActive: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isWorkflowRunPersistenceActive,
+  checkpointWriterIdentityMatches: mockCheckpointWriterIdentityMatches,
   WorkflowJournalUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).WorkflowJournalUnavailableError,
@@ -1203,6 +1212,7 @@ import {
   sessionIdContext,
   uiTelemetryService,
   WorkflowJournalUnavailableError,
+  isWorkflowRunPersistenceActive,
   type Config,
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
@@ -16813,6 +16823,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mockReadWorkflowSnapshot.mockReset().mockResolvedValue(undefined);
       mockReadWorkflowCheckpoint.mockReset().mockResolvedValue(undefined);
       mockClaimInterruptedWorkflowRun.mockReset().mockResolvedValue(undefined);
+      mockCheckpointWriterIdentityMatches.mockReset().mockReturnValue(true);
     });
 
     it('retries a failed run from its snapshot, resuming its journal under the same run id', async () => {
@@ -16896,7 +16907,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    it('starts a snapshot written before args were kept without args', async () => {
+    it('starts a snapshot that records neither args nor argsRecorded without args', async () => {
       const daemon = await startDaemon();
       const legacy = historical();
       delete (legacy as { args?: unknown }).args;
@@ -16911,10 +16922,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    it('refuses to retry a snapshot written before args were kept', async () => {
+    it('refuses to retry a snapshot that records neither args nor argsRecorded', async () => {
       const sdk = await actualSdk();
       const daemon = await startDaemon();
-      // The legacy snapshot carries neither `args` nor `argsOmitted`, so a
+      // The snapshot carries neither `args` nor `argsRecorded`, so a
       // retry cannot tell whether the run had any: resuming with `args:
       // undefined` would replay nothing and re-run everything under the
       // original run id.
@@ -17003,12 +17014,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    it('does not retry a run whose checkpoint shows another process still running it', async () => {
+    it('does not retry a run whose checkpoint this process still holds', async () => {
       const sdk = await actualSdk();
       const daemon = await startDaemon();
       mockReadWorkflowSnapshot.mockResolvedValue(historical());
       // The claim found its writer alive and left the checkpoint in place:
-      // this machine's hostname, and this process's own pid cannot be dead.
+      // this machine's hostname, and this process's own pid is this gate's
+      // first arm — the writer cannot be dead.
       mockReadWorkflowCheckpoint.mockResolvedValue({
         v: 1,
         runId,
@@ -17051,6 +17063,143 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({ resumeFromRunId: runId }),
         'deep-review',
       );
+      await daemon.stop();
+    });
+
+    it('does not retry a run whose checkpoint a live process on this machine recorded', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      // The writer is another live process on this host — the pid is this
+      // process's parent, which is alive and is not this process — and the
+      // recorded writer identity matches the process at the pid.
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: process.ppid,
+        hostname: os.hostname(),
+        startTime: 1_500,
+        writerStartTicks: 111,
+      });
+      mockCheckpointWriterIdentityMatches.mockReturnValue(true);
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_run_in_progress' },
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    // A live process at the checkpoint's pid whose start does not match the
+    // recorded writer's never ran the run — the pid was recycled — so the
+    // checkpoint must not latch the retry shut.
+    it('retries a run whose checkpoint pid a recycled process now holds', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: process.ppid,
+        hostname: os.hostname(),
+        startTime: 1_500,
+        writerStartTicks: 111,
+      });
+      mockCheckpointWriterIdentityMatches.mockReturnValue(false);
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        expect.objectContaining({ resumeFromRunId: runId }),
+        'deep-review',
+      );
+      await daemon.stop();
+    });
+
+    it('retries a run whose checkpoint writer has exited', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      let deadPid = -1;
+      for (let pid = 4_190_000; pid > 3_000_000; pid--) {
+        try {
+          process.kill(pid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+            deadPid = pid;
+            break;
+          }
+        }
+      }
+      expect(deadPid).toBeGreaterThan(0);
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: deadPid,
+        hostname: os.hostname(),
+        startTime: 1_500,
+      });
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+      // A dead writer's identity is never consulted.
+      expect(mockCheckpointWriterIdentityMatches).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    // The checkpoint gate is scoped to `retry`: a rerun starts a fresh run
+    // under a new id, which cannot collide with the live one.
+    it('reruns a run whose checkpoint a live process on this machine recorded', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(
+        historical({ status: 'completed' }),
+      );
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: process.ppid,
+        hostname: os.hostname(),
+        startTime: 1_500,
+      });
+
+      await expect(daemon.act('rerun')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+        taskId: 'wf_5678efab',
+      });
+      const [params] = daemon.buildSessionOwnedBackground.mock.calls[0]!;
+      expect(params).not.toHaveProperty('resumeFromRunId');
+      await daemon.stop();
+    });
+
+    // The claim is what makes a restart-interrupted run readable at all;
+    // inside the run's mutation lock the real claim short-circuits on
+    // isWorkflowRunPersistenceActive, no `failed` snapshot is written, and
+    // the retry reads nothing.
+    it('claims an interrupted run before taking the run mutation lock', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      mockClaimInterruptedWorkflowRun.mockImplementation(async () => {
+        expect(
+          isWorkflowRunPersistenceActive(
+            daemon.innerConfig as unknown as Config,
+            runId,
+          ),
+        ).toBe(false);
+        return undefined;
+      });
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+      expect(mockClaimInterruptedWorkflowRun).toHaveBeenCalled();
       await daemon.stop();
     });
 

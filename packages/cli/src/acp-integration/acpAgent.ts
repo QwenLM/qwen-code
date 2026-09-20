@@ -156,6 +156,7 @@ import {
   resolveSavedWorkflowScript,
   extractAndStripMeta,
   listWorkflowSnapshots,
+  checkpointWriterIdentityMatches,
   claimInterruptedWorkflowRuns,
   claimInterruptedWorkflowRun,
   isProcessRunning,
@@ -15309,7 +15310,10 @@ class QwenAgent implements Agent {
         }
         // A checkpoint the claim above left in place bars the retry only
         // while its writer may still be alive: one of this machine's
-        // processes that is still running (a foreign host's checkpoint is
+        // processes that is still running — and, for a foreign pid, still the
+        // writer, proven by the process start the checkpoint recorded; a live
+        // process at a recycled pid never ran this run, so its checkpoint
+        // must not bar the retry forever (a foreign host's checkpoint is
         // never claimed — its writer cannot be checked — and a dead writer's
         // survives a failed claim; treating either as live would bar the
         // run's retry forever). The refusal is named: the run's state did not
@@ -15319,7 +15323,9 @@ class QwenAgent implements Agent {
           if (
             checkpoint !== undefined &&
             checkpoint.hostname === os.hostname() &&
-            (checkpoint.pid === process.pid || isProcessRunning(checkpoint.pid))
+            (checkpoint.pid === process.pid ||
+              (isProcessRunning(checkpoint.pid) &&
+                checkpointWriterIdentityMatches(checkpoint)))
           ) {
             throw RequestError.invalidParams(
               { errorKind: 'workflow_run_in_progress' },
@@ -15333,11 +15339,12 @@ class QwenAgent implements Agent {
             `Workflow run ${runId} was launched with args too large to keep in its history, so it cannot be ${action === 'retry' ? 'retried' : 'rerun'} from there. Start it again with run-saved or run-script and the original args.`,
           );
         }
-        // A snapshot written before args were kept can say neither that the
-        // run had none nor what they were, so a retry would resume it with
-        // `args: undefined`: nothing replays, every agent re-runs under the
-        // same run id, and the settlement overwrites the run's record. A
-        // rerun starts fresh under a new id, so it stays allowed.
+        // A snapshot carrying neither `args` nor `argsRecorded` can say
+        // neither that the run had none nor what they were, so a retry would
+        // resume it with `args: undefined`: nothing replays, every agent
+        // re-runs under the same run id, and the settlement overwrites the
+        // run's record. A rerun starts fresh under a new id, so it stays
+        // allowed.
         if (
           action === 'retry' &&
           snapshot.args === undefined &&
@@ -15345,7 +15352,7 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(
             { errorKind: 'workflow_args_unavailable' },
-            `Workflow run ${runId} was saved before its history kept the launch args, so a retry cannot tell whether it had any. Start it again with run-saved or run-script and the original args.`,
+            `Workflow run ${runId} was saved before its history recorded whether it had launch args, so a retry cannot tell whether there were any to replay. Start it again with run-saved or run-script and the original args.`,
           );
         }
         return this.startWorkflowRestart(config, action, {

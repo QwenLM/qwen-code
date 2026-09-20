@@ -11,9 +11,11 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import {
   checkpointFromTask,
+  checkpointWriterIdentityMatches,
   claimInterruptedWorkflowRun,
   claimInterruptedWorkflowRuns,
   INTERRUPTED_WORKFLOW_ERROR,
+  processStartTicks,
   readWorkflowCheckpoint,
   removeWorkflowCheckpoint,
   writeWorkflowCheckpoint,
@@ -164,8 +166,19 @@ describe('checkpointFromTask', () => {
       startMode: 'retry',
       tokenBudgetTotal: 5000,
       args: { files: ['a.csv'] },
+      ...(process.platform === 'linux'
+        ? { writerStartTicks: expect.any(Number) }
+        : {}),
     });
   });
+
+  it.skipIf(process.platform !== 'linux')(
+    "records the writer's process start, so a recycled pid can be told apart from it",
+    () => {
+      const cp = checkpointFromTask(task(), { sessionId: 's', meta: null });
+      expect(cp.writerStartTicks).toBe(processStartTicks(process.pid));
+    },
+  );
 
   it('records that there were args it could not keep', () => {
     const big = 'x'.repeat(MAX_SNAPSHOT_ARGS_CHARS);
@@ -186,6 +199,61 @@ describe('checkpointFromTask', () => {
   });
 });
 
+describe('checkpointWriterIdentityMatches', () => {
+  it('cannot disprove a checkpoint that recorded no writer start', () => {
+    expect(checkpointWriterIdentityMatches(checkpoint())).toBe(true);
+  });
+
+  it('cannot disprove a writer whose start cannot be read', () => {
+    expect(
+      checkpointWriterIdentityMatches(
+        checkpoint({ writerStartTicks: 1234 }),
+        () => undefined,
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a live process whose start is the recorded one', () => {
+    expect(
+      checkpointWriterIdentityMatches(
+        checkpoint({ writerStartTicks: 1234 }),
+        () => 1234,
+      ),
+    ).toBe(true);
+  });
+
+  it('does not match a live process started at another time: the pid was recycled', () => {
+    expect(
+      checkpointWriterIdentityMatches(
+        checkpoint({ writerStartTicks: 1234 }),
+        () => 5678,
+      ),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'reads a process start from /proc, consistently and per process',
+    () => {
+      const own = processStartTicks(process.pid);
+      expect(own).toBeGreaterThan(0);
+      expect(processStartTicks(process.pid)).toBe(own);
+      // The parent was started at another time, so it reads differently.
+      expect(processStartTicks(process.ppid)).not.toBe(own);
+      let dead: number | undefined;
+      for (let pid = 4_000_000; pid > 3_000_000 && dead === undefined; pid--) {
+        try {
+          process.kill(pid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') dead = pid;
+        }
+      }
+      if (dead !== undefined) {
+        expect(processStartTicks(dead)).toBeUndefined();
+      }
+    },
+  );
+});
+
 describe('writing and reading a checkpoint', () => {
   it('round-trips, and is gone once removed', async () => {
     await fs.mkdir(path.join(root, RUN_ID));
@@ -198,6 +266,13 @@ describe('writing and reading a checkpoint', () => {
 
     await removeWorkflowCheckpoint(config, RUN_ID);
     expect(await readWorkflowCheckpoint(config, RUN_ID)).toBeUndefined();
+  });
+
+  it('round-trips a recorded writer start', async () => {
+    await fs.mkdir(path.join(root, RUN_ID));
+    const cp = checkpoint({ writerStartTicks: 424_242 });
+    expect(await writeWorkflowCheckpoint(config, cp)).toBe(true);
+    expect(await readWorkflowCheckpoint(config, RUN_ID)).toEqual(cp);
   });
 
   it('ignores a checkpoint that names another run', async () => {

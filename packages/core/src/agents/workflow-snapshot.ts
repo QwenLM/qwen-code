@@ -133,7 +133,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     sourceRunId: task.sourceRunId,
     startMode: task.startMode,
-    ...snapshotArgs(task.args),
+    ...taskArgsProjection(task),
     meta: task.meta,
     status: task.status,
     script: task.script ?? '',
@@ -158,6 +158,21 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     result: safeResult(task.result),
     error: task.error,
   };
+}
+
+/**
+ * The `args` projection a task settles with: its own `args` under
+ * {@link snapshotArgs}, or the `argsOmitted` carried from the run it
+ * resumed — an args-less resume of a run whose args were too large to keep
+ * still cannot supply them, so it must not vouch `argsRecorded` for the run.
+ */
+export function taskArgsProjection(
+  task: Pick<WorkflowTask, 'args' | 'argsOmitted'>,
+): Pick<WorkflowSnapshot, 'args' | 'argsOmitted' | 'argsRecorded'> {
+  if (task.args === undefined && task.argsOmitted === true) {
+    return { argsOmitted: true };
+  }
+  return snapshotArgs(task.args);
 }
 
 /**

@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
   toSnapshot,
+  taskArgsProjection,
   readWorkflowSnapshot,
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
@@ -158,6 +159,35 @@ describe('toSnapshot', () => {
     expect(serialized).not.toContain('PRIVATE_DIFF_SENTINEL');
     expect(toSnapshot(live)).not.toHaveProperty('pendingApprovals');
     expect(toSnapshot(live).events).toEqual(live.events);
+  });
+});
+
+describe('taskArgsProjection', () => {
+  // An args-less resume of a run whose args were too large to keep must not
+  // vouch the run had none: the retry gate admits a snapshot carrying
+  // `argsRecorded`, so the carried marker is what keeps refusing it.
+  it('keeps a carried argsOmitted instead of vouching argsRecorded', () => {
+    expect(taskArgsProjection({ args: undefined, argsOmitted: true })).toEqual({
+      argsOmitted: true,
+    });
+    expect(toSnapshot(task({ args: undefined, argsOmitted: true }))).toEqual(
+      expect.objectContaining({ argsOmitted: true }),
+    );
+    expect(
+      toSnapshot(task({ args: undefined, argsOmitted: true })),
+    ).not.toHaveProperty('argsRecorded');
+  });
+
+  it('vouches argsRecorded for a run that genuinely had none', () => {
+    expect(taskArgsProjection({ args: undefined })).toEqual({
+      argsRecorded: true,
+    });
+  });
+
+  it('keeps the args when the attempt restated them', () => {
+    expect(taskArgsProjection({ args: { a: 1 }, argsOmitted: true })).toEqual({
+      args: { a: 1 },
+    });
   });
 });
 
