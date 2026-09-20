@@ -17,6 +17,7 @@ import {
   getCommandRoots,
   getShellConfiguration,
   hasNonFinalTopLevelBackgroundOperator,
+  hasShellSubstitution,
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
@@ -1602,6 +1603,15 @@ describe('bash word separators (#12089)', () => {
   });
 
   describe('stripShellWrapper', () => {
+    it.each(NON_SEPARATORS)(
+      'keeps trailing %s glued to an unwrapped command',
+      (_name, char) => {
+        const command = `bash -c 'echo $(whoami)'${char}`;
+        expect(stripShellWrapper(command)).toBe(`echo $(whoami)${char}`);
+        expect(hasShellSubstitution(command)).toBe(true);
+      },
+    );
+
     it('does not start a wrapper token at a non-separator', () => {
       // `bash\u00a0-c` is one word to bash, so there is no wrapper to unwrap.
       expect(stripShellWrapper("bash\u00a0-c 'rm -rf /tmp/x'")).toBe(

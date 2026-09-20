@@ -1404,14 +1404,23 @@ function stripSymmetricQuotes(command: string): {
   quote: '"' | "'" | '';
 } {
   const trimmed = trimBashEdgeSeparators(command);
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return {
-      value: trimmed.substring(1, trimmed.length - 1),
-      quote: trimmed[0] as '"' | "'",
-    };
+  const quote = trimmed[0];
+  if (quote === '"' || quote === "'") {
+    let escaped = false;
+    for (let i = 1; i < trimmed.length; i++) {
+      const char = trimmed[i];
+      if (quote === '"' && !escaped && char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (!escaped && char === quote) {
+        return {
+          value: trimmed.slice(1, i) + trimmed.slice(i + 1),
+          quote,
+        };
+      }
+      escaped = false;
+    }
   }
 
   return { value: trimmed, quote: '' };
