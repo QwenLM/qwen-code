@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -155,11 +155,15 @@ function injectCssModules(): Plugin {
 // surfaces the read-only transcript can never render have no business there:
 // the Live Voice dialog and setup card alone are ~200 entries. Matching on the
 // resolved id (not the specifier) keeps this working however the module is
-// imported.
-const LIVE_MESSAGES_MODULE = resolve(__dirname, './client/live/messages.ts');
-const LIVE_MESSAGES_TRANSCRIPT_STUB = resolve(
-  __dirname,
-  './client/live/messages.transcript-stub.ts',
+// imported. Vite's ids use forward slashes on every platform while
+// `path.resolve` returns backslashes on Windows, so both sides go through
+// `normalizePath`: compared raw, the stub would never apply there and the
+// Windows build would blow the budget this exists to protect.
+const LIVE_MESSAGES_MODULE = normalizePath(
+  resolve(__dirname, './client/live/messages.ts'),
+);
+const LIVE_MESSAGES_TRANSCRIPT_STUB = normalizePath(
+  resolve(__dirname, './client/live/messages.transcript-stub.ts'),
 );
 
 function stubTranscriptDeadMessages(): Plugin {
@@ -171,7 +175,7 @@ function stubTranscriptDeadMessages(): Plugin {
         ...options,
         skipSelf: true,
       });
-      return resolved?.id === LIVE_MESSAGES_MODULE
+      return resolved && normalizePath(resolved.id) === LIVE_MESSAGES_MODULE
         ? LIVE_MESSAGES_TRANSCRIPT_STUB
         : null;
     },

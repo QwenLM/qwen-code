@@ -5,7 +5,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../i18n';
@@ -68,9 +68,15 @@ describe('Live Voice messages', () => {
   // while Live strings live here and nothing else asks for them.
   it('are defined and used nowhere outside client/live', () => {
     const offenders = sourceFiles(CLIENT_DIR)
-      .filter((path) => !relative(CLIENT_DIR, path).startsWith('live/'))
-      .filter((path) => LIVE_KEY.test(readFileSync(path, 'utf8')))
-      .map((path) => relative(CLIENT_DIR, path));
+      .map((path) => ({
+        path,
+        segments: relative(CLIENT_DIR, path).split(sep),
+      }))
+      // By path segment, not by a '/'-prefixed string: `relative` returns
+      // `live\messages.ts` on Windows and every Live file would be flagged.
+      .filter(({ segments }) => segments[0] !== 'live')
+      .filter(({ path }) => LIVE_KEY.test(readFileSync(path, 'utf8')))
+      .map(({ segments }) => segments.join('/'));
     expect(offenders).toEqual([]);
   });
 });
