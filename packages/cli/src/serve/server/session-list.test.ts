@@ -8,6 +8,10 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  SessionOrganizationService,
+  GROUP_COLOR_OPTIONS,
+} from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type {
   AcpSessionBridge,
@@ -28,6 +32,7 @@ describe('merged session catalog pagination', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -159,6 +164,84 @@ describe('merged session catalog pagination', () => {
 
     expect(seen).toEqual([2, 1, 0].map((index) => summary(index).sessionId));
     expect(cursor).toBeUndefined();
+  });
+
+  it('keeps legacy organized live-only rows on the first page only', async () => {
+    const { bridge } = bridgeFor([summary(0), summary(1), summary(2)]);
+    const options = { size: 1, view: 'organized' as const, group: 'all' };
+    const first = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      options,
+      { runtimeBaseDir },
+    );
+    expect(first.sessions.map((row) => row.sessionId)).toEqual([
+      summary(2).sessionId,
+    ]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { ...options, cursor: first.nextCursor },
+      { runtimeBaseDir },
+    );
+    expect(second.sessions).toEqual([]);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  it('rejects an unfiltered legacy cursor as a metadata cursor', async () => {
+    const { bridge } = bridgeFor([]);
+    await expect(
+      listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { cursor: '40' },
+        { runtimeBaseDir, paginateMerged: true },
+      ),
+    ).rejects.toThrow('not a valid metadata cursor');
+  });
+
+  it('returns groups from the same snapshot used to organize rows', async () => {
+    await persist(summary(0));
+    const { bridge } = bridgeFor([]);
+    const groups = [
+      {
+        id: 'group-1',
+        name: 'Group',
+        color: 'blue' as const,
+        order: 0,
+        createdAt: summary(0).createdAt,
+        updatedAt: summary(0).createdAt,
+      },
+    ];
+    const snapshot = vi
+      .spyOn(SessionOrganizationService.prototype, 'readSnapshot')
+      .mockResolvedValue({
+        groups,
+        sessions: new Map([
+          [
+            summary(0).sessionId,
+            {
+              groupId: 'group-1',
+              color: null,
+              isPinned: false,
+              updatedAt: summary(0).createdAt,
+            },
+          ],
+        ]),
+      });
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { view: 'organized' },
+      { runtimeBaseDir, paginateMerged: true, includeGroups: true },
+    );
+    expect(snapshot).toHaveBeenCalledOnce();
+    expect(result.sessions[0]?.groupId).toBe('group-1');
+    expect(result.groups).toEqual({
+      groups,
+      colorOptions: [...GROUP_COLOR_OPTIONS],
+    });
   });
 
   it('honors persisted-only reads without querying the live bridge', async () => {

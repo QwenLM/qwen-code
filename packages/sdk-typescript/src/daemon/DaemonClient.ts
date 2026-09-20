@@ -3272,6 +3272,7 @@ export class DaemonClient {
    */
   async listSessionsCatalog(
     request: DaemonSessionCatalogRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<DaemonSessionCatalogResult> {
     const { pageSize, ...options } = request.options ?? {};
     return await this.jsonRequest<DaemonSessionCatalogResult>(
@@ -3287,6 +3288,8 @@ export class DaemonClient {
               : { ...options, size: pageSize },
         },
         mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
       },
     );
   }

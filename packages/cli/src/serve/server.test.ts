@@ -19990,6 +19990,31 @@ describe('createServeApp', () => {
       });
     });
 
+    it('serves the advertised batch catalog through the daemon middleware', async () => {
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: fakeBridge(),
+          boundWorkspace: WS_BOUND,
+          primaryWorkspaceTrusted: true,
+        },
+      );
+      const result = await request(app)
+        .post('/sessions/catalog')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ workspaces: 'all' });
+      expect(result.status).toBe(200);
+      expect(result.body.workspaces).toEqual([
+        expect.objectContaining({
+          workspace: WS_BOUND,
+          cwd: WS_BOUND,
+          sessions: [],
+        }),
+      ]);
+      expect(result.body.workspaces[0].workspaceId).toEqual(expect.any(String));
+    });
+
     it('merges live sessions only on first page (no cursor)', async () => {
       const storedId = '550e8400-e29b-41d4-a716-446655440000';
       await writeStoredSession({

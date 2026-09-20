@@ -2,7 +2,7 @@
 
 [English](daemon-batch-session-catalog.md) | [简体中文](daemon-batch-session-catalog.zh-CN.md)
 
-Status: implementation proposal for [#12249](https://github.com/QwenLM/qwen-code/issues/12249).
+Status: implemented alongside this document for [#12249](https://github.com/QwenLM/qwen-code/issues/12249).
 
 ## Problem and scope
 
@@ -14,9 +14,9 @@ feed are outside this change.
 
 ## Ownership and failure semantics
 
-The new route has **batched persisted-workspace** ownership: an ordered collection
-of independently resolved persisted-workspace operations. This extends the
-[hardening baseline](daemon-multi-workspace-hardening.md) for this route only.
+Each member has **persisted-workspace** ownership under the existing
+[hardening baseline](daemon-multi-workspace-hardening.md). The batch is an ordered
+collection of independently resolved members; it does not add an ownership class.
 Authentication and HTTP admission remain process-global. Each member uses only
 its resolved runtime's bridge, runtime storage directory, and organization
 service; no member falls back to primary. No environment overlay or workspace
@@ -59,7 +59,8 @@ Return `{ workspaces: [...] }` in selection order. Successful members contain
 the existing optional `nextCursor`, `truncated`, and `liveMergeFailed` fields.
 Each session's `workspaceCwd` is normalized to this canonical owner as well.
 When requested, `groups` is the complete existing group catalog, including color
-options. Group IDs are scoped by the enclosing workspace. Error members contain
+options. Organized pages and their requested group catalog use one organization
+snapshot. Group IDs are scoped by the enclosing workspace. Error members contain
 `workspace`, resolved identity when available, and
 `error: { code, message, status }`; they never contain a successful empty page.
 Valid batches return HTTP 200 even with failed members. Malformed envelopes fail
@@ -78,7 +79,8 @@ the page size. Its cursors are not interchangeable with legacy numeric cursors.
 SDK `listSessionsCatalog` exposes the same
 shape, mapping its existing `pageSize` convention to wire `size`. Clients discover
 the capability once and use workspace-qualified APIs for older daemons; catalog
-refresh itself performs one HTTP request.
+refresh itself performs one HTTP request. An optional second SDK argument accepts
+`signal` and `timeoutMs`; these transport options are not sent in the JSON body.
 
 ## Bounds and implementation
 
@@ -86,7 +88,9 @@ Accept 1–20 members, 1–100 sessions per member (default 20), at most four co
 member reads, selectors up to 4096 characters, and cursors up to 16384 characters.
 Group and parent-session filters are limited to 256 characters. The read-only POST
 uses the existing read rate-limit tier and records request telemetry without
-attributing the whole batch to primary.
+attributing the whole batch to primary. Each member read has its own child span
+with the selected workspace hash, preserving per-member scan/cache attributes.
+The request span records member count and whether any returned page is truncated.
 An `all` selection exceeding 20 fails explicitly; callers can split an explicit
 selection. Never silently truncate selected workspaces. Each serialized successful
 member is limited to 512 KiB, bounding a response to approximately 10 MiB plus
@@ -115,7 +119,7 @@ keep this document and its Chinese translation synchronized.
 
 ## Open questions
 
-Maintainers should review the new ownership class, limits, and internal-workspace
-exclusion in the draft PR. These are explicit implementation choices for the
+Maintainers should review the public API, limits, and internal-workspace
+exclusion in this PR. These are explicit implementation choices for the
 requested no-ACP catalog contract; changing internal visibility later requires a
 separate boot-free persisted-read policy.

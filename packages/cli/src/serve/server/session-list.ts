@@ -18,6 +18,10 @@ import {
   type SessionGroupPresetColor,
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
+import {
+  GROUP_COLOR_OPTIONS,
+  type SessionGroupCatalog,
+} from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
@@ -70,6 +74,7 @@ export interface ListWorkspaceSessionsOptions {
 
 export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
+  groups?: SessionGroupCatalog;
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
@@ -100,6 +105,7 @@ export interface ListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
   /** Paginate the combined persisted/live catalog, including unfiltered reads. */
   paginateMerged?: boolean;
+  includeGroups?: boolean;
   /** Runtime root owned by the selected managed workspace. */
   runtimeBaseDir?: string;
   /** Aborts this caller's wait without cancelling other shared waiters. */
@@ -109,6 +115,7 @@ export interface ListWorkspaceSessionsReadOptions {
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
   paginateMerged?: boolean;
+  includeGroups?: boolean;
   runtimeBaseDir: string;
   signal?: AbortSignal;
 }
@@ -368,7 +375,7 @@ function parseMetadataSessionCursor(
   } catch {
     throw new InvalidCursorError(
       cursor,
-      expected.sourceType === undefined ? 'parent' : 'metadata',
+      expected.parentSessionId !== undefined ? 'parent' : 'metadata',
     );
   }
 }
@@ -1134,6 +1141,14 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
   return {
     sessions: page,
+    ...(readOptions.includeGroups
+      ? {
+          groups: {
+            groups: snapshot.groups,
+            colorOptions: [...GROUP_COLOR_OPTIONS],
+          },
+        }
+      : {}),
     ...(nextCursor !== undefined ? { nextCursor } : {}),
     ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
     ...(persisted.truncated ? { truncated: true } : {}),
@@ -1337,6 +1352,9 @@ export async function listWorkspaceSessionsForResponse(
           : {}),
         ...(readOptions.paginateMerged !== undefined
           ? { paginateMerged: readOptions.paginateMerged }
+          : {}),
+        ...(readOptions.includeGroups !== undefined
+          ? { includeGroups: readOptions.includeGroups }
           : {}),
         ...(readOptions.signal !== undefined
           ? { signal: readOptions.signal }

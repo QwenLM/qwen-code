@@ -2830,7 +2830,7 @@ Trusted active lists include live daemon overlay fields such as `clientCount`, `
 
 ### `POST /sessions/catalog`
 
-Read independently paginated session catalogs for several registered workspaces in one request. Pre-flight `session_catalog_batch` once; older daemons retain the workspace-qualified session-list and group endpoints. The route has batched persisted-workspace ownership: authentication and request admission are process-global, while each entry resolves and reads only its owning workspace. It never registers a workspace, creates a session, starts ACP, or falls back to the primary runtime.
+Read independently paginated session catalogs for several registered workspaces in one request. Pre-flight `session_catalog_batch` once; older daemons retain the workspace-qualified session-list and group endpoints. Each batch member has persisted-workspace ownership: authentication and request admission are process-global, while each entry resolves and reads only its owning workspace. It never registers a workspace, creates a session, starts ACP, or falls back to the primary runtime.
 
 ```json
 {
@@ -2869,7 +2869,7 @@ Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `v
       "workspace": "/canonical/workspace-b",
       "error": {
         "code": "workspace_not_found",
-        "message": "Workspace not found",
+        "message": "Workspace is not registered with this daemon.",
         "status": 404
       }
     }

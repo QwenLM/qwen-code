@@ -183,6 +183,19 @@ function makeResponse(): Response {
 }
 
 describe('resolveWorkspaceEntryBySelector', () => {
+  it('rejects relative selectors even when cwd is a registered workspace', () => {
+    const runtime = { ...makeRuntime(), workspaceCwd: process.cwd() };
+    const registry = createWorkspaceRegistry([runtime]);
+    for (const selector of ['.', 'sub/..', '']) {
+      expect(
+        resolveWorkspaceEntryBySelector(registry, selector),
+      ).toBeUndefined();
+    }
+    expect(resolveWorkspaceEntryBySelector(registry, runtime.workspaceId)).toBe(
+      registry.primaryEntry,
+    );
+  });
+
   it('resolves a workspace id before another workspace with the same cwd selector', () => {
     const primary = { ...makeRuntime(), workspaceId: '/work/secondary' };
     const secondary = {

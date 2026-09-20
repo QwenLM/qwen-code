@@ -9,6 +9,11 @@ import { z } from 'zod';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import { SessionOrganizationError } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { runWithoutDebugLogSession } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import {
+  addDaemonRequestAttribute,
+  hashDaemonWorkspace,
+  withDaemonSpan,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import type { SessionGroupCatalog } from '@qwen-code/qwen-code-core';
 import {
   InvalidCursorError,
@@ -188,27 +193,38 @@ export function registerSessionCatalogRoutes(
       }
       try {
         const read = () =>
-          runWithWorkspaceRuntimeStorage(runtime, async () => {
-            const page = await listWorkspaceSessionsForResponse(
-              runtime.bridge,
-              runtime.workspaceCwd,
-              { ...options, cursor },
-              {
-                mergeLive: runtime.trusted,
-                paginateMerged: true,
-                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
-                signal: controller.signal,
-              },
-            );
-            controller.signal.throwIfAborted();
-            if (!isCurrent()) return page;
-            const groups = includeGroups
-              ? await createSessionOrganizationService(
+          withDaemonSpan(
+            'qwen-code.daemon.session_catalog.member',
+            {
+              'qwen-code.workspace.hash': hashDaemonWorkspace(
+                runtime.workspaceCwd,
+              ),
+            },
+            () =>
+              runWithWorkspaceRuntimeStorage(runtime, async () => {
+                const page = await listWorkspaceSessionsForResponse(
+                  runtime.bridge,
                   runtime.workspaceCwd,
-                ).listGroups()
-              : undefined;
-            return { ...page, ...(groups ? { groups } : {}) };
-          });
+                  { ...options, cursor },
+                  {
+                    mergeLive: runtime.trusted,
+                    paginateMerged: true,
+                    includeGroups,
+                    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                    signal: controller.signal,
+                  },
+                );
+                controller.signal.throwIfAborted();
+                if (!isCurrent()) return page;
+                const groups = includeGroups
+                  ? (page.groups ??
+                    (await createSessionOrganizationService(
+                      runtime.workspaceCwd,
+                    ).listGroups()))
+                  : undefined;
+                return { ...page, ...(groups ? { groups } : {}) };
+              }),
+          );
         const page = await (runtime.trusted
           ? read()
           : runWithoutDebugLogSession(read));
@@ -278,7 +294,19 @@ export function registerSessionCatalogRoutes(
           },
         ),
       );
-      if (!controller.signal.aborted) res.status(200).json({ workspaces });
+      if (!controller.signal.aborted) {
+        addDaemonRequestAttribute(
+          'qwen-code.daemon.session_catalog.members',
+          workspaces.length,
+        );
+        addDaemonRequestAttribute(
+          'qwen-code.daemon.session_catalog.truncated',
+          workspaces.some(
+            (member) => 'truncated' in member && member.truncated === true,
+          ),
+        );
+        res.status(200).json({ workspaces });
+      }
     } finally {
       req.off('aborted', abort);
       res.off('close', onClose);

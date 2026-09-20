@@ -5,9 +5,15 @@
  */
 
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import {
+  addDaemonRequestAttribute,
+  hashDaemonWorkspace,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SessionGroupCatalog } from '@qwen-code/qwen-code-core';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { SessionOrganizationError } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { runWithoutDebugLogSession } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
@@ -22,14 +28,28 @@ import {
 import { registerSessionCatalogRoutes } from './session-catalog.js';
 
 const mocks = vi.hoisted(() => ({
-  groups: vi.fn(async () => ({ groups: [], colorOptions: [] })),
+  groups: vi.fn<() => Promise<SessionGroupCatalog>>(),
+  organization: vi.fn(),
+  span: vi.fn(),
+  attribute: vi.fn(),
 }));
+vi.mock(
+  '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/telemetry/daemon-tracing.js')
+    >()),
+    withDaemonSpan: mocks.span,
+    addDaemonRequestAttribute: mocks.attribute,
+  }),
+);
+const memberScope = new AsyncLocalStorage<string>();
 vi.mock('../server/session-list.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../server/session-list.js')>()),
   listWorkspaceSessionsForResponse: vi.fn(async () => ({ sessions: [] })),
 }));
 vi.mock('../session-organization-helpers.js', () => ({
-  createSessionOrganizationService: () => ({ listGroups: mocks.groups }),
+  createSessionOrganizationService: mocks.organization,
 }));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/debugLogger.js',
@@ -64,14 +84,39 @@ function setup(count = 3) {
 const list = vi.mocked(listWorkspaceSessionsForResponse);
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.span.mockImplementation(
+    (
+      _name: string,
+      attributes: Record<string, string>,
+      read: () => Promise<unknown>,
+    ) => memberScope.run(attributes['qwen-code.workspace.hash']!, read),
+  );
+  mocks.attribute.mockReset();
   list.mockResolvedValue({ sessions: [] });
   mocks.groups.mockResolvedValue({ groups: [], colorOptions: [] });
+  mocks.organization.mockReturnValue({ listGroups: mocks.groups });
 });
 
 describe('POST /sessions/catalog', () => {
   it('returns three ordered, independently owned pages and groups in their runtime storage contexts', async () => {
     const h = setup();
-    list.mockImplementation(async (_bridge, cwd, options, readOptions) => {
+    const catalogs = h.runtimes.map((runtime) => ({
+      groups: [
+        {
+          id: 'shared-group-id',
+          name: runtime.workspaceId,
+          color: 'blue' as const,
+          order: 0,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      colorOptions: ['blue' as const],
+    }));
+    list.mockImplementation(async (bridge, cwd, options, readOptions) => {
+      const runtime = h.runtimes.find((item) => item.workspaceCwd === cwd)!;
+      expect(bridge).toBe(runtime.bridge);
+      expect(readOptions?.mergeLive).toBe(runtime.trusted);
       expect(new Storage(cwd).getRuntimeBaseDir()).toBe(
         readOptions?.runtimeBaseDir,
       );
@@ -79,12 +124,15 @@ describe('POST /sessions/catalog', () => {
       expect(readOptions).toMatchObject({ paginateMerged: true });
       return { sessions: [], nextCursor: `next:${cwd}`, truncated: true };
     });
-    mocks.groups.mockImplementation(async () => {
-      expect(
-        h.runtimes.map((runtime) => runtime.sessionRuntimeBaseDir),
-      ).toContain(new Storage('/unused').getRuntimeBaseDir());
-      return { groups: [], colorOptions: [] };
-    });
+    mocks.organization.mockImplementation((cwd: string) => ({
+      listGroups: async () => {
+        const runtime = h.runtimes.find((item) => item.workspaceCwd === cwd)!;
+        expect(new Storage(cwd).getRuntimeBaseDir()).toBe(
+          runtime.sessionRuntimeBaseDir,
+        );
+        return catalogs[h.runtimes.indexOf(runtime)];
+      },
+    }));
     const res = await request(h.app)
       .post('/sessions/catalog')
       .send({
@@ -94,20 +142,79 @@ describe('POST /sessions/catalog', () => {
       });
     expect(res.status).toBe(200);
     expect(res.body.workspaces).toEqual(
-      h.runtimes.map((runtime) => ({
+      h.runtimes.map((runtime, index) => ({
         workspace: runtime.workspaceCwd,
         workspaceId: runtime.workspaceId,
         cwd: runtime.workspaceCwd,
         sessions: [],
         nextCursor: `next:${runtime.workspaceCwd}`,
         truncated: true,
-        groups: { groups: [], colorOptions: [] },
+        groups: catalogs[index],
       })),
     );
     expect(list).toHaveBeenCalledTimes(3);
-    expect(mocks.groups).toHaveBeenCalledTimes(3);
+    expect(mocks.organization.mock.calls.map(([cwd]) => cwd)).toEqual(
+      h.runtimes.map((runtime) => runtime.workspaceCwd),
+    );
     expect(list.mock.calls[2]?.[3]?.mergeLive).toBe(false);
     expect(runWithoutDebugLogSession).toHaveBeenCalledOnce();
+  });
+
+  it('isolates each member scan span and reports batch count and truncation', async () => {
+    const h = setup();
+    const writes: Array<{ scope?: string; key: string; value: unknown }> = [];
+    mocks.attribute.mockImplementation((key: string, value: unknown) => {
+      writes.push({ scope: memberScope.getStore(), key, value });
+    });
+    list.mockImplementation(async (_bridge, cwd) => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      expect(memberScope.getStore()).toBe(hashDaemonWorkspace(cwd));
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.session_list.persisted_sessions',
+        1,
+      );
+      return { sessions: [], truncated: cwd === h.runtimes[1]!.workspaceCwd };
+    });
+    const res = await request(h.app)
+      .post('/sessions/catalog')
+      .send({ workspaces: 'all' });
+    expect(res.status).toBe(200);
+    expect(mocks.span).toHaveBeenCalledTimes(3);
+    expect(writes.filter((write) => write.scope === undefined)).toEqual([
+      {
+        scope: undefined,
+        key: 'qwen-code.daemon.session_catalog.members',
+        value: 3,
+      },
+      {
+        scope: undefined,
+        key: 'qwen-code.daemon.session_catalog.truncated',
+        value: true,
+      },
+    ]);
+    expect(
+      new Set(
+        writes
+          .filter((write) => write.scope !== undefined)
+          .map((write) => write.scope),
+      ).size,
+    ).toBe(3);
+  });
+
+  it('reuses the organized page group catalog without another store read', async () => {
+    const h = setup(1);
+    const groups: SessionGroupCatalog = { groups: [], colorOptions: ['blue'] };
+    list.mockResolvedValueOnce({ sessions: [], groups });
+    const res = await request(h.app)
+      .post('/sessions/catalog')
+      .send({
+        workspaces: 'all',
+        options: { view: 'organized' },
+        includeGroups: true,
+      });
+    expect(res.body.workspaces[0].groups).toEqual(groups);
+    expect(list.mock.calls[0]?.[3]?.includeGroups).toBe(true);
+    expect(mocks.organization).not.toHaveBeenCalled();
   });
 
   it('reads only selected workspaces and preserves each cursor and shared filters', async () => {
@@ -134,6 +241,11 @@ describe('POST /sessions/catalog', () => {
       [h.runtimes[1]!.workspaceCwd, { ...options, cursor: 'page-b' }],
       [h.runtimes[2]!.workspaceCwd, { ...options, cursor: 'page-c' }],
     ]);
+    expect(
+      res.body.workspaces.map(
+        (member: { workspace: string }) => member.workspace,
+      ),
+    ).toEqual(['workspace-1', h.runtimes[2]!.workspaceCwd]);
     expect(mocks.groups).not.toHaveBeenCalled();
   });
 
@@ -156,6 +268,7 @@ describe('POST /sessions/catalog', () => {
         workspaces: [{ workspace: 'workspace-1' }],
       });
     const member = res.body.workspaces[0];
+    expect(member.workspace).toBe('workspace-1');
     expect(member.cwd).toBe(h.runtimes[1]!.workspaceCwd);
     expect(member.sessions[0].workspaceCwd).toBe(member.cwd);
   });
@@ -182,8 +295,16 @@ describe('POST /sessions/catalog', () => {
     expect(
       res.body.workspaces.map((member: { error: unknown }) => member.error),
     ).toEqual([
-      expect.objectContaining({ status: 404, code: 'workspace_not_found' }),
-      expect.objectContaining({ status: 404, code: 'workspace_not_found' }),
+      {
+        status: 404,
+        code: 'workspace_not_found',
+        message: 'Workspace is not registered with this daemon.',
+      },
+      {
+        status: 404,
+        code: 'workspace_not_found',
+        message: 'Workspace is not registered with this daemon.',
+      },
     ]);
     expect(list).not.toHaveBeenCalled();
   });
@@ -284,6 +405,20 @@ describe('POST /sessions/catalog', () => {
   it.each([
     {},
     { workspaces: [] },
+    { workspaces: 'all', unexpected: true },
+    { workspaces: [{ workspace: 'workspace-0', unexpected: true }] },
+    { workspaces: 'all', options: { cursor: 'wrong-level' } },
+    {
+      workspaces: Array.from({ length: 21 }, () => ({
+        workspace: 'workspace-0',
+      })),
+    },
+    { workspaces: [{ workspace: 'x'.repeat(4097) }] },
+    {
+      workspaces: 'all',
+      options: { view: 'organized', group: 'x'.repeat(257) },
+    },
+    { workspaces: 'all', options: { parentSessionId: 'x'.repeat(257) } },
     { workspaces: ['workspace-0'] },
     { workspaces: 'all', options: { size: 101 } },
     { workspaces: 'all', options: { size: 0 } },
@@ -373,7 +508,7 @@ describe('POST /sessions/catalog', () => {
     });
     const pending = request(server)
       .post('/sessions/catalog')
-      .send({ workspaces: 'all' });
+      .send({ workspaces: 'all', includeGroups: true });
     pending.end(() => {});
     try {
       await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(4));

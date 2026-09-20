@@ -45,6 +45,12 @@ interface LegacySessionTelemetryRoute {
 export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
+    path: '/sessions/catalog',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/catalog',
+  },
+  {
+    method: 'POST',
     path: '/session',
     attribution: 'handler_resolved',
     route: 'POST /session',
@@ -580,12 +586,6 @@ export function resolveDaemonTelemetryRoute(
   const legacyRoute = matchLegacySessionTelemetryRoute(req.method, req.path);
   if (legacyRoute) return legacyRoute;
   const path = req.path.replace(/\/$/, '') || '/';
-  if (req.method === 'POST' && /^\/sessions\/catalog$/i.test(path)) {
-    return {
-      route: 'POST /sessions/catalog',
-      attribution: 'handler_resolved',
-    };
-  }
   if (req.method === 'GET' && path === '/daemon/status') {
     return { route: 'GET /daemon/status' };
   }

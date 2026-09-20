@@ -621,16 +621,34 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       workspace: string;
       cursor?: string;
     }>();
-    expectTypeOf<DaemonSessionCatalogRequest['workspaces']>().toEqualTypeOf<
-      'all' | DaemonSessionCatalogWorkspace[]
-    >();
-    expectTypeOf<DaemonSessionCatalogPage>().toMatchTypeOf<Public.DaemonSessionListPage>();
-    expectTypeOf<DaemonSessionCatalogResult['workspaces']>().toEqualTypeOf<
-      Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>
-    >();
+    expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
+      workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      includeGroups?: boolean;
+    }>();
+    expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
+      sessions: Public.DaemonSessionSummary[];
+      nextCursor?: string;
+      liveMergeFailed?: boolean;
+      truncated?: boolean;
+      workspace: string;
+      workspaceId: string;
+      cwd: string;
+      groups?: Public.DaemonSessionGroupCatalog;
+    }>();
+    expectTypeOf<DaemonSessionCatalogError>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId?: string;
+      cwd?: string;
+      error: { code: string; message: string; status: number };
+    }>();
+    expectTypeOf<DaemonSessionCatalogResult>().toEqualTypeOf<{
+      workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
+    }>();
     expectTypeOf<DaemonClient['listSessionsCatalog']>().toEqualTypeOf<
       (
         request: DaemonSessionCatalogRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
       ) => Promise<DaemonSessionCatalogResult>
     >();
   });
