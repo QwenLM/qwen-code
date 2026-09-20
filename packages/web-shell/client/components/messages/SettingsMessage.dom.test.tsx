@@ -1073,4 +1073,39 @@ describe('SettingsMessage user-scope editing', () => {
       }
     },
   );
+
+  it('filters the connections block by builtin:connections alone', () => {
+    const connections = <div data-testid="connections-panel">connections</div>;
+    const state = () => makeState([boolSetting()], vi.fn());
+
+    const excluded = renderPanel(state(), {
+      initialCategory: 'Connections',
+      connections,
+      presentation: { excludeItems: ['builtin:connections'] },
+    });
+    expect(
+      excluded.querySelector('[data-testid="connections-panel"]'),
+    ).toBeNull();
+    expect(excluded.querySelector('nav')?.textContent ?? '').not.toContain(
+      'Connections',
+    );
+
+    const included = renderPanel(state(), {
+      initialCategory: 'Connections',
+      connections,
+      presentation: { includeItems: ['builtin:connections'] },
+    });
+    expect(
+      included.querySelector('[data-testid="connections-panel"]'),
+    ).not.toBeNull();
+
+    const siblingExcluded = renderPanel(state(), {
+      initialCategory: 'Connections',
+      connections,
+      presentation: { excludeItems: ['builtin:model-management'] },
+    });
+    expect(
+      siblingExcluded.querySelector('[data-testid="connections-panel"]'),
+    ).not.toBeNull();
+  });
 });

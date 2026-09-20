@@ -97,8 +97,27 @@ test('live daemon settings honor host inclusion and exclusion lists @smoke', asy
         json: { error: 'not available in fixture' },
       }),
     );
-    const cases = [
-      { name: 'default', exclude: '', empty: false },
+    // Each case declares its own expectations on the descriptor: `baseline`
+    // marks the unfiltered compatibility case, `language` whether the
+    // language row is expected, and `screenshot` which cases produce the
+    // design-doc PNGs, leaving `name` as only the artifact filename.
+    const cases: Array<{
+      name: string;
+      include?: string;
+      exclude?: string;
+      empty: boolean;
+      mobile?: boolean;
+      baseline?: boolean;
+      language?: boolean;
+      screenshot?: boolean;
+    }> = [
+      {
+        name: 'default',
+        exclude: '',
+        empty: false,
+        baseline: true,
+        screenshot: true,
+      },
       {
         name: 'exclude-all',
         exclude: WEB_SHELL_SETTING_ITEM_IDS.join(','),
@@ -108,19 +127,22 @@ test('live daemon settings honor host inclusion and exclusion lists @smoke', asy
         name: 'allowlist-desktop',
         include: 'setting:language,builtin:chat-width',
         empty: false,
+        screenshot: true,
       },
-      { name: 'empty-allowlist', include: '', empty: true },
+      { name: 'empty-allowlist', include: '', empty: true, screenshot: true },
       {
         name: 'conflict',
         include: 'setting:language,builtin:chat-width',
         exclude: 'setting:language',
         empty: false,
+        language: false,
       },
       {
         name: 'allowlist-mobile',
         include: 'setting:language,builtin:chat-width',
         empty: false,
         mobile: true,
+        screenshot: true,
       },
     ];
     for (const scenarioCase of cases) {
@@ -153,7 +175,7 @@ test('live daemon settings honor host inclusion and exclusion lists @smoke', asy
       const nav = page.getByRole('navigation', { name: 'Settings' });
       for (const scope of ['Workspace', 'User']) {
         await page.getByRole('tab', { name: scope, exact: true }).click();
-        if (scenarioCase.name === 'default') {
+        if (scenarioCase.baseline) {
           await nav.getByRole('button', { name: /^Experimental/ }).click();
           await expect(
             page.getByText('Enable Omni Media Delivery', { exact: true }),
@@ -162,7 +184,7 @@ test('live daemon settings honor host inclusion and exclusion lists @smoke', asy
           await expect(nav.getByRole('button')).toHaveCount(0);
           await expect(page.locator('[data-slot="empty"]')).toBeVisible();
         } else {
-          const languageIncluded = scenarioCase.name !== 'conflict';
+          const languageIncluded = scenarioCase.language ?? true;
           await expect(nav.getByRole('button')).toHaveCount(
             languageIncluded ? 2 : 1,
           );
@@ -187,18 +209,13 @@ test('live daemon settings honor host inclusion and exclusion lists @smoke', asy
           ).toHaveCount(0);
         }
       }
-      if (scenarioCase.name === 'default') {
+      if (scenarioCase.baseline) {
         await nav.getByRole('button', { name: /^UI/ }).click();
         await expect(
           page.getByText('Chat width', { exact: true }),
         ).toBeVisible();
       }
-      if (
-        scenarioCase.name === 'default' ||
-        scenarioCase.name === 'allowlist-desktop' ||
-        scenarioCase.name === 'allowlist-mobile' ||
-        scenarioCase.name === 'empty-allowlist'
-      ) {
+      if (scenarioCase.screenshot) {
         await page.screenshot({
           path: testInfo.outputPath(`${scenarioCase.name}.png`),
           fullPage: true,
