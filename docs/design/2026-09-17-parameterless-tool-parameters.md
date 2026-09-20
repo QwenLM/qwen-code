@@ -73,19 +73,22 @@ list, which the converter reduces to `undefined`, and one that declares no
 schema at all, which never receives a schema. A converter-side fix only reaches
 the first.
 
-A third shape is left alone because it already carries the field. An MCP tool
-whose declared schema is `{ "type": "object" }` with no `properties` key — the
-common way an MCP server says "no arguments" — satisfies neither of the two
-conditions the converter reduces on, so `relaxSchemaForFunctionCalling` leaves
-the bare object; the node-repl MCP server declares its kernel-reset tool as
-`{}` and reaches the wire with no `type` either. The repair keys on
-`parameters === undefined`, so it leaves both of those untouched: an opted-in
-request carries the empty-object schema for the tools above and whatever shape
-the server declared for these. The field is present either way, and the TabbyAPI
-run below records HTTP 200 for the bare shape, so this is a shape split rather
-than a rejected request. Filling `properties` on those tools so every
-parameterless tool ships one shape is recorded under Not in scope; the
-user-facing documents qualify the promise the same way.
+A third shape is left alone because it already carries the field: a schema
+declared as `{ "type": "object" }` with no `properties` key. The converter
+reduces only a schema that declares an empty `properties` object, or one whose
+`properties` is absent together with `additionalProperties: false`, so a bare
+object meets neither condition, `relaxSchemaForFunctionCalling` leaves it
+intact, and the repair — which keys on `parameters === undefined` — leaves it
+untouched. An opted-in request therefore carries the empty-object schema for the
+tools above and the declared shape for a tool that publishes this one. The field
+is present either way, and the TabbyAPI run below records HTTP 200 for the bare
+shape, so this is a shape split rather than a rejected request. An MCP tool
+registered with an empty argument list is not an instance of this carve-out: the
+SDK publishes it as `{ "type": "object", "properties": {} }`, which the converter
+does reduce, so the opt-in rewrites it. Filling `properties` on the tools the
+repair leaves alone, so that every parameterless tool ships one shape, is
+recorded under Not in scope; the user-facing documents qualify the promise the
+same way.
 
 ### Shape
 
@@ -118,9 +121,17 @@ hostname-gated, so it applies wherever the user opted in.
 ## Limits and risks
 
 - The provider holds the `ContentGeneratorConfig` it was built with, so the
-  opt-in takes effect on the next model switch or restart, not on the request in
-  flight. The `qwen-oauth` hot-update path copies a fixed field set without
-  rebuilding the provider, and is not a route this opt-in can serve.
+  opt-in is read when the request provider for a route is built. An edit under
+  `modelProviders` is consumed by the settings hot reload: the watcher classifies
+  the change at the `modelProviders` leaf — the longest schema key that is a
+  prefix of the changed path, which does not require a restart — and the listener
+  reloads the model registry and refreshes the auth, which rebuilds the provider,
+  so the value applies to the next request. An edit under `model.generationConfig`
+  has no such consumer, so it applies on the next model switch or restart.
+  Neither reaches a request already in flight, and neither is hot-reloaded in
+  bare mode, where settings are not watched. The `qwen-oauth` hot-update path
+  copies a fixed field set without rebuilding the provider, and is not a route
+  this opt-in can serve.
 - The opt-in is scoped to a route, not inherited by one. A side model — a
   subagent, a fork, or a `baseLlmClient` target — whose `baseUrl` differs from
   the parent's loses the parent's value, and one that shares it keeps it. An

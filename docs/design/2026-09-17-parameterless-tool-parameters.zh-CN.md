@@ -65,15 +65,17 @@ DashScope 自行组装请求，从其合并步骤调用同一份修复。映射�
 以及完全没有声明 schema 的工具（从未获得 schema）。
 在 converter 侧的修复只能覆盖前者。
 
-第三种形状被原样保留，因为它本就带有该字段。MCP 工具声明的 schema 若是
-`{ "type": "object" }` 且没有 `properties` 键 —— 这是 MCP 服务器声明无参数的
-常见写法 —— 就不满足 converter 归约的两个条件，因此
-`relaxSchemaForFunctionCalling` 保留这个裸对象；node-repl 的 MCP 服务器把它的
-kernel-reset 工具声明为 `{}`，上线时连 `type` 也没有。修复以
-`parameters === undefined` 为条件，因此这两种形状都不被改动：开启开关的请求
-对上面那些工具发出空对象 schema，对这些工具则发出服务器自己声明的形状。
-两种情况字段都在，下面的 TabbyAPI 实测记录裸形状为 HTTP 200，
-所以这是形状不一致，而非请求被拒。给这些工具补上 `properties`
+第三种形状被原样保留，因为它本就带有该字段：声明为 `{ "type": "object" }`
+且没有 `properties` 键的 schema。converter 只归约两种情形——声明了空
+`properties` 对象的 schema，或 `properties` 缺失且
+`additionalProperties: false` 的 schema——裸对象两者都不满足，因此
+`relaxSchemaForFunctionCalling` 保留它，以 `parameters === undefined`
+为条件的修复也不改动它。开启开关的请求于是对上面那些工具发出空对象 schema，
+对以这一形状上线的工具则发出其自身声明的形状。两种情况字段都在，
+下面的 TabbyAPI 实测记录裸形状为 HTTP 200，所以这是形状不一致，而非请求被拒。
+以空参数列表注册的 MCP 工具并不属于这一豁免：SDK 会把它发布为
+`{ "type": "object", "properties": {} }`，而这一形状会被 converter 归约，
+因此开启开关后它同样被改写。给这些被保留的工具补上 `properties`
 以使所有无参数工具发出同一形状，已记入下方的不在范围内，
 面向用户的文档也以同样方式限定这一承诺。
 
@@ -105,8 +107,13 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
 
 ## 限制与风险
 
-- provider 持有其构建时的 `ContentGeneratorConfig`，因此该开关在下一次模型切换
-  或重启后生效，而不是作用于正在进行的请求。`qwen-oauth`
+- provider 持有其构建时的 `ContentGeneratorConfig`，因此该开关在构建该路由的
+  请求 provider 时读取。`modelProviders` 下的修改会被设置热重载消费：
+  watcher 按最长前缀把该变更归类到 `modelProviders` 叶节点（它不要求重启），
+  监听器随后重载模型注册表并刷新鉴权，从而重建 provider，
+  因此该取值作用于下一个请求。`model.generationConfig` 下的修改没有这样的
+  消费者，因此在下一次模型切换或重启后生效。两者都不作用于正在进行的请求，
+  且在 bare 模式（不监听设置文件）下都不会热重载。`qwen-oauth`
   的热更新路径只复制固定的字段集合且不重建 provider，也不是该开关能服务的路由。
 - 该开关按路由生效，不会被其它路由继承。子 agent、fork 或 `baseLlmClient` 目标
   这类侧模型，只要其 `baseUrl` 与父级不同就会失去父级的取值，共用同一 `baseUrl`
