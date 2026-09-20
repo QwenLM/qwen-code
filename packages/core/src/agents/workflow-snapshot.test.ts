@@ -16,7 +16,9 @@ import {
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
   deleteWorkflowSnapshot,
+  snapshotArgs,
   MAX_RETAINED_SNAPSHOTS,
+  MAX_SNAPSHOT_ARGS_CHARS,
 } from './workflow-snapshot.js';
 import {
   markWorkflowRunPersistenceActive,
@@ -248,6 +250,48 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
 
     await expect(
       readWorkflowSnapshot({} as Config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+  });
+
+  // A retry keys its journal from a hash of the run's args, so "the run had
+  // none" has to be a recorded fact rather than the absence of a field: a
+  // snapshot from before args were kept looks the same and must be refused.
+  it('records that a run had no args, and rejects a marker that is not true', async () => {
+    expect(snapshotArgs(undefined)).toEqual({ argsRecorded: true });
+    expect(snapshotArgs({ q: 1 })).toEqual({
+      args: { q: 1 },
+      argsRecorded: true,
+    });
+    expect(snapshotArgs('x'.repeat(MAX_SNAPSHOT_ARGS_CHARS + 1))).toEqual({
+      argsOmitted: true,
+    });
+
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_none' }));
+    expect(await readWorkflowSnapshot(config, 'wf_none')).toMatchObject({
+      argsRecorded: true,
+    });
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_none'))?.args,
+    ).toBeUndefined();
+
+    const file = config.storage.getWorkflowRunSnapshotPath('wf_bad_marker');
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        ...JSON.parse(
+          await fs.readFile(
+            config.storage.getWorkflowRunSnapshotPath('wf_none'),
+            'utf8',
+          ),
+        ),
+        runId: 'wf_bad_marker',
+        argsRecorded: 'yes',
+      }),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_bad_marker'),
     ).resolves.toBeUndefined();
   });
 
