@@ -827,7 +827,8 @@ export class DaemonClient {
   // fully-resolved request URL so root and per-workspace scopes never alias
   // (#11604). Entries exist only while a request is pending: this is not a
   // cache, and once the shared promise settles the next caller issues a
-  // fresh request — explicit reloads stay authoritative.
+  // fresh request. A caller arriving while one is still pending shares that
+  // read, so a reload racing an in-flight request is not authoritative.
   private readonly workspaceProvidersInFlight = new Map<
     string,
     Promise<DaemonWorkspaceProvidersStatus>
@@ -1730,7 +1731,11 @@ export class DaemonClient {
    * request is pending. Concurrent callers of the same resource share one
    * request and observe the same value (or the same rejection); a caller
    * arriving after the shared promise settles always triggers a fresh
-   * fetch, so consumer-side `reload()` stays authoritative.
+   * fetch, while a caller arriving while one is pending shares that read
+   * (a reload racing an in-flight request is not authoritative). Dedup is
+   * skipped entirely when the fetch timeout is disabled, because a
+   * consumer-supplied fetch that never settles would otherwise pin the
+   * URL to a dead promise for this client's lifetime.
    */
   requestWorkspaceProviders(
     path: string,
@@ -1749,21 +1754,38 @@ export class DaemonClient {
         return (await res.json()) as DaemonWorkspaceProvidersStatus;
       },
     );
+    // `fetchTimeoutMs: 0` (or Infinity) is the documented "no request
+    // deadline" sentinel: with no bound on the request, an entry whose
+    // promise never settles could never be reclaimed, so fall back to one
+    // request per caller.
+    if (!this.fetchTimeoutMs) return request;
     this.workspaceProvidersInFlight.set(url, request);
     // Drop the entry on settle (single microtask, both outcomes) so a
     // settled request never poisons or delays the next caller. The cleanup
     // handler swallows the rejection for this chain only — every real
     // caller still observes it.
+    const forget = () => {
+      if (this.workspaceProvidersInFlight.get(url) === request) {
+        this.workspaceProvidersInFlight.delete(url);
+      }
+    };
+    // Safety net for a transport that ignores the abort signal: the armed
+    // timeout aborts the fetch but cannot force the promise to settle, so
+    // drop a still-pending entry once the deadline has clearly passed
+    // instead of letting a dead request shadow later callers. Identity-
+    // guarded and never aborts anything on its own.
+    const watchdog = setTimeout(forget, this.fetchTimeoutMs + 1_000);
+    if (typeof watchdog === 'object' && watchdog && 'unref' in watchdog) {
+      (watchdog as { unref: () => void }).unref();
+    }
     request.then(
       () => {
-        if (this.workspaceProvidersInFlight.get(url) === request) {
-          this.workspaceProvidersInFlight.delete(url);
-        }
+        clearTimeout(watchdog);
+        forget();
       },
       () => {
-        if (this.workspaceProvidersInFlight.get(url) === request) {
-          this.workspaceProvidersInFlight.delete(url);
-        }
+        clearTimeout(watchdog);
+        forget();
       },
     );
     return request;
@@ -6384,6 +6406,12 @@ export class DaemonClient {
     this.restoreBudgetGeneration = ++this.capabilitiesGeneration;
     this.capabilitiesRequest = undefined;
     this.capabilityFeatures = undefined;
+    // Dropping in-flight entries makes the next workspace-providers call
+    // start a fresh request, which the disposed transport rejects with
+    // DaemonTransportClosedError — matching how every other post-dispose
+    // request behaves. The settle handlers' identity guard keeps a late
+    // settle from deleting a newer entry after this clear.
+    this.workspaceProvidersInFlight.clear();
     this.transport.dispose();
   }
 
