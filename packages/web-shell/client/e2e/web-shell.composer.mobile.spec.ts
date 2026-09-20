@@ -305,6 +305,30 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveCount(0);
 });
 
+test('history arrows recall the first welcome submission @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('First input from mobile');
+  await page.locator('[data-web-shell-composer-submit]').tap();
+  await completeReplay(page, daemon, scenario.sessionId);
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  await daemon.sendEvent(turnCompleteEvent('prompt-mobile', { id: 11 }));
+  await expect(textarea).toHaveValue('');
+
+  const draft = 'New draft 😀\nsecond line';
+  await textarea.fill(draft);
+  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
+  await expect(textarea).toHaveValue('First input from mobile');
+  await expect(textarea).toBeFocused();
+  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
+  await expect(textarea).toHaveValue(draft);
+  expect(daemon.promptRequests()).toHaveLength(1);
+});
+
 for (const width of [390, 240]) {
   test(`history arrows restore the draft without submitting at ${width}px @smoke`, async ({
     page,

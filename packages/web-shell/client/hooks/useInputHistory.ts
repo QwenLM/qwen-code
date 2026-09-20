@@ -9,7 +9,7 @@ export function getPromptHistoryStorageKey(workspaceCwd?: string): string {
     : DEFAULT_STORAGE_KEY;
 }
 
-function readHistory(storageKey: string): string[] {
+function readHistory(storageKey: string): string[] | null {
   try {
     const raw = localStorage.getItem(storageKey);
     if (!raw) return [];
@@ -18,16 +18,16 @@ function readHistory(storageKey: string): string[] {
       ? parsed.filter((v) => typeof v === 'string')
       : [];
   } catch {
-    return [];
+    return null;
   }
 }
 
 function loadHistory(
   storageKey: string,
   fallbackStorageKey?: string,
-): string[] {
+): string[] | null {
   const history = readHistory(storageKey);
-  return history.length === 0 && fallbackStorageKey
+  return history?.length === 0 && fallbackStorageKey
     ? readHistory(fallbackStorageKey)
     : history;
 }
@@ -38,8 +38,10 @@ function saveHistory(storageKey: string, history: string[]) {
       storageKey,
       JSON.stringify(history.slice(-MAX_HISTORY)),
     );
+    return true;
   } catch {
     // Ignore storage failures in private browsing or restricted contexts.
+    return false;
   }
 }
 
@@ -48,9 +50,9 @@ export function pushInputHistoryEntry(
   text: string,
   fallbackStorageKey?: string,
 ): void {
-  const history = loadHistory(storageKey, fallbackStorageKey);
+  const history = loadHistory(storageKey, fallbackStorageKey) ?? [];
   if (history[history.length - 1] === text) {
-    if (fallbackStorageKey && readHistory(storageKey).length === 0) {
+    if (fallbackStorageKey && readHistory(storageKey)?.length === 0) {
       saveHistory(storageKey, history);
     }
     return;
@@ -72,8 +74,9 @@ export function useInputHistory(
   fallbackStorageKeyRef.current = fallbackStorageKey;
   const historyRef = useRef<string[]>([]);
   const historyLoadedRef = useRef(false);
+  const unsavedHistoryRef = useRef(false);
   if (!historyLoadedRef.current) {
-    historyRef.current = loadHistory(storageKey, fallbackStorageKey);
+    historyRef.current = loadHistory(storageKey, fallbackStorageKey) ?? [];
     historyLoadedRef.current = true;
   }
   const indexRef = useRef<number>(-1);
@@ -104,36 +107,51 @@ export function useInputHistory(
     }
     loadedStorageKeyRef.current = storageKey;
     loadedFallbackStorageKeyRef.current = fallbackStorageKey;
-    historyRef.current = loadHistory(storageKey, fallbackStorageKey);
+    historyRef.current = loadHistory(storageKey, fallbackStorageKey) ?? [];
+    unsavedHistoryRef.current = false;
     indexRef.current = -1;
     draftRef.current = '';
     searchIndexRef.current = -1;
     syncNav();
   }, [fallbackStorageKey, storageKey, syncNav]);
 
+  const readCurrentHistory = useCallback(() => {
+    if (unsavedHistoryRef.current) return historyRef.current;
+    return (
+      loadHistory(storageKeyRef.current, fallbackStorageKeyRef.current) ??
+      historyRef.current
+    );
+  }, []);
+
   const push = useCallback(
     (text: string) => {
-      const h = historyRef.current;
+      const h = readCurrentHistory();
+      historyRef.current = h;
       if (h[h.length - 1] === text) {
         if (
-          fallbackStorageKeyRef.current &&
-          readHistory(storageKeyRef.current).length === 0
+          unsavedHistoryRef.current ||
+          (fallbackStorageKeyRef.current &&
+            readHistory(storageKeyRef.current)?.length === 0)
         ) {
-          saveHistory(storageKeyRef.current, h);
+          unsavedHistoryRef.current = !saveHistory(storageKeyRef.current, h);
         }
         return;
       }
       h.push(text);
       if (h.length > MAX_HISTORY) h.shift();
-      saveHistory(storageKeyRef.current, h);
+      unsavedHistoryRef.current = !saveHistory(storageKeyRef.current, h);
       indexRef.current = -1;
       syncNav();
     },
-    [syncNav],
+    [readCurrentHistory, syncNav],
   );
 
   const navigateUp = useCallback(
     (currentText: string): string | null => {
+      if (indexRef.current === -1) {
+        // A deferred acceptance can write history after the workspace changes.
+        historyRef.current = readCurrentHistory();
+      }
       const h = historyRef.current;
       if (h.length === 0) return null;
 
@@ -149,7 +167,7 @@ export function useInputHistory(
       syncNav();
       return h[indexRef.current];
     },
-    [syncNav],
+    [readCurrentHistory, syncNav],
   );
 
   const navigateDown = useCallback((): string | null => {
@@ -175,48 +193,61 @@ export function useInputHistory(
     syncNav();
   }, [syncNav]);
 
-  const searchReverse = useCallback((query: string): string | null => {
-    const h = historyRef.current;
-    if (h.length === 0 || !query) return null;
+  const searchReverse = useCallback(
+    (query: string): string | null => {
+      if (searchIndexRef.current === -1 && indexRef.current === -1) {
+        historyRef.current = readCurrentHistory();
+      }
+      const h = historyRef.current;
+      if (h.length === 0 || !query) return null;
 
-    const startIdx =
-      searchIndexRef.current === -1 ? h.length - 1 : searchIndexRef.current - 1;
+      const startIdx =
+        searchIndexRef.current === -1
+          ? h.length - 1
+          : searchIndexRef.current - 1;
 
-    if (startIdx < 0) {
+      if (startIdx < 0) {
+        searchIndexRef.current = -1;
+        return null;
+      }
+
+      const lowerQuery = query.toLowerCase();
+      for (let i = startIdx; i >= 0; i--) {
+        if (h[i].toLowerCase().includes(lowerQuery)) {
+          searchIndexRef.current = i;
+          return h[i];
+        }
+      }
+
       searchIndexRef.current = -1;
       return null;
-    }
+    },
+    [readCurrentHistory],
+  );
 
-    const lowerQuery = query.toLowerCase();
-    for (let i = startIdx; i >= 0; i--) {
-      if (h[i].toLowerCase().includes(lowerQuery)) {
-        searchIndexRef.current = i;
-        return h[i];
-      }
-    }
-
-    searchIndexRef.current = -1;
-    return null;
-  }, []);
-
-  const getReverseMatches = useCallback((query: string): string[] => {
-    const lowerQuery = query.trim().toLowerCase();
-    return historyRef.current
-      .slice()
-      .reverse()
-      .filter((item) => !lowerQuery || item.toLowerCase().includes(lowerQuery));
-  }, []);
+  const getReverseMatches = useCallback(
+    (query: string): string[] => {
+      const lowerQuery = query.trim().toLowerCase();
+      return readCurrentHistory()
+        .slice()
+        .reverse()
+        .filter(
+          (item) => !lowerQuery || item.toLowerCase().includes(lowerQuery),
+        );
+    },
+    [readCurrentHistory],
+  );
 
   const getLastEntry = useCallback(
     (filter?: (entry: string) => boolean): string | null => {
-      const h = historyRef.current;
+      const h = readCurrentHistory();
       if (!filter) return h.length > 0 ? h[h.length - 1] : null;
       for (let i = h.length - 1; i >= 0; i--) {
         if (filter(h[i])) return h[i];
       }
       return null;
     },
-    [],
+    [readCurrentHistory],
   );
 
   const resetSearch = useCallback(() => {

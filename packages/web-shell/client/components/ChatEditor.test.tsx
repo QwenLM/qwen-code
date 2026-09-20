@@ -3493,7 +3493,13 @@ describe('ChatEditor mobile composer actions', () => {
       cancelable: true,
     });
     previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(true);
+    expect(pointerDown.defaultPrevented).toBe(false);
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    previous.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
     composerCoreState.focus.mockClear();
     await clickButton('Previous input');
     await clickButton('Next input');
