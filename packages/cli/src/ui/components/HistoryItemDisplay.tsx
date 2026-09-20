@@ -70,6 +70,7 @@ import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { hyperlinkAtCell } from '../utils/hyperlink-at.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
+import { terminalToGrid, snapWideChar } from '../selection/selection-coords.js';
 import { MULTI_CLICK_MS } from '../selection/use-text-selection.js';
 import {
   measureElementPosition,
@@ -303,20 +304,44 @@ export const CollapsibleToolGroupMessage: React.FC<
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
-        if (event.name.endsWith('-press')) {
+        if (
+          event.name.startsWith('scroll-') ||
+          (event.name.endsWith('-press') && event.name !== 'left-press')
+        ) {
           cancelPendingCollapse();
+          pressRef.current = null;
+          lastClickRef.current = null;
+          return;
         }
         if (!canToggle || !ref.current) return;
         if (event.name === 'move') {
+          if (event.button === 'none') return;
+          if (lastClickRef.current?.count === 1) {
+            lastClickRef.current = null;
+          }
+          if (!pressRef.current) return;
+        }
+        const col = event.col - 1;
+        const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
+        const buffer = getScreenBuffer(stdout);
+        const point = snapWideChar(
+          buffer?.frame,
+          buffer
+            ? terminalToGrid(
+                event.col,
+                event.row,
+                stdout.rows ?? buffer.dimensions.height,
+                buffer.dimensions.height,
+              )
+            : { x: col, y: row },
+        );
+        if (event.name === 'move') {
           if (
             pressRef.current &&
-            (event.col !== pressRef.current.col ||
-              event.row !== pressRef.current.row)
+            (point.x !== pressRef.current.col ||
+              point.y !== pressRef.current.row)
           ) {
             pressRef.current = null;
-            if (lastClickRef.current?.count === 1) {
-              lastClickRef.current = null;
-            }
           }
           return;
         }
@@ -326,8 +351,6 @@ export const CollapsibleToolGroupMessage: React.FC<
           return;
         }
         const metrics = measureElementPosition(ref.current);
-        const col = event.col - 1;
-        const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
         const isInsideBounds =
           col >= metrics.x &&
           col < metrics.x + metrics.width &&
@@ -335,22 +358,23 @@ export const CollapsibleToolGroupMessage: React.FC<
           row < metrics.y + metrics.height;
         const isInside = isInsideBounds && (collapsed || row === metrics.y);
         if (event.name === 'left-press') {
+          if (isInsideBounds) cancelPendingCollapse();
           if (!isInside) {
             pressRef.current = null;
             lastClickRef.current = null;
             return;
           }
-          pressRef.current = { col: event.col, row: event.row };
+          pressRef.current = { col: point.x, row: point.y };
           const now = Date.now();
           const previous = lastClickRef.current;
           const near =
             previous !== null &&
-            previous.row === row &&
-            Math.abs(previous.col - col) <= 1 &&
+            previous.row === point.y &&
+            Math.abs(previous.col - point.x) <= 1 &&
             now - previous.time < MULTI_CLICK_MS;
           lastClickRef.current = {
-            col,
-            row,
+            col: point.x,
+            row: point.y,
             time: now,
             count: near ? Math.min(previous.count + 1, 3) : 1,
           };
@@ -358,7 +382,7 @@ export const CollapsibleToolGroupMessage: React.FC<
         }
         const press = pressRef.current;
         pressRef.current = null;
-        if (isInside && press?.col === event.col && press.row === event.row) {
+        if (isInside && press?.col === point.x && press.row === point.y) {
           if (lastClickRef.current?.count !== 1) return;
           if (props.isPending && expanded) return;
           const url = hyperlinkAtCell(

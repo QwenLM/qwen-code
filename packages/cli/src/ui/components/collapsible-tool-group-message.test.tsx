@@ -5,8 +5,8 @@
  */
 
 import { act, useEffect, useState } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { Box } from 'ink';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Box, type ReadonlyFrame } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
@@ -27,6 +27,10 @@ import { ToolCallStatus } from '../types.js';
 import { toggleInSet } from '../utils/toggle-in-set.js';
 import { MULTI_CLICK_MS } from '../selection/use-text-selection.js';
 import {
+  getScreenBuffer,
+  type ScreenBuffer,
+} from '../selection/screen-buffer.js';
+import {
   CollapsibleToolGroupMessage,
   HistoryItemDisplay,
 } from './HistoryItemDisplay.js';
@@ -43,6 +47,10 @@ vi.mock('../hooks/useMouseEvents.js', () => ({
 vi.mock('../utils/measure-element-position.js', () => ({
   layoutRowForEvent: vi.fn(),
   measureElementPosition: vi.fn(),
+}));
+
+vi.mock('../selection/screen-buffer.js', () => ({
+  getScreenBuffer: vi.fn(),
 }));
 
 vi.mock('../utils/hyperlink-at.js', () => ({
@@ -139,7 +147,13 @@ describe('<CollapsibleToolGroupMessage />', () => {
       height: 1,
     });
     vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
-    vi.mocked(hyperlinkAtCell).mockReturnValue(undefined);
+    vi.mocked(hyperlinkAtCell).mockReset().mockReturnValue(undefined);
+    vi.mocked(getScreenBuffer).mockReset().mockReturnValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
   it('renders the underlying hidden-details row', () => {
@@ -242,6 +256,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
   });
 
   it('does not collapse from a click below the expanded header row', () => {
+    vi.useFakeTimers();
     const { handler, lastFrame } = renderCollapsedTool();
 
     act(() => {
@@ -259,6 +274,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
     act(() => {
       expandedHandler?.(mouseEvent('left-press', 5, 2));
       expandedHandler?.(mouseEvent('left-release', 5, 2));
+      vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
     });
 
     expect(lastFrame()).toContain('very long result');
@@ -415,6 +431,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
   });
 
   it('does not collapse a live expanded batch', () => {
+    vi.useFakeTimers();
     const toggleBatch = vi.fn();
     const { lastFrame } = renderWithProviders(
       <ToolDetailsExpandedProvider
@@ -440,10 +457,152 @@ describe('<CollapsibleToolGroupMessage />', () => {
     act(() => {
       handler?.(mouseEvent('left-press', 5));
       handler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
     });
 
     expect(toggleBatch).not.toHaveBeenCalled();
     expect(lastFrame()).toContain('very long result');
+  });
+
+  it('cancels a batch-linked collapse when the group unmounts', () => {
+    vi.useFakeTimers();
+    const toggleBatch = vi.fn();
+    const view = renderWithProviders(
+      <ToolDetailsExpandedProvider
+        value={{ expandedBatchIds: new Set(['batch-unmount']), toggleBatch }}
+      >
+        <VirtualViewportContext.Provider value={true}>
+          <CollapsibleToolGroupMessage
+            toolCalls={[tool]}
+            groupId={1}
+            contentWidth={96}
+            isPending={false}
+            expansionKey="batch-unmount"
+          />
+        </VirtualViewportContext.Provider>
+      </ToolDetailsExpandedProvider>,
+      { settings: collapsedSettings, config: {} as Config },
+    );
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+    });
+    expect(toggleBatch).not.toHaveBeenCalled();
+    act(() => view.unmount());
+    act(() => vi.advanceTimersByTime(MULTI_CLICK_MS + 1));
+    expect(toggleBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['outside columns', 'left-press', 95, 1, true],
+    ['below the group', 'left-press', 5, 8, true],
+    ['same group body', 'left-press', 5, 2, false],
+    ['context menu', 'right-press', 5, 1, false],
+    ['scroll', 'scroll-down', 5, 1, false],
+  ] as const)(
+    'handles %s after arming a collapse',
+    (_label, name, col, row, shouldCollapse) => {
+      vi.useFakeTimers();
+      const { handler, lastFrame } = renderCollapsedTool();
+      act(() => {
+        handler?.(mouseEvent('left-press', 5));
+        handler?.(mouseEvent('left-release', 5));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
+      });
+      vi.mocked(measureElementPosition).mockReturnValue({
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 3,
+      });
+      const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      act(() => {
+        expandedHandler?.(mouseEvent('left-press', 5));
+        expandedHandler?.(mouseEvent('left-release', 5));
+        vi.advanceTimersByTime(30);
+        expandedHandler?.(mouseEvent(name, col, row));
+        if (name === 'left-press') {
+          expandedHandler?.(mouseEvent('left-release', col, row));
+        }
+        vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
+      });
+      expect(lastFrame()?.includes('click to expand')).toBe(shouldCollapse);
+      expect(lastFrame()?.includes('very long result')).toBe(!shouldCollapse);
+    },
+  );
+
+  it.each([
+    [5, 7, false],
+    [7, 8, true],
+    [6, 7, false],
+    [1, 2, false],
+  ] as const)(
+    'uses snapped columns for clicks from %i to %i',
+    (first, second, shouldCollapse) => {
+      vi.useFakeTimers();
+      const cells = [...'Read(中文.md)'].flatMap((value) => {
+        const cell = {
+          type: 'char' as const,
+          value,
+          fullWidth: /[中文]/u.test(value),
+          styles: [],
+          selectable: true,
+          flowId: 1,
+        };
+        return cell.fullWidth
+          ? [cell, { ...cell, value: '', fullWidth: false }]
+          : [cell];
+      });
+      const frame: ReadonlyFrame = {
+        width: cells.length,
+        height: 1,
+        cells: [cells],
+        boundaries: [cells.map(() => null)],
+      };
+      vi.mocked(getScreenBuffer).mockReturnValue({
+        frame,
+        dimensions: { width: frame.width, height: frame.height },
+      } as ScreenBuffer);
+      const { handler, lastFrame } = renderCollapsedTool();
+      act(() => {
+        handler?.(mouseEvent('left-press', 1));
+        handler?.(mouseEvent('left-release', 1));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
+      });
+      const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      act(() => {
+        expandedHandler?.(mouseEvent('left-press', first));
+        expandedHandler?.(mouseEvent('left-release', first));
+        vi.advanceTimersByTime(30);
+        expandedHandler?.(mouseEvent('left-press', second));
+        expandedHandler?.(mouseEvent('left-release', second));
+        vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
+      });
+      expect(lastFrame()?.includes('click to expand')).toBe(shouldCollapse);
+      expect(lastFrame()?.includes('very long result')).toBe(!shouldCollapse);
+    },
+  );
+
+  it('breaks the single-click chain on a held move within the same cell', () => {
+    vi.useFakeTimers();
+    const { handler, lastFrame } = renderCollapsedTool();
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(MULTI_CLICK_MS);
+    });
+    const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    act(() => {
+      expandedHandler?.(mouseEvent('left-press', 5));
+      expandedHandler?.(mouseEvent('move', 5));
+      expandedHandler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(30);
+      expandedHandler?.(mouseEvent('left-press', 5));
+      expandedHandler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
+    });
+    expect(lastFrame()).toContain('click to expand');
   });
 
   it('disables toggling while a context menu is open', async () => {
@@ -570,18 +729,22 @@ describe('<CollapsibleToolGroupMessage />', () => {
   });
 
   it('treats a different row as a new click', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     vi.mocked(measureElementPosition).mockReturnValue({
       x: 0,
       y: 0,
       width: 80,
       height: 2,
     });
+    // Keep the first click collapsed so the second row remains clickable.
     vi.mocked(hyperlinkAtCell).mockReturnValueOnce('https://example.com');
     const { handler, lastFrame } = renderCollapsedTool();
 
     act(() => {
       handler?.(mouseEvent('left-press', 5));
       handler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(30);
       handler?.(mouseEvent('left-press', 5, 2));
       handler?.(mouseEvent('left-release', 5, 2));
     });

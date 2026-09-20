@@ -17,10 +17,14 @@ time, and an expansion hint. Arguments, results, images, and notices remain in
 the history item and are only hidden by the renderer.
 
 In Virtualized History with mouse tracking enabled, clicking the collapsed row
-expands that tool group. Clicking the first row of a completed expanded group
-collapses it again; clicks in result content, link clicks, multi-click text
-selection, drag selection, and context-menu interactions do not toggle the
-group. A live group may be expanded but cannot be collapsed until it completes.
+expands that tool group immediately on release, including the first click of
+multi-click selection. A single click on the first row of a completed expanded
+group collapses it after the multi-click window. A follow-up click in the same
+group, a scroll, or a context-menu press cancels that pending collapse; unrelated
+left clicks outside the group do not. Multi-click detection uses the same
+wide-character-snapped frame coordinates and held-drag rules as text selection.
+Clicks in result content, link clicks, multi-click text selection, drag selection,
+and context-menu interactions do not collapse an expanded group. A live group may be expanded but cannot be collapsed until it completes.
 Scheduler-backed groups keep this state by `batchId` when their live pending row
 becomes committed history; adapter-built groups without a batch id keep it for
 their mounted lifetime. In append-only terminal mode, the row points to
@@ -36,10 +40,14 @@ recording, model context, or serialized history.
 - Verify the setting is schema-registered, visible in `/settings`, and does not
   require restart.
 - Verify a collapsed tool group omits its description and result.
-- Verify one complete click expands a group and another click on its first row
-  collapses it.
-- Verify result-body clicks, link clicks, multi-click selection, drag selection,
-  and context-menu interactions do not toggle a group.
+- Verify one complete click expands immediately, even when it starts a multi-click
+  selection; an independent single click on its first row collapses only after
+  the multi-click window.
+- Advance past that window when verifying that result-body clicks, link clicks,
+  multi-click selection, drag selection, and context-menu interactions do not
+  collapse an expanded group. Cover wide-character boundaries and same-cell drags.
+- Verify outside left clicks preserve a pending collapse, while scrolling and
+  unmounting cancel it without changing shared batch state.
 - Verify a pending group can expand but cannot collapse until it completes.
 - Verify approval prompts and focused/user-initiated shells remain expanded.
 - Verify `Ctrl+O` still forces full detail.
