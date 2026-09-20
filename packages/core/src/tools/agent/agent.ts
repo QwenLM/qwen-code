@@ -911,15 +911,23 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         .join('\n');
     }
 
+    const teamEnabled = this.config.isAgentTeamEnabled();
     // Only advertise team coordination when the experimental
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
-    const teamGuidance = this.config.isAgentTeamEnabled()
+    const teamGuidance = teamEnabled
       ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Named teammates always run concurrently and report through team messaging; omit \`run_in_background\` when spawning one — an explicit \`run_in_background: false\` is rejected, so for an inline blocking result omit \`name\` and use a regular agent instead. Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const todoGuidance = this.config.isTodoWriteEnabled()
       ? '- When a user-visible todo plan exists, set `todo_id` to the ID of the plan node this top-level agent execution implements. Create the todo before launching the agent when practical. Omit `todo_id` for work that is not represented by the current plan.\n'
       : '';
+    // The worktree tail is about `name`, which the schema declares only when
+    // the team feature is on — the same gating `run_in_background`'s teammate
+    // note has. Sent unconditionally it told a non-team session how to
+    // combine `working_dir` with a parameter it had not been given.
+    const teammateWorktreeTail = teamEnabled
+      ? '; named teammates may use one, but must be shut down before it is removed.'
+      : '.';
     const baseDescription = `Launch a specialized agent to handle a complex task autonomously.
 
 Available agent types and the tools they have access to:
@@ -947,7 +955,7 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default; a foreground regular agent returns its result inline. Set \`run_in_background: false\` when the current turn must wait. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches; named teammates may use one, but must be shut down before it is removed.
+- Top-level regular subagents run in the background by default; a foreground regular agent returns its result inline. Set \`run_in_background: false\` when the current turn must wait. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches${teammateWorktreeTail}
 
 ## Working with background agents
 
@@ -959,7 +967,7 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 
 Choose a fork when the task needs substantial context from the parent conversation. Use a regular subagent when a fresh prompt provides enough context.
 A background fork's result arrives through a completion notification; the background-agent rules above apply to background forks unchanged. Forks share the parent's prompt cache, so do not set a different model.
-**Writing a fork prompt.** Forks inherit all or the selected recent window. State what to do and the scope; include older context only when \`fork_turns\` excludes it.
+**Writing a fork prompt.** State what to do and the scope; include older context only when \`fork_turns\` excludes it.
 
 ## Writing the prompt
 
@@ -985,9 +993,8 @@ Make the task, boundaries, context, and expected output explicit. Regular subage
       };
     };
     if (schema.properties) {
-      const teamEnabled = this.config.isAgentTeamEnabled();
-      // The teammate note tracks the flag here too: `isAgentTeamEnabled()`
-      // is re-read on every refresh, so a mid-session toggle that adds or
+      // The teammate note tracks the flag read at the top of this method:
+      // every refresh re-reads it, so a mid-session toggle that adds or
       // removes `name` has to move the note with it.
       if (schema.properties.run_in_background) {
         schema.properties.run_in_background.description =

@@ -1005,6 +1005,28 @@ describe('AgentTool', () => {
       );
     });
 
+    it('gates the description worktree tail on the team feature', async () => {
+      // The tail of that bullet is about `name`, which the schema declares
+      // only when the team feature is on — the same gating the parameter's
+      // teammate note has. Both arms are asserted so the clause cannot be
+      // dropped from the team-enabled description either.
+      const teamOff = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(teamOff.description).toContain(
+        'downgraded to the foreground for nested launches.',
+      );
+      expect(teamOff.description).not.toContain('named teammates may use one');
+
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+      const teamOn = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(teamOn.description).toContain(
+        'named teammates may use one, but must be shut down before it is removed.',
+      );
+    });
+
     it('explains how to continue reusable background agents', async () => {
       const tool = new AgentTool(config);
       await vi.runAllTimersAsync();
