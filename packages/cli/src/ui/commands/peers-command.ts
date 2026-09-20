@@ -105,7 +105,12 @@ function describeRemaining(
 
 export function formatHeldList(
   held: readonly HeldMessage[],
-  expiryMs: number | null = null,
+  /**
+   * How long the given message has left, asked per message: each is
+   * judged on the lifetime configured for the session it is addressed
+   * to, and the countdown shown has to be the one that will happen.
+   */
+  expiryFor: (entry: HeldMessage) => number | null = () => null,
 ): string {
   if (held.length === 0) return 'No messages from other sessions are waiting.';
 
@@ -134,7 +139,7 @@ export function formatHeldList(
       `  ${handle}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
       `      held because ${describeHoldCause(entry.cause, entry.policyScope)}` +
-      describeRemaining(entry, expiryMs)
+      describeRemaining(entry, expiryFor(entry))
     );
   });
 
@@ -349,7 +354,9 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: formatHeldList(held, peerMessaging.getHeldExpiryMs()),
+        content: formatHeldList(held, (entry) =>
+          peerMessaging.getHeldExpiryMs(entry.frame.toSessionId),
+        ),
       };
     }
 

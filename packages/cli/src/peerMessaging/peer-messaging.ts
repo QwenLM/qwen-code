@@ -204,6 +204,13 @@ export interface PeerMessagingOptions {
    * single-session process holds, and here it could mean any of several.
    */
   ownsSessionId?: (id: string) => boolean;
+  /**
+   * This host's own name for the session a message is addressed to, when
+   * it answers to more than one spelling of the same session. See the
+   * gate: it decides which settings a message is judged by and which hold
+   * allowance it counts against.
+   */
+  resolveSessionId?: (toSessionId: string) => string | undefined;
   socketPath?: string;
   /**
    * Overrides the generated inbox token. A test seam like `socketPath`:
@@ -363,6 +370,9 @@ export class PeerMessaging {
       ...(options.ownsSessionId
         ? { ownsSessionId: options.ownsSessionId }
         : {}),
+      ...(options.resolveSessionId
+        ? { resolveSessionId: options.resolveSessionId }
+        : {}),
       deliver: (frame, origin) => messaging.deliver(frame, origin),
       reportDropped: (frame, reason, origin) =>
         dropReceipts.note(frame, origin ?? { selfSent: false }, reason),
@@ -494,11 +504,13 @@ export class PeerMessaging {
   }
 
   /**
-   * How long a held message has to live, in milliseconds, or null when
-   * holds do not expire. Used by `/peers` to show what is left.
+   * How long a held message addressed to `sessionId` has to live, in
+   * milliseconds, or null when holds do not expire for it. Used by
+   * `/peers` to show what is left, and asked per message: a process
+   * holding several sessions gives each its own lifetime.
    */
-  getHeldExpiryMs(): number | null {
-    return this.gate?.getHeldExpiryMs() ?? null;
+  getHeldExpiryMs(sessionId?: string): number | null {
+    return this.gate?.getHeldExpiryMs(sessionId) ?? null;
   }
 
   /**

@@ -373,6 +373,19 @@ export interface InboundGateOptions {
    */
   ownsSessionId?: (id: string) => boolean;
   /**
+   * The host's own name for the session a frame is addressed to, or
+   * undefined when it holds no such session.
+   *
+   * A host can answer to more than one spelling of one session: the ACP
+   * host answers both to the id a session was published under and to the
+   * id it has now, because `/clear` swaps the latter. Those are one
+   * session, and everything below judges them as one — which settings to
+   * read, and which hold allowance the message counts against. Without
+   * this, the gate has only the string on the frame, and two spellings
+   * would read as two sessions, each with its own allowance.
+   */
+  resolveSessionId?: (toSessionId: string) => string | undefined;
+  /**
    * How long a message may sit parked before it expires, in
    * milliseconds, or null to keep it until the session ends. Read on
    * every reschedule rather than captured once, so changing the setting
@@ -551,7 +564,9 @@ export class InboundGate {
     // those are "the user asked for accept".
     let explicit: InboundPolicy | undefined;
     try {
-      const configured = this.options.getPolicySetting(frame?.toSessionId);
+      const configured = this.options.getPolicySetting(
+        this.addressedSessionId(frame),
+      );
       if (configured !== undefined && !isInboundPolicy(configured)) {
         debugLogger.debug(
           `unrecognized crossSessionInbound value (failing closed): ${String(
@@ -560,7 +575,7 @@ export class InboundGate {
         );
         return this.hold(
           'policy-unreadable',
-          this.policyScope(frame?.toSessionId),
+          this.policyScope(this.addressedSessionId(frame)),
         );
       }
       explicit = configured;
@@ -575,7 +590,7 @@ export class InboundGate {
     if (explicit === 'hold') {
       return this.hold(
         'explicit-setting',
-        this.policyScope(frame?.toSessionId),
+        this.policyScope(this.addressedSessionId(frame)),
       );
     }
     if (explicit !== undefined) {
@@ -598,7 +613,7 @@ export class InboundGate {
 
     let mode: ApprovalMode | null;
     try {
-      mode = this.options.getApprovalMode(frame?.toSessionId);
+      mode = this.options.getApprovalMode(this.addressedSessionId(frame));
     } catch (error) {
       debugLogger.debug(
         `approval-mode getter threw (failing closed): ${
@@ -899,12 +914,16 @@ export class InboundGate {
     let dropped = 0;
 
     let misaddressed = 0;
+    // Only for a gate that answers for several sessions: a message for a
+    // session that is no longer one of them has nobody left to decide it,
+    // and judging it by the policy of a session that does not exist would
+    // report a refusal nobody made. A gate that answers for one session
+    // is left exactly as it was — a message pinned to the id it had
+    // before `/clear` keeps waiting in `/peers`, as it always did.
+    const dropMessagesForSessionsThatLeft =
+      this.options.ownsSessionId !== undefined;
     for (const entry of this.held) {
-      // First, before any policy: a message for a session that is no
-      // longer here has nobody left to decide it, and judging it by the
-      // policy of a session that does not exist would report a refusal
-      // nobody made.
-      if (!this.pinStillValid(entry.frame)) {
+      if (dropMessagesForSessionsThatLeft && !this.pinStillValid(entry.frame)) {
         misaddressed += 1;
         this.forgetAdmittedBody(entry.frame, originOf(entry));
         this.recordSettled(entry.frame.msgId, 'misaddressed');
@@ -1026,6 +1045,28 @@ export class InboundGate {
    * session holds now, not the one the frame saw on arrival.
    */
   /**
+   * Which session a frame is for, as the host names it: the answer every
+   * settings reader is asked about, and what the hold cap counts. Falls
+   * back to the frame's own spelling when the host cannot resolve it, so
+   * a host that answers to one spelling needs nothing.
+   */
+  private addressedSessionId(
+    frame: Pick<PeerUserFrame, 'toSessionId'> | undefined,
+  ): string | undefined {
+    const addressed = frame?.toSessionId;
+    if (addressed === undefined) return undefined;
+    const resolve = this.options.resolveSessionId;
+    if (resolve === undefined) return addressed;
+    try {
+      return resolve(addressed) ?? addressed;
+    } catch {
+      // A host that cannot answer leaves the frame's own spelling, which
+      // is what a gate without this reader uses anyway.
+      return addressed;
+    }
+  }
+
+  /**
    * The session a held message counts against for the hold cap.
    *
    * One bucket unless this gate answers for several sessions: a session
@@ -1036,7 +1077,7 @@ export class InboundGate {
    */
   private heldSessionKey(frame: PeerUserFrame): string {
     if (!this.options.ownsSessionId) return '';
-    return frame.toSessionId?.toLowerCase() ?? '';
+    return this.addressedSessionId(frame)?.toLowerCase() ?? '';
   }
 
   private pinStillValid(frame: PeerUserFrame): boolean {
@@ -1195,7 +1236,9 @@ export class InboundGate {
     const survivors: HeldMessage[] = [];
     const expired: HeldMessage[] = [];
     for (const entry of this.held) {
-      const expiryMs = this.getHeldExpiryMs(entry.frame.toSessionId);
+      const expiryMs = this.getHeldExpiryMs(
+        this.addressedSessionId(entry.frame),
+      );
       (expiryMs !== null && this.ageOf(entry) >= expiryMs
         ? expired
         : survivors
@@ -1240,7 +1283,9 @@ export class InboundGate {
     // is not necessarily the next to expire.
     let remaining: number | null = null;
     for (const entry of this.held) {
-      const expiryMs = this.getHeldExpiryMs(entry.frame.toSessionId);
+      const expiryMs = this.getHeldExpiryMs(
+        this.addressedSessionId(entry.frame),
+      );
       if (expiryMs === null) continue;
       const left = expiryMs - this.ageOf(entry);
       if (remaining === null || left < remaining) remaining = left;

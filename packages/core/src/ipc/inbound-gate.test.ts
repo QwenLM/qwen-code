@@ -821,6 +821,38 @@ describe('receipts', () => {
     expect(statuses).toEqual(['held', 'misaddressed']);
   });
 
+  it('leaves a re-judge alone when one session answers for this gate', () => {
+    // A `/clear` swaps the id under a running session, so a message
+    // parked before it is pinned to an id the session no longer answers
+    // to. Re-judging the backlog must not quietly settle it: the user is
+    // watching `/peers`, and the release path already reports
+    // `misaddressed` if they act on it.
+    let currentSessionId = 'session-a';
+    const statuses: string[] = [];
+    let policy: InboundPolicy | undefined = 'hold';
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => policy,
+      getSessionId: () => currentSessionId,
+      deliver: () => {},
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const parked = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+    expect(gate.admit(parked)).toBe('held');
+
+    currentSessionId = 'session-b';
+    expect(gate.reevaluate('approval-mode-changed')).toBe(0);
+    expect(gate.getHeld()).toHaveLength(1);
+    expect(statuses).toEqual(['held']);
+
+    // And the settings still decide it: turning the policy to refuse
+    // denies it, as it did before any of this.
+    policy = 'refuse';
+    gate.reevaluate('settings-changed');
+    expect(gate.getHeld()).toHaveLength(0);
+    expect(statuses).toEqual(['held', 'denied']);
+  });
+
   it('judges a parked frame against the sessions a host still holds', () => {
     // The multi-session shape: no single id to compare, so the release
     // path asks whether the frame's addressee is still one of them — a
@@ -2408,6 +2440,40 @@ describe('a gate for a process hosting several sessions', () => {
     expect(
       host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'relaxed' })),
     ).toBe('held');
+  });
+
+  it('treats every spelling a host answers to as the one session', () => {
+    // The ACP host answers both to the id a session was published under
+    // and to the id it has now: one session, two spellings. Judged apart,
+    // a sender alternating between them would get two hold allowances and
+    // two sets of settings.
+    const asked: Array<string | undefined> = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: (id) => {
+        asked.push(id);
+        return 'hold';
+      },
+      getHeldExpiryMs: () => DEFAULT_HELD_EXPIRY_MS,
+      ownsSessionId: (id) => id === 'published' || id === 'current',
+      resolveSessionId: (id) =>
+        id === 'published' || id === 'current' ? 'published' : undefined,
+      deliver: () => {},
+      reportStatus: () => {},
+    });
+
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      expect(
+        gate.admit(frame({ fromMode: 'bypass', toSessionId: 'published' })),
+      ).toBe('held');
+    }
+    // The other spelling is the same session, so it is full too.
+    expect(
+      gate.admit(frame({ fromMode: 'bypass', toSessionId: 'current' })),
+    ).toBe('dropped');
+    // And the settings were read for the session, not for the spelling.
+    expect(new Set(asked)).toEqual(new Set(['published']));
   });
 
   it('answers a held message whose session is gone misaddressed, not denied', () => {
