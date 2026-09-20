@@ -17,8 +17,10 @@ cleared after the first turn.
 ## Contract
 
 Ordinary and standalone creation accept optional
-`startupConfig: { modelServiceId, reasoningEffort }`. Both properties are required
-when present. Reasoning uses the existing `ReasoningSelection` values, including
+`startupConfig: { modelServiceId, reasoningEffort? }`. `modelServiceId` is required;
+`reasoningEffort` is optional. Omission selects only the model, without calling the
+reasoning setter or substituting `default`, so models without reasoning controls
+are supported. Explicit reasoning uses the existing `ReasoningSelection` values, including
 `default` and `none`, with the composer's existing validation and application
 semantics. Unknown properties, a simultaneous legacy `modelServiceId`, and explicit
 `sessionScope: 'single'` are rejected. Ordinary startup configuration implies
@@ -30,7 +32,10 @@ load/resume and the `create_sub_session` tool schema are outside this PR.
 
 Success returns `modelApplied: true` and `startupConfigApplied`, describing the
 canonical current model selector, requested reasoning selection and effective
-reasoning state. This acknowledges preparation, not an immutable lifetime policy.
+reasoning state when reasoning was explicitly requested. Model-only requests
+return only the confirmed model selector in `startupConfigApplied`; they do not
+claim to have applied a reasoning choice. This acknowledges preparation, not an
+immutable lifetime policy.
 Malformed requests are rejected before workspace mutations. Invalid selections
 fail creation rather than running the initial prompt with a different selection.
 Existing authentication, ownership, timeout and uncertain-outcome errors retain
@@ -67,7 +72,8 @@ existing persistence semantics. The other three PRs are not dependencies.
 
 - Compare actual provider requests from composer-equivalent preparation and the
   new creation API, including tool-loop continuation requests.
-- Cover explicit tiers, `default`, `none`, unsupported choices and shared `none`
+- Cover model-only creation on models without reasoning controls, explicit tiers,
+  `default`, `none`, unsupported choices and shared `none`
   with requested `high`.
 - Confirm standalone commit → selection → release → prompt ordering; preparation
   failures admit zero prompts.

@@ -9,11 +9,11 @@ import type { AcpSessionBridge } from './bridgeTypes.js';
 
 export interface SessionStartupConfig {
   modelServiceId: string;
-  reasoningEffort: ReasoningEffort | 'default' | 'none';
+  reasoningEffort?: ReasoningEffort | 'default' | 'none';
 }
 
 export interface SessionStartupConfigApplied extends SessionStartupConfig {
-  effectiveReasoning:
+  effectiveReasoning?:
     | { state: 'enabled'; effort?: ReasoningEffort }
     | { state: 'disabled' }
     | { state: 'provider-default' };
@@ -32,7 +32,7 @@ export class SessionStartupConfigError extends Error {
 
 function isReasoningSelection(
   value: unknown,
-): value is SessionStartupConfig['reasoningEffort'] {
+): value is NonNullable<SessionStartupConfig['reasoningEffort']> {
   return (
     typeof value === 'string' &&
     ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value)
@@ -54,18 +54,21 @@ export function parseSessionStartupConfig(
     ) ||
     typeof config.modelServiceId !== 'string' ||
     !config.modelServiceId.trim() ||
-    !isReasoningSelection(config.reasoningEffort) ||
+    (config.reasoningEffort !== undefined &&
+      !isReasoningSelection(config.reasoningEffort)) ||
     request.modelServiceId !== undefined ||
     request.sessionScope === 'single'
   ) {
     throw new SessionStartupConfigError(
       'invalid_startup_config',
-      'startupConfig requires modelServiceId and reasoningEffort, without unknown fields, a legacy modelServiceId or single session scope.',
+      'startupConfig requires modelServiceId and an optional valid reasoningEffort, without unknown fields, a legacy modelServiceId or single session scope.',
     );
   }
   return {
     modelServiceId: config.modelServiceId.trim(),
-    reasoningEffort: config.reasoningEffort,
+    ...(config.reasoningEffort !== undefined
+      ? { reasoningEffort: config.reasoningEffort }
+      : {}),
   };
 }
 
@@ -88,6 +91,7 @@ export async function applySessionStartupConfig(
       'The session did not confirm its model selection.',
     );
   }
+  if (config.reasoningEffort === undefined) return { modelServiceId };
   const result = await bridge.setSessionConfigOption(sessionId, {
     sessionId,
     configId: 'reasoning_effort',

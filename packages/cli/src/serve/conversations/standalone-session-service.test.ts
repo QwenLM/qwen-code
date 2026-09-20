@@ -587,6 +587,40 @@ describe('StandaloneSessionService', () => {
     });
   });
 
+  it('prepares a model-only standalone session without a reasoning option', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    const modelServiceId = 'gpt-4.1(openai)';
+    harness.bridge.setSessionConfigOption.mockResolvedValue({
+      configOptions: [{ id: 'model', currentValue: modelServiceId }],
+    });
+    const created = await harness.service.createWithInitialPrompt(
+      { sessionId, startupConfig: { modelServiceId } },
+      'hello',
+    );
+    expect(created.session).toMatchObject({
+      modelApplied: true,
+      startupConfigApplied: { modelServiceId },
+    });
+    expect(created.session.startupConfigApplied).not.toHaveProperty(
+      'reasoningEffort',
+    );
+    expect(created.session.startupConfigApplied).not.toHaveProperty(
+      'effectiveReasoning',
+    );
+    expect(
+      harness.bridge.setSessionConfigOption,
+    ).toHaveBeenCalledExactlyOnceWith(sessionId, {
+      sessionId,
+      configId: 'model',
+      value: modelServiceId,
+    });
+    expect(
+      harness.bridge.releaseManagedConversationBinding,
+    ).toHaveBeenCalledOnce();
+    expect(harness.bridge.sendPrompt).toHaveBeenCalledOnce();
+  });
+
   it('does not release or admit a prompt after startup selection fails', async () => {
     mockDurableStandalone();
     const harness = createHarness();

@@ -14082,7 +14082,7 @@ describe('createServeApp', () => {
       for (const body of [
         { startupConfig, sessionScope: 'single' },
         { startupConfig, modelServiceId: 'legacy' },
-        { startupConfig: { modelServiceId: 'gpt-5.4(openai)' } },
+        { startupConfig: { reasoningEffort: 'high' } },
         { startupConfig: { ...startupConfig, persist: true } },
       ]) {
         const rejected = await request(app)

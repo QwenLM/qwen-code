@@ -193,6 +193,34 @@ describe('DaemonClient standalone sessions', () => {
     });
   });
 
+  it('accepts a model-only standalone confirmation without reasoning fields', async () => {
+    const startupConfig = { modelServiceId: 'gpt-4.1(openai)' };
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? jsonResponse(200, {
+            v: 1,
+            features: ['standalone_sessions_v1', 'session_startup_config'],
+          })
+        : jsonResponse(200, {
+            ...standaloneSession(),
+            modelApplied: true,
+            startupConfigApplied: startupConfig,
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    expect(
+      (
+        await client.createStandaloneSession({
+          sessionId: SESSION_ID,
+          startupConfig,
+        })
+      ).startupConfigApplied,
+    ).toEqual(startupConfig);
+    expect(
+      JSON.parse(calls.find((call) => call.method === 'POST')!.body!),
+    ).toEqual({ sessionId: SESSION_ID, startupConfig });
+  });
+
   it('gates standalone options with their dedicated capability', async () => {
     const { fetch, calls } = recordingFetch(() =>
       capabilityResponse(true, false),

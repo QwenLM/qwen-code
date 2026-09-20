@@ -47,7 +47,8 @@ describe('session startup configuration', () => {
     null,
     [],
     {},
-    { modelServiceId: 'x' },
+    { reasoningEffort: 'high' },
+    { modelServiceId: 'x', reasoningEffort: null },
     { ...startupConfig, reasoningEffort: 'invalid' },
     { ...startupConfig, extra: true },
   ])('rejects malformed configuration %j', (value) => {
@@ -66,6 +67,29 @@ describe('session startup configuration', () => {
     expect(() =>
       parseSessionStartupConfig(startupConfig, { sessionScope: 'single' }),
     ).toThrow();
+  });
+
+  it('only selects the model when reasoning is omitted and no reasoning option exists', async () => {
+    const modelServiceId = 'gpt-4.1(openai)';
+    const setSessionConfigOption = vi.fn().mockResolvedValue({
+      configOptions: options('high', modelServiceId).filter(
+        (option) => option.id === 'model',
+      ),
+    });
+    const config = parseSessionStartupConfig({ modelServiceId })!;
+    expect(config).toEqual({ modelServiceId });
+    expect(
+      await applySessionStartupConfig(
+        { setSessionConfigOption },
+        'session',
+        config,
+      ),
+    ).toEqual({ modelServiceId });
+    expect(setSessionConfigOption).toHaveBeenCalledExactlyOnceWith('session', {
+      sessionId: 'session',
+      configId: 'model',
+      value: modelServiceId,
+    });
   });
 
   it.each(['high', 'none', 'default'])(

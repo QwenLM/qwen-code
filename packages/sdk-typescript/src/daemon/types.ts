@@ -3594,12 +3594,12 @@ export interface SetModelResult {
 /** Creation-only selection; does not change shared defaults or later session behavior. */
 export interface SessionStartupConfig {
   modelServiceId: string;
-  reasoningEffort: ReasoningSelection;
+  reasoningEffort?: ReasoningSelection;
 }
 
 /** Confirmed state after startup preparation, not a lifetime policy. */
 export interface SessionStartupConfigApplied extends SessionStartupConfig {
-  effectiveReasoning:
+  effectiveReasoning?:
     | {
         state: 'enabled';
         effort?: Exclude<ReasoningSelection, 'default' | 'none'>;

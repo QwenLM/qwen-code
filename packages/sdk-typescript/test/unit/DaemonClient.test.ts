@@ -3339,6 +3339,27 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[1]!.body!)).toEqual({ startupConfig });
     });
 
+    it('serializes model-only startup without inventing a reasoning selection', async () => {
+      const modelOnly = { modelServiceId: 'gpt-4.1(openai)' };
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, { v: 1, features: ['session_startup_config'] })
+          : jsonResponse(200, {
+              sessionId: 'new',
+              modelApplied: true,
+              startupConfigApplied: modelOnly,
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const created = await client.createOrAttachSession({
+        startupConfig: modelOnly,
+      });
+      expect(created.startupConfigApplied).toEqual(modelOnly);
+      expect(
+        JSON.parse(calls.find((call) => call.method === 'POST')!.body!),
+      ).toEqual({ startupConfig: modelOnly });
+    });
+
     it('does not create when the daemon lacks startup capability', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { v: 1, features: [] }),

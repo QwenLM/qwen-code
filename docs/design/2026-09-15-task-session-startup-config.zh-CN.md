@@ -13,15 +13,16 @@
 
 ## 契约
 
-普通及 standalone 创建接受可选的 `startupConfig: { modelServiceId, reasoningEffort }`。
-对象存在时两个字段都必填。思考强度复用现有 `ReasoningSelection`，包括 `default`、`none`，
+普通及 standalone 创建接受可选的 `startupConfig: { modelServiceId, reasoningEffort? }`。
+`modelServiceId` 必填，`reasoningEffort` 可选。省略时只选择模型，不调用思考强度 setter，也不自动补 `default`，因此支持没有思考强度控件的模型。显式思考强度复用现有 `ReasoningSelection`，包括 `default`、`none`，
 校验和应用语义与输入框一致。拒绝未知字段、同时提供旧的顶层 `modelServiceId`、显式
 `sessionScope: 'single'`。普通会话的启动配置隐含 `sessionScope: 'thread'`。省略对象完全保留旧 API。
 
 daemon 声明 `session_startup_config` 能力。TypeScript SDK 检查能力并支持 REST 与 daemon ACP HTTP/WS 映射。
 直接子进程 ACP、load/resume 和 `create_sub_session` 工具 schema 不在本 PR 范围内。
 
-成功返回 `modelApplied: true` 和 `startupConfigApplied`，描述当前规范模型选择符、请求档位及实际思考状态。
+成功返回 `modelApplied: true` 和 `startupConfigApplied`，描述当前规范模型选择符；仅显式请求思考强度时才包含请求档位及实际思考状态。
+仅指定模型时，`startupConfigApplied` 只返回已确认的模型选择符，不声称应用过思考强度选择。
 这表示启动准备完成，不代表整个生命周期内不可变。结构错误在任何工作区变更之前拒绝。
 不合法的选择使创建失败，不允许初始提问使用不同配置执行。
 认证、归属、超时与结果不确定错误保留既有语义。
@@ -48,7 +49,7 @@ release 和首条 prompt 放行前准备组合。准备失败沿用已有的本�
 ## 验收
 
 - 比较输入框等效准备流程与新创建 API 的实际 provider 请求，包含工具循环的后续请求。
-- 覆盖显式档位、`default`、`none`、不支持的选择，以及共享为 `none`、请求为 `high`。
+- 覆盖不支持思考强度控件的模型仅指定模型创建、显式档位、`default`、`none`、不支持的选择，以及共享为 `none`、请求为 `high`。
 - 验证 standalone commit → 配置 → release → prompt 顺序；准备失败时 prompt 次数为零。
 - 验证用户/工作区设置和兄弟会话不变、不产生默认值变更事件、第二轮和人工修改沿用现状、legacy 创建兼容。
 - 覆盖旧 daemon、非法请求、工作区归属、断连和清理失败。

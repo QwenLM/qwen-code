@@ -33,12 +33,13 @@ export function validateStartupConfigRequest(request: {
     ) ||
     typeof config.modelServiceId !== 'string' ||
     !config.modelServiceId.trim() ||
-    !isSelection(config.reasoningEffort) ||
+    (config.reasoningEffort !== undefined &&
+      !isSelection(config.reasoningEffort)) ||
     request.modelServiceId !== undefined ||
     request.sessionScope === 'single'
   ) {
     throw new TypeError(
-      'Invalid startupConfig: provide modelServiceId and reasoningEffort without legacy modelServiceId or single session scope.',
+      'Invalid startupConfig: provide modelServiceId and an optional valid reasoningEffort without legacy modelServiceId or single session scope.',
     );
   }
 }
@@ -65,9 +66,11 @@ export function assertStartupConfigApplied(
     typeof applied.modelServiceId !== 'string' ||
     !applied.modelServiceId.trim() ||
     applied.reasoningEffort !== requested.reasoningEffort ||
-    !effectiveValid ||
+    ((requested.reasoningEffort !== undefined || effective !== undefined) &&
+      !effectiveValid) ||
     (requested.reasoningEffort === 'none' && effective?.state !== 'disabled') ||
-    (requested.reasoningEffort !== 'default' &&
+    (requested.reasoningEffort !== undefined &&
+      requested.reasoningEffort !== 'default' &&
       requested.reasoningEffort !== 'none' &&
       (effective?.state !== 'enabled' ||
         effective.effort !== requested.reasoningEffort))
