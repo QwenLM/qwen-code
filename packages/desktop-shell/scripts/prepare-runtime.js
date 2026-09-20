@@ -300,27 +300,24 @@ function stageNodePty(desktopTarget) {
   }
 }
 
-// The exact pinned versions of these packages, read from the checkout the
-// release job installed (QWEN_CODE_ROOT) so the runtime carries what
-// package-lock.json was built against. Returns null when the repo pins none of
-// them, which is how an unsupported target degrades instead of inventing a
-// version the lockfile never tested.
+// The exact versions declared by the checkout the release job installed
+// (QWEN_CODE_ROOT). The source's frozen install already verifies these pins
+// against its lockfile. Returns null when the repo pins none of them, which is
+// how an unsupported target degrades instead of inventing a version.
 function nodePtyPackageSpecs(packageNames) {
   const rootPackage = JSON.parse(
     fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'),
   );
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(sourceRoot, 'package-lock.json'), 'utf8'),
-  );
   const pinned = rootPackage.optionalDependencies ?? {};
   const specs = [];
   for (const packageName of packageNames) {
-    if (!pinned[packageName]) return null;
-    const version =
-      packageLock.packages?.[`node_modules/${packageName}`]?.version;
-    if (!version) {
+    const version = pinned[packageName];
+    if (!version) return null;
+    if (
+      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)
+    ) {
       throw new Error(
-        `node-pty package version is not locked for ${packageName}`,
+        `node-pty package version must be exact for ${packageName}`,
       );
     }
     specs.push(`${packageName}@${version}`);

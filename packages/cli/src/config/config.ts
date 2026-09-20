@@ -1687,7 +1687,7 @@ export async function loadCliConfig(
   const ideMode = settings.ide?.enabled ?? false;
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
+  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1766,12 +1766,19 @@ export async function loadCliConfig(
 
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
+  // Whether a privileged mode was actually asked for (flag or setting). The
+  // AUTO fall-through below is a built-in default, not a request, so an
+  // untrusted folder must not claim it overrode something the caller never set.
+  let approvalModeRequested = false;
   if (argv.approvalMode) {
     approvalMode = parseApprovalModeValue(argv.approvalMode);
+    approvalModeRequested = true;
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
+    approvalModeRequested = true;
   } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
+    approvalModeRequested = true;
   } else if (bareMode || safeMode) {
     // Restricted modes strip permissions/allowlists and are meant to be
     // maximally restrictive, so they keep manual approval rather than the
@@ -1787,9 +1794,11 @@ export async function loadCliConfig(
     approvalMode !== ApprovalMode.DEFAULT &&
     approvalMode !== ApprovalMode.PLAN
   ) {
-    writeStderrLine(
-      `Approval mode overridden to "default" because the current folder is not trusted.`,
-    );
+    if (approvalModeRequested) {
+      writeStderrLine(
+        `Approval mode overridden to "default" because the current folder is not trusted.`,
+      );
+    }
     approvalMode = ApprovalMode.DEFAULT;
   }
 

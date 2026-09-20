@@ -267,7 +267,7 @@ import {
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
   discardAbandonedRemoteWorkspaceAdd,
-  getRemoteWorkspaceAddStep,
+  isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
   selectRemoteWorkspaceLocation,
 } from './config/remote-workspace-add';
@@ -463,8 +463,10 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
+  type WebShellAssistantTurnSettledEvent,
   type WebShellSessionArtifactsChange,
 } from './customization';
+import { useAssistantTurnSettlementProjection } from './assistant-turn-settlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
@@ -1449,6 +1451,12 @@ export interface WebShellProps {
   composerInputVersion?: number;
   /** Called when a session-level event occurs (rename, submit, turn complete). */
   onSessionChange?: (event: SessionChangeEvent) => void;
+  /**
+   * Called for authoritative terminals observed live, or replayed for a prompt
+   * this provider admitted. Multiple mounted providers can report the same
+   * `(sessionId, promptId)`, so hosts should deduplicate by that key.
+   */
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Prepare the immutable payload for a daemon submission. Called once for a
    * direct or queued logical submit, after local command routing and before
@@ -3143,6 +3151,7 @@ export function App({
   composerInput,
   composerInputVersion,
   onSessionChange,
+  onAssistantTurnSettled,
   prepareSubmit,
   onSubmitBefore,
   restartSseOnPrompt,
@@ -3151,6 +3160,7 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -3659,25 +3669,23 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
-  const [initialRemoteWorkspaceAddStep] = useState(() =>
-    standalone ? getRemoteWorkspaceAddStep() : undefined,
+  const [initialRemoteWorkspaceAddActive] = useState(
+    () => standalone && isRemoteWorkspaceAddActive(),
   );
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
-    initialRemoteWorkspaceAddStep === 'browse',
+    initialRemoteWorkspaceAddActive,
   );
   // Browsing the daemon's folders, whether this tab navigated here for it or
   // opened the browser in place.
-  const workspaceBrowseActiveRef = useRef(
-    initialRemoteWorkspaceAddStep === 'browse',
-  );
+  const workspaceBrowseActiveRef = useRef(initialRemoteWorkspaceAddActive);
   useEffect(() => {
     // No marker on a standalone boot means the hand-over that wrote the return
     // location was abandoned (reload or Back), not resumed. Dropping it here
     // keeps a later Cancel in an unrelated Add-workspace dialog from consuming
     // the stale location and navigating the shell away.
-    if (initialRemoteWorkspaceAddStep) clearRemoteWorkspaceAddStep();
+    if (initialRemoteWorkspaceAddActive) clearRemoteWorkspaceAddStep();
     else if (standalone) discardAbandonedRemoteWorkspaceAdd();
-  }, [initialRemoteWorkspaceAddStep, standalone]);
+  }, [initialRemoteWorkspaceAddActive, standalone]);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -4211,7 +4219,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
-  } = useSessionArtifacts();
+  } = useSessionArtifacts(t);
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
   const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
@@ -19736,6 +19744,7 @@ export function App({
                       <SplitView
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
+                        onAssistantTurnSettled={onAssistantTurnSettled}
                         showSessionDetails={
                           (sidebarOptions.sessionActions?.items ??
                             DEFAULT_SESSION_ACTION_ITEMS).includes('details')

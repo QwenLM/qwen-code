@@ -309,6 +309,7 @@ const {
   mockReleaseWebTerminal,
   mockUseWorkspaceSessionLiveState,
   mockUseDaemonSessionActivityBridge,
+  mockUseDaemonActivePromptBridge,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -519,6 +520,7 @@ const {
       tasks: [],
     }),
     loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
+    addArtifact: vi.fn().mockResolvedValue({}),
     loadSession: vi.fn().mockResolvedValue(undefined),
     reloadSession: vi.fn().mockResolvedValue(undefined),
   };
@@ -828,6 +830,7 @@ const {
     mockReleaseDetachedWebTerminal: vi.fn(),
     mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
     mockUseDaemonSessionActivityBridge: vi.fn(),
+    mockUseDaemonActivePromptBridge: vi.fn(),
   };
 });
 
@@ -1758,6 +1761,7 @@ vi.mock('./session-catalog/session-catalog-hooks', () => ({
     authoritative: true,
   }),
   useDaemonSessionActivityBridge: mockUseDaemonSessionActivityBridge,
+  useDaemonActivePromptBridge: mockUseDaemonActivePromptBridge,
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
@@ -7147,6 +7151,7 @@ describe('artifact panel fullscreen', () => {
 
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       'notes.txt',
+      { maxBytes: 256 * 1024 },
     );
     expect(container.textContent).not.toContain(
       'This workspace may have been removed',
@@ -10639,6 +10644,10 @@ beforeEach(() => {
     hasActivePrompt: testState.sessionHasActivePrompt,
     activeWorkState: undefined,
   }));
+  mockUseDaemonActivePromptBridge.mockReset();
+  mockUseDaemonActivePromptBridge.mockImplementation(
+    () => testState.sessionHasActivePrompt,
+  );
   mockWorkspace.status = 'connected';
   mockWorkspace.brand = undefined;
   mockWorkspace.brandSettled = false;
@@ -33336,6 +33345,62 @@ describe('App session callbacks', () => {
       artifactsByTurn: new Map(),
     });
     mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+  });
+
+  it('localizes a registration failure toast for an export reported on the main view', async () => {
+    // The main-view registration hook runs in App's own hook body, above the
+    // I18nProvider App renders — this pins that its toast is still localized.
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const toastRequests: string[] = [];
+    const listener = (event: Event) => {
+      toastRequests.push(
+        (event as CustomEvent<{ message: string }>).detail.message,
+      );
+    };
+    window.addEventListener('qwen:toast-request', listener);
+    try {
+      // mockClear in the file's beforeEach keeps stale once-queues; reset the
+      // two mocks this chain depends on so hydration cannot stall on residue.
+      mockSessionActions.loadArtifacts.mockReset().mockResolvedValue({
+        artifacts: [],
+      });
+      mockSessionActions.addArtifact
+        .mockReset()
+        .mockRejectedValue(new Error('daemon exploded'));
+      testState.blocks = [
+        {
+          id: 'export-result',
+          kind: 'assistant',
+          text: 'Exported',
+          meta: {
+            source: 'slash_command',
+            sessionArtifacts: [
+              {
+                kind: 'file',
+                storage: 'workspace',
+                title: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+                workspacePath: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+              },
+            ],
+          },
+        },
+      ];
+      renderApp();
+      await vi.waitFor(async () => {
+        await flush();
+        expect(mockSessionActions.addArtifact).toHaveBeenCalledTimes(1);
+      });
+      await flush();
+      expect(toastRequests).toEqual([
+        'Could not add exported artifact: daemon exploded',
+      ]);
+    } finally {
+      window.removeEventListener('qwen:toast-request', listener);
+      mockSessionActions.addArtifact.mockReset().mockResolvedValue({});
+    }
   });
 
   it('opens a split pane monitor in the right panel', async () => {

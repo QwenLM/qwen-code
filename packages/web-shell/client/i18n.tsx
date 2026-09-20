@@ -525,6 +525,13 @@ const EN: Messages = {
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
   'artifact.openLink': 'Open link',
+  'artifact.longDocument': 'File is large. Source is shown by default.',
+  'artifact.renderFullPreview': 'Render full preview',
+  'artifact.registrationFailed': (v) =>
+    `Could not add exported artifact: ${v?.message ?? ''}`,
+  'artifact.previewFailed': (v) =>
+    `Could not load preview: ${v?.message ?? ''}`,
+  'artifact.showSource': 'Show source',
   'common.na': 'N/A',
   'common.server': 'Server',
   'common.agent': 'Agent',
@@ -556,7 +563,7 @@ const EN: Messages = {
   'live.setupDescription':
     'Install Qwen Live Host and complete every permission before Live Voice can start.',
   'live.noFallback':
-    'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
+    'This daemon only supports Live Voice through Qwen Live Host; it never falls back to a reduced no-Appshot mode.',
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
   'live.browser.connect': 'Talk in this browser',
   'live.browser.connecting': 'Connecting microphone…',
@@ -595,6 +602,17 @@ const EN: Messages = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
   'settings.liveSetup.apiKeyReplace': 'Enter a new key to replace it',
+  'settings.liveSetup.keyFromEnv': (v) =>
+    `Read from the ${v?.env ?? ''} environment variable of the selected model.`,
+  'settings.liveSetup.keyFromEnvMissing': (v) =>
+    `The selected model reads its key from ${v?.env ?? ''}, which is not set in the daemon's environment.`,
+  'settings.liveSetup.model': 'Realtime model',
+  'settings.liveSetup.modelHint':
+    'Add a model with realtimeOnly: true under modelProviders in your user settings (~/.qwen/settings.json) to choose it here.',
+  'settings.liveSetup.voice': 'Voice',
+  'settings.liveSetup.voiceHint':
+    'A voice name of the selected model. It is checked with the provider when Live Voice is on.',
+  'settings.liveSetup.appliesNextCall': 'Applies to the next call.',
   'settings.liveSetup.configured': 'Configured',
   'settings.liveSetup.notConfigured': 'Required',
   'settings.liveSetup.save': 'Save',
@@ -1013,6 +1031,9 @@ const EN: Messages = {
   'contextUsage.free': 'Free',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
+  'contextUsage.startupContext': 'Startup context',
+  'contextUsage.unattributed': 'Unattributed',
+  'contextUsage.cachedPrefix': 'Cached prefix',
   'contextUsage.mcpTools': 'MCP tools',
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
@@ -1803,7 +1824,6 @@ const EN: Messages = {
   'sidebar.reloadWorkspace': 'Reload runtime',
   'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
-  'sidebar.workspacesOnHost': (v) => `Workspaces on ${v?.host}`,
   'sidebar.sessionsRunning': (v) =>
     `${v?.count ?? 0} running session${v?.count === 1 ? '' : 's'}`,
   'sidebar.sessionsAttention': (v) =>
@@ -4557,6 +4577,11 @@ const ZH: Messages = {
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
   'artifact.openLink': '打开链接',
+  'artifact.longDocument': '文件过大，默认展示源码。',
+  'artifact.renderFullPreview': '完整排版预览',
+  'artifact.registrationFailed': (v) => `无法添加导出文件：${v?.message ?? ''}`,
+  'artifact.previewFailed': (v) => `无法加载预览：${v?.message ?? ''}`,
+  'artifact.showSource': '显示源码',
   'common.na': '不适用',
   'common.server': '服务器',
   'common.agent': '智能体',
@@ -4587,7 +4612,7 @@ const ZH: Messages = {
   'live.setupDescription':
     '安装 Qwen Live Host 并完成全部授权后，才能使用实时语音。',
   'live.noFallback':
-    '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
+    '此 daemon 仅支持通过 Qwen Live Host 使用实时语音，不会降级为缺少 Appshot 的模式。',
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
   'live.browser.connect': '在此浏览器中通话',
   'live.browser.connecting': '正在连接麦克风…',
@@ -4623,6 +4648,17 @@ const ZH: Messages = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
   'settings.liveSetup.apiKeyReplace': '输入新 Key 以替换当前配置',
+  'settings.liveSetup.keyFromEnv': (v) =>
+    `从所选模型的环境变量 ${v?.env ?? ''} 读取。`,
+  'settings.liveSetup.keyFromEnvMissing': (v) =>
+    `所选模型从 ${v?.env ?? ''} 读取 key，但 daemon 的环境里没有设置它。`,
+  'settings.liveSetup.model': 'Realtime 模型',
+  'settings.liveSetup.modelHint':
+    '在用户设置（~/.qwen/settings.json）的 modelProviders 下添加带 realtimeOnly: true 的模型后，即可在此选择。',
+  'settings.liveSetup.voice': '音色',
+  'settings.liveSetup.voiceHint':
+    '所选模型的音色名称。开启 Live Voice 时保存前会先向 provider 校验。',
+  'settings.liveSetup.appliesNextCall': '将在下一次通话生效。',
   'settings.liveSetup.configured': '已配置',
   'settings.liveSetup.notConfigured': '必填',
   'settings.liveSetup.save': '保存',
@@ -5006,6 +5042,9 @@ const ZH: Messages = {
   'contextUsage.free': '空闲',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
+  'contextUsage.startupContext': '启动上下文',
+  'contextUsage.unattributed': '未归因',
+  'contextUsage.cachedPrefix': '缓存前缀',
   'contextUsage.mcpTools': 'MCP 工具',
   'contextUsage.model': '模型',
   'contextUsage.noSession':
@@ -5742,7 +5781,6 @@ const ZH: Messages = {
   'sidebar.reloadWorkspace': '重新加载运行时',
   'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
-  'sidebar.workspacesOnHost': (v) => `${v?.host} 上的工作区`,
   'sidebar.sessionsRunning': (v) => `${v?.count ?? 0} 个会话运行中`,
   'sidebar.sessionsAttention': (v) => `${v?.count ?? 0} 个会话等待处理`,
   'sidebar.sessionsTotal': (v) =>
