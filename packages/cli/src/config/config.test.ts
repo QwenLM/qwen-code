@@ -5568,6 +5568,22 @@ describe('loadCliConfig interactive', () => {
     expect(config.getShouldUseNodePtyShell()).toBe(true);
   });
 
+  it('should keep the interactive shell default for stream-json input', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--prompt',
+      'test',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getShouldUseNodePtyShell()).toBe(true);
+  });
+
   it('should not be interactive if positional prompt words are provided with other flags', async () => {
     process.stdin.isTTY = true;
     process.argv = ['node', 'script.js', '--model', 'gemini-1.5-pro', 'Hello'];

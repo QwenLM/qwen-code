@@ -87,6 +87,10 @@ export interface SettingDefinition {
   label: string;
   category: string;
   requiresRestart: boolean;
+  // Required even when there is no fixed default (use
+  // `default: undefined as <type> | undefined`): it is load-bearing for the
+  // `satisfies SettingsSchema` constraint and `InferSettings` below, and at
+  // runtime it feeds only display and reset paths, never the load path.
   default: SettingsValue;
   description?: string;
   parentKey?: string;
