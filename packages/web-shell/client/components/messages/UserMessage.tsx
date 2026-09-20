@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { formatTimestamp } from '../MessageTimestamp';
 import { FileAttachmentContent } from '../FileAttachmentContent';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
@@ -122,11 +123,11 @@ function parseScheduledTaskRunContent(
 }
 
 function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
-  const { language, t } = useI18n();
+  const { t } = useI18n();
   const triggeredAt = new Date(run.triggeredAt);
   const triggeredAtLabel = Number.isNaN(triggeredAt.getTime())
     ? run.triggeredAt
-    : triggeredAt.toLocaleString(language);
+    : formatTimestamp(triggeredAt.getTime());
   return (
     <div
       className={styles.scheduledTaskRun}

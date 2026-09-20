@@ -32,6 +32,7 @@ import {
   sanitizeControlChars,
 } from './toolFormatting';
 import { Badge } from '../ui/badge';
+import { formatTimestamp } from '../MessageTimestamp';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -1239,7 +1240,7 @@ export function MonitorTaskDetail({
           {currentTask.eventCount > 0 && (
             <MonitorMetric
               label={t('tasks.detail.lastEvent')}
-              value={new Date(currentTask.lastEventTime).toLocaleTimeString()}
+              value={formatTimestamp(currentTask.lastEventTime)}
             />
           )}
           {currentTask.droppedLines > 0 && (

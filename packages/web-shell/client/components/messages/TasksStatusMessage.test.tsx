@@ -40,7 +40,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   }),
 }));
 
-const { TasksStatusMessage } = await import('./TasksStatusMessage');
+const { TasksStatusMessage, MonitorTaskDetail } = await import(
+  './TasksStatusMessage'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -250,6 +252,25 @@ describe('TasksStatusMessage monitor details', () => {
     expect(container.textContent).toContain('prompt-line-0');
     expect(container.textContent).toContain('prompt-line-5');
     expect(container.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('shows the date and seconds for the last monitor event', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorTaskDetail
+            task={monitorTask({
+              lastEventTime: new Date(2026, 5, 13, 9, 8, 7).getTime(),
+            })}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(container.textContent).toContain('2026-06-13 09:08:07');
   });
 
   it('opens an embedded monitor in the right-panel callback', () => {

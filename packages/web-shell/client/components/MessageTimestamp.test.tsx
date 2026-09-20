@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MessageTimestamp, formatTimestamp } from './MessageTimestamp';
@@ -11,7 +11,13 @@ import styles from './MessageTimestamp.module.css';
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(2026, 5, 13, 12, 0, 0));
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -32,37 +38,45 @@ describe('formatTimestamp', () => {
   // (month is 0-based: 5 = June).
   const now = new Date(2026, 5, 13, 12, 0, 0);
 
-  it('shows only HH:mm:ss for a same-day timestamp', () => {
+  it('shows only time for a same-day timestamp', () => {
     const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
     expect(formatTimestamp(ts, now)).toBe('09:08:07');
   });
 
   it('shows full yyyy-MM-dd HH:mm:ss for an earlier day in the same year', () => {
     const ts = new Date(2026, 0, 2, 9, 8, 7).getTime();
-    expect(formatTimestamp(ts, now)).toBe('2026-01-02 09:08:07');
+    expect(formatTimestamp(ts)).toBe('2026-01-02 09:08:07');
+  });
+
+  it('distinguishes dates on either side of local midnight', () => {
+    vi.setSystemTime(new Date(2026, 0, 2, 0, 0, 1));
+    expect(formatTimestamp(new Date(2026, 0, 1, 23, 59, 59).getTime())).toBe(
+      '2026-01-01 23:59:59',
+    );
+    expect(formatTimestamp(new Date(2026, 0, 2, 0, 0, 0).getTime())).toBe(
+      '00:00:00',
+    );
   });
 
   it('shows full yyyy-MM-dd HH:mm:ss for a previous year', () => {
     // Same month/day as `now` but last year — must not be read as "today".
     const ts = new Date(2025, 5, 13, 9, 8, 7).getTime();
-    expect(formatTimestamp(ts, now)).toBe('2025-06-13 09:08:07');
+    expect(formatTimestamp(ts)).toBe('2025-06-13 09:08:07');
   });
 });
 
 describe('MessageTimestamp', () => {
-  it('reveals the wall-clock time as a hover tooltip when a timestamp is set', () => {
-    const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
+  it.each([false, true])('shows the date with chatMode=%s', (chatMode) => {
+    const ts = new Date(2026, 5, 12, 9, 8, 7).getTime();
     const container = render(
-      <MessageTimestamp timestamp={ts}>
+      <MessageTimestamp timestamp={ts} chatMode={chatMode}>
         <div>body</div>
       </MessageTimestamp>,
     );
 
     const tip = container.querySelector('span[aria-hidden="true"]');
     expect(tip).not.toBeNull();
-    // Every variant ends in HH:mm:ss; the leading parts depend on the real
-    // "now", so assert the shape rather than an exact string here.
-    expect(tip?.textContent).toMatch(/\d{2}:\d{2}:\d{2}$/);
+    expect(tip?.textContent).toBe('2026-06-12 09:08:07');
     expect(container.textContent).toContain('body');
   });
 

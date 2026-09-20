@@ -312,7 +312,7 @@ describe('UserMessage', () => {
       'Scheduled task: Review PRs\n' +
       'Task ID: task-1\n' +
       'Schedule: 0 * * * *\n' +
-      'Triggered at: 2026-08-26T07:27:00.000Z\n' +
+      `Triggered at: ${new Date(2026, 7, 26, 7, 27, 0).toISOString()}\n` +
       'Trigger: scheduled\n' +
       'Session: new chat for this run\n\n' +
       'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
@@ -328,6 +328,9 @@ describe('UserMessage', () => {
     expect(
       container.querySelector('[data-web-shell-scheduled-task-run-message]'),
     ).not.toBeNull();
+    expect(container.querySelector('time')?.textContent).toBe(
+      '2026-08-26 07:27:00',
+    );
     expect(container.textContent).toContain('定时任务运行');
     expect(container.textContent).toContain('Review PRs');
     expect(container.textContent).toContain('任务 ID: task-1');
