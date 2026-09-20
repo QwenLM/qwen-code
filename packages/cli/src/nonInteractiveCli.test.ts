@@ -306,6 +306,7 @@ describe('runNonInteractive', () => {
       getTool: vi.fn(),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
+      isDeferredAndHidden: vi.fn().mockReturnValue(false),
     } as unknown as ToolRegistry;
 
     mockBackgroundTaskRegistry = {
@@ -2404,7 +2405,7 @@ describe('runNonInteractive', () => {
     expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
   });
 
-  it('emits direct Goal v2 state before the legacy partial projection', async () => {
+  it('emits Goal v2 state as the only Goal stream event with partial messages on', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('active');
@@ -2426,7 +2427,7 @@ describe('runNonInteractive', () => {
       )
       .map(({ event }) => event?.type)
       .filter((type) => type === 'goal_state' || type === 'active_goal');
-    expect(goalEventTypes).toEqual(['goal_state', 'active_goal']);
+    expect(goalEventTypes).toEqual(['goal_state']);
     expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
@@ -3967,9 +3968,15 @@ describe('runNonInteractive', () => {
         finalize: vi.fn(),
         flush: vi.fn().mockResolvedValue(undefined),
       });
-      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
-        kind: Kind.Read,
-      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name) =>
+          ({ name, kind: Kind.Read }) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name) => name === ToolNames.GET_GOAL || name === ToolNames.UPDATE_GOAL,
+      );
       const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
       mockCoreExecuteToolCall.mockImplementation(
         async (
@@ -3998,12 +4005,16 @@ describe('runNonInteractive', () => {
             : {}),
         }),
       );
-      const goalToolCall = (callId: string, name: string) => ({
+      const goalToolCall = (
+        callId: string,
+        name: string,
+        args: Record<string, unknown> = {},
+      ) => ({
         type: LlmEventType.ToolCallRequest,
         value: {
           callId,
           name,
-          args: {},
+          args,
           isClientInitiated: false,
           prompt_id: 'p-goal',
           goalContext: permit,
@@ -4014,6 +4025,10 @@ describe('runNonInteractive', () => {
           createStreamFromEvents([
             goalToolCall('shell-1', ToolNames.READ_FILE),
             goalToolCall('goal-read', ToolNames.GET_GOAL),
+            goalToolCall('goal-update-bridged', ToolNames.TOOL_CALL, {
+              name: ToolNames.UPDATE_GOAL,
+              arguments: {},
+            }),
             goalToolCall('shell-failed', ToolNames.SHELL),
           ] as unknown as ServerLlmStreamEvent[]),
         )
@@ -4028,6 +4043,10 @@ describe('runNonInteractive', () => {
       expect(optionsByCallId.get('shell-1')).toEqual({ goalContext: permit });
       // ...while the Goal's own reads stay out of the catalog.
       expect(optionsByCallId.get('goal-read')).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+      expect(optionsByCallId.get('goal-update-bridged')).toEqual({
         goalContext: permit,
         provenance: 'goal_runtime',
       });
@@ -4144,6 +4163,94 @@ describe('runNonInteractive', () => {
       expect(started).toBe(total);
       expect(startOrder).toEqual(['tool-1', 'tool-2', 'tool-3']);
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
+    });
+
+    it('uses deferred target identity for headless bridge concurrency and completion tracking', async () => {
+      setupMetricsMock();
+      const targetName = 'mcp__docs__read';
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === targetName
+            ? { name: targetName, kind: Kind.Read }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name: string) => name === targetName,
+      );
+
+      const total = 2;
+      let started = 0;
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          started += 1;
+          if (started === total) openGate();
+          await gate;
+          const response = {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: ToolNames.TOOL_CALL,
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          };
+          await options.onAllToolCallsComplete?.([
+            {
+              status: 'success',
+              request: {
+                ...request,
+                name: targetName,
+                args: request.args['arguments'],
+              },
+              response,
+              durationMs: 1,
+            } as never,
+          ]);
+          return response;
+        },
+      );
+
+      const bridgeEvents = ['bridge-1', 'bridge-2'].map((callId) => ({
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId,
+          name: ToolNames.TOOL_CALL,
+          args: {
+            name: targetName,
+            arguments: { path: callId },
+          },
+          isClientInitiated: false,
+          prompt_id: 'p-bridge-parallel',
+        },
+      })) as ServerLlmStreamEvent[];
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(bridgeEvents))
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'read both',
+        'p-bridge-parallel',
+      );
+
+      expect(started).toBe(total);
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        targetName,
+        { path: 'bridge-1' },
+      );
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        targetName,
+        { path: 'bridge-2' },
+      );
     });
 
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {
@@ -9568,46 +9675,6 @@ describe('formatGoalState', () => {
     expect(output).not.toContain('\r');
     expect(output).not.toContain('\u001b');
     expect(output).not.toContain('\u0007');
-  });
-
-  it('names the checkpoint failure below the stop reason', () => {
-    // The stop reason names the kind of checkpoint failure; only this line
-    // says which one it was.
-    expect(
-      formatGoalState(
-        goalSnapshot({
-          status: 'usage_limited',
-          lastReason: 'Checkpoints stalled.',
-          checkpointStalls: 3,
-          lastCheckpointFailure:
-            'Error: Goal checkpoint verifier timed out after 30000ms',
-        }),
-        'status',
-      ),
-    ).toBe(
-      'Goal usage limited: ship the release notes\nReason: Checkpoints stalled.\nCheckpoint: 3/3 stalled · Error: Goal checkpoint verifier timed out after 30000ms',
-    );
-  });
-
-  it('shows checkpoint health under the rule the interactive cards use', () => {
-    expect(
-      formatGoalState(
-        goalSnapshot({ lastCheckpointFailure: 'Error: provider failed' }),
-        'status',
-      ),
-    ).toBe(
-      'Goal active: ship the release notes\nCheckpoint: last check failed · Error: provider failed',
-    );
-    expect(
-      formatGoalState(
-        goalSnapshot({
-          status: 'complete',
-          checkpointStalls: 1,
-          lastCheckpointFailure: 'Error: provider failed',
-        }),
-        'status',
-      ),
-    ).not.toContain('Checkpoint');
   });
 
   it('has no usage to report for a cleared Goal', () => {

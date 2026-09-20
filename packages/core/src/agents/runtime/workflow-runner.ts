@@ -28,7 +28,16 @@ import {
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
-import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
+import {
+  readWorkflowSnapshot,
+  writeWorkflowSnapshot,
+  type WorkflowSnapshot,
+} from '../workflow-snapshot.js';
+import {
+  checkpointFromTask,
+  removeWorkflowCheckpoint,
+  writeWorkflowCheckpoint,
+} from '../workflow-checkpoint.js';
 import {
   readWorkflowSourceRef,
   type WorkflowSourceRef,
@@ -63,6 +72,7 @@ import {
 import {
   compileWorkflowScript,
   describeWorkflowCompileError,
+  type WorkflowMeta,
 } from './workflow-sandbox.js';
 import {
   resolveReviewWorkflowLimits,
@@ -230,6 +240,23 @@ export class WorkflowStartCancelledError extends Error {
   }
 }
 
+/**
+ * A resume refused because the run's journal is not there to replay: missing
+ * from disk, or present but unreadable. A class so a host starting the resume
+ * on a caller's behalf can tell this refusal — which a rerun answers — from a
+ * fault in the host itself.
+ */
+export class WorkflowJournalUnavailableError extends Error {
+  constructor(
+    readonly runId: string,
+    readonly reason: 'missing' | 'unreadable',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'WorkflowJournalUnavailableError';
+  }
+}
+
 export class WorkflowRunner {
   static async start(
     options: WorkflowRunnerOptions,
@@ -289,6 +316,13 @@ export class WorkflowRunner {
     };
     const storage = config.storage;
     const previousEntry = registry?.get(runId);
+    // The run as it was before this start: the registry entry while the
+    // process still has one, else its snapshot (the registry does not outlive
+    // the process). Read once, for the sourceRef guard below and for putting
+    // back the inline script copy a resume that fails to start overwrote.
+    let previousRun:
+      | Pick<WorkflowSnapshot, 'sourceRef' | 'script'>
+      | undefined = previousEntry;
     let journalPath = storage
       ? storage.getWorkflowRunJournalPath(runId)
       : undefined;
@@ -303,6 +337,7 @@ export class WorkflowRunner {
     let callerWasAbortedBeforeStart: boolean;
     let orchestrator: WorkflowOrchestrator;
     let reviewLimits: ReviewWorkflowLimits | undefined;
+    let scriptMeta: WorkflowMeta | null = null;
     try {
       const loaded = options.loadScript
         ? await options.loadScript()
@@ -327,7 +362,7 @@ export class WorkflowRunner {
         registry?.get(runId)?.workflowName;
 
       try {
-        compileWorkflowScript(script);
+        scriptMeta = compileWorkflowScript(script).meta;
       } catch (error) {
         throw new WorkflowScriptNotLaunchedError(
           describeWorkflowCompileError(
@@ -348,9 +383,29 @@ export class WorkflowRunner {
         );
       }
 
-      resumeReplay = options.resumeFromRunId
-        ? await journal?.load()
-        : undefined;
+      if (options.resumeFromRunId) {
+        // A resume replays a journal. With none to replay it would dispatch
+        // every agent again under the old run id while reading as a
+        // continuation, so it is refused before anything is spent or written.
+        // Without storage there is no journal to have lost, and a resume
+        // there has always been a live run under the old id.
+        const loaded = await journal?.load();
+        if (loaded?.kind === 'missing') {
+          throw new WorkflowJournalUnavailableError(
+            options.resumeFromRunId,
+            'missing',
+            `No journal found for workflow run ${options.resumeFromRunId}, so there is nothing to resume. To run the workflow from the start, call Workflow again without resumeFromRunId.`,
+          );
+        }
+        if (loaded?.kind === 'unreadable') {
+          throw new WorkflowJournalUnavailableError(
+            options.resumeFromRunId,
+            'unreadable',
+            `Could not read the journal for workflow run ${options.resumeFromRunId}: ${loaded.reason}`,
+          );
+        }
+        resumeReplay = loaded?.replay;
+      }
       sourceRef = readWorkflowSourceRef(options.sourceRef);
       if (resumeReplay?.sourceError) throw new Error(resumeReplay.sourceError);
       if (options.resumeFromRunId) {
@@ -365,7 +420,14 @@ export class WorkflowRunner {
             'Workflow sourceRef must match the original journal. Start a new run to use a different source.',
           );
         }
-        if (previousEntry?.sourceRef && !original) {
+        // After a restart the run's snapshot is what still says it carried a
+        // reference. Without it this guard could not fire, and the resumed
+        // run would settle without the reference and overwrite the snapshot
+        // that held it.
+        if (!previousRun) {
+          previousRun = await readWorkflowSnapshot(config, runId);
+        }
+        if (previousRun?.sourceRef && !original) {
           throw new Error(
             'Workflow source metadata is missing from its journal.',
           );
@@ -386,6 +448,16 @@ export class WorkflowRunner {
       if (journal && !(await journal.ensureExists())) {
         journalPath = undefined;
       }
+      // Queued before anything else so the journal of a run that launched is
+      // never empty: a later resume can then tell a run interrupted before its
+      // first result from one whose journal is gone. Not awaited, so a slow
+      // disk does not hold the launch: appends are serialized, so it still
+      // lands before the `source` record below and every dispatch's lines, and
+      // a start that fails from here on reaches `journal.remove()`, which waits
+      // for it before deleting.
+      if (journal && journalPath && !options.resumeFromRunId) {
+        void journal.markLaunched();
+      }
       if (sourceRef) {
         if (!journal || !journalPath) {
           throw new Error(
@@ -399,7 +471,9 @@ export class WorkflowRunner {
       // Persisted only once the run is certain to start: a script that never
       // compiled, and a start the registry cancelled out from under us, leave
       // no file behind. A resume of an inline script overwrites the copy from
-      // the original run, which is the file the model was told to edit.
+      // the original run, which is the file the model was told to edit; a
+      // resume that then fails to start puts the original back (see the
+      // catch below).
       if (options.script !== undefined && scriptPath === undefined) {
         const persisted = await persistInlineWorkflowScript(
           config,
@@ -480,8 +554,8 @@ export class WorkflowRunner {
       if (persistedInlineScript && options.resumeFromRunId === undefined) {
         await deleteInlineWorkflowScript(config, runId);
       }
-      if (persistedInlineScript && options.resumeFromRunId && previousEntry) {
-        await persistInlineWorkflowScript(config, runId, previousEntry.script);
+      if (persistedInlineScript && options.resumeFromRunId && previousRun) {
+        await persistInlineWorkflowScript(config, runId, previousRun.script);
       }
       if (options.resumeFromRunId === undefined) {
         await journal?.remove();
@@ -489,6 +563,18 @@ export class WorkflowRunner {
       releasePersistenceActivity();
       throw error;
     }
+    // Lets a later process find this run if this one exits before it
+    // settles. Not awaited: nothing about starting depends on it, and the
+    // settlement below waits for it before removing it.
+    const checkpointWrite = entry
+      ? writeWorkflowCheckpoint(
+          config,
+          checkpointFromTask(entry, {
+            sessionId: config.getSessionId?.() ?? '',
+            meta: scriptMeta,
+          }),
+        )
+      : undefined;
     const emitUpdate = (): void => {
       if (!entry || !options.onUpdate || !isCurrentEntry()) return;
       try {
@@ -742,6 +828,13 @@ export class WorkflowRunner {
             } catch {
               // Telemetry must not affect workflow execution.
             }
+          }
+          // The run settled, so nothing is left for a later process to
+          // claim — even when the snapshot write failed, since a claim would
+          // then call a run interrupted that was not.
+          if (checkpointWrite) {
+            await checkpointWrite;
+            await removeWorkflowCheckpoint(config, runId);
           }
           releasePersistenceActivity();
           registry?.releaseHandle(runId, handle);

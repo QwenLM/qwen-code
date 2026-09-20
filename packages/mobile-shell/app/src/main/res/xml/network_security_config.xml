@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security configuration for the Qwen Code Android shell.
+
+  The daemon can be reached over three topologies:
+    1. loopback (localhost / 127.0.0.1) — explicitly allowed below.
+    2. LAN (http://192.168.x.x, http://10.x.x.x, etc.) — explicit cleartext.
+    3. Public TLS endpoint (https://) — default; no special config needed.
+
+  Per maintainer guidance (@wenshao, issue #11704): "Android also blocks cleartext
+  traffic by default from API 28, so a LAN profile needs an explicit network
+  security config entry."
+
+  We block cleartext globally and only allow it for explicitly named domains or
+  IP addresses configured for development LAN access. For now localhost is
+  allowed (used during development) and explicit LAN hosts must be added by the
+  operator if they run a plain-HTTP LAN daemon.
+
+  Public HTTPS profiles require no entry here.
+-->
+<network-security-config>
+    <!-- Block cleartext globally (Android 9+ default, enforced on all APIs here). -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Allow cleartext for loopback — used in development / local daemon. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">::1</domain>
+    </domain-config>
+
+    <!--
+      LAN profiles: to connect to a plain-HTTP daemon on the local network,
+      add the daemon's hostname or IP here, e.g.:
+        <domain-config cleartextTrafficPermitted="true">
+            <domain includeSubdomains="false">192.168.1.100</domain>
+        </domain-config>
+      Or configure the daemon with a TLS certificate and key to use HTTPS.
+    -->
+</network-security-config>

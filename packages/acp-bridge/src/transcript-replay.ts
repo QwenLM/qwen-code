@@ -20,13 +20,21 @@ import {
   type TranscriptRecordInput,
   type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
+// Telemetry event names, matched against the `ui_telemetry` records this
+// module projects. Its own Node-free subpath: `constants.ts` imports nothing,
+// and core's `utils/` layer may not re-export a value from outside itself.
+import {
+  EVENT_API_ERROR,
+  EVENT_API_RESPONSE,
+  EVENT_TOOL_CALL,
+} from '@qwen-code/qwen-code-core/telemetryConstants';
 import {
   GOAL_PAUSE_REASON_COMMAND,
   isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
   parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
-  projectGoalStateToLegacy,
+  projectGoalCard,
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
@@ -61,6 +69,13 @@ export interface PendingTranscriptToolCall {
    * against both.
    */
   readonly rawCallId?: string;
+  /**
+   * Set once a timing frame has claimed this call, so a second telemetry
+   * record naming the same recorded id resolves to the next allocation
+   * instead of re-claiming this one. Persisted with the rest of the pending
+   * entry because a page can split between a call and its telemetry.
+   */
+  readonly timingMatched?: true;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -94,6 +109,14 @@ export interface TranscriptReplayMachineOptions {
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
   readonly skipFinalizeCallIds?: ReadonlySet<string>;
+  /**
+   * Emit a timing frame for every `ui_telemetry` record (see
+   * {@link createTranscriptTimingUpdate}). Off by default: these frames add
+   * one update per recorded request and per recorded tool call, and the bulk
+   * `session/load` replay is capped at a fixed number of updates. Paged
+   * replay, which is bounded by records and bytes per page, turns it on.
+   */
+  readonly includeTiming?: boolean;
 }
 
 export interface TranscriptReplayMachine {
@@ -171,8 +194,8 @@ const TRANSCRIPT_GOAL_STATUS_KINDS = new Set([
   // A paused goal is not running, and dropping the card here is not neutral:
   // the replay stream is what feeds the goal renderer, so the older `set` card
   // stays newest and every surface keeps claiming autonomous work is under way.
-  // Kept in step with `GOAL_STATUS_KINDS`, which the daemon-side reader
-  // (`parseGoalStatusItem`) validates the same on-disk cards against.
+  // Kept in step with `GOAL_CARD_KINDS` in core's `goal-legacy-cards.ts`,
+  // which the daemon-side readers validate the same on-disk cards against.
   'paused',
   'checking',
 ]);
@@ -326,6 +349,179 @@ export function createTranscriptUsageUpdate(
     content: { type: 'text', text: options.text ?? '' },
     _meta: meta,
   } as SessionUpdate;
+}
+
+/**
+ * Recorded timing for one model request or one tool call, read back from the
+ * `ui_telemetry` records the telemetry loggers persist alongside the
+ * conversation.
+ *
+ * Every field but `kind` and `durationMs` is optional and is only ever set
+ * from a recorded value: a trajectory that shows a fabricated duration is
+ * worse than one that shows none.
+ */
+export interface TranscriptTimingMeta {
+  readonly kind: 'request' | 'tool';
+  /**
+   * Epoch ms, and `kind === 'request'` only. A request is logged when its
+   * stream ends, so its start time is a real subtraction from a real end time.
+   * Tool calls are logged in one loop after their whole batch settles, so the
+   * recorded timestamp is the batch's end for every tool in it and no honest
+   * per-tool start can be derived; a tool frame carries only `durationMs`
+   * until the recorded event itself carries a start time.
+   */
+  readonly startedAt?: number;
+  readonly durationMs: number;
+  /** `kind === 'request'`: dispatch to first user-visible content. */
+  readonly ttftMs?: number;
+  /** `kind === 'request'`: 'error' comes from an `api_error` record. */
+  readonly status?: 'ok' | 'error';
+  readonly responseId?: string;
+  readonly promptId?: string;
+  readonly model?: string;
+  /** `kind === 'tool'`: pairs the frame with its `tool_call` update. */
+  readonly callId?: string;
+  readonly toolName?: string;
+  readonly toolStatus?: 'success' | 'error' | 'cancelled';
+  /** Set when a subagent issued the request or tool call. */
+  readonly subagentId?: string;
+}
+
+/**
+ * Build a timing frame: an empty-text assistant chunk carrying `_meta.timing`.
+ *
+ * The carrier matches the usage frame's shape on purpose. An empty-text chunk
+ * opens no message segment, and clients that do not know the key normalize it
+ * to nothing, so the frame is inert for every existing reader.
+ *
+ * It deliberately carries no `_meta.usage`: a present `usage.durationMs` is
+ * what tells the daemon host a frame came from a live model round rather than
+ * replay, and reusing it here would double-count into the metrics ring.
+ */
+export function createTranscriptTimingUpdate(
+  timing: TranscriptTimingMeta,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  const meta = buildUpdateMeta({
+    ...options,
+    extra: { timing, ...(options.extra ?? {}) },
+  });
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: meta,
+  } as SessionUpdate;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * A subagent round's prompt id is `<sessionId>#<agentId>#<round>`; the main
+ * session's is `<sessionId>########<n>`, which splits into nine parts rather
+ * than three. Kept in step with `extractSubagentSuffix` in core's
+ * `openaiLogger.ts`, the canonical reader of this shape.
+ */
+function isSubagentPromptId(promptId: string | undefined): boolean {
+  if (promptId === undefined) return false;
+  const parts = promptId.split('#');
+  if (parts.length !== 3) return false;
+  const [, agentId, round] = parts;
+  return Boolean(agentId) && /^\d+$/.test(round ?? '');
+}
+
+function parseToolTimingStatus(
+  value: unknown,
+): TranscriptTimingMeta['toolStatus'] {
+  return value === 'success' || value === 'error' || value === 'cancelled'
+    ? value
+    : undefined;
+}
+
+/**
+ * Project a `ui_telemetry` record's payload into a timing frame's metadata,
+ * or `undefined` when the record carries no usable timing.
+ *
+ * Response text, tool arguments and token counts are deliberately left behind:
+ * the first two are large and already in the conversation, and token counts
+ * already ride on the usage frame.
+ */
+function parseTelemetryTiming(
+  payload: unknown,
+): TranscriptTimingMeta | undefined {
+  const uiEvent = isObjectRecord(payload)
+    ? isObjectRecord(payload['uiEvent'])
+      ? payload['uiEvent']
+      : undefined
+    : undefined;
+  if (!uiEvent) return undefined;
+  const eventName = uiEvent['event.name'];
+  if (
+    eventName !== EVENT_API_RESPONSE &&
+    eventName !== EVENT_API_ERROR &&
+    eventName !== EVENT_TOOL_CALL
+  ) {
+    return undefined;
+  }
+  const durationMs = finiteNumber(uiEvent['duration_ms']);
+  if (durationMs === undefined || durationMs < 0) return undefined;
+
+  const shared = {
+    durationMs,
+    ...(nonEmptyString(uiEvent['response_id']) !== undefined
+      ? { responseId: nonEmptyString(uiEvent['response_id']) }
+      : {}),
+    ...(nonEmptyString(uiEvent['prompt_id']) !== undefined
+      ? { promptId: nonEmptyString(uiEvent['prompt_id']) }
+      : {}),
+    ...(nonEmptyString(uiEvent['subagent_id']) !== undefined
+      ? { subagentId: nonEmptyString(uiEvent['subagent_id']) }
+      : {}),
+  };
+
+  if (eventName === EVENT_TOOL_CALL) {
+    // Without a call id the frame cannot be paired with anything.
+    const callId = nonEmptyString(uiEvent['call_id']);
+    if (callId === undefined) return undefined;
+    const toolName = nonEmptyString(uiEvent['function_name']);
+    const toolStatus = parseToolTimingStatus(uiEvent['status']);
+    // A call denied at confirmation, failed validation, or cancelled before it
+    // ran is recorded with `durationMs: 0` as a placeholder, and
+    // `ToolCallEvent` turns a missing duration into 0 as well. A zero on
+    // anything but a success is therefore a stand-in, not a measurement.
+    if (durationMs === 0 && toolStatus !== 'success') return undefined;
+    return {
+      kind: 'tool',
+      ...shared,
+      callId,
+      ...(toolName !== undefined ? { toolName } : {}),
+      ...(toolStatus !== undefined ? { toolStatus } : {}),
+    };
+  }
+
+  const ttftMs = finiteNumber(uiEvent['ttft_ms']);
+  const model = nonEmptyString(uiEvent['model']);
+  // A request is logged the moment its stream ends, so its `event.timestamp`
+  // really is this span's end and the start time follows from the duration.
+  // Tool calls are logged in a batch loop after the whole batch settles, so
+  // the same subtraction would place a fast tool just before the batch ended
+  // rather than when it actually ran — see `startedAt` on the type.
+  const endMs = toTranscriptEpochMs(
+    typeof uiEvent['event.timestamp'] === 'string'
+      ? uiEvent['event.timestamp']
+      : undefined,
+  );
+  return {
+    kind: 'request',
+    ...shared,
+    ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
+    status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
+    ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
+      ? { ttftMs }
+      : {}),
+    ...(model !== undefined ? { model } : {}),
+  };
 }
 
 export function createTranscriptToolCallStartUpdate(
@@ -1011,6 +1207,21 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'ui_telemetry') {
+      // Emitted in place, at the telemetry record's own position, rather than
+      // attached to the assistant record it describes. A backward page may
+      // start exactly at that assistant record, which would strand its
+      // `api_response` record on the older page, and backward pages replay
+      // with no carried state. Stateless frames survive any page split; the
+      // client pairs them across its own contiguous event window.
+      if (!this.options.includeTiming) return;
+      const timing = parseTelemetryTiming(record.systemPayload);
+      if (!timing) return;
+      yield emit(
+        createTranscriptTimingUpdate(this.resolveTimingCallId(timing), meta),
+      );
+      return;
+    }
     if (record.subtype === 'turn_result') {
       const payload = isObjectRecord(record.systemPayload)
         ? record.systemPayload
@@ -1118,10 +1329,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         previous: this.goalState,
         next: payload.snapshot,
       });
-      const projection = projectGoalStateToLegacy(
-        payload,
-        this.goalState?.goal ?? null,
-      );
+      const goalStatus = projectGoalCard(payload, this.goalState?.goal ?? null);
       const goalControlCommand = projectGoalControlCommand(
         payload.cause,
         payload.snapshot,
@@ -1142,7 +1350,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           }),
         );
       }
-      const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
@@ -1151,9 +1358,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           extra: {
             goalState: payload.snapshot,
             goalStatus,
-            ...(projection.goalTerminal
-              ? { goalTerminal: projection.goalTerminal }
-              : {}),
             'qwen.session.recordId': record.uuid,
           },
         }),
@@ -1191,12 +1395,29 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         continue;
       }
       if (!isObjectRecord(item) || typeof item['text'] !== 'string') continue;
+      const contextCompression = isObjectRecord(item['contextCompression'])
+        ? item['contextCompression']
+        : undefined;
+      const contextCompressionNotice = isObjectRecord(
+        item['contextCompressionNotice'],
+      )
+        ? item['contextCompressionNotice']
+        : undefined;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
           text: item['text'].replace(/\n/g, '  \n'),
           ...meta,
-          extra: { source: 'slash_command' },
+          extra: {
+            source: 'slash_command',
+            ...(contextCompression ? { contextCompression } : {}),
+            // Replayed on its own key, exactly as it was recorded: the folded
+            // block keeps both, so the note survives beside the result.
+            ...(contextCompressionNotice ? { contextCompressionNotice } : {}),
+            ...(Array.isArray(item['sessionArtifacts'])
+              ? { sessionArtifacts: item['sessionArtifacts'] }
+              : {}),
+          },
         }),
       );
     }
@@ -1239,6 +1460,48 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const id = `${candidate}:${occurrence}`;
     this.usedToolCallIds.add(id);
     return id;
+  }
+
+  /**
+   * Re-point a tool timing frame at the call id the tool_call update actually
+   * went out with. `allocateToolCallId` rewrites ids that collide within a
+   * replay, keeping the recorded one as `rawCallId`; telemetry records the raw
+   * one. The owning pending entry is still open here, because a tool's
+   * telemetry record is written after its assistant record and before its
+   * result. A subagent's tool never has a pending entry in this machine, so
+   * its id passes through untouched.
+   *
+   * When one recorded id was allocated more than once, the candidates are
+   * consumed in allocation order — the map preserves insertion order — so the
+   * first telemetry record naming it takes the first allocation rather than
+   * every record collapsing onto the rewritten one.
+   *
+   * Two guards keep a subagent's tool from claiming a main-session call.
+   * `logToolCall` attaches no subagent identity, so a subagent's tool
+   * telemetry is indistinguishable by id alone — only its prompt id says it
+   * came from a subagent, and this machine holds no pending entry for a
+   * subagent's own calls. A provider that reuses `call_0` on every response
+   * would otherwise let the first tool inside an Agent call claim the Agent
+   * call itself, permanently, via `timingMatched`. The tool name has to agree
+   * for the same reason.
+   */
+  private resolveTimingCallId(
+    timing: TranscriptTimingMeta,
+  ): TranscriptTimingMeta {
+    if (timing.kind !== 'tool' || timing.callId === undefined) return timing;
+    if (isSubagentPromptId(timing.promptId)) return timing;
+    for (const pending of this.pendingToolCalls.values()) {
+      const recordedId = pending.rawCallId ?? pending.callId;
+      if (recordedId !== timing.callId || pending.timingMatched) continue;
+      if (timing.toolName !== undefined && pending.toolName !== timing.toolName)
+        continue;
+      this.pendingToolCalls.set(pending.callId, {
+        ...pending,
+        timingMatched: true,
+      });
+      return { ...timing, callId: pending.callId };
+    }
+    return timing;
   }
 
   private resolveToolMetadata(
@@ -1535,6 +1798,14 @@ function parseInitialState(
           sourceRecordId: pending['sourceRecordId'],
           ...(typeof pending['sourceTimestamp'] === 'string'
             ? { sourceTimestamp: pending['sourceTimestamp'] }
+            : {}),
+          // Dropping these would make a timing frame that arrives on a later
+          // page resolve against the recorded id instead of the allocated one.
+          ...(typeof pending['rawCallId'] === 'string'
+            ? { rawCallId: pending['rawCallId'] }
+            : {}),
+          ...(pending['timingMatched'] === true
+            ? { timingMatched: true as const }
             : {}),
         },
       ];
