@@ -16,8 +16,19 @@ export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser_use';
 // Bump whenever the Host changes without a protocol change. First use reuses
 // an installed Host of the same protocol, so without a higher revision a Host
 // fix would never reach a user who already installed one.
-export const CHROME_NATIVE_HOST_REVISION = 1;
+export const CHROME_NATIVE_HOST_REVISION = 2;
+// The id an unpacked build keeps, pinned by the manifest key, and the id the
+// Chrome Web Store assigned the listing, which rejects that key. A user's
+// extension carries one or the other, so both reach the Host. Adding an id
+// here means bumping CHROME_NATIVE_HOST_REVISION in the same change: the Host
+// bundles this set, and an installed Host of the same revision is reused
+// rather than replaced, so without the bump it would keep rejecting the id.
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
+export const CHROME_WEB_STORE_EXTENSION_ID = 'hdhmmjclhibojdddmancfgbkleahfaph';
+export const CHROME_EXTENSION_IDS: readonly string[] = [
+  CHROME_EXTENSION_ID,
+  CHROME_WEB_STORE_EXTENSION_ID,
+];
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
 
 // Operation deadlines (core/schemas.ts timeoutMs) may reach 120s, and every

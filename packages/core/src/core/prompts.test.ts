@@ -1464,6 +1464,7 @@ describe('resident tool gating (#12032)', () => {
     // other way with a full set, over-gating.
     const leaked = Object.values(ToolNames).filter(
       (name) =>
+        name !== ToolNames.TOOL_CALL &&
         !declared.has(name) &&
         new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
     );
@@ -1494,8 +1495,15 @@ describe('resident tool gating (#12032)', () => {
         // `ask_user_question` is exempt from `tools.eager`, so it is declared
         // in practice, and the interaction-mode bullet naming it also carries
         // the policy for not asking questions — gating that bullet would drop
-        // real guidance. Recorded as residue in the design's §6.
-        if (tool === ToolNames.ASK_USER_QUESTION) continue;
+        // real guidance. Recorded as residue in the design's §6. `tool_call`
+        // is also the literal protocol marker in every example notation, so a
+        // text scan cannot distinguish that syntax from the bridge tool name.
+        if (
+          tool === ToolNames.ASK_USER_QUESTION ||
+          tool === ToolNames.TOOL_CALL
+        ) {
+          continue;
+        }
         const declared = new Set(everyTool);
         declared.delete(tool);
         const [guidance, examples] = gatedParts(modelPrompt(model, declared));
