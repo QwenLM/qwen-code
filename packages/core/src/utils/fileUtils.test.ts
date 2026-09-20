@@ -1360,10 +1360,13 @@ describe('fileUtils', () => {
       );
       const parts = result.llmContent as Part[];
       expect(parts[0]).toEqual({
+        // The shared stub declares tool_search and defers zoom_image, so the
+        // hint takes the bridge form: review through tool_search, invoke
+        // through tool_call.
         text:
-          'Image overview: 20x10; oriented source: 20x10. ' +
-          'If details are too small, use tool_search for "zoom image", then ' +
-          'call zoom_image with coordinates normalized from 0 to 1000.',
+          'Image overview: 20x10; oriented source: 20x10.' +
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
       });
       expect(parts[1]).toEqual({
         inlineData: {
@@ -1398,7 +1401,9 @@ describe('fileUtils', () => {
         declared: ['read_file', 'tool_search'],
         deferred: ['zoom_image'],
         bindings: [],
-        hint: ' If details are too small, use tool_search for "zoom image", then call zoom_image with coordinates normalized from 0 to 1000.',
+        hint:
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
       },
       {
         codeModeOnly: false,
