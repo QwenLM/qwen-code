@@ -11,6 +11,10 @@ import {
 } from '../config/config.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import { type McpTransportKind, mcpTransportOf } from './mcp-client-manager.js';
+import {
+  effectiveAppResourceMaxBytes,
+  effectiveAppResourceTimeoutMs,
+} from './mcp-app-resource-limits.js';
 import type { ConnectionId } from './mcp-pool-events.js';
 
 /**
@@ -109,7 +113,10 @@ function sortedEntries(
  * produce the same fingerprint and thus share a pool entry; any divergence
  * creates a distinct entry. App resource limits belong in the key because
  * discovery stores them in the shared tool snapshot without per-session
- * re-projection.
+ * re-projection. They hash at their enforced (clamped/floored/defaulted)
+ * values — the same normalization the read site applies — so configs whose
+ * effective policy is byte-identical share one entry instead of spawning a
+ * second process for one server.
  *
  * Hashed fields (transport and shared tool-snapshot settings):
  *   transport, command, args, cwd, env, url, httpUrl, tcp, headers,
@@ -141,8 +148,10 @@ export function fingerprint(cfg: MCPServerConfig): PoolKey {
     tcp: cfg.tcp ?? null,
     headers: sortedEntries(cfg.headers),
     timeout: cfg.timeout ?? null,
-    appResourceMaxBytes: cfg.appResourceMaxBytes ?? null,
-    appResourceTimeoutMs: cfg.appResourceTimeoutMs ?? null,
+    appResourceMaxBytes: effectiveAppResourceMaxBytes(cfg.appResourceMaxBytes),
+    appResourceTimeoutMs: effectiveAppResourceTimeoutMs(
+      cfg.appResourceTimeoutMs,
+    ),
     automaticVersionNegotiation: cfg.versionNegotiation === 'auto',
     oauth: canonicalOAuth(cfg.oauth),
     authProviderType: cfg.authProviderType ?? null,

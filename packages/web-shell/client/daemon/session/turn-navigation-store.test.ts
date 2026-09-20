@@ -1666,6 +1666,74 @@ describe('createDaemonTurnNavigationStore', () => {
     });
   });
 
+  it('degrades oversized MCP App HTML instead of failing the historical page', async () => {
+    const store = createDaemonTurnNavigationStore();
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValueOnce(
+      turnPage(0, ['turn-0'], { totalTurns: 1 }),
+    );
+    getTranscriptPage.mockResolvedValueOnce(transcriptPage('turn-0'));
+    // Two documents at the 4 MiB ceiling: each estimates at two bytes per
+    // UTF-16 code unit, so together they exceed the default 16 MiB
+    // historical-page budget.
+    const html = 'x'.repeat(4 * 1024 * 1024);
+    const mcpAppBlock = (
+      id: string,
+      recordId: string,
+    ): DaemonTranscriptBlock => ({
+      id,
+      kind: 'tool',
+      toolCallId: `call-${recordId}`,
+      title: 'chart',
+      status: 'success',
+      preview: { kind: 'mcp_invocation', serverId: 'demo', toolName: 'chart' },
+      rawOutput: {
+        type: 'mcp_app',
+        serverName: 'demo',
+        resourceUri: 'ui://demo/chart',
+        html,
+        toolResult: { content: [{ type: 'text', text: 'ok' }] },
+        toolArguments: {},
+        fallbackText: 'chart rendered',
+      },
+      sourceRecordIds: [recordId],
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    client.materializeTranscriptEvents = (_events, nextBlockOrdinal) => ({
+      blocks: [
+        userBlock(`block-${nextBlockOrdinal}`, 'turn-0'),
+        mcpAppBlock(`block-${nextBlockOrdinal + 1}`, 'record-app-1'),
+        mcpAppBlock(`block-${nextBlockOrdinal + 2}`, 'record-app-2'),
+      ],
+      nextBlockOrdinal: nextBlockOrdinal + 3,
+      encounteredRecordIds: ['turn-0', 'record-app-1', 'record-app-2'],
+    });
+    store.configure({ sessionId: 'session-1', supported: true, client });
+    await flushInitialHead(store);
+
+    const location = await store.locateOrdinal(0);
+
+    expect(store.getSnapshot().selected).toMatchObject({
+      ordinal: 0,
+      status: 'ready',
+    });
+    const page = store.getSnapshot().historicalPages.get(location.pageId!);
+    const appOutputs = page?.blocks
+      .filter((block) => block.kind === 'tool')
+      .map(
+        (block) => block.rawOutput as { html: string; fallbackText: string },
+      );
+    expect(appOutputs).toHaveLength(2);
+    for (const output of appOutputs ?? []) {
+      // Dropped whole, never truncated; the fallback keeps the turn
+      // navigable.
+      expect(output.html).toBe('');
+      expect(output.fallbackText).toBe('chart rendered');
+    }
+  });
+
   it('keeps index navigation ready when one transcript page is too large', async () => {
     const store = createDaemonTurnNavigationStore();
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();

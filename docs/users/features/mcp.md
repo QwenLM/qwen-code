@@ -525,6 +525,16 @@ while increasing retained transcript and replay size. The size check happens
 **after** the SDK reads the response; it does not cap network transfer or peak
 memory. Sandbox and CSP protections are unchanged.
 
+App HTML is mounted only in a daemon-backed WebShell session and in replay of
+a recorded transcript. Terminal and headless sessions render the fallback text
+instead, so there these keys change only the warning text, the fetch cost and
+latency, and the retained transcript size.
+
+Set these keys in the same source that declares the server. Configuration
+sources replace whole server objects by precedence rather than merging fields,
+so a same-named entry added in another file shadows the original server
+instead of adjusting its limits.
+
 <a id="qwen-mcp-cli"></a>
 
 ### Manage MCP servers with `qwen mcp`

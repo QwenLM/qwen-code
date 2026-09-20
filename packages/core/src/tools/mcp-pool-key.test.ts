@@ -108,18 +108,53 @@ describe('mcp-pool-key', () => {
       expect(fingerprint(a)).toBe(fingerprint(b));
     });
 
-    it.each(['appResourceMaxBytes', 'appResourceTimeoutMs'] as const)(
-      'isolates pooled tools with different %s limits',
-      (setting) => {
+    it.each([
+      // In-range values on both sides: enforced policy differs, so the pool
+      // must split. (Both 2_000_000 and 3_000_000 clamp to the same enforced
+      // appResourceTimeoutMs ceiling, so the timeout arm needs in-range
+      // values to keep asserting isolation.)
+      { setting: 'appResourceMaxBytes', low: 2_000_000, high: 3_000_000 },
+      { setting: 'appResourceTimeoutMs', low: 20_000, high: 30_000 },
+    ] as const)(
+      'isolates pooled tools with different $setting limits',
+      ({ setting, low, high }) => {
         const base = { command: 'node' };
         expect(fingerprint(base)).not.toBe(
-          fingerprint({ ...base, [setting]: 2_000_000 }),
+          fingerprint({ ...base, [setting]: low }),
         );
-        expect(fingerprint({ ...base, [setting]: 2_000_000 })).not.toBe(
-          fingerprint({ ...base, [setting]: 3_000_000 }),
+        expect(fingerprint({ ...base, [setting]: low })).not.toBe(
+          fingerprint({ ...base, [setting]: high }),
         );
       },
     );
+
+    it('hashes App resource limits at their enforced values', () => {
+      const base = { command: 'node' };
+      // Unset and the explicit default enforce the same 1 MiB limit.
+      expect(fingerprint(base)).toBe(
+        fingerprint({ ...base, appResourceMaxBytes: 1_048_576 }),
+      );
+      // Two over-ceiling values clamp to the same enforced limit.
+      expect(fingerprint({ ...base, appResourceMaxBytes: 8_388_608 })).toBe(
+        fingerprint({ ...base, appResourceMaxBytes: 4_194_304 }),
+      );
+      expect(fingerprint({ ...base, appResourceTimeoutMs: 2_000_000 })).toBe(
+        fingerprint({ ...base, appResourceTimeoutMs: 3_000_000 }),
+      );
+      // A non-numeric value behaves exactly like unset at the read site.
+      expect(fingerprint(base)).toBe(
+        fingerprint({
+          ...base,
+          appResourceMaxBytes: '4194304' as unknown as number,
+        }),
+      );
+      expect(fingerprint(base)).toBe(
+        fingerprint({
+          ...base,
+          appResourceTimeoutMs: '30000' as unknown as number,
+        }),
+      );
+    });
 
     it('produces a 16-char hex string', () => {
       const fp = fingerprint(new MCPServerConfig('node'));

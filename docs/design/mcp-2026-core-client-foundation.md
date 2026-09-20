@@ -101,8 +101,21 @@ six bytes per HTML byte). The 120-second ceiling limits optional UI latency.
 These are host policy choices, not protocol limits or a guarantee of Amplitude
 compatibility. The SDK materializes the response before the size check, so the
 limit bounds accepted/retained HTML, not network transfer or peak memory.
-Larger accepted documents increase transcript and replay payloads. Streaming
-transfer limits and App-initiated tool calls remain outside this change.
+
+A retained App document crosses several budgets tighter than that envelope, in
+different units: the WebShell historical-page budget (16 MiB, estimated as
+UTF-16 code units times two — a page holding two ceiling-size documents no
+longer fits); the daemon's 4 MiB compacted replay window, which one
+ceiling-size document fills by construction; the 2 MiB EventBus per-subscriber
+live-frame budget; and the 32 MiB restore-page limit measured on the
+JSON-serialized stream. Historical-page admission therefore degrades per
+document rather than failing per page: when a materialized page exceeds its
+budget, the page table drops each MCP App display's `html` whole (replay
+mounts the iframe only for non-empty `html` and never re-fetches the resource)
+and the turn stays navigable on `fallbackText`; only a page with nothing left
+to degrade fails closed. Larger accepted documents increase transcript and
+replay payloads. Streaming transfer limits and App-initiated tool calls remain
+outside this change.
 
 The daemon serves a static sandbox proxy before bearer authentication. It
 contains no session data or credentials. WebShell loads that proxy in an

@@ -1710,6 +1710,8 @@ async function discoverToolsWithMetadata(
             {
               appResourceMaxBytes: mcpServerConfig.appResourceMaxBytes,
               appResourceTimeoutMs: mcpServerConfig.appResourceTimeoutMs,
+              extensionName: mcpServerConfig.extensionName,
+              scope: mcpServerConfig.scope,
             },
           ),
         );

@@ -47,6 +47,14 @@ import {
 } from '../utils/tool-name-utils.js';
 import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 import { buildMcpClassifierInput } from './mcp-classifier-input.js';
+import {
+  boundedAppLimit,
+  MCP_APP_RESOURCE_MAX_BYTES_CEILING,
+  MCP_APP_RESOURCE_MAX_BYTES_DEFAULT,
+  MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+  MCP_APP_RESOURCE_TIMEOUT_MAX_MS,
+  MCP_APP_RESOURCE_TIMEOUT_MIN_MS,
+} from './mcp-app-resource-limits.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
 
@@ -275,24 +283,15 @@ interface McpReadResourceResult {
 }
 
 const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
-const MCP_APP_RESOURCE_MAX_BYTES = 1024 * 1024;
-const MCP_APP_RESOURCE_TIMEOUT_MS = 10_000;
 
+// `extensionName`/`scope` ride along so a limit warning can name the source
+// that actually declares the server — a `mcpServers.<name>` settings path is
+// destructive advice for an extension-declared server (a same-named settings
+// entry replaces the whole server object) and ineffective for a project one.
 type McpAppResourceLimits = Pick<
   MCPServerConfig,
-  'appResourceMaxBytes' | 'appResourceTimeoutMs'
+  'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'extensionName' | 'scope'
 >;
-
-function boundedAppLimit(
-  value: number | undefined,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? Math.max(min, Math.min(Math.floor(value), max))
-    : fallback;
-}
 
 // Discriminated union for MCP Content Blocks to ensure type safety.
 type McpTextBlock = {
@@ -760,6 +759,50 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * `boundedAppLimit` plus the diagnostic the silent fallback otherwise
+   * lacks: `mcpServers` carries no per-key schema, so a hand-edited
+   * `"appResourceMaxBytes": "4194304"` reaches here untyped and would be
+   * dropped without a trace while the limit warning names the key.
+   */
+  private appResourceLimit(
+    value: number | undefined,
+    fallback: number,
+    min: number,
+    max: number,
+    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
+  ): number {
+    if (
+      value !== undefined &&
+      (typeof value !== 'number' || !Number.isFinite(value))
+    ) {
+      debugLogger.warn(
+        `Ignoring non-finite MCP App resource limit ${this.appLimitSettingRef(key)} (${typeof value === 'string' ? JSON.stringify(value) : String(value)}); falling back to ${fallback}`,
+      );
+    }
+    return boundedAppLimit(value, fallback, min, max);
+  }
+
+  /**
+   * Name the setting an operator must change, in the source that declares
+   * the server: the `mcpServers.<name>.<key>` settings path is only valid
+   * for settings-declared servers — configuration sources replace whole
+   * server objects by precedence, so a partial same-named settings entry
+   * would shadow an extension's or project's server rather than merge.
+   */
+  private appLimitSettingRef(
+    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'timeout',
+  ): string {
+    const extensionName = this.appResourceLimits?.extensionName;
+    if (extensionName) {
+      return `${key} for server '${this.serverName}' declared by extension '${extensionName}'`;
+    }
+    if (this.appResourceLimits?.scope === 'project') {
+      return `${key} for server '${this.serverName}' declared in .mcp.json`;
+    }
+    return `mcpServers.${this.serverName}.${key}`;
+  }
+
   private async loadMcpAppDisplay(
     toolResult: McpCallToolResult,
     fallbackText: string,
@@ -767,24 +810,27 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<McpAppResultDisplay | undefined> {
     if (!this.appResourceUri || !this.mcpClient?.readResource) return undefined;
 
-    const maxBytes = boundedAppLimit(
-      this.appResourceLimits?.appResourceMaxBytes,
-      MCP_APP_RESOURCE_MAX_BYTES,
+    const configuredMaxBytes = this.appResourceLimits?.appResourceMaxBytes;
+    const configuredTimeoutMs = this.appResourceLimits?.appResourceTimeoutMs;
+    const maxBytes = this.appResourceLimit(
+      configuredMaxBytes,
+      MCP_APP_RESOURCE_MAX_BYTES_DEFAULT,
       1,
-      // JSON escaping can expand HTML 6x inside the 32 MiB replay envelope.
-      4 * 1024 * 1024,
+      MCP_APP_RESOURCE_MAX_BYTES_CEILING,
+      'appResourceMaxBytes',
     );
     const defaultTimeoutMs = boundedAppLimit(
       this.mcpTimeout,
-      MCP_APP_RESOURCE_TIMEOUT_MS,
+      MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
       1,
-      MCP_APP_RESOURCE_TIMEOUT_MS,
+      MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
     );
-    const timeoutMs = boundedAppLimit(
-      this.appResourceLimits?.appResourceTimeoutMs,
+    const timeoutMs = this.appResourceLimit(
+      configuredTimeoutMs,
       defaultTimeoutMs,
-      100,
-      120_000,
+      MCP_APP_RESOURCE_TIMEOUT_MIN_MS,
+      MCP_APP_RESOURCE_TIMEOUT_MAX_MS,
+      'appResourceTimeoutMs',
     );
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     try {
@@ -818,7 +864,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const htmlBytes = Buffer.byteLength(html, 'utf8');
       if (htmlBytes > maxBytes) {
         throw new Error(
-          `resource HTML is ${htmlBytes} bytes, exceeding the ${maxBytes} byte host limit (mcpServers.${this.serverName}.appResourceMaxBytes)`,
+          `resource HTML is ${htmlBytes} bytes, exceeding the ${maxBytes} byte host limit (${this.appLimitSettingRef('appResourceMaxBytes')})`,
         );
       }
 
@@ -839,11 +885,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     } catch (error) {
       if (signal.aborted) return undefined;
       const cause = getErrorMessage(error);
+      // Credit the deadline to the key that produced it: a discarded
+      // non-numeric override must not be named, and without an explicit App
+      // timeout the deadline came from the general `timeout` (or its 10 s
+      // default), so that is the setting the operator can actually change.
+      const timeoutKey =
+        typeof configuredTimeoutMs === 'number' &&
+        Number.isFinite(configuredTimeoutMs)
+          ? 'appResourceTimeoutMs'
+          : 'timeout';
       const reason =
         timeoutSignal.aborted ||
         (error instanceof Error && error.name === 'TimeoutError') ||
         isMcpSdkRequestTimeout(error)
-          ? `resource read timed out (limit: ${timeoutMs} ms; mcpServers.${this.serverName}.appResourceTimeoutMs)`
+          ? `resource read timed out (limit: ${timeoutMs} ms; ${this.appLimitSettingRef(timeoutKey)})`
           : cause;
       const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
       // On the timeout branch `reason` replaces the underlying message, so
