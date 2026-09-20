@@ -91,6 +91,24 @@ describe('clampInlineMediaPart', () => {
     expect(clampInlineMediaPart(part, 1000)).toBe(part);
   });
 
+  it('names the default limit and remedy at the call sites that override neither', () => {
+    // This diff rebuilt the shared sentence from concatenated literals into a
+    // template with two fallbacks. Every caller that does not pass
+    // `placeholderOptions` — nine production sites — emits the defaults, while
+    // the MCP sites override both halves and only ever assert their own
+    // wording. Pin the default remedy positively: emptying `DEFAULT_REMEDY`,
+    // or dropping the sentence separator in a future template edit, must not
+    // leave the suite green.
+    const part = {
+      inlineData: { mimeType: 'image/png', data: 'A'.repeat(2000) },
+    };
+    const result = clampInlineMediaPart(part, 1000);
+    expect(result.text).toContain('inline limit.');
+    expect(result.text).toContain(
+      'Ask the user to resize/compress it, or reference it via an @file path so it can be read from disk.',
+    );
+  });
+
   it('sanitizes the mime type in the placeholder to prevent injection', () => {
     const part = {
       inlineData: {

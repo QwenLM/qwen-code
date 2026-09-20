@@ -885,6 +885,44 @@ describe('DiscoveredMCPTool', () => {
       expect(placeholder.text).not.toContain('@file path');
     });
 
+    it('does not call an untyped resource blob an image in the placeholder', async () => {
+      // The gate admits a resource blob whose mime the server left out, so the
+      // pre-decode guard can fire on bytes that are not an image. It must not
+      // tell the model to resize an image that does not exist.
+      const realClamp = inlineMediaLimit.clampInlineMediaPart;
+      vi.spyOn(inlineMediaLimit, 'clampInlineMediaPart').mockImplementation(
+        (part, limitBytes, placeholderOptions) =>
+          realClamp(part, Math.min(limitBytes ?? 1, 1), placeholderOptions),
+      );
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'resource',
+                  resource: { uri: 'file:///backup.zip', blob: 'AAAA' },
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'archive' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+      const placeholder = (result.llmContent as Part[])[1]!;
+      expect(placeholder.text).toContain('application/octet-stream');
+      expect(placeholder.text).toContain('source limit');
+      expect(placeholder.text).not.toContain('image source limit');
+      expect(placeholder.text).not.toContain('resize or compress the image');
+    });
+
     it('never sends a non-image inline part to the renderer', async () => {
       const bound = vi.spyOn(imageView, 'boundImageBuffer');
       mockCallTool.mockResolvedValue([
@@ -903,6 +941,74 @@ describe('DiscoveredMCPTool', () => {
         .execute(new AbortController().signal);
 
       expect(bound).not.toHaveBeenCalled();
+    });
+
+    it('forwards oversized non-image inline media instead of a placeholder', async () => {
+      // Bounding is image-only by design: replacing an oversized audio block
+      // with text drops bytes nothing else can supply, so both skip paths leave
+      // non-image media exactly as the server sent it. Pin that boundary — a
+      // clamp re-added on either path keeps every other case green.
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'audio', mimeType: 'audio/wav', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'recording' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+      expect(result.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following audio data with mime-type: audio/wav]`,
+        },
+        { inlineData: { mimeType: 'audio/wav', data: 'AAAA' } },
+      ]);
+    });
+
+    it('forwards an oversized undecodable resource blob instead of a placeholder', async () => {
+      // Same boundary on the other skip path: an untyped blob the renderer
+      // could not decode is not an image, so the trailing clamp must skip it.
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+      vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValueOnce(
+        new imageView.ImageViewError('decode_failed', 'failed to decode'),
+      );
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'resource',
+                  resource: { uri: 'file:///backup.zip', blob: 'AAAA' },
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'archive' })
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following embedded resource with mime-type: application/octet-stream]`,
+        },
+        {
+          inlineData: { mimeType: 'application/octet-stream', data: 'AAAA' },
+        },
+      ]);
     });
 
     it('warns with the server and tool when the renderer is unavailable', async () => {

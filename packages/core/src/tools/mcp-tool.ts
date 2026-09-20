@@ -1362,17 +1362,27 @@ async function boundInlineImageParts(
       continue;
     }
     const { mimeType, data } = inline;
+    // The gate above also admits untyped resource blobs, whose real format is
+    // only known once the renderer sniffs them. This guard runs before that, so
+    // it must not describe a non-image as an image: pick the wording from what
+    // is actually known here.
+    const labelledImage = isImagePart(part);
     const sourceLimitedPart = clampInlineMediaPart(
       part,
       IMAGE_MAX_SOURCE_BYTES,
-      {
-        // This is the decoder's source cap, not the inline-media limit, and
-        // the bytes exist only in this tool result — no `@file` can supply
-        // them. Say so instead of borrowing the default wording.
-        limitLabel: 'image source limit',
-        remedy:
-          'Ask the user to resize or compress the image, or return it as a resource link instead of inline bytes.',
-      },
+      labelledImage
+        ? {
+            // This is the decoder's source cap, not the inline-media limit, and
+            // the bytes exist only in this tool result — no `@file` can supply
+            // them. Say so instead of borrowing the default wording.
+            limitLabel: 'image source limit',
+            remedy:
+              'Ask the user to resize or compress the image, or return it as a resource link instead of inline bytes.',
+          }
+        : {
+            limitLabel: 'source limit',
+            remedy: 'Ask the user to have the tool return a smaller payload.',
+          },
     );
     if (sourceLimitedPart !== part) {
       boundedParts.push(sourceLimitedPart);
