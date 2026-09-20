@@ -65,6 +65,7 @@ const BUILTIN_IDS = [
   'builtin:browser-notifications',
   'builtin:live-setup',
   'builtin:local-control',
+  'builtin:connections',
   'builtin:model-management',
 ] as const;
 

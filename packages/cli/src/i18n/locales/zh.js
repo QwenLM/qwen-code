@@ -2201,6 +2201,9 @@ export default {
   'Memory files': '记忆文件',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '启动上下文',
+  Unattributed: '未归因',
+  'Cached prefix': '缓存前缀',
   tokens: 'tokens',
   'Estimated pre-conversation overhead': '预估对话前开销',
   'No API response yet. Send a message to see actual usage.':
