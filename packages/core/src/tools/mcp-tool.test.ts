@@ -772,6 +772,69 @@ describe('DiscoveredMCPTool', () => {
       ).toBeLessThanOrEqual(1568);
     });
 
+    it('forwards original bytes untouched when omni delivery owns the media', async () => {
+      // With omni delivery active the scheduler-side funnel uploads the
+      // ORIGINAL bytes and swaps the part for a fileData reference (the
+      // fileUtils.ts precedent: no local resize on the omni path), so the
+      // bound must skip — the inline-size pressure it relieves never exists
+      // on this path. Removing the gate in boundInlineParts turns this test
+      // red: the 3840x2160 PNG comes back re-encoded to a ~1456px JPEG.
+      const omniActiveConfig = {
+        isOmniEnabled: () => true,
+        isTrustedFolder: () => true,
+        getOmniUploadConfig: () => ({
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          apiKey: 'test-key',
+          model: 'qwen-vl-max',
+        }),
+        getTruncateToolOutputThreshold: () => 500_000,
+        getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      const omniTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        omniActiveConfig,
+      );
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      const oversized = await sharp({
+        create: {
+          width: 3840,
+          height: 2160,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .png()
+        .toBuffer();
+      const data = oversized.toString('base64');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', data, mimeType: 'image/png' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await omniTool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+      expect((result.llmContent as Part[])[1]!.inlineData).toEqual({
+        mimeType: 'image/png',
+        data,
+      });
+    });
+
     it('bounds images sequentially', async () => {
       const mockBoundImageBuffer = vi.spyOn(imageView, 'boundImageBuffer');
       let releaseFirst!: () => void;

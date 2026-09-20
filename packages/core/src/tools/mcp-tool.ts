@@ -32,6 +32,10 @@ import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { clampInlineMediaPart } from '../core/inlineMediaLimit.js';
+// Leaf-module import by design (omni/delivery-gate.ts header): the funnel's
+// own activation predicate, without statically pulling the delivery pipeline
+// (storage, upload, ffmpeg, policy orchestrator) into this module's closure.
+import { isOmniDeliveryActive } from '../omni/delivery-gate.js';
 import {
   boundImageBuffer,
   IMAGE_MAX_SOURCE_BYTES,
@@ -713,10 +717,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         );
       }
 
-      const transformedParts = await boundInlineImageParts(
+      const transformedParts = await this.boundInlineParts(
         transformMcpContentToParts(rawResponseParts),
         signal,
-        `${this.serverName}/${this.serverToolName}`,
       );
       const truncated = await this.truncateTextParts(transformedParts);
       const fallbackText = getDisplayFromPartsWithPersistedOutput(
@@ -884,10 +887,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         );
       }
 
-      const transformedParts = await boundInlineImageParts(
+      const transformedParts = await this.boundInlineParts(
         transformMcpContentToParts(rawResponseParts),
         signal,
-        `${this.serverName}/${this.serverToolName}`,
       );
       const truncated = await this.truncateTextParts(transformedParts);
 
@@ -923,11 +925,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     let persistedOutputFiles: string[] | undefined;
     if (imageContent) {
       const truncatedContent = await this.truncateTextParts(
-        await boundInlineImageParts(
-          imageContent,
-          signal,
-          `${this.serverName}/${this.serverToolName}`,
-        ),
+        await this.boundInlineParts(imageContent, signal),
       );
       llmContent = truncatedContent.parts;
       persistedOutputFiles = truncatedContent.persistedOutputFiles;
@@ -954,6 +952,32 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
     };
+  }
+
+  /**
+   * Bounds inline images only when the bytes will actually be delivered
+   * inline. With omni delivery active the scheduler-side funnel
+   * (`processToolResultOmniMedia`) uploads the ORIGINAL bytes and swaps the
+   * part for a `fileData` reference — the `fileUtils.ts` precedent: a local
+   * resize is a lossy transform reserved for omni policies with disclosure —
+   * so clamping here would destroy the fidelity the funnel is contracted to
+   * deliver while buying no inline-size relief. The funnel's own predicate
+   * (`isOmniDeliveryActive`, not `Config.isOmniEnabled`) decides, so a config
+   * where omni is enabled but delivery is inactive still gets bounded; a
+   * missing Config reads as omni-inactive.
+   */
+  private boundInlineParts(
+    parts: Part[],
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    if (this.cliConfig && isOmniDeliveryActive(this.cliConfig)) {
+      return Promise.resolve(parts);
+    }
+    return boundInlineImageParts(
+      parts,
+      signal,
+      `${this.serverName}/${this.serverToolName}`,
+    );
   }
 
   /**
