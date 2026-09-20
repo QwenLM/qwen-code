@@ -347,7 +347,7 @@ describe('navigateToDaemon', () => {
 
     assign.mockClear();
     mod.navigateToDaemon('http://remote.example:4170', undefined, {
-      continueRemoteWorkspaceAdd: true,
+      continueFlow: 'workspace',
     });
     assigned = new URL(assign.mock.calls[0]![0] as string);
     expect(assigned.searchParams.get('addRemoteWorkspace')).toBe('browse');
@@ -358,7 +358,7 @@ describe('navigateToDaemon', () => {
     const mod = await import('./daemon');
 
     mod.navigateToDaemon('http://remote.example:4170', undefined, {
-      continueRemoteConnectionAdd: true,
+      continueFlow: 'connection',
     });
 
     const assigned = new URL(assign.mock.calls[0]![0] as string);
@@ -379,6 +379,22 @@ describe('navigateToDaemon', () => {
     expect(assign).not.toHaveBeenCalled();
     // The persist half still ran, or the reload would boot the old credential.
     expect(mod.getDaemonToken('http://localhost:5173')).toBe('rotated-token');
+  });
+
+  it('preserves continuation when reloading the current target', async () => {
+    const { reload } = setupPage('http://localhost:5173/app');
+    const replaceState = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => undefined);
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://localhost:5173', undefined, {
+      continueFlow: 'workspace',
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    const replaced = new URL(replaceState.mock.calls[0]![2] as URL);
+    expect(replaced.searchParams.get('addRemoteWorkspace')).toBe('browse');
   });
 
   // Boot scrubbed the fragment, so with storage disabled the in-memory cache

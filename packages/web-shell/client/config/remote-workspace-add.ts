@@ -7,17 +7,11 @@ import {
 const FLOW_PARAM = 'addRemoteWorkspace';
 const RETURN_URL_KEY = 'qwen-remote-workspace-return';
 
-export type RemoteWorkspaceAddStep = 'browse';
-
-export function getRemoteWorkspaceAddStep():
-  | RemoteWorkspaceAddStep
-  | undefined {
-  // Parity with getAllowedDaemonOrigin in the sibling module: this is the only
-  // reader on a render path, and an entry point that evaluates outside a
-  // document has no URL to carry a step.
-  if (typeof window === 'undefined') return undefined;
-  const step = new URLSearchParams(window.location.search).get(FLOW_PARAM);
-  return step === 'browse' ? step : undefined;
+export function isRemoteWorkspaceAddActive(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    new URLSearchParams(window.location.search).get(FLOW_PARAM) === 'browse'
+  );
 }
 
 export function clearRemoteWorkspaceAddStep(): void {
@@ -43,7 +37,7 @@ export function startRemoteWorkspaceAdd(
   }
 
   const started = navigateToDaemon(daemonOrigin, token, {
-    continueRemoteWorkspaceAdd: true,
+    continueFlow: 'workspace',
   });
   if (started) return true;
 
@@ -63,7 +57,7 @@ export function selectRemoteWorkspaceLocation(
   try {
     if (window.sessionStorage.getItem(RETURN_URL_KEY)) {
       return navigateToDaemon(daemonOrigin, token, {
-        continueRemoteWorkspaceAdd: true,
+        continueFlow: 'workspace',
       });
     }
   } catch {

@@ -7551,7 +7551,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
 
       expect(harness.workspaceFileActions.readFileBytes).toHaveBeenCalledWith(
         'docs/notes.txt',
-        { offset: 0, maxBytes: 100 * 1024 },
+        { offset: 0, maxBytes: 256 * 1024 },
       );
       expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledWith(
         expect.objectContaining({

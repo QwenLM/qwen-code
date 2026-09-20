@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   forgetRemoteConnection,
+  formatOriginHost,
   isRemoteConnectionKnown,
   readRemoteConnections,
   rememberRemoteConnection,
@@ -38,6 +39,10 @@ describe('remote connections', () => {
     );
 
     expect(readRemoteConnections()).toEqual(['https://remote.example']);
+  });
+
+  it('keeps an invalid display origin from breaking render paths', () => {
+    expect(formatOriginHost('//remote.example')).toBe('//remote.example');
   });
 
   it('forgets a connection', () => {
