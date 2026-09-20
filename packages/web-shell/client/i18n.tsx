@@ -3880,122 +3880,55 @@ const EN: Messages = {
     'Image-capable model used as the vision bridge. Leave empty to auto-select.',
 
   // --- Additional settings labels & descriptions (previously untranslated) ---
-  'settings.category.Review': 'Review',
-  'settings.category.Output': 'Output',
   'settings.category.IDE': 'IDE',
-  'settings.category.Goals': 'Goals',
-  'settings.category.Policy': 'Policy',
-  'settings.category.Agents': 'Agents',
   'settings.category.Memory': 'Memory',
   'settings.category.MCP': 'MCP',
   'settings.category.Security': 'Security',
   'settings.category.Generation Configuration': 'Generation Configuration',
 
   'settings.label.review.attribution': 'Attribution: review',
-  'settings.description.review.attribution':
-    'Append the attribution footer naming the model and CLI version to review bodies and inline comments posted to GitHub.',
   'settings.label.review.sandbox': 'Sandbox the reviewed code: review',
-  'settings.description.review.sandbox':
-    'Run the reviewed code in a sandbox environment.',
   'settings.label.review.effort': 'Default effort: review',
-  'settings.description.review.effort':
-    'Default effort for /review when neither --effort nor a project-remembered level applies.',
   'settings.label.review.comment': 'Comment by default: review',
-  'settings.description.review.comment':
-    'Treat every PR /review as if --comment was passed: findings are posted to the pull request without the flag.',
   'settings.label.review.severityFloor': 'Posting floor: review',
-  'settings.description.review.severityFloor':
-    'The lowest severity a PR /review posts when --severity-floor is not given.',
   'settings.label.review.reverseAuditRounds':
     'Reverse-audit round ceiling: review',
-  'settings.description.review.reverseAuditRounds':
-    'Lower the reverse-audit loop ceiling for /review.',
   'settings.label.review.approachRounds':
     'Approach-signal round threshold: review',
-  'settings.description.review.approachRounds':
-    'How many rounds a pull request must reach before the review may add an advisory paragraph about the change shape.',
 
   'settings.label.output.showTimestamps': 'Show Timestamps',
-  'settings.description.output.showTimestamps':
-    'Show [HH:MM:SS] timestamp before each assistant response.',
 
   'settings.label.ui.disableWorkflowKeywordTrigger':
     'Disable Workflow Keyword Trigger',
-  'settings.description.ui.disableWorkflowKeywordTrigger':
-    'Mentioning the word "workflow" in a prompt no longer steers the turn toward the Workflow tool.',
   'settings.label.ui.showStatusInTitle': 'Show Status in Title',
-  'settings.description.ui.showStatusInTitle':
-    'Show Qwen Code session name and status in the terminal window title.',
   'settings.label.ui.showResponseTokensPerSecond':
     'Show Response Tokens Per Second',
-  'settings.description.ui.showResponseTokensPerSecond':
-    'Show a live tokens/sec estimate next to the response token counter while the model is streaming.',
   'settings.label.ui.showToolCallDetails': 'Show Tool Call Details',
-  'settings.description.ui.showToolCallDetails':
-    'Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary.',
 
   'settings.label.modelFallbacks': 'Model Fallbacks',
-  'settings.description.modelFallbacks':
-    'Ordered list of fallback model IDs (max 3) to try when the primary model hits capacity errors.',
 
   'settings.label.tools.codeModeOnly': 'Code Mode Only (Experimental)',
-  'settings.description.tools.codeModeOnly':
-    'Expose ordinary tools to the model only through the isolated exec JavaScript tool.',
   'settings.label.tools.webSearch.enabled': 'Enable WebSearch',
-  'settings.description.tools.webSearch.enabled':
-    'Set false to disable the built-in web_search tool.',
   'settings.label.tools.webSearch.model': 'Search Model',
-  'settings.description.tools.webSearch.model':
-    'Model selector for the explicit search path.',
   'settings.label.tools.webSearch.webExtractor': 'Open Result Pages',
-  'settings.description.tools.webSearch.webExtractor':
-    'Let the search agent open and read result pages for better-grounded answers.',
   'settings.label.tools.webSearch.timeoutMs': 'Search Timeout (ms)',
-  'settings.description.tools.webSearch.timeoutMs':
-    'Total time budget for one web_search call, in milliseconds.',
   'settings.label.tools.webSearch.maxPerSession': 'Max Searches per Session',
-  'settings.description.tools.webSearch.maxPerSession':
-    'Maximum web_search calls in one session.',
   'settings.label.tools.toolSearch.threshold':
     'Deferred Tool Preload Threshold (%)',
-  'settings.description.tools.toolSearch.threshold':
-    'Context-window percentage used as the session-start budget for preloading deferred tools.',
   'settings.label.tools.listDirectory.enabled': 'Enable ListDirectory',
-  'settings.description.tools.listDirectory.enabled':
-    'Enable the built-in list_directory tool.',
   'settings.label.tools.todoWrite.enabled': 'Enable Todo Write',
-  'settings.description.tools.todoWrite.enabled':
-    'Enable the built-in todo_write tool and its system-prompt guidance.',
   'settings.label.tools.workflowsEnabled': 'Dynamic Workflows',
-  'settings.description.tools.workflowsEnabled':
-    'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel.',
   'settings.label.tools.workflowSizeGuideline': 'Dynamic Workflow Size',
-  'settings.description.tools.workflowSizeGuideline':
-    'Advisory size guideline for the dynamic workflows the model writes.',
   'settings.label.tools.workflowNameOnly': 'Named Workflows Only',
-  'settings.description.tools.workflowNameOnly':
-    'Restrict the model to running named workflows only.',
 
   'settings.label.goals.modelProposed': 'Model-Proposed Goals',
-  'settings.description.goals.modelProposed':
-    'Controls the propose_goal tool, which lets the model propose a session Goal for you to approve.',
 
   'settings.label.experimental.cron': 'Enable Cron/Loop Tools',
-  'settings.description.experimental.cron':
-    'Enable in-session cron/loop tools for creating recurring prompts.',
   'settings.label.experimental.sessionWriterLease':
     'Enable ACP Session Writer Lease',
-  'settings.description.experimental.sessionWriterLease':
-    'Enable cross-process write fencing for persisted ACP and daemon sessions.',
   'settings.label.experimental.agentTeam': 'Enable Agent Team',
-  'settings.description.experimental.agentTeam':
-    'Enable agent team collaboration tools (experimental).',
   'settings.label.omni.enabled': 'Enable Omni Media Delivery',
-  'settings.description.omni.enabled':
-    'Enable the omni media pipeline for media files referenced with @.',
   'settings.label.experimental.artifact': 'Enable Artifacts',
-  'settings.description.experimental.artifact':
-    'Enable artifact tools for publishing interactive HTML pages.',
 
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
@@ -7751,12 +7684,7 @@ const ZH: Messages = {
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
 
   // --- 补全缺失的设置项中文翻译 ---
-  'settings.category.Review': '代码审查',
-  'settings.category.Output': '输出',
   'settings.category.IDE': 'IDE',
-  'settings.category.Goals': '目标',
-  'settings.category.Policy': '策略',
-  'settings.category.Agents': '智能体',
   'settings.category.Memory': '记忆',
   'settings.category.MCP': 'MCP',
   'settings.category.Security': '安全',
