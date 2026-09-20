@@ -854,17 +854,17 @@ describe('receipts', () => {
   });
 
   it('delivers nothing on an address its host could not confirm', () => {
-    // `ownsSessionId` reads live state and can throw mid-teardown. An
+    // `resolveSessionId` reads live state and can throw mid-teardown. An
     // unanswered question is not "yes": releasing on it would deliver to
     // an address nobody confirmed and receipt the sender `delivered`.
-    let owns: (id: string) => boolean = () => true;
+    let owns: (id: string) => string | undefined = (id) => id;
     const delivered: PeerUserFrame[] = [];
     const statuses: string[] = [];
     const gate = new InboundGate({
       admission: unmeteredAdmission(),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => 'hold',
-      ownsSessionId: (id) => owns(id),
+      resolveSessionId: (id) => owns(id),
       deliver: (candidate) => delivered.push(candidate),
       reportStatus: (_candidate, status) => statuses.push(status),
     });
@@ -894,7 +894,7 @@ describe('receipts', () => {
   it('releases nothing when the host cannot answer during a re-judge', () => {
     // The same question on the other release path: a mode change frees a
     // parked message, and the pin check throws while it is being let out.
-    let owns: (id: string) => boolean = () => true;
+    let owns: (id: string) => string | undefined = (id) => id;
     let mode: ApprovalMode = ApprovalMode.DEFAULT;
     const delivered: PeerUserFrame[] = [];
     const statuses: string[] = [];
@@ -902,7 +902,7 @@ describe('receipts', () => {
       admission: unmeteredAdmission(),
       getApprovalMode: () => mode,
       getPolicySetting: () => undefined,
-      ownsSessionId: (id) => owns(id),
+      resolveSessionId: (id) => owns(id),
       deliver: (candidate) => delivered.push(candidate),
       reportStatus: (_candidate, status) => statuses.push(status),
     });
@@ -929,7 +929,7 @@ describe('receipts', () => {
     const gate = new InboundGate({
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => 'hold',
-      ownsSessionId: (id) => hosted.has(id),
+      resolveSessionId: (id) => (hosted.has(id) ? id : undefined),
       deliver: (candidate) => delivered.push(candidate),
       reportStatus: (_candidate, status) => statuses.push(status),
     });
@@ -958,7 +958,7 @@ describe('receipts', () => {
     const gate = new InboundGate({
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => 'hold',
-      ownsSessionId: () => true,
+      resolveSessionId: (id) => id,
       deliver: (candidate) => delivered.push(candidate),
       reportStatus: (_candidate, status) => statuses.push(status),
     });
@@ -2412,6 +2412,9 @@ describe('a gate for a process hosting several sessions', () => {
       },
       relaxed: { mode: ApprovalMode.DEFAULT, expiryMs: 300_000 },
     };
+    // A second name the host answers to for one of them, as `/clear`
+    // leaves behind.
+    const aliases: Record<string, string> = { 'strict-before-clear': 'strict' };
     const gate = new InboundGate({
       admission: unmeteredAdmission(),
       getApprovalMode: (id) => {
@@ -2425,7 +2428,13 @@ describe('a gate for a process hosting several sessions', () => {
       getPolicyScope: (id) => (id ? settings[id]?.scope : undefined),
       getHeldExpiryMs: (id) =>
         id ? (settings[id]?.expiryMs ?? null) : DEFAULT_HELD_EXPIRY_MS,
-      ownsSessionId: (id) => id in settings,
+      // A real host keeps one name per session and answers to every
+      // spelling of it — case, and the id a session had before /clear.
+      resolveSessionId: (id) => {
+        const folded = id.toLowerCase();
+        if (folded in settings) return folded;
+        return aliases[folded];
+      },
       deliver: (candidate) => delivered.push(candidate),
       reportStatus: (candidate, status) =>
         statuses.push({ msgId: candidate.msgId, status }),
@@ -2498,9 +2507,14 @@ describe('a gate for a process hosting several sessions', () => {
         host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'strict' })),
       ).toBe('held');
     }
-    // Full for `strict`, respelled or not...
+    // Full for `strict` under every name its host answers to...
     expect(
       host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'STRICT' })),
+    ).toBe('dropped');
+    expect(
+      host.gate.admit(
+        frame({ fromMode: 'bypass', toSessionId: 'strict-before-clear' }),
+      ),
     ).toBe('dropped');
     // ...and still open for its sibling.
     expect(
@@ -2522,5 +2536,215 @@ describe('a gate for a process hosting several sessions', () => {
       msgId: forStrict.msgId,
       status: 'misaddressed',
     });
+  });
+
+  it('judges both names of one session by that session, not by the spelling', () => {
+    const host = hostOfTwo();
+    // `strict-before-clear` is the id this session was published under;
+    // `strict` is what it answers to now. Nothing on the frames says they
+    // are the same session — only the host knows that.
+    const beforeClear = frame({
+      fromMode: 'prompting',
+      toSessionId: 'strict-before-clear',
+    });
+    const afterClear = frame({ fromMode: 'prompting', toSessionId: 'strict' });
+
+    expect(host.gate.admit(beforeClear)).toBe('held');
+    expect(host.gate.admit(afterClear)).toBe('held');
+
+    // One session's settings answered for both, including the hold cause
+    // and the scope that only `strict` has configured.
+    expect(host.gate.getHeld().map((entry) => entry.cause)).toEqual([
+      'explicit-setting',
+      'explicit-setting',
+    ]);
+    expect(
+      host.asked.filter((ask) => ask.sessionId === 'strict-before-clear'),
+    ).toEqual([]);
+    expect(host.asked).toContainEqual({
+      reader: 'policy',
+      sessionId: 'strict',
+    });
+  });
+
+  it('judges a frame by the id it carries when the host cannot answer', () => {
+    // A resolver that throws mid-teardown must not take `admit` down with
+    // it: a message is in hand and a verdict has to come out. The id the
+    // sender used is the only name left to judge by.
+    const asked: Array<string | undefined> = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: (id) => {
+        asked.push(id);
+        return 'hold';
+      },
+      resolveSessionId: () => {
+        throw new Error('the session map is being torn down');
+      },
+      deliver: () => {},
+    });
+
+    expect(
+      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'session-a' })),
+    ).toBe('held');
+    expect(asked).toEqual(['session-a']);
+  });
+
+  /** A host of several sessions whose repeat window is actually on. */
+  function metered() {
+    const delivered: PeerUserFrame[] = [];
+    const gate = new InboundGate({
+      admission: new PeerAdmission({
+        limits: {
+          bucketCapacity: 1e6,
+          refillPerSecond: 1e6,
+          globalBucketCapacity: 1e6,
+          globalRefillPerSecond: 1e6,
+          dedupWindowMs: 30_000,
+        },
+      }),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      resolveSessionId: (id) => id,
+      deliver: (candidate) => delivered.push(candidate),
+    });
+    const line = (toSessionId: string, msgId: string) => ({
+      ...buildUserFrame({ content: 'stand by' }),
+      msgId,
+      fromMode: 'bypass' as const,
+      toSessionId,
+    });
+    return { gate, delivered, line };
+  }
+
+  it('lets one line reach every session of a host it is sent to', () => {
+    // The repeat check asks "the same thing again?" of one conversation.
+    // A host's sessions are separate conversations behind one socket, so
+    // the same line sent to two of them arrived at neither twice.
+    const host = metered();
+
+    expect(host.gate.admit(host.line('session-a', 'm1'))).toBe('accept');
+    expect(host.gate.admit(host.line('session-b', 'm2'))).toBe('accept');
+    expect(host.delivered).toHaveLength(2);
+  });
+
+  it('still calls a line repeated to the same session a duplicate', () => {
+    const host = metered();
+
+    expect(host.gate.admit(host.line('session-a', 'm1'))).toBe('accept');
+    expect(host.gate.admit(host.line('session-a', 'm2'))).toBe('dropped');
+    expect(host.delivered).toHaveLength(1);
+  });
+
+  it('keeps a session as its own repeat baseline across an interleaving', () => {
+    // The baseline is per addressee, not "the last message overall", so
+    // a sender alternating between two sessions cannot launder a repeat
+    // to one of them by putting a message to the other in between.
+    const host = metered();
+
+    expect(host.gate.admit(host.line('session-a', 'm1'))).toBe('accept');
+    expect(host.gate.admit(host.line('session-b', 'm2'))).toBe('accept');
+    expect(host.gate.admit(host.line('session-a', 'm3'))).toBe('dropped');
+    expect(host.delivered).toHaveLength(2);
+  });
+});
+
+describe('a host with no way to show a parked message', () => {
+  function refusingHost(policy: InboundPolicy | undefined, mode: ApprovalMode) {
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      presentsHolds: false,
+      getApprovalMode: () => mode,
+      getPolicySetting: () => policy,
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    return { gate, delivered, statuses };
+  }
+
+  it.each([
+    [
+      'an explicit hold setting',
+      'hold' as const,
+      ApprovalMode.DEFAULT,
+      'prompting' as const,
+    ],
+    [
+      'a mode it does not recognize',
+      undefined,
+      'not-a-mode' as ApprovalMode,
+      'prompting' as const,
+    ],
+    [
+      'a sender in the other review class',
+      undefined,
+      ApprovalMode.DEFAULT,
+      'bypass' as const,
+    ],
+  ])(
+    'refuses what it would have parked for %s',
+    (_label, policy, mode, fromMode) => {
+      // Parking it would leave the message waiting on a decision nobody can
+      // be asked for, and the sender would have been told `held` — which
+      // promises a person will look at it.
+      const host = refusingHost(policy, mode);
+      const f = frame({ fromMode, toSessionId: 'session-a' });
+
+      expect(host.gate.admit(f)).toBe('refused');
+      expect(host.gate.getHeld()).toEqual([]);
+      expect(host.statuses).toEqual(['refused']);
+      expect(host.delivered).toEqual([]);
+    },
+  );
+
+  it('still accepts what its policy accepts', () => {
+    const host = refusingHost(undefined, ApprovalMode.YOLO);
+    const f = frame({ fromMode: 'bypass', toSessionId: 'session-a' });
+
+    expect(host.gate.admit(f)).toBe('accept');
+    expect(host.delivered).toEqual([f]);
+  });
+
+  it('still accepts a trusted controller the parity rule would have parked', () => {
+    // The reason this is the gate's decision rather than the host
+    // answering `refuse` to `getPolicySetting`: that reader cannot tell a
+    // message that would be parked from one that would be accepted. A
+    // controller grant is judged below any explicit setting, so a host
+    // refusing there would turn away the very messages a user minted a
+    // grant to be able to send.
+    const host = refusingHost(undefined, ApprovalMode.DEFAULT);
+    const parked = frame({ fromMode: 'bypass', toSessionId: 'session-a' });
+    const granted = frame({ fromMode: 'bypass', toSessionId: 'session-a' });
+
+    // Same sender class, same session: the parity rule parks it, so this
+    // host refuses it.
+    expect(host.gate.admit(parked)).toBe('refused');
+    // The grant is not subject to parity, so nothing would have parked
+    // it and nothing refuses it.
+    expect(
+      host.gate.admit(granted, {
+        selfSent: false,
+        controller: { id: 'grant-1' },
+      }),
+    ).toBe('accept');
+    expect(host.delivered).toEqual([granted]);
+  });
+
+  it('parks what it would park when the host says nothing', () => {
+    const delivered: PeerUserFrame[] = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      deliver: (candidate) => delivered.push(candidate),
+    });
+
+    expect(
+      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'session-a' })),
+    ).toBe('held');
+    expect(gate.getHeld()).toHaveLength(1);
   });
 });

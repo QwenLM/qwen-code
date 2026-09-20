@@ -145,6 +145,18 @@ export function hasToken(tokens: number): boolean {
   return tokens >= 1;
 }
 
+/** This sender's most recent body admitted for one addressee. */
+function lastBodyInScope(
+  bodies: readonly AdmittedBody[],
+  scope: string | undefined,
+): AdmittedBody | undefined {
+  for (let index = bodies.length - 1; index >= 0; index -= 1) {
+    const record = bodies[index];
+    if (record?.scope === scope) return record;
+  }
+  return undefined;
+}
+
 /** Whether a remembered body is still inside the shared repeat window. */
 export function isBodyWithinWindow(
   at: number,
@@ -168,6 +180,8 @@ export function isBodyWithinWindow(
 interface AdmittedBody {
   messageId: string | undefined;
   hash: string;
+  /** Which addressee this body counted as a repeat to. See `dedupScope`. */
+  scope: string | undefined;
   at: number;
   atWall: number;
 }
@@ -195,6 +209,16 @@ export interface AdmissionRequest {
   body: string;
   /** Message identity used to roll back this exact admission. */
   messageId?: string;
+  /**
+   * Who the message was addressed to, when the receiver answers for more
+   * than one session. The repeat check then asks "identical to what this
+   * sender last said *to this session*": a host holding several sessions
+   * is one socket, but its sessions are separate conversations, and the
+   * same line sent to two of them arrived at neither twice.
+   *
+   * The rate limit is deliberately not scoped this way — see `admit`.
+   */
+  dedupScope?: string;
   /**
    * Skip the duplicate check. Set for this session's own processes and
    * for trusted controllers; the buckets still apply.
@@ -291,7 +315,12 @@ export class PeerAdmission {
     const bodyHash = request.exemptFromDedup
       ? undefined
       : hashBody(request.body);
-    const lastBody = meter.bodies.at(-1);
+    // The baseline is this sender's last message to this addressee, not
+    // its last message overall: with one addressee the two are the same,
+    // and with several a line alternating between sessions is new to each
+    // of them. The sender's bucket below is charged across all of them,
+    // so a flood cannot buy itself a fresh allowance per session.
+    const lastBody = lastBodyInScope(meter.bodies, request.dedupScope);
     if (bodyHash !== undefined && lastBody?.hash === bodyHash) {
       debugLogger.debug(
         `dropping a peer message from ${request.senderKey}: identical to its previous message`,
@@ -320,6 +349,7 @@ export class PeerAdmission {
       meter.bodies.push({
         messageId: request.messageId,
         hash: bodyHash,
+        scope: request.dedupScope,
         at: now,
         atWall: wallNow,
       });

@@ -210,7 +210,7 @@ async function start(
   mode: ApprovalMode | null = ApprovalMode.DEFAULT,
   extra: {
     getSessionId?: () => string;
-    ownsSessionId?: (id: string) => boolean;
+    resolveSessionId?: (id: string) => string | undefined;
     settleSentMessage?: (
       msgId: string,
       status: string,
@@ -508,7 +508,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const sender = await startSenderInbox();
     const hosted = new Set(['session-a', 'session-b']);
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
-      ownsSessionId: (id) => hosted.has(id),
+      resolveSessionId: (id) => (hosted.has(id) ? id : undefined),
     });
 
     const mine = peerFrame({
@@ -544,7 +544,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     // protocol page tells senders to always pin for exactly this reason.
     const sender = await startSenderInbox();
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
-      ownsSessionId: () => true,
+      resolveSessionId: (id) => id,
     });
     const unpinned = peerFrame({
       content: 'to whom it may concern',
@@ -567,9 +567,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await expect(
       start(ApprovalMode.DEFAULT, {
         getSessionId: () => 'session-now',
-        ownsSessionId: () => true,
+        resolveSessionId: (id) => id,
       }),
-    ).rejects.toThrow('getSessionId or ownsSessionId');
+    ).rejects.toThrow('getSessionId or resolveSessionId');
   });
 
   it('admits a pinned message when it has no session id to judge it against', async () => {
@@ -1390,7 +1390,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     // the approval mode. One message each covers all four readers.
     let policy: InboundPolicy | undefined = 'hold';
     const { submitted } = await start(null, {
-      ownsSessionId: (id) => id === 'hosted-1',
+      resolveSessionId: (id) => (id === 'hosted-1' ? id : undefined),
       getPolicySetting: (id) => {
         asked['policy']!.push(id);
         return policy;

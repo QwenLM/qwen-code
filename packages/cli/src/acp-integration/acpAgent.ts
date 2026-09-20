@@ -4853,23 +4853,7 @@ class QwenAgent implements Agent {
           getPolicySetting: () => 'refuse',
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             this.publishInboxAddress(ipcPath, ipcToken),
-          ownsSessionId: (id) => {
-            // The map key froze when the session was published, while
-            // the record a sender reads follows the Config's live id —
-            // /clear swaps the id under a running session. Test both, so
-            // a frame pinned to either spelling is answered by the
-            // session that holds it.
-            const wanted = normalizeSessionIdForLookup(id);
-            return (
-              this.sessions.has(wanted) ||
-              [...this.sessions.values()].some(
-                (session) =>
-                  normalizeSessionIdForLookup(
-                    session.getConfig().getSessionId(),
-                  ) === wanted,
-              )
-            );
-          },
+          resolveSessionId: (id) => this.resolveHostedSessionId(id),
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
@@ -4893,6 +4877,30 @@ class QwenAgent implements Agent {
         return null;
       }
     })();
+  }
+
+  /**
+   * The one name this process keeps a hosted session under, or undefined
+   * for a session it does not hold.
+   *
+   * The map key froze when the session was published, while the record a
+   * sender reads follows the Config's live id — `/clear` swaps the id
+   * under a running session. Both spellings resolve to the map key, so a
+   * gate judging, bucketing or metering by the answer treats a sender
+   * that alternates between them as talking to one session, which it is.
+   */
+  private resolveHostedSessionId(id: string): string | undefined {
+    const wanted = normalizeSessionIdForLookup(id);
+    if (this.sessions.has(wanted)) return wanted;
+    for (const [key, session] of this.sessions) {
+      if (
+        normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
+        wanted
+      ) {
+        return key;
+      }
+    }
+    return undefined;
   }
 
   /** Close the inbox and stop advertising it. Safe to call more than once. */

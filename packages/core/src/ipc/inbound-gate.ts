@@ -295,16 +295,15 @@ export interface HeldMessage {
  * What the gate asks its host.
  *
  * Every settings reader takes the session the frame in hand is addressed
- * to — its `toSessionId`, or undefined for a frame that names none. A
- * host holding one session has one set of settings and ignores the
- * argument. A host of several (see `ownsSessionId`) can hold sessions
- * from different workspaces, each with its own review policy, hold
- * lifetime and approval mode, and a message is judged by the rules of
- * the session it is for. Such a host only ever sees pinned frames here:
- * an unpinned one is answered as misaddressed before it reaches the
- * gate. A host that answers to more than one spelling of one session
- * sees each spelling as its own session; resolving them to one name is
- * the host's, and is added with the host that needs it.
+ * to — or undefined for a frame that names none. A host holding one
+ * session has one set of settings and ignores the argument. A host of
+ * several (see `resolveSessionId`) can hold sessions from different
+ * workspaces, each with its own review policy, hold lifetime and
+ * approval mode, and a message is judged by the rules of the session it
+ * is for. Such a host only ever sees pinned frames here: an unpinned one
+ * is answered as misaddressed before it reaches the gate. The name it is
+ * asked about is the one its own `resolveSessionId` returned, so the two
+ * spellings a session can answer to arrive here as one name.
  */
 export interface InboundGateOptions {
   /**
@@ -366,15 +365,25 @@ export interface InboundGateOptions {
    */
   getSessionId?: () => string | undefined;
   /**
-   * For a process hosting several sessions: whether `id` is one of them.
+   * For a process hosting several sessions: the one name it keeps for the
+   * session `id` names, or undefined for a session it does not hold.
    *
    * Wired instead of `getSessionId`, which asks "what is the one session
    * here" — a question such a process has no single answer to. A frame
    * that names no session at all is not for any of them: with one session
    * an unpinned frame can only have meant that one, and with several
    * there is nothing to guess from.
+   *
+   * It answers with a name rather than yes-or-no because a host can hold
+   * one session under more than one spelling — it publishes a session
+   * under one id and `/clear` swaps the id it answers to — and the host
+   * is the only party that knows the two are one session. The gate
+   * judges, buckets and meters by the name it gets back, so a sender
+   * alternating between the spellings gets one session's allowance and
+   * one session's settings, not two. Case folding belongs here too: the
+   * gate compares the names as given.
    */
-  ownsSessionId?: (id: string) => boolean;
+  resolveSessionId?: (id: string) => string | undefined;
   /**
    * How long a message may sit parked before it expires, in
    * milliseconds, or null to keep it until the session ends. Read on
@@ -383,6 +392,12 @@ export interface InboundGateOptions {
    * the session each is addressed to.
    */
   getHeldExpiryMs?: (sessionId?: string) => number | null;
+  /**
+   * Whether this host can put a parked message in front of someone.
+   * Defaults to true. False turns every hold into a refusal — see
+   * `admit` — for a host with no review surface of its own.
+   */
+  presentsHolds?: boolean;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
 }
@@ -481,7 +496,7 @@ export class InboundGate {
 
   constructor(private readonly options: InboundGateOptions) {
     this.admission = options.admission ?? new PeerAdmission();
-    this.answersForSeveralSessions = options.ownsSessionId !== undefined;
+    this.answersForSeveralSessions = options.resolveSessionId !== undefined;
   }
 
   /** Messages currently parked, oldest first. */
@@ -559,22 +574,24 @@ export class InboundGate {
     frame?: Pick<PeerUserFrame, 'fromMode' | 'toSessionId'>,
     origin?: PeerOrigin,
   ): PolicyDecision {
+    // Every reader below is asked about the session the host keeps this
+    // frame's addressee under, not the spelling the sender happened to
+    // use, so two spellings of one session are judged by one set of
+    // settings.
+    const addressed = this.addressee(frame);
     // The setting is read from user configuration, so it can be missing,
     // misspelled, or backed by a getter that throws mid-teardown. None of
     // those are "the user asked for accept".
     let explicit: InboundPolicy | undefined;
     try {
-      const configured = this.options.getPolicySetting(frame?.toSessionId);
+      const configured = this.options.getPolicySetting(addressed);
       if (configured !== undefined && !isInboundPolicy(configured)) {
         debugLogger.debug(
           `unrecognized crossSessionInbound value (failing closed): ${String(
             configured,
           )}`,
         );
-        return this.hold(
-          'policy-unreadable',
-          this.policyScope(frame?.toSessionId),
-        );
+        return this.hold('policy-unreadable', this.policyScope(addressed));
       }
       explicit = configured;
     } catch (error) {
@@ -586,10 +603,7 @@ export class InboundGate {
       return { policy: 'hold', cause: 'policy-unreadable' };
     }
     if (explicit === 'hold') {
-      return this.hold(
-        'explicit-setting',
-        this.policyScope(frame?.toSessionId),
-      );
+      return this.hold('explicit-setting', this.policyScope(addressed));
     }
     if (explicit !== undefined) {
       return { policy: explicit };
@@ -611,7 +625,7 @@ export class InboundGate {
 
     let mode: ApprovalMode | null;
     try {
-      mode = this.options.getApprovalMode(frame?.toSessionId);
+      mode = this.options.getApprovalMode(addressed);
     } catch (error) {
       debugLogger.debug(
         `approval-mode getter threw (failing closed): ${
@@ -673,7 +687,7 @@ export class InboundGate {
     // Only a process holding one session can "change session" — that is
     // what a `/clear` or a resume does, and the meter starts over because
     // the conversation it was pacing is gone. A process hosting several
-    // wires `ownsSessionId` instead, has no single id to compare, and
+    // wires `resolveSessionId` instead, has no single id to compare, and
     // meters across all of them: its sessions come and go constantly, and
     // resetting on each would hand a flooding peer a fresh allowance.
     const sessionId = this.options.getSessionId?.();
@@ -700,6 +714,11 @@ export class InboundGate {
       senderKey: peerSenderKey(frame, origin),
       body: frame.message.content,
       messageId: frame.msgId,
+      // "The same thing again" is a question about one conversation. A
+      // gate answering for one session has one, and passes nothing here.
+      ...(this.answersForSeveralSessions
+        ? { dedupScope: this.addressee(frame) ?? '' }
+        : {}),
       // A hook reporting the same line twice, or a user repeating
       // themselves to a controller, is not the model-driven repetition
       // the duplicate check exists to stop. Both are still rate limited.
@@ -744,7 +763,22 @@ export class InboundGate {
     }
 
     const decision = this.resolvePolicy(frame, origin);
-    const { policy } = decision;
+    // A host with no way to put a parked message in front of anyone turns
+    // every hold into a refusal. Parking one there would leave it waiting
+    // on a decision nobody can be asked for, until it expires — and the
+    // sender would have been told `held`, which promises a person will
+    // look. `refused` is the truth: this receiver will not take it.
+    //
+    // Decided here rather than by the host answering `refuse` to
+    // `getPolicySetting`, because that reader cannot tell a message that
+    // would be held from one that would be accepted: an explicit setting
+    // outranks both a trusted controller and this session's own
+    // processes, so refusing there would turn away messages this gate
+    // accepts without asking anyone.
+    const policy =
+      decision.policy === 'hold' && this.options.presentsHolds === false
+        ? 'refuse'
+        : decision.policy;
 
     if (policy === 'refuse') {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
@@ -1052,18 +1086,49 @@ export class InboundGate {
   }
 
   /**
+   * The one name this gate judges, buckets and meters a frame by.
+   *
+   * With `resolveSessionId` wired it is the host's answer, which
+   * collapses the spellings of one session into a single name. Without
+   * it there is one session, and the frame's own id is the only name
+   * there is.
+   *
+   * A resolver that throws leaves the frame judged by the id it carries,
+   * which is what the gate did before a resolver existed. A judgement has
+   * to come out of here — `admit` has a message in hand — and the honest
+   * fallback is the name the sender used.
+   */
+  private addressee(
+    frame: Pick<PeerUserFrame, 'toSessionId'> | undefined,
+  ): string | undefined {
+    const resolveSessionId = this.options.resolveSessionId;
+    if (!resolveSessionId || frame?.toSessionId === undefined) {
+      return frame?.toSessionId;
+    }
+    try {
+      return resolveSessionId(frame.toSessionId) ?? frame.toSessionId;
+    } catch (error) {
+      debugLogger.debug(
+        `the session-name resolver threw (judging by the id on the frame): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return frame.toSessionId;
+    }
+  }
+
+  /**
    * The session a held message counts against for the hold cap.
    *
    * One bucket unless this gate answers for several sessions: a session
    * receives frames both pinned to it and unpinned, and counting those
-   * apart would hand one session two allowances. Ids are compared
-   * case-insensitively. A host that answers to two *different* ids for
-   * one session still gets a bucket for each; resolving those to one
-   * name is the host's, and is not wired yet.
+   * apart would hand one session two allowances. Two spellings of one
+   * session share a bucket, because the host resolved them to one name
+   * before they got here.
    */
   private heldSessionKey(frame: PeerUserFrame): string {
     if (!this.answersForSeveralSessions) return '';
-    return frame.toSessionId?.toLowerCase() ?? '';
+    return this.addressee(frame) ?? '';
   }
 
   /**
@@ -1104,12 +1169,13 @@ export class InboundGate {
   }
 
   private pinValidNow(frame: PeerUserFrame): boolean {
-    const ownsSessionId = this.options.ownsSessionId;
-    if (ownsSessionId) {
+    const resolveSessionId = this.options.resolveSessionId;
+    if (resolveSessionId) {
       // A process hosting several sessions cannot act on an unpinned
       // frame: there is no one session it could have meant.
       return (
-        frame.toSessionId !== undefined && ownsSessionId(frame.toSessionId)
+        frame.toSessionId !== undefined &&
+        resolveSessionId(frame.toSessionId) !== undefined
       );
     }
     if (frame.toSessionId === undefined) return true;
@@ -1259,7 +1325,7 @@ export class InboundGate {
     const survivors: HeldMessage[] = [];
     const expired: HeldMessage[] = [];
     for (const entry of this.held) {
-      const expiryMs = this.getHeldExpiryMs(entry.frame.toSessionId);
+      const expiryMs = this.getHeldExpiryMs(this.addressee(entry.frame));
       (expiryMs !== null && this.ageOf(entry) >= expiryMs
         ? expired
         : survivors
@@ -1274,7 +1340,7 @@ export class InboundGate {
         `held peer message ${entry.frame.msgId} expired after ` +
           `${this.ageOf(entry)} ms (session ${
             entry.frame.toSessionId ?? 'unpinned'
-          } holds for ${this.getHeldExpiryMs(entry.frame.toSessionId)} ms)`,
+          } holds for ${this.getHeldExpiryMs(this.addressee(entry.frame))} ms)`,
       );
       this.forgetAdmittedBody(entry.frame, originOf(entry));
       this.recordSettled(entry.frame.msgId, 'expired');
@@ -1307,7 +1373,7 @@ export class InboundGate {
     // is not necessarily the next to expire.
     let remaining: number | null = null;
     for (const entry of this.held) {
-      const expiryMs = this.getHeldExpiryMs(entry.frame.toSessionId);
+      const expiryMs = this.getHeldExpiryMs(this.addressee(entry.frame));
       if (expiryMs === null) continue;
       const left = expiryMs - this.ageOf(entry);
       if (remaining === null || left < remaining) remaining = left;

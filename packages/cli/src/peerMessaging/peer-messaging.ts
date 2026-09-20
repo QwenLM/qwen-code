@@ -195,15 +195,23 @@ export interface PeerMessagingOptions {
    */
   getSessionId?: () => string;
   /**
-   * For a process hosting several sessions: whether `id` is one of them.
+   * For a process hosting several sessions: the one name this process
+   * keeps the session `id` names under, or undefined for a session it
+   * does not hold.
    *
    * Wired instead of `getSessionId` — the two are mutually exclusive,
-   * because a process either has one session to name or a set to test
+   * because a process either has one session to name or a set to resolve
    * against. With this set, a frame naming no session at all is
    * misaddressed: an unpinned frame could have meant the one session a
    * single-session process holds, and here it could mean any of several.
    */
-  ownsSessionId?: (id: string) => boolean;
+  resolveSessionId?: (id: string) => string | undefined;
+  /**
+   * Whether this process can put a message its gate parks in front of
+   * someone. Defaults to true; false makes the gate refuse what it would
+   * otherwise hold.
+   */
+  presentsHolds?: boolean;
   socketPath?: string;
   /**
    * Overrides the generated inbox token. A test seam like `socketPath`:
@@ -256,7 +264,7 @@ export class PeerMessaging {
     ipcToken?: string,
   ) => Promise<void> = async () => {};
   private getSessionId: (() => string) | null = null;
-  private ownsSessionId: ((id: string) => boolean) | null = null;
+  private resolveSessionId: ((id: string) => string | undefined) | null = null;
   private settleSentMessage: (
     msgId: string,
     status: PeerDeliveryStatus,
@@ -308,13 +316,13 @@ export class PeerMessaging {
   static async start(
     options: PeerMessagingOptions,
   ): Promise<PeerMessaging | null> {
-    if (options.getSessionId && options.ownsSessionId) {
+    if (options.getSessionId && options.resolveSessionId) {
       // A configuration mistake rather than a runtime condition: one asks
       // which session this process is, the other which sessions it hosts,
       // and a process that answered both would judge pins against
       // whichever happened to be checked first.
       throw new Error(
-        'PeerMessaging: pass getSessionId or ownsSessionId, not both',
+        'PeerMessaging: pass getSessionId or resolveSessionId, not both',
       );
     }
     const messaging = new PeerMessaging();
@@ -360,9 +368,12 @@ export class PeerMessaging {
       isControllerValid: (id) => messaging.validControllerIds?.has(id) ?? true,
       ...(options.admission ? { admission: options.admission } : {}),
       getSessionId: options.getSessionId,
-      ...(options.ownsSessionId
-        ? { ownsSessionId: options.ownsSessionId }
+      ...(options.resolveSessionId
+        ? { resolveSessionId: options.resolveSessionId }
         : {}),
+      ...(options.presentsHolds === undefined
+        ? {}
+        : { presentsHolds: options.presentsHolds }),
       deliver: (frame, origin) => messaging.deliver(frame, origin),
       reportDropped: (frame, reason, origin) =>
         dropReceipts.note(frame, origin ?? { selfSent: false }, reason),
@@ -392,7 +403,7 @@ export class PeerMessaging {
     // session id and the send ledger this process holds, not against the
     // nulls a later assignment would leave in place.
     messaging.getSessionId = options.getSessionId ?? null;
-    messaging.ownsSessionId = options.ownsSessionId ?? null;
+    messaging.resolveSessionId = options.resolveSessionId ?? null;
     messaging.settleSentMessage =
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
@@ -888,11 +899,12 @@ export class PeerMessaging {
     // may be the stale side (a skipped /clear patch), so it is re-asserted
     // too; otherwise every later send here would be refused the same way.
     const ownSessionId = this.getSessionId?.();
-    const ownsSessionId = this.ownsSessionId;
-    const misaddressed = ownsSessionId
+    const resolveSessionId = this.resolveSessionId;
+    const misaddressed = resolveSessionId
       ? // Hosting several sessions: a frame has to say which, and name one
         // this process still holds.
-        frame.toSessionId === undefined || !ownsSessionId(frame.toSessionId)
+        frame.toSessionId === undefined ||
+        resolveSessionId(frame.toSessionId) === undefined
       : frame.toSessionId !== undefined &&
         ownSessionId !== undefined &&
         frame.toSessionId !== ownSessionId;

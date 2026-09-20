@@ -5387,7 +5387,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           token: string,
         ) => Promise<void>;
         getPolicySetting: () => string;
-        ownsSessionId: (id: string) => boolean;
+        resolveSessionId: (id: string) => string | undefined;
       };
       await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
 
@@ -5410,8 +5410,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // Inbound is turned away rather than parked: nobody is watching a
       // hold list on a daemon-managed session's behalf.
       expect(options.getPolicySetting()).toBe('refuse');
-      expect(options.ownsSessionId('hosted-a')).toBe(true);
-      expect(options.ownsSessionId('someone-else')).toBe(false);
+      expect(options.resolveSessionId('hosted-a')).toBe('hosted-a');
+      expect(options.resolveSessionId('someone-else')).toBeUndefined();
 
       mockConnectionState.resolve();
       await agentPromise;
@@ -5487,16 +5487,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
       await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
       const options = mockPeerMessagingStart.mock.calls[0]![0] as {
-        ownsSessionId: (id: string) => boolean;
+        resolveSessionId: (id: string) => string | undefined;
       };
 
       vi.mocked(innerConfig.getSessionId).mockReturnValue('hosted-clear-2');
 
-      expect(options.ownsSessionId('hosted-clear-2')).toBe(true);
+      // Both spellings resolve to the one name the process keeps this
+      // session under, so a gate judging by the answer sees one session.
       // The frozen publication key still answers: a skipped /clear patch
       // leaves the record advertising it.
-      expect(options.ownsSessionId('hosted-a')).toBe(true);
-      expect(options.ownsSessionId('someone-else')).toBe(false);
+      expect(options.resolveSessionId('hosted-clear-2')).toBe('hosted-a');
+      expect(options.resolveSessionId('hosted-a')).toBe('hosted-a');
+      expect(options.resolveSessionId('someone-else')).toBeUndefined();
 
       mockConnectionState.resolve();
       await agentPromise;
@@ -5664,7 +5666,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           path: string | undefined,
           token?: string,
         ) => Promise<void>;
-        ownsSessionId: (id: string) => boolean;
+        resolveSessionId: (id: string) => string | undefined;
       };
 
       // Fan-out: the session already published gets the address.
@@ -5694,8 +5696,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           ([fields]) => fields.slot === 'own',
         ),
       ).toBe(true);
-      expect(options.ownsSessionId('hosted-1')).toBe(true);
-      expect(options.ownsSessionId('hosted-2')).toBe(true);
+      expect(options.resolveSessionId('hosted-1')).toBe('hosted-1');
+      expect(options.resolveSessionId('hosted-2')).toBe('hosted-2');
 
       mockConnectionState.resolve();
       await agentPromise;
