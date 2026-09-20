@@ -77,8 +77,8 @@ export interface FormatDurationOptions {
 
 /**
  * Formats a duration in milliseconds into a concise, human-readable string (e.g., "1h 5s").
- * It omits any time units that are zero.
  * @param milliseconds The duration in milliseconds.
+ * @param options Controls whether whole sub-minute seconds omit the trailing `.0`.
  * @returns A formatted string representing the duration.
  */
 export const formatDuration = (
