@@ -15481,7 +15481,11 @@ export class Session implements SessionContext {
         // Replace bare \n with Markdown hard line-breaks (two trailing spaces)
         // so Zed's Markdown renderer preserves the line structure.
         const rendered = (result.content || '').replace(/\n/g, '  \n');
-        await this.messageEmitter.emitSlashCommandOutput(rendered);
+        await this.messageEmitter.emitSlashCommandOutput(
+          rendered,
+          undefined,
+          result.artifacts,
+        );
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
@@ -15492,7 +15496,13 @@ export class Session implements SessionContext {
             .map((b) => (b.type === 'text' ? b.text : ''))
             .join(' '),
           outputHistoryItems: [
-            { type: 'assistant', text: result.content || '' },
+            {
+              type: 'assistant',
+              text: result.content || '',
+              ...(result.artifacts?.length
+                ? { sessionArtifacts: result.artifacts }
+                : {}),
+            },
           ],
         });
         return null;
@@ -15520,6 +15530,7 @@ export class Session implements SessionContext {
           const notice = msg.contextCompressionNotice;
           await this.messageEmitter.emitSlashCommandOutput(
             content.replace(/\n/g, '  \n'),
+            undefined,
             undefined,
             notice
               ? { contextCompressionNotice: notice }

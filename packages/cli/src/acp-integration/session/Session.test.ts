@@ -26970,6 +26970,54 @@ describe('Session', () => {
         );
       });
 
+      it('forwards export artifacts to live output and persisted command history', async () => {
+        const artifacts = [
+          {
+            kind: 'file' as const,
+            storage: 'workspace' as const,
+            title: 'export.md',
+            workspacePath: 'export.md',
+            mimeType: 'text/markdown; charset=utf-8',
+            sizeBytes: 42,
+          },
+        ];
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Exported.',
+          artifacts,
+        });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/export md' }],
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Exported.' },
+            _meta: { source: 'slash_command', sessionArtifacts: artifacts },
+          },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            phase: 'result',
+            rawCommand: '/export md',
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Exported.',
+                sessionArtifacts: artifacts,
+              },
+            ],
+          }),
+        );
+      });
+
       it('returns a structured standalone-policy error for a blocked slash command', async () => {
         session.dispose();
         vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(

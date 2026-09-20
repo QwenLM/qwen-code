@@ -968,14 +968,21 @@ describe('Server Config (config.ts)', () => {
       expect(config.getProjectHooks()).toBeUndefined();
     });
 
-    it('keeps the folder trust gate for project hooks after replacing hooks', () => {
-      const config = new Config({ ...baseParams, trustedFolder: false });
+    it.each([false, undefined])(
+      'keeps the project hook gate when folder trust is %s',
+      (trustedFolder) => {
+        const config = new Config({
+          ...baseParams,
+          folderTrust: true,
+          trustedFolder,
+        });
 
-      config.setHooksFromSettings({ userHooks, projectHooks });
+        config.setHooksFromSettings({ userHooks, projectHooks });
 
-      expect(config.getProjectHooks()).toBeUndefined();
-      expect(config.getUserHooks()).toBe(userHooks);
-    });
+        expect(config.getProjectHooks()).toBeUndefined();
+        expect(config.getUserHooks()).toBe(userHooks);
+      },
+    );
 
     it('replaces system hooks together with the other fields', () => {
       const config = new Config({ ...baseParams, systemHooks });
@@ -13020,13 +13027,19 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
-  it('should NOT throw an error when setting any mode if trustedFolder is undefined', () => {
+  it('allows privileged modes when folder trust is disabled and no decision is supplied', () => {
     const config = new Config(baseParams);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true); // isTrustedFolder defaults to true
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
+  it('rejects privileged modes before an enabled folder trust decision', () => {
+    const config = new Config({ ...baseParams, folderTrust: true });
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
   });
 
   describe('DAC plan workflow', () => {

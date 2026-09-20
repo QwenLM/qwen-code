@@ -1907,6 +1907,9 @@ export default {
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
+  'Startup context': "Context d'inici",
+  Unattributed: 'No atribuït',
+  'Cached prefix': 'Prefix en memòria cau',
   'Run /context detail for per-item breakdown.':
     'Executeu /context detail per a un desglossament per element.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
