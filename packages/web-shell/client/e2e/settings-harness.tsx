@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
 import type { WebShellSettingItemId } from '../settings';
@@ -24,13 +24,35 @@ const excludeItems = (params.get('exclude') ?? '')
   .map((item) => item.trim())
   .filter((item): item is WebShellSettingItemId => validIds.has(item));
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
+function SettingsHarness() {
+  const [modelManagement, setModelManagement] = useState(() => ({
+    allowAdd: params.has('allowAdd')
+      ? params.get('allowAdd') !== 'false'
+      : undefined,
+    allowDelete: params.has('allowDelete')
+      ? params.get('allowDelete') !== 'false'
+      : undefined,
+  }));
+  useEffect(() => {
+    const update = (event: Event) => {
+      setModelManagement((event as CustomEvent<typeof modelManagement>).detail);
+    };
+    window.addEventListener('model-management-change', update);
+    return () => window.removeEventListener('model-management-change', update);
+  }, []);
+  return (
     <WebShellWithProviders
       baseUrl={window.location.origin}
       sessionId={sessionId}
       theme={theme}
       settings={{ excludeItems }}
+      modelManagement={modelManagement}
     />
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <SettingsHarness />
   </React.StrictMode>,
 );

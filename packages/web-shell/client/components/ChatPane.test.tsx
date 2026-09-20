@@ -3094,6 +3094,67 @@ describe('ChatPane', () => {
     ]);
   });
 
+  it('hides model setup dynamically while preserving model and session commands', () => {
+    connectionState.commands = [
+      { name: 'auth', description: 'Configure models' },
+      { name: 'model', description: 'Select model' },
+      { name: 'delete', description: 'Delete session' },
+    ];
+    render();
+    const names = () =>
+      latestChatEditorProps.commands.map(
+        (command: { name: string }) => command.name,
+      );
+    expect(names()).toContain('auth');
+    rerender({ modelManagement: { allowAdd: false } });
+    expect(names()).not.toContain('auth');
+    expect(names()).toContain('model');
+    expect(names()).toContain('delete');
+    rerender({ modelManagement: { allowDelete: false } });
+    expect(names()).toContain('auth');
+  });
+
+  it.each([false, true])(
+    'blocks model setup before host handling and queueing (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => true);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      for (const command of ['/auth', '  /AUTH provider  ']) {
+        let accepted;
+        act(() => {
+          accepted = latestOnSubmit!(command);
+        });
+        expect(accepted).toBe(true);
+      }
+      expect(onSlashCommand).not.toHaveBeenCalled();
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).toHaveBeenCalledWith(
+        'warning',
+        'Adding models is disabled by the host.',
+      );
+    },
+  );
+
+  it('uses current model management policy in a retained submit callback', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+    const retainedSubmit = latestOnSubmit!;
+    rerender({ onSlashCommand, modelManagement: { allowAdd: false } });
+    act(() => {
+      expect(retainedSubmit('/auth')).toBe(true);
+    });
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
   it("lists the pane session's own commands in the slash menu", () => {
     connectionState.commands = [
       { name: 'clear', description: 'Clear', source: 'builtin-command' },

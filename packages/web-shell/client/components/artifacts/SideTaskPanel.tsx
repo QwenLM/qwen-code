@@ -14,6 +14,11 @@ import {
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import {
+  isModelSetupCommand,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from '../../modelManagement';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
@@ -45,6 +50,7 @@ interface SideTaskPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  modelManagement?: WebShellModelManagementOptions;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
 }
 
@@ -65,6 +71,7 @@ export function SideTaskPanel({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
   onImageIngestionNotice,
 }: SideTaskPanelProps) {
   if (!sessionId) {
@@ -103,6 +110,7 @@ export function SideTaskPanel({
         onArtifactsChange={onArtifactsChange}
         onError={onError}
         sessionWorkflowEnabled={sessionWorkflowEnabled}
+        modelManagement={modelManagement}
         onImageIngestionNotice={onImageIngestionNotice}
       />
     </DaemonSessionProvider>
@@ -207,6 +215,7 @@ function SideTaskSession({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
   onImageIngestionNotice,
 }: Omit<
   SideTaskPanelProps,
@@ -300,6 +309,13 @@ function SideTaskSession({
     if (!prompt || !restoredEmptySession || initialPromptSentRef.current)
       return;
     initialPromptSentRef.current = true;
+    if (
+      !resolveModelManagement(modelManagement).allowAdd &&
+      isModelSetupCommand(prompt)
+    ) {
+      onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+      return;
+    }
     actions
       .sendPrompt(prompt, {
         onAdmitted: () => {
@@ -321,6 +337,8 @@ function SideTaskSession({
     catalogOwnerCwd,
     connection.sessionId,
     initialPrompt,
+    modelManagement,
+    onImageIngestionNotice,
     nameFromFirstPrompt,
     onError,
     restoredEmptySession,
@@ -348,6 +366,7 @@ function SideTaskSession({
       onRightPanelOpen={onRightPanelOpen}
       onPaneArtifactsChange={onArtifactsChange}
       sessionWorkflowEnabled={sessionWorkflowEnabled}
+      modelManagement={modelManagement}
     />
   );
 }

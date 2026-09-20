@@ -367,6 +367,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `lockWorkspaceCwd`     | `string`                              | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                                                             |
 | `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
 | `settings`             | `WebShellSettingsOptions`             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+| `modelManagement`      | `WebShellModelManagementOptions`      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
 
 ### Workspace 会话创建超时
 
@@ -415,6 +416,7 @@ daemon 参数的完整含义和配置方式见
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
 | `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
 | `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+| `modelManagement`          | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
 详情的打开操作：
@@ -573,6 +575,24 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 不传 `settings`、不传 `excludeItems` 或传入空列表，都会保持现有呈现。排除在两个设置作用域（工作区与用户）中都生效。被排空的分类会消失，分类导航回退到可用分类；排除全部条目则显示现有的空状态。从设置面板打开的选择器会在其来源条目被排除时关闭。
 
 **呈现限制不是访问控制。** 排除不会改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供白名单、作用域策略、字段覆盖或条目级深链。
+
+## 模型增删交互
+
+宿主可以保留模型列表和切换，同时关闭 WebShell 内的新增与删除入口：
+
+```tsx
+<WebShellWithProviders
+  modelManagement={{ allowAdd: false, allowDelete: false }}
+/>
+```
+
+公共类型 `WebShellModelManagementOptions` 的两个字段独立控制，省略均为 `true`。
+`allowAdd: false` 隐藏新增按钮和 `/auth` 建议，并在主窗口、欢迎页、分屏和侧任务中拦截手动 `/auth`，优先于宿主命令回调及隐藏命令转发。添加模型弹框无法打开或保存。
+`allowDelete: false` 隐藏模型删除按钮并阻止删除动作。模型列表、当前标识、选择、`/model`、参数编辑及会话 `/delete` 保持原行为。
+
+动态收紧策略会关闭相关弹框或确认，之后的浏览器队列发送读取最新策略。已交给 SDK/daemon 的请求不能由 props 撤销。恢复允许不会重新打开旧弹框。
+
+这仅用于界面防误操作，不是安全权限。daemon API、CLI、配置文件写入和外部模型下发不受影响；`settings.excludeItems` 的呈现策略仍独立生效。
 
 ## Markdown 图表接入
 

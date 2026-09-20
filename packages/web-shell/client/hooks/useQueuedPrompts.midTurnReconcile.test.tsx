@@ -100,6 +100,7 @@ function deferred<T>() {
 }
 
 interface HarnessOptions {
+  modelManagement?: { allowAdd?: boolean; allowDelete?: boolean };
   connected?: boolean;
   writeBlocked?: boolean;
   sessionId?: string;
@@ -156,6 +157,7 @@ function createHarness() {
   function TestComponent(opts: HarnessOptions) {
     latest = useQueuedPrompts({
       connected: opts.connected ?? true,
+      modelManagement: opts.modelManagement,
       writeBlocked: opts.writeBlocked ?? false,
       sessionId: opts.sessionId ?? 'session-a',
       workspaceCwd: opts.workspaceCwd ?? '/workspace',
@@ -253,6 +255,114 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     sdkMock.injectedBatches = [];
     sdkMock.pendingEvents = [];
   });
+
+  it('checks current model policy when a held auth command is released', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ holdQueuedPromptsLocally: true });
+      act(() => harness.result().enqueuePrompt('/auth'));
+      await harness.render({
+        streamingState: 'idle',
+        modelManagement: { allowAdd: false },
+      });
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalled();
+      expect(harness.editor.setText).toHaveBeenCalledWith('/auth');
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('checks current model policy through a retained enqueue callback', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      const enqueue = harness.result().enqueuePrompt;
+      await harness.render({
+        streamingState: 'idle',
+        modelManagement: { allowAdd: false },
+      });
+      await act(async () => {
+        enqueue('/auth');
+      });
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('checks model policy after annotated file preparation before mid-turn admission', async () => {
+    const uploaded = deferred<{
+      type: string;
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({});
+      const fileText = '@notes.txt';
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(fileText + ' /auth', undefined, undefined, undefined, [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:notes.txt',
+                kind: 'file',
+                value: 'notes.txt',
+              },
+            },
+          ]);
+      });
+      expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+      await harness.render({ modelManagement: { allowAdd: false } });
+      await act(async () => {
+        uploaded.resolve({
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        });
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+        'notes.txt',
+        expect.anything(),
+      );
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it.each(['/model', 'please explain /auth', '/authenticate'])(
+    'keeps unrelated queued prompts enabled: %s',
+    async (text) => {
+      const harness = createHarness();
+      try {
+        await harness.render({
+          streamingState: 'idle',
+          modelManagement: { allowAdd: false },
+        });
+        await act(async () => {
+          harness.result().enqueuePrompt(text);
+        });
+        expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+          text,
+          expect.anything(),
+        );
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
 
   it('does not restore a row from a snapshot older than its injection', async () => {
     const harness = createHarness();

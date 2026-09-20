@@ -1,3 +1,8 @@
+import {
+  isModelSetupCommand,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from './modelManagement';
 import './styles/globals.css';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
@@ -1155,6 +1160,8 @@ export type WebShellSlashCommandHandler = (
 export interface WebShellProps {
   /** Native settings-page presentation. Does not restrict commands or daemon access. */
   settings?: WebShellSettingsOptions;
+  /** Model add/delete interactions across WebShell. Not a backend permission policy. */
+  modelManagement?: WebShellModelManagementOptions;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -3110,6 +3117,7 @@ export function App({
   chatMaxWidth,
   sidebar,
   settings: settingsPresentation,
+  modelManagement,
   header,
   rightPanel,
   environmentPanel,
@@ -3160,6 +3168,9 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  const modelManagementPolicy = resolveModelManagement(modelManagement);
+  const modelManagementRef = useRef(modelManagementPolicy);
+  modelManagementRef.current = modelManagementPolicy;
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -9449,6 +9460,9 @@ export function App({
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
+  useEffect(() => {
+    if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
+  }, [modelManagementPolicy.allowAdd]);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
@@ -10884,6 +10898,7 @@ export function App({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   } = useQueuedPrompts({
+    modelManagement,
     connected,
     writeBlocked:
       sessionWriteBlocked ||
@@ -15119,6 +15134,10 @@ export function App({
       ) {
         return false;
       }
+      if (!modelManagementRef.current.allowAdd && isModelSetupCommand(text)) {
+        pushToast('info', t('settings.models.addDisabled'));
+        return true;
+      }
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
@@ -17094,6 +17113,7 @@ export function App({
 
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
+      if (!modelManagementRef.current.allowDelete) return;
       const owner = sessionOwnerGuard.capture();
       const modelActionToken = ++modelActionTokenRef.current;
       setModelActionBusy(true);
@@ -17568,7 +17588,10 @@ export function App({
           !NON_WORKSPACE_BLOCKED_COMMANDS.has(command.name.toLowerCase()),
       )
       .filter(
-        (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
+        (command) =>
+          !hiddenCommands.has(normalizeHiddenCommand(command.name)) &&
+          (modelManagementPolicy.allowAdd ||
+            normalizeHiddenCommand(command.name) !== 'auth'),
       )
       .map((command) => {
         const skillKey = skillDescriptionKey(command.name);
@@ -17581,6 +17604,7 @@ export function App({
       });
   }, [
     additionalSlashCommands,
+    modelManagementPolicy.allowAdd,
     connection.commands,
     connection.sessionId,
     connection.skills,
@@ -18203,6 +18227,7 @@ export function App({
     onOpenWorkflowAgent: openEnvironmentAgent,
     onError: reportError,
     sessionWorkflowEnabled,
+    modelManagement,
     workflow: sessionWorkflowEnabled
       ? {
           todos: sessionWorkflowTodos,
@@ -18471,13 +18496,14 @@ export function App({
               }}
             />
           )}
-          {showAuthDialog && (
+          {modelManagementPolicy.allowAdd && showAuthDialog && (
             <DialogShell
               title={t('auth.title')}
               size="lg"
               onClose={handleCloseAuthDialog}
             >
               <AuthMessage
+                allowAdd={modelManagementPolicy.allowAdd}
                 onMessage={(text, type = 'status') => {
                   store.dispatch([
                     type === 'error'
@@ -19262,6 +19288,7 @@ export function App({
                           standalone ? <DaemonConnectionsSettings /> : undefined
                         }
                         modelManagement={{
+                          ...modelManagementPolicy,
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
                           onUpdateContextWindow: handleModelContextWindowUpdate,
@@ -19276,6 +19303,7 @@ export function App({
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
                           onAddModel: () => {
+                            if (!modelManagementRef.current.allowAdd) return;
                             if (
                               isItemExcluded(
                                 'builtin:model-management',
@@ -19751,6 +19779,7 @@ export function App({
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
+                        modelManagement={modelManagement}
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
                         onAssistantTurnSettled={onAssistantTurnSettled}

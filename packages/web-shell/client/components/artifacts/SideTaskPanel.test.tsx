@@ -374,6 +374,42 @@ it('renders a restored side task as a full chat pane', () => {
   });
 });
 
+it('threads model management policy to its chat pane', () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const modelManagement = { allowAdd: false, allowDelete: false };
+  act(() => {
+    renderSideTask({ modelManagement });
+  });
+  expect(latestChatPaneProps.current?.modelManagement).toEqual(modelManagement);
+});
+
+it('does not send a disabled model setup command as the initial side-task prompt', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onImageIngestionNotice = vi.fn();
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: '/auth',
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+    });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(onImageIngestionNotice).toHaveBeenCalledWith(
+    'warning',
+    'Adding models is disabled by the host.',
+  );
+});
+
 it('threads sessionWorkflowEnabled to its chat pane', () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Investigate flaky tests';

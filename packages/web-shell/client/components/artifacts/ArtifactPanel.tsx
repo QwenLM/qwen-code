@@ -104,6 +104,7 @@ import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
+import type { WebShellModelManagementOptions } from '../../modelManagement';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import { TerminalPanel } from '../terminal/TerminalPanel';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
@@ -414,6 +415,7 @@ interface ArtifactPanelProps {
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  modelManagement?: WebShellModelManagementOptions;
   workflow?: {
     todos: readonly TodoItem[];
     tools: readonly ACPToolCall[];
@@ -472,6 +474,7 @@ export function ArtifactPanel({
   onOpenWorkflowAgent,
   onError,
   sessionWorkflowEnabled,
+  modelManagement,
   workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
@@ -1202,6 +1205,7 @@ export function ArtifactPanel({
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
+            modelManagement={modelManagement}
             onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'image' ? (

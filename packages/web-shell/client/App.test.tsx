@@ -35162,6 +35162,63 @@ describe('App session callbacks', () => {
     }
   });
 
+  it.each([undefined, 's1'])(
+    'blocks host-disabled model setup in welcome/session %s before callbacks and forwarding',
+    async (sessionId) => {
+      mockConnection.sessionId = sessionId;
+      const onSlashCommand = vi.fn(() => false);
+      const { container } = renderApp({
+        modelManagement: { allowAdd: false, allowDelete: false },
+        hiddenSlashCommands: ['auth'],
+        onSlashCommand,
+      });
+      await flush();
+      expect(testState.latestChatEditorProps?.commands).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'auth' })]),
+      );
+      testState.prompt = '/auth';
+      await clickSubmit(container);
+      await flush();
+      expect(onSlashCommand).not.toHaveBeenCalled();
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).toBeNull();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('applies current model-management policy to retained settings callbacks and closes auth', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    const oldActions = testState.latestModelManagement!;
+    act(() => oldActions.onAddModel?.());
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    rerender({ modelManagement: { allowAdd: false, allowDelete: false } });
+    await flush();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    act(() => {
+      oldActions.onAddModel?.();
+      oldActions.onDeleteModel?.({ authType: 'openai', modelId: 'example' });
+    });
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(mockWorkspaceActions.deleteModel).not.toHaveBeenCalled();
+    rerender({ modelManagement: {} });
+    await flush();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    testState.prompt = '/auth';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+  });
+
   it('forwards host exclusions to the settings page and updates them at runtime', async () => {
     const settings: WebShellSettingsOptions = {
       excludeItems: ['setting:fast-model', 'builtin:model-management'],

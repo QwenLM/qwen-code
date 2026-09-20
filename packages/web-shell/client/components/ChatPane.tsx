@@ -57,6 +57,11 @@ import type {
   EditorHandle,
 } from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
+import {
+  isModelSetupCommand,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from '../modelManagement';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -222,6 +227,7 @@ export interface ChatPaneProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
+  modelManagement?: WebShellModelManagementOptions;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -274,6 +280,7 @@ export function ChatPane({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  modelManagement,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -578,6 +585,9 @@ export function ChatPane({
     },
     [onError],
   );
+  const modelManagementPolicy = resolveModelManagement(modelManagement);
+  const modelManagementRef = useRef(modelManagementPolicy);
+  modelManagementRef.current = modelManagementPolicy;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
   const pendingApproval = useMemo(
@@ -683,6 +693,7 @@ export function ChatPane({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   } = useQueuedPrompts({
+    modelManagement,
     connected: connection.status === 'connected',
     writeBlocked: connection.runtimeStopped,
     runtimeStopped: connection.runtimeStopped,
@@ -905,6 +916,10 @@ export function ChatPane({
       commitAccepted?: ComposerSubmitCommit,
       metadata?: ComposerSubmitMetadata,
     ): boolean => {
+      if (!modelManagementRef.current.allowAdd && isModelSetupCommand(text)) {
+        onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+        return true;
+      }
       let trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
@@ -1350,16 +1365,22 @@ export function ChatPane({
     return localizeBuiltinDescriptions(
       mergeCommands(connection.commands ?? [], getLocalCommands(t)),
       t,
-    ).map((command) => {
-      const skillKey = skillDescriptionKey(command.name);
-      if (!skillKey) return command;
-      return {
-        ...command,
-        displayCategory: 'skill' as const,
-        description: t(skillKey),
-      };
-    });
-  }, [connection.commands, t]);
+    )
+      .filter(
+        (command) =>
+          modelManagementPolicy.allowAdd ||
+          command.name.toLowerCase() !== 'auth',
+      )
+      .map((command) => {
+        const skillKey = skillDescriptionKey(command.name);
+        if (!skillKey) return command;
+        return {
+          ...command,
+          displayCategory: 'skill' as const,
+          description: t(skillKey),
+        };
+      });
+  }, [connection.commands, modelManagementPolicy.allowAdd, t]);
   const skills = useMemo(() => {
     const commandsByName = new Map(
       commands.map((command) => [command.name.toLowerCase(), command]),

@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -37,6 +38,11 @@ import {
   DaemonPendingPromptLimitError,
 } from '@qwen-code/sdk/daemon';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
+import {
+  isModelSetupCommand,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from '../modelManagement';
 import type { EditorHandle } from './useComposerCore';
 import { removeInjectedFromQueue } from '../midTurnDedup';
 import { isCommandPrompt } from '../utils/localCommandQueue';
@@ -55,6 +61,7 @@ interface RefBox<T> {
 }
 
 interface UseQueuedPromptsArgs {
+  modelManagement?: WebShellModelManagementOptions;
   connected: boolean;
   writeBlocked?: boolean;
   runtimeStopped?: boolean;
@@ -93,6 +100,8 @@ interface UseQueuedPromptsArgs {
   reportError: (error: unknown, fallback: string) => void;
   t: ReturnType<typeof getTranslator>;
 }
+
+class ModelSetupDisabledError extends Error {}
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
@@ -499,6 +508,7 @@ export interface UseQueuedPromptsResult {
 }
 
 export function useQueuedPrompts({
+  modelManagement,
   connected,
   writeBlocked = false,
   runtimeStopped = false,
@@ -512,12 +522,37 @@ export function useQueuedPrompts({
   streamingState,
   sessionHasActivePrompt = false,
   holdQueuedPromptsLocally = false,
-  sessionActions,
+  sessionActions: unguardedSessionActions,
   store,
   editorRef,
   reportError,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
+  const allowAdd = resolveModelManagement(modelManagement).allowAdd;
+  const allowAddRef = useRef(allowAdd);
+  allowAddRef.current = allowAdd;
+  const sessionActions = useMemo<DaemonSessionActions>(
+    () => ({
+      ...unguardedSessionActions,
+      submitPrompt: (text, options) => {
+        if (!allowAddRef.current && isModelSetupCommand(text)) {
+          return Promise.reject(
+            new ModelSetupDisabledError(t('settings.models.addDisabled')),
+          );
+        }
+        return unguardedSessionActions.submitPrompt(text, options);
+      },
+      enqueueMidTurnMessage: (text, options) => {
+        if (!allowAddRef.current && isModelSetupCommand(text)) {
+          return Promise.reject(
+            new ModelSetupDisabledError(t('settings.models.addDisabled')),
+          );
+        }
+        return unguardedSessionActions.enqueueMidTurnMessage(text, options);
+      },
+    }),
+    [unguardedSessionActions, t],
+  );
   const writeBlockedRef = useRef(writeBlocked);
   writeBlockedRef.current = writeBlocked;
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
@@ -3264,6 +3299,8 @@ export function useQueuedPrompts({
             }
           })
           .catch(async (error: unknown) => {
+            if (error instanceof ModelSetupDisabledError)
+              enqueueStarted = false;
             if (!enqueueStarted) await removeUploadedAttachments();
             if (!targetIsCurrent()) {
               completionCallbacksRef.current.delete(midTurnMessageId);
