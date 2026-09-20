@@ -2583,6 +2583,35 @@ describe('PermissionManager', () => {
       ).toBe(expected);
     });
 
+    // The declared tradeoff: bash runs one command here, since everything from
+    // `#` on is a comment, but the pre-fix reading splits inside it and a
+    // `Bash(rm *)` deny refuses a commit the user cannot see an `rm` in. Only
+    // shapes that bail out of #12096's comment fast path still reach it — a
+    // newline here, or `monitor` — while the single-line spelling stays one
+    // segment for `Bash(...)` rules and is allowed again.
+    it.each<[string, string, string]>([
+      [
+        'run_shell_command',
+        "git commit -m 'x' # saved to 'C:\\'\nrm draft",
+        'deny',
+      ],
+      ['monitor', "git commit -m 'x' # saved to 'C:\\' ; rm draft", 'deny'],
+      [
+        'run_shell_command',
+        "git commit -m 'x' # saved to 'C:\\' ; rm draft",
+        'allow',
+      ],
+    ])('%s %j is %s', async (toolName, command, expected) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.evaluate({ toolName, command })).toBe(expected);
+    });
+
     it('|| compound: all allowed → allow', async () => {
       pm = new PermissionManager(
         makeConfig({
