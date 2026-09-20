@@ -2068,6 +2068,15 @@ export class McpClientManager {
     }
 
     try {
+      // A transport error alone does not prove the session is dead: `onerror`
+      // also fires when a cancelled request's late response reaches a handler
+      // the SDK already deleted, with the transport still open and serving
+      // requests. Resolve the ambiguous case with a protocol-level probe
+      // before deciding the server is unhealthy.
+      if (client.hasPendingTransportError()) {
+        await client.verifyPendingTransportError();
+      }
+
       // Check if client is connected by getting its status
       const status = client.getStatus();
 

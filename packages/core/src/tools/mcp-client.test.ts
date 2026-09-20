@@ -868,6 +868,76 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
   });
 
   describe('McpClient', () => {
+    it('resolves a pending transport error with a ping instead of trusting the status', async () => {
+      const ping = vi.fn().mockResolvedValue({});
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+        ping,
+      } as unknown as ClientLib.Client);
+
+      const serverName = 'unverified-transport-error-server';
+      const client = new McpClient(
+        serverName,
+        { httpUrl: 'https://example.com/mcp' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      // An `onerror` records DISCONNECTED, but that status is not proof the
+      // session is dead: a cancelled request's late response reaches a
+      // deleted handler with the transport still open.
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      (
+        client as unknown as { transportErrorPending: boolean }
+      ).transportErrorPending = true;
+
+      expect(client.hasPendingTransportError()).toBe(true);
+      await expect(client.verifyPendingTransportError(5)).resolves.toBe(true);
+
+      // A live protocol request re-asserts CONNECTED, so downstream
+      // consumers (health check, connection preparation) never rebuild a
+      // session that is still serving requests.
+      expect(ping).toHaveBeenCalledTimes(1);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      expect(client.hasPendingTransportError()).toBe(false);
+    });
+
+    it('reports a failed verification as unreachable', async () => {
+      const ping = vi.fn().mockRejectedValue(new Error('transport closed'));
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+        ping,
+      } as unknown as ClientLib.Client);
+
+      const serverName = 'dead-transport-server';
+      const client = new McpClient(
+        serverName,
+        { httpUrl: 'https://example.com/mcp' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      (
+        client as unknown as { transportErrorPending: boolean }
+      ).transportErrorPending = true;
+
+      await expect(client.verifyPendingTransportError(5)).resolves.toBe(false);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      expect(client.hasPendingTransportError()).toBe(false);
+    });
+
     it('recovers HTTP connections when the SDK omits the 401 status', async () => {
       const connect = vi
         .fn()

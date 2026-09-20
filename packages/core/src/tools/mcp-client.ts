@@ -92,6 +92,16 @@ export type SendSdkMcpMessage = (
 ) => Promise<JSONRPCMessage>;
 
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
+
+/**
+ * Timeout for the protocol-level `ping` used to resolve a transport error
+ * that has not been confirmed by `onclose`. Deliberately short: it only has
+ * to distinguish "transport still serving requests" from "transport gone",
+ * and it runs on the health-check path where a long wait would defer
+ * recovery. A timeout means "not confirmed usable", never "confirmed dead"
+ * on its own — the caller decides what to do with that.
+ */
+export const MCP_VERIFY_TIMEOUT_MSEC = 10 * 1000; // 10 seconds
 // Auto-negotiation `server/discover` otherwise inherits connect()'s
 // timeout (10 minutes here, 60s SDK default). Silent legacy stdio
 // servers never answer that probe; cap it so fallback fits inside
@@ -530,6 +540,17 @@ export class McpClient {
    * consumer post-disconnect.
    */
   private lastTransportError?: Error;
+  /**
+   * Set when the SDK client reported a transport error through `onerror` but
+   * the transport has not been observed closing. `onerror` alone does not
+   * prove the session is dead: a cancelled request's late response (or an
+   * in-flight progress notification) lands on handlers the SDK already
+   * deleted and is surfaced here while the transport stays open and still
+   * serves protocol requests. Consumers must verify with a protocol-level
+   * probe (`verifyPendingTransportError`) before treating the server as
+   * unusable, so a live session is never torn down for a bare error.
+   */
+  private transportErrorPending = false;
   private instructions: string | undefined;
 
   constructor(
@@ -560,6 +581,7 @@ export class McpClient {
     // synthetic marker — but a stale error from a previous incarnation
     // would mis-attribute a fresh transport drop to an old cause.
     this.lastTransportError = undefined;
+    this.transportErrorPending = false;
     this.updateStatus(MCPServerStatus.CONNECTING);
     try {
       this.transport = await this.createTransport();
@@ -568,22 +590,41 @@ export class McpClient {
         if (this.isDisconnecting) {
           return;
         }
-        // capture the upstream error
-        // BEFORE the synchronous `updateStatus(DISCONNECTED)` cascades
-        // to PoolEntry's statusChangeListener. The listener's
-        // silent-drop block reads `lastTransportError` inline; setting
-        // it ahead of `updateStatus` guarantees the field is populated
-        // by the time the listener fires.
+        // Capture the upstream error for diagnostics. Use getErrorMessage
+        // (not `error.toString()`) so the underlying syscall behind opaque
+        // wrappers like undici's `TypeError: fetch failed` (e.g.
+        // `ECONNREFUSED`, a proxy `502`) is surfaced instead of a bare
+        // "fetch failed". Critical for diagnosing local-server / proxy
+        // connectivity issues.
         this.lastTransportError = error;
-        // Use getErrorMessage (not `error.toString()`) so the underlying
-        // syscall behind opaque wrappers like undici's `TypeError: fetch
-        // failed` (e.g. `ECONNREFUSED`, a proxy `502`) is surfaced instead of
-        // a bare "fetch failed". Critical for diagnosing local-server /
-        // proxy connectivity issues.
         debugLogger.error(
           `MCP ERROR (${this.serverName}): ${getErrorMessage(error)}`,
         );
+        // `onerror` is NOT proof the session is dead: a cancelled request's
+        // late response (or an in-flight progress notification) hits handlers
+        // the SDK already deleted and lands here while the transport stays
+        // open and still serves protocol requests. The status enum means
+        // "disconnected or experiencing errors", so recording it here keeps
+        // existing consumers (pool silent-drop, health pill) working — but
+        // every decision that would TEAR DOWN or REBUILD the connection must
+        // verify first (`verifyPendingTransportError`, consumed by the health
+        // check and by connection preparation).
+        this.transportErrorPending = true;
         this.updateStatus(MCPServerStatus.DISCONNECTED);
+      };
+
+      // `onclose` is the authoritative signal that the transport is gone.
+      // Chain whatever handler the SDK client (or an outer layer) already
+      // installed instead of bashing over it.
+      const priorOnClose = this.client.onclose;
+      this.client.onclose = () => {
+        this.transportErrorPending = false;
+        // A late close from a replaced (already disconnecting) instance must
+        // not overwrite the status of the connection that replaced it.
+        if (!this.isDisconnecting) {
+          this.updateStatus(MCPServerStatus.DISCONNECTED);
+        }
+        priorOnClose?.();
       };
 
       this.client.registerCapabilities({
@@ -883,6 +924,52 @@ export class McpClient {
    */
   getLastTransportError(): Error | undefined {
     return this.lastTransportError;
+  }
+
+  /**
+   * True when a transport error was observed (`onerror`) but the transport
+   * has not been confirmed closed. Callers must resolve it with
+   * {@link verifyPendingTransportError} before treating the server as
+   * unusable: an error that reaches `onerror` can come from a cancelled
+   * request whose late response hit a deleted handler, with the transport
+   * still open and serving protocol requests.
+   */
+  hasPendingTransportError(): boolean {
+    return this.transportErrorPending && !this.isDisconnecting;
+  }
+
+  /**
+   * Resolves a pending transport error with a protocol-level probe.
+   *
+   * `ping` mutates no server state, so it is safe to use for liveness
+   * (unlike a business `callTool`, which may have side effects).
+   *
+   * @returns `true` when the session is still usable (the pending flag is
+   *          cleared and the recorded status is restored to `CONNECTED`),
+   *          `false` when the transport is confirmed unreachable (the server
+   *          stays `DISCONNECTED` so the caller can recover it).
+   */
+  async verifyPendingTransportError(timeoutMs?: number): Promise<boolean> {
+    if (!this.hasPendingTransportError()) {
+      return true;
+    }
+    try {
+      await this.client.ping({
+        timeout: timeoutMs ?? MCP_VERIFY_TIMEOUT_MSEC,
+      });
+      this.transportErrorPending = false;
+      // The transport answered a protocol request, so the session is live:
+      // re-assert CONNECTED instead of leaving the error-time status behind.
+      this.updateStatus(MCPServerStatus.CONNECTED);
+      return true;
+    } catch (error) {
+      this.transportErrorPending = false;
+      debugLogger.warn(
+        `MCP verification failed for '${this.serverName}': ${getErrorMessage(error)}`,
+      );
+      this.updateStatus(MCPServerStatus.DISCONNECTED);
+      return false;
+    }
   }
 
   getInstructions(): string | undefined {
@@ -1473,8 +1560,20 @@ export async function connectAndDiscover(
     );
 
     mcpClient.onerror = (error) => {
+      // Same reasoning as `McpClient.connect()`: an `onerror` is not proof the
+      // session is dead (a cancelled request's late response reaches a deleted
+      // handler). Record the cause; the transport going away is reported by
+      // `onclose` below, and a failed call still drives the reconnect path.
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
+      recordMCPServerLastError(mcpServerName, getErrorMessage(error));
+    };
+
+    // `onclose` is the authoritative "transport is gone" signal. Chain any
+    // handler already installed so the legacy path keeps working.
+    const priorOnClose = mcpClient.onclose;
+    mcpClient.onclose = () => {
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
+      priorOnClose?.();
     };
 
     // Attempt to discover prompts, resources, and tools
