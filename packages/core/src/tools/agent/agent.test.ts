@@ -981,7 +981,7 @@ describe('AgentTool', () => {
       // The rules are stated once for every background agent; the fork
       // section defers to them instead of carrying a fork-scoped copy.
       expect(tool.description).toContain(
-        'the background-agent rules above apply to background forks unchanged.',
+        'The background-agent rules above apply to background forks unchanged.',
       );
       expect(tool.description).not.toContain(
         'For a background fork, do not read or tail its output',

@@ -8971,9 +8971,8 @@ describe('ShellTool', () => {
      * The other half of a budget: naming what may not be traded away to
      * meet one. These are call boundaries and safety rules rather than
      * prose — #12054 lists this tool's quoting rules and the
-     * "prefer dedicated tools over cat/grep/sed" policy explicitly as text
-     * that reads verbose but is load-bearing, and notes that cutting them
-     * would fail no test. This is that test.
+     * representative dedicated-tool and execution-boundary rules explicitly
+     * as text that reads verbose but is load-bearing.
      */
     it.each(SHAPES)(
       'keeps the call-boundary rules in the %s description',

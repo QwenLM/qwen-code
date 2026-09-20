@@ -107,24 +107,24 @@ function surfaceLength(tool: AgentTool): number {
 
 describe('AgentTool per-turn size budgets', () => {
   it('keeps the description within its budget in the default shape', async () => {
-    // Two subagents, team off, todo on: what a default install with a
-    // couple of project agents sends. Measured at ~5,200 characters.
+    // Two subagents, team off, todo on. The catalogue itself is covered by
+    // the proportional-growth test below. Measured at ~9,730 characters.
     const tool = await buildTool();
-    expect(tool.description.length).toBeLessThanOrEqual(5_500);
+    expect(tool.description.length).toBeLessThanOrEqual(10_200);
   });
 
   it('keeps the description within its budget with no subagents configured', async () => {
     // The skeleton on its own — the catalogue collapses to a one-line
-    // "no subagents are configured" placeholder. Measured at ~4,900.
+    // "no subagents are configured" placeholder. Measured at ~9,470.
     const tool = await buildTool({ subagents: [], todo: false });
-    expect(tool.description.length).toBeLessThanOrEqual(5_200);
+    expect(tool.description.length).toBeLessThanOrEqual(9_900);
   });
 
   it('keeps the description within its budget with every optional block on', async () => {
     // Team coordination guidance and the todo clause both present.
-    // Measured at ~6,100.
+    // Measured at ~10,710.
     const tool = await buildTool({ team: true, todo: true });
-    expect(tool.description.length).toBeLessThanOrEqual(6_400);
+    expect(tool.description.length).toBeLessThanOrEqual(11_200);
   });
 
   // The two optional blocks are the part a reader can lose track of,
@@ -256,15 +256,14 @@ describe('AgentTool per-turn size budgets', () => {
   });
 
   /**
-   * The total is what the request actually carries, and it is the number
-   * #12054 asks to track. Kept as a separate assertion because the
-   * description and the schema can trade places without either
-   * per-part budget noticing.
+   * The default-shape total is kept as a separate assertion because the
+   * description and schema can trade places without either per-part budget
+   * noticing. Optional blocks have their own bounds above.
    */
   it('keeps the whole model-visible surface within its budget', async () => {
-    // Description plus serialized schema, default shape. Measured at ~9,100
-    // characters after removing prose already carried by the parameter schema.
+    // Description plus serialized schema, default shape. Measured at ~13,720
+    // characters after the teammate-only guidance moved behind the team flag.
     const tool = await buildTool();
-    expect(surfaceLength(tool)).toBeLessThanOrEqual(9_500);
+    expect(surfaceLength(tool)).toBeLessThanOrEqual(14_200);
   });
 });
