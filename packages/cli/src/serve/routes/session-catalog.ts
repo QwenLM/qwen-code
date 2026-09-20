@@ -177,7 +177,7 @@ export function registerSessionCatalogRoutes(
       const isCurrent = () =>
         workspaceRegistry.getEntryByWorkspaceId(entry.workspaceId) === entry &&
         entry.state === 'active' &&
-        entry.current === generation &&
+        entry.current?.generationId === generation?.generationId &&
         generation !== undefined &&
         !generation.guard.closed;
       if (!generation || !isCurrent()) return unavailable();

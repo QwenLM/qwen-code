@@ -342,6 +342,106 @@ describe('POST /sessions/catalog', () => {
     expect(list).toHaveBeenCalledOnce();
   });
 
+  describe.each(['sessions', 'groups'] as const)(
+    'lifecycle changes during %s reads',
+    (phase) => {
+      it('retains the page when only the policy revision advances', async () => {
+        const h = setup();
+        const entry = h.registry.getEntryByWorkspaceId('workspace-1')!;
+        const generation = entry.current!;
+        const advanceRevision = () => {
+          h.registry.advancePolicyRevision(entry, 'updated-policy');
+        };
+        list.mockImplementation(async () => {
+          if (phase === 'sessions') advanceRevision();
+          return { sessions: [], nextCursor: 'next-page' };
+        });
+        const groups = { groups: [], colorOptions: ['blue' as const] };
+        mocks.groups.mockImplementation(async () => {
+          if (phase === 'groups') advanceRevision();
+          return groups;
+        });
+
+        const res = await request(h.app)
+          .post('/sessions/catalog')
+          .send({
+            workspaces: [{ workspace: 'workspace-1' }],
+            includeGroups: true,
+          });
+
+        expect(entry.current).not.toBe(generation);
+        expect(entry.current?.generationId).toBe(generation.generationId);
+        expect(entry.current?.runtime).toBe(generation.runtime);
+        expect(entry.current?.guard).toBe(generation.guard);
+        expect(generation.guard.closed).toBe(false);
+        expect(res.status).toBe(200);
+        expect(res.body.workspaces).toEqual([
+          {
+            workspace: 'workspace-1',
+            workspaceId: entry.workspaceId,
+            cwd: entry.workspaceCwd,
+            sessions: [],
+            nextCursor: 'next-page',
+            groups,
+          },
+        ]);
+        expect(mocks.groups).toHaveBeenCalledOnce();
+      });
+
+      it.each(['drain', 'remove', 'replace'] as const)(
+        'discards the page on %s',
+        async (change) => {
+          const h = setup();
+          const runtime = h.runtimes[1]!;
+          const entry = h.registry.getEntryByWorkspaceId(runtime.workspaceId)!;
+          const generation = entry.current!;
+          const changeLifecycle = () => {
+            if (change === 'replace') {
+              h.registry.beginReplacement(entry, 'replacement-policy');
+              h.registry.activateReplacement(
+                entry,
+                { ...runtime, trusted: false },
+                'replacement-policy',
+              );
+              expect(entry.current?.generationId).not.toBe(
+                generation.generationId,
+              );
+            } else {
+              h.registry.beginDrain(runtime);
+              expect(generation.guard.closed).toBe(false);
+              if (change === 'remove') h.registry.completeDrain(runtime);
+            }
+          };
+          list.mockImplementation(async () => {
+            if (phase === 'sessions') changeLifecycle();
+            return { sessions: [] };
+          });
+          mocks.groups.mockImplementation(async () => {
+            if (phase === 'groups') changeLifecycle();
+            return { groups: [], colorOptions: [] };
+          });
+
+          const res = await request(h.app)
+            .post('/sessions/catalog')
+            .send({
+              workspaces: [{ workspace: runtime.workspaceId }],
+              includeGroups: true,
+            });
+
+          expect(res.status).toBe(200);
+          expect(res.body.workspaces[0].error).toMatchObject({
+            status: 503,
+            code: 'workspace_runtime_unavailable',
+          });
+          expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+          expect(mocks.groups).toHaveBeenCalledTimes(
+            phase === 'groups' ? 1 : 0,
+          );
+        },
+      );
+    },
+  );
+
   it('discards a page when its generation closes during the read', async () => {
     const h = setup();
     list.mockImplementation(async () => {
