@@ -14,6 +14,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 import {
   TARGET_CLIPBOARD_PACKAGE,
   standaloneArchiveName,
@@ -71,8 +72,7 @@ const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // packaging cross-builds all targets from a single host. Linux is glibc-only
 // on purpose: RELEASE_TARGETS bundles glibc-linked Bun binaries that cannot
 // start on musl hosts, so the -musl render packages would be dead weight
-// claiming support the archive cannot deliver. Declared before the
-// top-level `main()` call below (ESM const TDZ).
+// claiming support the archive cannot deliver.
 const OPENTUI_PLATFORM_PACKAGES = [
   '@opentui/core-darwin-arm64',
   '@opentui/core-darwin-x64',
@@ -81,15 +81,6 @@ const OPENTUI_PLATFORM_PACKAGES = [
   '@opentui/core-win32-arm64',
   '@opentui/core-win32-x64',
 ];
-
-if (isMainModule()) {
-  try {
-    await main();
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  }
-}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -239,10 +230,23 @@ async function packageTarget({
   });
 }
 
-function readClipboardPackageSpecs() {
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
+// The release installs from pnpm-lock.yaml, so that is where every target's
+// native package version comes from. Only the build host's own platform
+// package is installed, so the installed tree cannot answer for the others.
+let pnpmLockedKeys;
+function readPnpmLockedVersion(packageName) {
+  pnpmLockedKeys ??= Object.keys(
+    parseYaml(fs.readFileSync(path.join(rootDir, 'pnpm-lock.yaml'), 'utf8'))
+      ?.packages ?? {},
   );
+  const versions = pnpmLockedKeys
+    .filter((key) => key.startsWith(`${packageName}@`))
+    .map((key) => key.slice(packageName.length + 1));
+  // Two locked versions would leave the staged one ambiguous; fail instead.
+  return versions.length === 1 ? versions[0] : undefined;
+}
+
+function readClipboardPackageSpecs() {
   const cliPackage = JSON.parse(
     fs.readFileSync(
       path.join(rootDir, 'packages', 'cli', 'package.json'),
@@ -255,8 +259,7 @@ function readClipboardPackageSpecs() {
   ];
 
   return packageNames.map((packageName) => {
-    const version =
-      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    const version = readPnpmLockedVersion(packageName);
     const declaredVersion = cliPackage.optionalDependencies?.[packageName];
     if (!version || ![version, `^${version}`].includes(declaredVersion)) {
       fail(`Clipboard package version is not locked for ${packageName}`);
@@ -273,9 +276,6 @@ function readClipboardPackageSpecs() {
 // runtime (#11872). Deriving the list from the root manifest keeps it in sync
 // when a platform pin is added (e.g. linux-arm64).
 function readNodePtyPackageSpecs() {
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
-  );
   const rootPackage = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
   );
@@ -284,8 +284,7 @@ function readNodePtyPackageSpecs() {
   ).filter((packageName) => packageName.startsWith('@lydell/node-pty'));
 
   return packageNames.map((packageName) => {
-    const version =
-      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    const version = readPnpmLockedVersion(packageName);
     if (!version) {
       fail(`node-pty package version is not locked for ${packageName}`);
     }
@@ -329,13 +328,8 @@ function stageNativeModules(runtimeDir) {
 // render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
 // so each standalone archive must ship the matching platform package(s).
 function readOpenTuiPackageSpecs() {
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
-  );
-
   return OPENTUI_PLATFORM_PACKAGES.map((packageName) => {
-    const version =
-      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    const version = readPnpmLockedVersion(packageName);
     if (!version) {
       fail(`OpenTUI platform package version is not locked for ${packageName}`);
     }
@@ -559,3 +553,12 @@ export {
   readNodePtyPackageSpecs,
   RELEASE_TARGETS,
 };
+
+if (isMainModule()) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
+}
