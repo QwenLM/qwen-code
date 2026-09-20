@@ -46,7 +46,7 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 | 改动后，被 `skills.disabled` 关掉                                       | 7,192  | 1,798  |
 | 改动后，内联（完全没有 skill 通路）                                     | 10,377 | 2,594  |
 
-即常见情形下每次请求省下 **2,344 字符 ≈ 586 token**，代价是 192 字符的指针。新 skill 会在系统提示词里增加一条清单项——它 247 字符的 `description`，≈62 token——因此净收益是**每次请求 ≈524 token**，且在每个会话的每一轮都成立，包括那些从不委派的轮次。
+即常见情形下每次请求省下 **2,344 字符 ≈ 586 token**，代价是 192 字符的指针。新 skill 会在 `<available_skills>` 清单里增加一条，而该清单是由会话启动前奏（session-start prelude）以 **user 角色消息**携带的，不在系统提示词里。这一条渲染后是 **371 字符、≈93 token**——由 `renderAvailableSkillsBlock` 实测得到，不是 frontmatter 里 `description` 那 247 字符，因为渲染还会加上 `<skill>` / `<name>` / `<description>` / `<location>` 外壳、一个 ` (bundled)` 后缀，并把 "the Agent tool's" 里的撇号转义成 `&apos;`。因此净收益是**每次请求 ≈493 token**，且在每个会话的每一轮都成立，包括那些从不委派的轮次。
 
 ToolSearch 那一形态比纯指针多 77 字符：一句话告诉模型，要加载这份参考得先把 Skill 工具取出来。
 
@@ -72,7 +72,7 @@ ToolSearch 那一形态比纯指针多 77 字符：一句话告诉模型，要�
 - **每次请求**携带的 Agent 声明都变短了。嵌套的 agent 启动与 fork 继承同一份描述。
 - **#12142 的预算测试**按新测量值下调，每条都取"实测长度 + ~350"，与该 PR 自己那次收紧的口径一致（默认形态 10,200 → 7,750；无 subagent 9,900 → 7,450；所有可选块打开 11,200 → 8,750；模型可见总面 14,200 → 11,750），并新增两条：内联形态的上限，以及"指针 vs 内联"的下限差值，防止这个差距被悄悄抹平。
 - **`agent.test.ts`** 有五处断言锚在搬走的文本上。其中三处本来会"碰巧"继续通过，因为该文件的 stub `Config` 没有 skill manager、从而拿到内联形态——它们已改锚到描述在任何形态下都保留的事实（fork 上不要设 `model`、fork 默认继承完整对话、传一个简短的 `name`）。
-- **skills 清单**多出一条内置项，会出现在 `/skills` 中，并与其他 skill 一样受 `skills.disabled` / `skills.enabled` 控制。
+- **skills 清单**多出一条内置项，会出现在 `/skills` 中，并与其他 skill 一样受 `skills.disabled` / `skills.enabled` 控制。它是通过会话启动前奏里的 `<available_skills>` 块到达模型的——一条 user 角色消息，不是系统提示词——代价就是 §3 里算过的渲染后 371 字符。
 - **打包**无需额外改动：`scripts/copy_bundle_assets.js` 与 `scripts/copy_files.js` 都递归拷贝 `skills/bundled/**`，而 `bundled-skills.integration.test.ts` 会解析每一份随包发布的 `SKILL.md`，新目录因此同时被两者覆盖。
 - **没有任何提示词、快照或 ACP 面**引用被搬走的文本：全仓库只有 `agent.ts` 和 `agent.test.ts` 提到它。
 

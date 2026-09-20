@@ -46,7 +46,7 @@ Description length read off the constructed tool, with the two subagent entries 
 | After, reference withheld by `skills.disabled`                                        | 7,192  | 1,798   |
 | After, reference inlined (no route to any skill)                                      | 10,377 | 2,594   |
 
-So the normal case saves **2,344 characters ≈ 586 tokens per request**, against a 192-character pointer. The new skill costs one listing entry in the system prompt — its 247-character `description`, ≈62 tokens — so the net is **≈524 tokens per request**, recovered on every turn of every session including the ones that never delegate.
+So the normal case saves **2,344 characters ≈ 586 tokens per request**, against a 192-character pointer. The new skill costs one entry in the `<available_skills>` listing, which the session-start prelude carries in a user-role message rather than in the system prompt. That entry renders at **371 characters, ≈93 tokens** — measured through `renderAvailableSkillsBlock`, not the 247 of the frontmatter `description` alone, because the render adds the `<skill>` / `<name>` / `<description>` / `<location>` wrapper, a ` (bundled)` suffix, and XML-escapes the apostrophe in "the Agent tool's" to `&apos;`. The net is therefore **≈493 tokens per request**, recovered on every turn of every session including the ones that never delegate.
 
 The ToolSearch variant costs 77 characters more than the plain pointer: one sentence telling the model to reveal the Skill tool before it can load the reference.
 
@@ -72,7 +72,7 @@ The inline shape is 647 characters larger than today's description, and that 647
 - **Every request** carries the shorter Agent declaration. Nested agent launches and forks inherit the same description.
 - **#12142's budget tests** are lowered to the new measurements, each at measured length plus ~350 as that PR's own tightening pass set them (default 10,200 → 7,750; no-subagents 9,900 → 7,450; all blocks on 11,200 → 8,750; whole model-visible surface 14,200 → 11,750), and gain two rows: a ceiling for the inline shape and a floor on pointer-vs-inline so the gap cannot quietly close.
 - **`agent.test.ts`** had five assertions anchored on text that moved. Three would have kept passing by accident, because that file's stub `Config` has no skill manager and therefore gets the inlined reference — they are re-anchored on facts the description keeps in every shape (don't set `model` on a fork, forks inherit the full parent conversation by default, pass a short `name`).
-- **The skills listing** gains one bundled entry, listed in `/skills` and gated by `skills.disabled` / `skills.enabled` like any other.
+- **The skills listing** gains one bundled entry, listed in `/skills` and gated by `skills.disabled` / `skills.enabled` like any other. It reaches the model through the session-start prelude's `<available_skills>` block — a user-role message, not the system prompt — at the 371 rendered characters costed in §3.
 - **Bundling** needs nothing new: `scripts/copy_bundle_assets.js` and `scripts/copy_files.js` copy `skills/bundled/**` recursively, and `bundled-skills.integration.test.ts` parses every shipped `SKILL.md`, so the new directory is covered by both.
 - **No prompt, snapshot, or ACP surface** references the moved text: the only files naming it were `agent.ts` and `agent.test.ts`.
 
