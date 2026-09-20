@@ -66,16 +66,10 @@ jobs:
             java: '17'
           - os: 'ubuntu-latest'
             java: '21'
-          - os: 'ubuntu-latest'
-            java: '25'
           - os: 'macos-latest'
             java: '21'
-          - os: 'macos-latest'
-            java: '25'
           - os: 'windows-latest'
             java: '21'
-          - os: 'windows-latest'
-            java: '25'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -140,7 +134,7 @@ jobs:
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
-          if [ "${MATRIX_JAVA}" = "25" ]; then
+          if [ "${MATRIX_JAVA}" = "21" ]; then
             cd ../runtime-broker
             mvn --batch-mode --no-transfer-progress clean test
           fi
@@ -153,7 +147,7 @@ jobs:
         run: 'mvn --batch-mode --no-transfer-progress clean test'
 
       - name: 'Run Runtime Broker state tests'
-        if: "${{ runner.environment == 'github-hosted' && matrix.java == '25' }}"
+        if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' }}"
         working-directory: 'packages/sdk-java/runtime-broker'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
@@ -167,7 +161,7 @@ jobs:
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
       - name: 'Run Runtime Broker state Checkstyle'
-        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '25' }}"
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
         working-directory: 'packages/sdk-java/runtime-broker'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'

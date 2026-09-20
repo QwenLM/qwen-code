@@ -17,8 +17,8 @@ The main branch has no Managed Runtime Broker module. Runtime placement,
 transport, Hosted Harness integration, and production persistence remain future
 work. This change adds only the state boundary needed by those later layers.
 
-The module uses Java 25 as its compilation and runtime baseline. Services
-embedding its JAR must run on JDK 25 or later. The existing Java SDK retains
+The module uses Java 21 as its compilation and runtime baseline. Services
+embedding its JAR must run on JDK 21 or later. The existing Java SDK retains
 its separate Java 11 compatibility baseline.
 
 These records are private Java control-plane placement and ownership state.
@@ -98,14 +98,14 @@ be allowed to replace them.
 
 ## Validation plan
 
-- Compile and test the module on JDK 25 with a Java 25 release target.
+- Compile and test the module on JDK 21 with a Java 21 release target.
 - Run repository unit tests covering concurrent create, generation rollover,
   version-only stale compare-and-set rejection, successful operation renewal,
   operation takeover after expiry, and Session accounting, including
   cross-tenant identity collisions and cross-scope replacement rejection.
 - Run Checkstyle against the repository Java conventions.
 - Verify hosted and self-hosted Java CI execute the Runtime Broker module only
-  in the Java 25 matrix entries, including Linux, macOS, and Windows coverage.
+  in the Java 21 matrix entries, including Linux, macOS, and Windows coverage.
 
 ## Acceptance criteria
 

@@ -16,7 +16,7 @@ Runtime 代次或 Session 绑定。
 Harness 集成和生产级持久化仍属于后续工作。本次变更只增加这些后续层所需的
 状态边界。
 
-本模块以 Java 25 作为编译和运行基线。嵌入其 JAR 的服务必须使用 JDK 25 或
+本模块以 Java 21 作为编译和运行基线。嵌入其 JAR 的服务必须使用 JDK 21 或
 更高版本。现有 Java SDK 继续保持独立的 Java 11 兼容基线。
 
 这些记录是 Java 管控面私有的调度与所有权状态，既不同于 Harness Session
@@ -84,12 +84,12 @@ Authority 日志，也不同于公共 Agent Event/Item/Snapshot 存储。持久�
 
 ## 验证计划
 
-- 在 JDK 25 上使用 Java 25 release target 编译并测试模块。
+- 在 JDK 21 上使用 Java 21 release target 编译并测试模块。
 - 运行 Repository 单元测试，覆盖并发创建、代次轮换、仅版本过期的
   compare-and-set 拒绝、有效操作续租、租约过期后的操作接管、Session 计数、
   跨租户身份冲突和跨 scope 替换拒绝。
 - 按仓库 Java 规范运行 Checkstyle。
-- 验证 hosted 与 self-hosted Java CI 仅在 Java 25 matrix 中执行 Runtime
+- 验证 hosted 与 self-hosted Java CI 仅在 Java 21 matrix 中执行 Runtime
   Broker 模块，并覆盖 Linux、macOS 和 Windows。
 
 ## 验收标准

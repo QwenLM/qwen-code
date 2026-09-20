@@ -54,13 +54,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('runs Runtime Broker tests from the sibling module on self-hosted Java 25', () => {
+  it('runs Runtime Broker tests from the sibling module on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain(
       'mvn --batch-mode --no-transfer-progress clean test\n' +
-        '          if [ "${MATRIX_JAVA}" = "25" ]; then\n' +
+        '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            cd ../runtime-broker\n' +
         '            mvn --batch-mode --no-transfer-progress clean test\n' +
         '          fi',

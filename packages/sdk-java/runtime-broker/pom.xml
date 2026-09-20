@@ -9,7 +9,7 @@
     <description>Runtime Broker state and repository contracts for Qwen Managed Agents.</description>
 
     <properties>
-        <maven.compiler.release>25</maven.compiler.release>
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
