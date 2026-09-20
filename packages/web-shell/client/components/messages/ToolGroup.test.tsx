@@ -1197,6 +1197,7 @@ describe('tool row rendering', () => {
     const titleRow = container.querySelector('[class*="shellHeading"]');
     expect(titleRow).not.toBeNull();
     expect(titleRow?.textContent).toContain('Failed');
+    expect(titleRow?.querySelector('.lucide-circle-x')).not.toBeNull();
   });
 
   it('shows completion without claiming success for unstructured shell output', () => {

@@ -22,6 +22,7 @@ import {
   getToolDescription,
   isActiveToolStatus,
   localizeToolDisplayName,
+  sanitizeControlChars,
 } from '../toolFormatting';
 import styles from './ToolChrome.module.css';
 
@@ -39,15 +40,17 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
   };
   const raw = tool.rawOutput;
   const text =
-    raw &&
-    typeof raw === 'object' &&
-    'type' in raw &&
-    raw.type === 'shell_result' &&
-    !isShellResultDisplay(raw)
-      ? 'text' in raw && typeof raw.text === 'string'
-        ? raw.text
-        : JSON.stringify(raw, null, 2)
-      : extractText(tool) || '';
+    typeof raw === 'string' && raw
+      ? raw
+      : raw &&
+          typeof raw === 'object' &&
+          'type' in raw &&
+          raw.type === 'shell_result' &&
+          !isShellResultDisplay(raw)
+        ? 'text' in raw && typeof raw.text === 'string'
+          ? raw.text
+          : JSON.stringify(raw, null, 2)
+        : extractText(tool) || '';
   const active = isActiveToolStatus(tool.status);
   const result =
     !active && isShellResultDisplay(tool.rawOutput) ? tool.rawOutput : null;
@@ -83,9 +86,18 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
   }, [output, documentMode, active]);
-  const elapsed = active ? formatElapsed(tool.startTime, now) : '';
+  const elapsed = active
+    ? formatElapsed(tool.startTime, now)
+    : tool.endTime !== undefined
+      ? formatElapsed(tool.startTime, tool.endTime)
+      : '';
   const command =
     typeof tool.args?.command === 'string' ? tool.args.command : '';
+  const legacyOutputRepeatsCommand =
+    !active &&
+    !result &&
+    command !== '' &&
+    output.startsWith(`Command: ${command}`);
   const showTimeout =
     !!command &&
     !tool.args?.is_background &&
@@ -141,8 +153,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           </span>
         </div>
         <div className={styles.expandedCardBody}>
-          {command && <pre className={styles.expandedOutput}>{command}</pre>}
-          <pre className={styles.expandedOutput}>{output}</pre>
+          <pre className={styles.expandedOutput}>
+            {output ? sanitizeControlChars(output) : t('shell.result.empty')}
+          </pre>
         </div>
       </div>
     );
@@ -179,12 +192,12 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
             {getToolDescription(tool)}
           </div>
         )}
-        {command && (
+        {command && !legacyOutputRepeatsCommand && (
           <div className={styles.shellSection}>
             <details open>
               <summary>{t('shell.result.command')}</summary>
               <pre className={`${styles.expandedOutput} ${styles.shellOutput}`}>
-                {command}
+                {sanitizeControlChars(command)}
               </pre>
             </details>
             {!documentMode && (
@@ -225,7 +238,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {output
                 ? segments?.map((seg, i) => (
                     <span key={i} style={seg.style}>
-                      {seg.text}
+                      {sanitizeControlChars(seg.text)}
                     </span>
                   ))
                 : t(active ? 'shell.result.waiting' : 'shell.result.empty')}
@@ -258,7 +271,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           <details className={styles.shellDetails} open>
             <summary>{t('shell.result.notices')}</summary>
             <pre className={`${styles.expandedOutput} ${styles.shellOutput}`}>
-              {result.notices.join('\n\n')}
+              {sanitizeControlChars(result.notices.join('\n\n'))}
             </pre>
           </details>
         )}
@@ -305,7 +318,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {result && (
                 <>
                   <dt>{t('shell.result.directory')}</dt>
-                  <dd>{result.directory}</dd>
+                  <dd>{sanitizeControlChars(result.directory)}</dd>
                 </>
               )}
               {result?.exitCode != null &&
@@ -320,7 +333,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {result && result.outputFiles.length > 0 && (
                 <>
                   <dt>{t('shell.result.outputFiles')}</dt>
-                  <dd>{result.outputFiles.join('\n')}</dd>
+                  <dd>{sanitizeControlChars(result.outputFiles.join('\n'))}</dd>
                 </>
               )}
               {result?.pid && (

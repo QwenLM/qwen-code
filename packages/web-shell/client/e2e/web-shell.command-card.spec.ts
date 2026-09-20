@@ -35,7 +35,7 @@ const shellResult = (
   outputFiles: [],
 });
 
-test('shell card separates output, reveals and copies commands, and retains failures', async ({
+test('shell card separates output, reveals and copies commands, and retains failures @smoke', async ({
   page,
   context,
 }, testInfo) => {
@@ -264,6 +264,7 @@ test('running shell renders snapshots and follows output until the reader scroll
   });
   const daemon = await installMockDaemon(page, scenario);
   await page.goto('/session/test-session?language=zh-CN&theme=light');
+  await daemon.sse.waitForConnection('test-session');
   await page.getByRole('button', { name: /正在执行 运行命令/ }).click();
   const card = page.locator('[data-shell-command-card]');
   await expect(card).toBeVisible();

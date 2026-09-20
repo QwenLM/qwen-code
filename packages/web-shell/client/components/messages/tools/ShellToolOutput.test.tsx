@@ -85,6 +85,16 @@ describe('shell result presentation', () => {
     expect(container.textContent).not.toContain('Use default');
     expect(container.querySelector('button')).toBeNull();
   });
+  it('does not repeat the command a second time in documents', () => {
+    render(tool(envelope()), true);
+    // The collapsed row header already carries the command; the card body must
+    // not add a second copy next to the one inside the fallback envelope.
+    expect(container.textContent?.split(command)).toHaveLength(2);
+  });
+  it('labels an empty legacy result in documents', () => {
+    render(tool(''), true);
+    expect(container.textContent).toContain('No output');
+  });
   it.each([
     ['cancelled', null],
     ['timed_out', null],
@@ -94,6 +104,9 @@ describe('shell result presentation', () => {
     expect(container.querySelector('dl')?.textContent).not.toContain(
       'Exit code',
     );
+    expect(
+      container.querySelector('[class*="shellStatus"]')?.textContent,
+    ).not.toContain('Exited with code');
   });
 
   it('uses compatible text for unknown structured versions', () => {
@@ -118,15 +131,32 @@ describe('shell result presentation', () => {
     expect(container.querySelector('dl')?.textContent).toContain('Exit code1');
   });
   it('shows running elapsed time outside collapsed details', () => {
-    render(tool('', { status: 'in_progress', startTime: Date.now() - 5000 }));
+    // Fake timers: the elapsed string is rounded from a wall-clock gap, so a
+    // live-clock fixture flips 5s to 6s on a loaded worker with no code
+    // regression.
+    vi.useFakeTimers();
+    vi.setSystemTime(60_000);
+    try {
+      render(tool('', { status: 'in_progress', startTime: 55_000 }));
+      expect(
+        container.querySelector('[class*="shellStatus"]')?.textContent,
+      ).toMatch(/Running.*5s/);
+      expect(
+        container
+          .querySelector('[class*="shellDetails"]:last-child')
+          ?.hasAttribute('open'),
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('keeps the elapsed time once a completed command has an endTime', () => {
+    render(
+      tool('', { status: 'completed', startTime: 1_000, endTime: 66_000 }),
+    );
     expect(
       container.querySelector('[class*="shellStatus"]')?.textContent,
-    ).toMatch(/Running.*5s/);
-    expect(
-      container
-        .querySelector('[class*="shellDetails"]:last-child')
-        ?.hasAttribute('open'),
-    ).toBe(false);
+    ).toMatch(/Completed.*1m 5s/);
   });
   it('reads structured output and metadata independently of model text', () => {
     render(
@@ -173,6 +203,9 @@ describe('shell result presentation', () => {
     ).toBe(text);
     expect(container.textContent).toContain('Completed');
     expect(container.textContent).not.toContain('Succeeded');
+    // The command appears exactly once: inside the fallback envelope when the
+    // envelope already leads with it, otherwise in the Command section.
+    expect(container.textContent?.split(command)).toHaveLength(2);
   });
 
   it.each([
@@ -193,6 +226,17 @@ describe('shell result presentation', () => {
     expect(container.textContent).toContain(label);
     expect(container.textContent).toContain('diagnostic');
     expect(container.textContent).toContain('Signal: 15');
+    if (outcome === 'cancelled') {
+      expect(container.querySelector('.lucide-circle-x')).toBeNull();
+    } else {
+      expect(container.querySelector('.lucide-circle-x')).not.toBeNull();
+    }
+  });
+
+  it('shows a success icon for a clean structured exit', () => {
+    render(tool('', { rawOutput: result() }));
+    expect(container.querySelector('.lucide-circle-check')).not.toBeNull();
+    expect(container.querySelector('.lucide-circle-x')).toBeNull();
   });
 
   it('keeps long-running notices outside output and copies stdout only', async () => {
@@ -238,6 +282,46 @@ describe('shell result presentation', () => {
       }
     },
   );
+
+  it('prefers a string rawOutput display over model-facing content', () => {
+    render(
+      tool('Foreground command moved… press ↓ + Enter on the footer pill', {
+        rawOutput: 'Promoted to background: sh_1',
+      }),
+    );
+    expect(
+      container.querySelector('[class*="shellDetails"] > pre')?.textContent,
+    ).toBe('Promoted to background: sh_1');
+    expect(container.textContent).not.toContain('footer pill');
+  });
+
+  it('escapes control characters in the rendered command but copies it raw', async () => {
+    const tricky = 'ls \u202efile';
+    render(tool('', { args: { command: tricky } }));
+    const commandPre = container.querySelector('[class*="shellSection"] pre');
+    expect(commandPre?.textContent).toBe('ls \\u202efile');
+    expect(commandPre?.textContent).not.toContain('\u202e');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Copy command"]')
+        ?.click(),
+    );
+    expect(writeClipboardText).toHaveBeenLastCalledWith(tricky);
+  });
+
+  it('escapes control characters in rendered output but copies it raw', async () => {
+    const tricky = 'a\u202eb';
+    render(tool('unrelated text', { rawOutput: result({ output: tricky }) }));
+    expect(
+      container.querySelector('[class*="shellDetails"] > pre')?.textContent,
+    ).toBe('a\\u202eb');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Copy output"]')
+        ?.click(),
+    );
+    expect(writeClipboardText).toHaveBeenLastCalledWith(tricky);
+  });
 
   it('copies the exact command and renders all content without actions in documents', async () => {
     const command = 'printf "one"\nprintf "two"';
@@ -310,7 +394,7 @@ describe('shell result presentation', () => {
       root.render(
         <I18nProvider language="en">
           <ShellToolOutput
-            tool={tool('Cancelled', {
+            tool={tool('model text', {
               wasCancelled: true,
               args: { command, is_background: true },
             })}
@@ -318,9 +402,26 @@ describe('shell result presentation', () => {
         </I18nProvider>,
       ),
     );
-    expect(container.textContent).toContain('Cancelled');
+    expect(
+      container.querySelector('[class*="shellStatus"]')?.textContent,
+    ).toContain('Cancelled');
     expect(container.textContent).not.toContain('Timeout');
     expect(container.textContent).not.toContain('Succeeded');
+  });
+
+  it('omits the foreground timeout row for a run_in_background arg', () => {
+    render(
+      tool('', {
+        status: 'in_progress',
+        args: { command, run_in_background: true },
+      }),
+    );
+    expect(container.textContent).not.toContain('Timeout');
+  });
+
+  it('omits the foreground timeout row for background execution mode', () => {
+    render(tool('', { status: 'in_progress', executionMode: 'background' }));
+    expect(container.textContent).not.toContain('Timeout');
   });
 
   it('reports clipboard failure', async () => {
