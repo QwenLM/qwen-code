@@ -240,6 +240,23 @@ export class WorkflowStartCancelledError extends Error {
   }
 }
 
+/**
+ * A resume refused because the run's journal is not there to replay: missing
+ * from disk, or present but unreadable. A class so a host starting the resume
+ * on a caller's behalf can tell this refusal — which a rerun answers — from a
+ * fault in the host itself.
+ */
+export class WorkflowJournalUnavailableError extends Error {
+  constructor(
+    readonly runId: string,
+    readonly reason: 'missing' | 'unreadable',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'WorkflowJournalUnavailableError';
+  }
+}
+
 export class WorkflowRunner {
   static async start(
     options: WorkflowRunnerOptions,
@@ -374,12 +391,16 @@ export class WorkflowRunner {
         // there has always been a live run under the old id.
         const loaded = await journal?.load();
         if (loaded?.kind === 'missing') {
-          throw new Error(
+          throw new WorkflowJournalUnavailableError(
+            options.resumeFromRunId,
+            'missing',
             `No journal found for workflow run ${options.resumeFromRunId}, so there is nothing to resume. To run the workflow from the start, call Workflow again without resumeFromRunId.`,
           );
         }
         if (loaded?.kind === 'unreadable') {
-          throw new Error(
+          throw new WorkflowJournalUnavailableError(
+            options.resumeFromRunId,
+            'unreadable',
             `Could not read the journal for workflow run ${options.resumeFromRunId}: ${loaded.reason}`,
           );
         }

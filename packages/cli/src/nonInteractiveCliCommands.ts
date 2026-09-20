@@ -15,6 +15,7 @@ import {
   type Config,
   type GoalStateCause,
   type GoalStateResponse,
+  type ToolArtifact,
   createDebugLogger,
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
@@ -103,6 +104,7 @@ export type NonInteractiveSlashCommandResult = (
       type: 'message';
       messageType: 'info' | 'warning' | 'error';
       content: string;
+      artifacts?: ToolArtifact[];
       outputHistoryItems?: HistoryItemWithoutId[];
     }
   | {
@@ -187,6 +189,7 @@ function handleCommandResult(
         type: 'message',
         messageType: result.messageType,
         content: result.content,
+        ...(result.artifacts?.length ? { artifacts: result.artifacts } : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
