@@ -44,6 +44,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
@@ -83,7 +84,7 @@ import {
   normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
-  artifactPreviewDocument,
+  loadArtifactPreviewDocument,
 } from './artifactUtils';
 import {
   displayPath,
@@ -178,6 +179,7 @@ export type ArtifactPanelTab =
       id: string;
       kind: 'file';
       title: string;
+      previewVersion?: number;
       workspacePath: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -1129,6 +1131,7 @@ export function ArtifactPanel({
             <WorkspaceFilePreview
               key={activeTab.id}
               workspacePath={activeTab.workspacePath}
+              artifactVersion={String(activeTab.previewVersion ?? 0)}
               workspaceActions={activeWorkspaceActions!}
               previewContent={activeTab.previewContent}
               previewData={activeTab.previewData}
@@ -2846,6 +2849,7 @@ function ArtifactDetail({
         artifactVersion={getArtifactFreshnessKey(artifact)}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
+        previewSizeBytes={artifact.sizeBytes}
         imageMimeType={imageMimeType}
         previewKind={
           isHtmlArtifact(artifact)
@@ -3233,21 +3237,23 @@ function SourceDetail({
           }
         />
       ) : (
-        <WorkspaceFilePreview
-          key={attempt}
-          workspacePath={path}
-          workspaceActions={workspaceActions!}
-          onLoadError={setError}
-          previewData={data}
-          previewOnly={locator.type === 'attachment'}
-          previewMimeType={data?.type}
-          previewKind={
-            /\.html?$/i.test(path) ||
-            normalizeArtifactMimeType(data?.type) === 'text/html'
-              ? 'source'
-              : undefined
-          }
-        />
+        <div className="relative min-h-0 flex-1 overflow-auto">
+          <WorkspaceFilePreview
+            key={attempt}
+            workspacePath={path}
+            workspaceActions={workspaceActions!}
+            onLoadError={setError}
+            previewData={data}
+            previewOnly={locator.type === 'attachment'}
+            previewMimeType={data?.type}
+            previewKind={
+              /\.html?$/i.test(path) ||
+              normalizeArtifactMimeType(data?.type) === 'text/html'
+                ? 'source'
+                : undefined
+            }
+          />
+        </div>
       )}
     </div>
   );
@@ -3298,6 +3304,7 @@ function WorkspaceFilePreview({
   artifactVersion,
   workspaceActions,
   previewContent,
+  previewSizeBytes,
   previewData,
   previewMimeType,
   imageMimeType,
@@ -3309,6 +3316,7 @@ function WorkspaceFilePreview({
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
+  previewSizeBytes?: number;
   previewData?: Blob;
   previewMimeType?: string;
   imageMimeType?: string;
@@ -3347,6 +3355,7 @@ function WorkspaceFilePreview({
         artifactVersion={artifactVersion}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
+        previewSizeBytes={previewSizeBytes}
         previewOnly={previewOnly}
         onLoadError={onLoadError}
       />
@@ -3359,6 +3368,7 @@ function WorkspaceFilePreview({
         artifactVersion={artifactVersion}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
+        previewSizeBytes={previewSizeBytes}
         previewOnly={previewOnly}
         onLoadError={onLoadError}
       />
@@ -3475,6 +3485,7 @@ function TextAttachmentPreview({
       workspacePath={workspacePath}
       workspaceActions={workspaceActions}
       previewContent={content}
+      previewSizeBytes={data.size}
       previewOnly
       previewKind={previewKind}
     />
@@ -3611,7 +3622,6 @@ function useWorkspaceFileContent({
   workspaceActions,
   previewContent,
   previewOnly,
-  truncatedMessage,
   onLoadError,
 }: {
   workspacePath: string;
@@ -3619,16 +3629,17 @@ function useWorkspaceFileContent({
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   previewOnly?: boolean;
-  truncatedMessage: string;
   onLoadError?: (error: string) => void;
 }) {
   const [content, setContent] = useState<string | null>(previewContent ?? null);
+  const [sizeBytes, setSizeBytes] = useState<number>();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setContent(previewContent ?? null);
     setError(null);
+    setSizeBytes(undefined);
     if (previewOnly) return undefined;
     workspaceActions
       .stat(workspacePath)
@@ -3637,12 +3648,32 @@ function useWorkspaceFileContent({
         if (stat.type === 'directory') {
           throw new Error('Directories cannot be opened as artifacts.');
         }
-        return workspaceActions.readWorkspaceFile(workspacePath);
+        return workspaceActions.readWorkspaceFile(workspacePath, {
+          maxBytes: 256 * 1024,
+        });
+      })
+      .then(async (file) => {
+        if (cancelled || !file || !file.truncated) return file;
+        const blob = await readWorkspaceFileAsBlob(
+          (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
+          workspacePath,
+          'application/octet-stream',
+          {
+            statFile: (filePath) => workspaceActions.stat(filePath),
+            isCancelled: () => cancelled,
+          },
+        );
+        return {
+          sizeBytes: blob.size,
+          content: new TextDecoder(file.encoding || 'utf-8').decode(
+            await blob.arrayBuffer(),
+          ),
+        };
       })
       .then((file) => {
         if (cancelled || !file) return;
+        setSizeBytes(file.sizeBytes);
         setContent(file.content);
-        if (file.truncated) setError(truncatedMessage);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -3657,13 +3688,12 @@ function useWorkspaceFileContent({
     artifactVersion,
     previewContent,
     previewOnly,
-    truncatedMessage,
     onLoadError,
     workspaceActions,
     workspacePath,
   ]);
 
-  return { content, error };
+  return { content, error, sizeBytes };
 }
 
 function HtmlArtifactPreview({
@@ -3671,6 +3701,7 @@ function HtmlArtifactPreview({
   artifactVersion,
   workspaceActions,
   previewContent,
+  previewSizeBytes,
   previewOnly,
   onLoadError,
 }: {
@@ -3678,34 +3709,84 @@ function HtmlArtifactPreview({
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
+  previewSizeBytes?: number;
   previewOnly?: boolean;
   onLoadError?: (error: string) => void;
 }) {
-  const { content, error } = useWorkspaceFileContent({
+  const { content, error, sizeBytes } = useWorkspaceFileContent({
     workspacePath,
     artifactVersion,
     workspaceActions,
     previewContent,
     previewOnly,
-    truncatedMessage: 'Preview is truncated because the file is too large.',
     onLoadError,
   });
 
   return (
     <div className={styles.htmlPreviewWrap}>
       {content === null ? (
-        <div className={styles.empty}>Loading preview...</div>
+        !error && <div className={styles.empty}>Loading preview...</div>
       ) : (
-        <iframe
-          className={styles.htmlPreview}
-          referrerPolicy="no-referrer"
-          sandbox="allow-scripts"
-          srcDoc={artifactPreviewDocument(content, `Preview ${workspacePath}`)}
-          title={`Preview ${workspacePath}`}
-        />
+        <LargeDocumentPreview
+          content={content}
+          sizeBytes={sizeBytes ?? previewSizeBytes}
+          workspacePath={workspacePath}
+          workspaceActions={workspaceActions}
+        >
+          {() => (
+            <RenderedHtmlPreview
+              content={content}
+              workspacePath={workspacePath}
+            />
+          )}
+        </LargeDocumentPreview>
       )}
       {error && <div className={styles.previewError}>{error}</div>}
     </div>
+  );
+}
+
+function RenderedHtmlPreview({
+  content,
+  workspacePath,
+}: {
+  content: string;
+  workspacePath: string;
+}) {
+  const title = `Preview ${workspacePath}`;
+  const { t } = useI18n();
+  const [document, setDocument] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    setDocument(null);
+    setError(null);
+    void loadArtifactPreviewDocument(content, title, controller.signal).then(
+      (document) => {
+        if (!controller.signal.aborted) setDocument(document);
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) setError(extractErrorDetail(error));
+      },
+    );
+    return () => controller.abort();
+  }, [content, title]);
+  if (error)
+    return (
+      <div className={styles.previewError}>
+        {t('artifact.previewFailed', { message: error })}
+      </div>
+    );
+  if (document === null)
+    return <div className={styles.empty}>{t('attachment.loadingPreview')}</div>;
+  return (
+    <iframe
+      className={styles.htmlPreview}
+      referrerPolicy="no-referrer"
+      sandbox="allow-scripts"
+      srcDoc={document}
+      title={title}
+    />
   );
 }
 
@@ -3732,7 +3813,6 @@ function FileArtifactPreview({
     workspaceActions,
     previewContent,
     previewOnly,
-    truncatedMessage: 'File is truncated because it is too large.',
     onLoadError,
   });
 
@@ -3763,7 +3843,7 @@ function FileArtifactPreview({
   return (
     <div className={styles.filePreviewWrap}>
       {content === null ? (
-        <div className={styles.empty}>Loading file...</div>
+        !error && <div className={styles.empty}>Loading file...</div>
       ) : (
         <div ref={hostRef} className={styles.codeMirrorFile} />
       )}
@@ -3774,11 +3854,63 @@ function FileArtifactPreview({
   );
 }
 
+function LargeDocumentPreview({
+  content,
+  sizeBytes,
+  workspacePath,
+  workspaceActions,
+  children,
+}: {
+  content: string;
+  sizeBytes?: number;
+  workspacePath: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  children: () => ReactNode;
+}) {
+  const { t } = useI18n();
+  const [renderedContent, setRenderedContent] = useState<string | null>(null);
+  const large = useMemo(
+    () =>
+      (sizeBytes ?? new TextEncoder().encode(content).byteLength) > 1024 * 1024,
+    [content, sizeBytes],
+  );
+  if (!large) return children();
+  const rendered = renderedContent === content;
+  return (
+    <div className="absolute inset-3 flex min-h-0 flex-col gap-2">
+      <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
+        <span>{t('artifact.longDocument')}</span>
+        <Button
+          className="ml-auto shrink-0"
+          variant="outline"
+          size="sm"
+          onClick={() => setRenderedContent(rendered ? null : content)}
+        >
+          {t(rendered ? 'artifact.showSource' : 'artifact.renderFullPreview')}
+        </Button>
+      </div>
+      <div className="relative min-h-0 flex-1 overflow-auto">
+        {rendered ? (
+          children()
+        ) : (
+          <FileArtifactPreview
+            workspacePath={workspacePath}
+            workspaceActions={workspaceActions}
+            previewContent={content}
+            previewOnly
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MarkdownArtifactPreview({
   workspacePath,
   artifactVersion,
   workspaceActions,
   previewContent,
+  previewSizeBytes,
   previewOnly,
   onLoadError,
 }: {
@@ -3786,25 +3918,36 @@ function MarkdownArtifactPreview({
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
+  previewSizeBytes?: number;
   previewOnly?: boolean;
   onLoadError?: (error: string) => void;
 }) {
-  const { content, error } = useWorkspaceFileContent({
+  const { content, error, sizeBytes } = useWorkspaceFileContent({
     workspacePath,
     artifactVersion,
     workspaceActions,
     previewContent,
     previewOnly,
-    truncatedMessage: 'Preview is truncated because the file is too large.',
     onLoadError,
   });
 
   return (
-    <div className={styles.markdownPreviewWrap}>
+    <div className={styles.htmlPreviewWrap}>
       {content === null ? (
-        <div className={styles.empty}>Loading preview...</div>
+        !error && <div className={styles.empty}>Loading preview...</div>
       ) : (
-        <Markdown content={content} />
+        <LargeDocumentPreview
+          content={content}
+          sizeBytes={sizeBytes ?? previewSizeBytes}
+          workspacePath={workspacePath}
+          workspaceActions={workspaceActions}
+        >
+          {() => (
+            <div className={styles.markdownPreviewWrap}>
+              <Markdown content={content} />
+            </div>
+          )}
+        </LargeDocumentPreview>
       )}
       {error && <div className={styles.previewError}>{error}</div>}
     </div>

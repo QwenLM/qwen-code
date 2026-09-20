@@ -43,6 +43,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type OmniPolicyToolsSettings,
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
@@ -52,13 +53,20 @@ import {
   loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
+  validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import {
+  agentExecutionBackend,
+  agentExecutionFactory,
+} from './agent-execution.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
+import { getSettingsSchema } from './settingsSchema.js';
+import { resolveHookSettingsForConfig } from './hook-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -103,7 +111,6 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
-  validateGoalCheckpointTimeoutSeconds,
   validateGoalMaxActiveMinutes,
   validateGoalMaxTurns,
   validateGoalTokenBudget,
@@ -1157,18 +1164,6 @@ function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
   }
 }
 
-function resolveGoalCheckpointTimeoutSeconds(
-  settings: Settings,
-): number | undefined {
-  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
-  if (fromSettings === undefined) return undefined;
-  try {
-    return validateGoalCheckpointTimeoutSeconds(fromSettings);
-  } catch (err) {
-    throw new Error(`settings.json: ${(err as Error).message}`);
-  }
-}
-
 /**
  * Resolves the tool-call budget for a run. Returns the validated count
  * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
@@ -1338,6 +1333,70 @@ export function buildDisabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
   return () => resolveSkillSettings(loadedSettings).disabledNames;
+}
+
+/**
+ * Reject unknown keys directly under `omni`.
+ *
+ * The generic settings loader only scans TOP-LEVEL keys, and only writes a
+ * debug line — so a nested typo is caught by nothing: `omni.memoryy` or
+ * `omni.processingg` leaves `settings.omni?.memory` / `?.processing`
+ * undefined, every downstream normalizer sees "not configured" and returns
+ * defaults, and the session silently runs with the operator's entire
+ * configuration discarded (probe: `omni.memoryy.recall.mode = sideQuery`
+ * still registered the active-mode recall tool). The omni namespace's
+ * declared stance is that a misconfiguration must fail loud, so this
+ * mirrors the nested checks its own normalizers already perform.
+ *
+ * The allowed set is derived from the settings schema rather than
+ * hardcoded, so it cannot drift as the namespace grows.
+ */
+function assertKnownOmniSettingKeys(settings: Settings): void {
+  const omni = settings.omni;
+  if (omni === undefined || omni === null || typeof omni !== 'object') return;
+  const schemaOmni = getSettingsSchema()['omni'] as
+    | { properties?: Record<string, unknown> }
+    | undefined;
+  // No schema properties resolved (unexpected): stay silent rather than
+  // rejecting every valid key.
+  if (Object.keys(schemaOmni?.properties ?? {}).length === 0) return;
+
+  // Walk nested object settings too: the deletion-controlling knobs live
+  // at `omni.storage.*`, and a typo there would silently leave the GC on
+  // defaults. Free-form map nodes (fixedPolicies, policyTools — schema
+  // nodes without `properties`) stop the walk: their keys are
+  // user-defined.
+  const walk = (
+    value: unknown,
+    schemaNode: { properties?: Record<string, unknown> } | undefined,
+    label: string,
+  ): void => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return;
+    }
+    const props = schemaNode?.properties;
+    if (!props || Object.keys(props).length === 0) return;
+    const allowed = new Set(Object.keys(props));
+    const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Invalid settings: unknown key(s) under "${label}": ` +
+          `${unknown.map((k) => `"${k}"`).join(', ')}. ` +
+          `Allowed: ${[...allowed].sort().join(', ')}. ` +
+          `An unrecognized ${label} entry would be silently ignored, ` +
+          `leaving the session running with defaults instead of your ` +
+          `configuration.`,
+      );
+    }
+    for (const [key, child] of Object.entries(value)) {
+      walk(
+        child,
+        props[key] as { properties?: Record<string, unknown> } | undefined,
+        `${label}.${key}`,
+      );
+    }
+  };
+  walk(omni, schemaOmni, 'omni');
 }
 
 export function buildEnabledSkillNamesProvider(
@@ -1514,6 +1573,7 @@ export async function loadCliConfig(
    * If provided, these override settings.hooks for hook loading.
    */
   hooksConfig?: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
@@ -1572,6 +1632,7 @@ export async function loadCliConfig(
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
+  assertKnownOmniSettingKeys(settings);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -1620,7 +1681,7 @@ export async function loadCliConfig(
   const ideMode = settings.ide?.enabled ?? false;
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
+  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1699,12 +1760,19 @@ export async function loadCliConfig(
 
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
+  // Whether a privileged mode was actually asked for (flag or setting). The
+  // AUTO fall-through below is a built-in default, not a request, so an
+  // untrusted folder must not claim it overrode something the caller never set.
+  let approvalModeRequested = false;
   if (argv.approvalMode) {
     approvalMode = parseApprovalModeValue(argv.approvalMode);
+    approvalModeRequested = true;
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
+    approvalModeRequested = true;
   } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
+    approvalModeRequested = true;
   } else if (bareMode || safeMode) {
     // Restricted modes strip permissions/allowlists and are meant to be
     // maximally restrictive, so they keep manual approval rather than the
@@ -1720,9 +1788,11 @@ export async function loadCliConfig(
     approvalMode !== ApprovalMode.DEFAULT &&
     approvalMode !== ApprovalMode.PLAN
   ) {
-    writeStderrLine(
-      `Approval mode overridden to "default" because the current folder is not trusted.`,
-    );
+    if (approvalModeRequested) {
+      writeStderrLine(
+        `Approval mode overridden to "default" because the current folder is not trusted.`,
+      );
+    }
     approvalMode = ApprovalMode.DEFAULT;
   }
 
@@ -1993,7 +2063,27 @@ export async function loadCliConfig(
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
-  // Unified resolution of generation config with source attribution
+  // Validate provider protocols and per-model `wireApi` fields up front. The
+  // registry resolver throws a bare Error, and every startup shape passes
+  // through here, even without a selected model/auth type — classify it as a
+  // FatalConfigError so the user gets the message and the "please fix the
+  // configuration file(s)" hint instead of a stack trace before the TUI
+  // starts.
+  try {
+    validateModelProvidersConfig(
+      settings.modelProviders,
+      settings.providerProtocol,
+    );
+  } catch (err) {
+    throw new FatalConfigError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Unified resolution of generation config with source attribution. Note the
+  // up-front provider validation above is what classifies invalid configuration;
+  // this call's own settings reads must not re-wrap a resolver
+  // defect as a user config error, so it stays unwrapped.
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {
       model: argv.model,
@@ -2363,7 +2453,6 @@ export async function loadCliConfig(
     goalTokenBudget: resolveGoalTokenBudget(settings),
     goalMaxTurns: resolveGoalMaxTurns(settings),
     goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
-    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2403,12 +2492,42 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
+    omniEnabled: settings.omni?.enabled ?? false,
+    omniMaxUploadFileBytes:
+      settings.omni?.processing?.transportGuard?.maxUploadFileBytes,
+    omniMaxEstimatedTokens:
+      settings.omni?.processing?.transportGuard?.maxEstimatedTokens,
+    omniMaxDurationSeconds:
+      settings.omni?.processing?.transportGuard?.maxDurationSeconds,
+    omniUrlDownloadMaxFileBytes:
+      settings.omni?.ingestion?.localization?.url?.maxFileBytes,
+    omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
+    omniUploadBaseUrl: settings.omni?.delivery?.upload?.baseUrl,
+    omniUploadApiKeyEnv: settings.omni?.delivery?.upload?.apiKeyEnv,
+    omniUploadModel: settings.omni?.delivery?.upload?.model,
+    omniPolicyTools: settings.omni?.processing?.policyTools as
+      | OmniPolicyToolsSettings
+      | undefined,
+    omniFixedPolicies: settings.omni?.processing?.fixedPolicies as
+      | Record<string, unknown>
+      | undefined,
+    omniTransportGuardPolicies: settings.omni?.processing?.transportGuard
+      ?.policies as Record<string, unknown> | undefined,
+    omniProcessingLimits: settings.omni?.processing?.limits as
+      | Record<string, unknown>
+      | undefined,
+    omniQuarantineRetentionDays:
+      settings.omni?.storage?.quarantine?.retentionDays,
+    omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
+    omniStorageRetentionDays: settings.omni?.storage?.retentionDays,
+    omniStorageMaxTotalBytes: settings.omni?.storage?.maxTotalBytes,
+    omniMemory: settings.omni?.memory as Record<string, unknown> | undefined,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType: selectedAuthType,
+    authType: resolvedCliConfig.authType,
     inputFormat,
     outputFormat,
     includePartialMessages,
@@ -2439,6 +2558,7 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
+    workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
@@ -2501,12 +2621,11 @@ export async function loadCliConfig(
       settings.modelFallbacks,
     ),
     // Use separated hooks if provided, otherwise fall back to merged hooks
-    userHooks:
-      bareMode || safeMode
-        ? undefined
-        : (hooksConfig?.userHooks ?? settings.hooks),
-    projectHooks: bareMode || safeMode ? undefined : hooksConfig?.projectHooks,
-    hooks: bareMode || safeMode ? undefined : settings.hooks,
+    ...resolveHookSettingsForConfig(
+      settings.hooks,
+      hooksConfig,
+      bareMode || safeMode,
+    ),
     disableAllHooks:
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
@@ -2556,6 +2675,8 @@ export async function loadCliConfig(
         }
       : undefined,
     settingsWatcher,
+    agentExecutionBackend: agentExecutionBackend(),
+    executionEnvironmentFactory: agentExecutionFactory(),
   };
 
   const config = new Config(configParams);

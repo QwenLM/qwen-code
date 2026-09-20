@@ -56,6 +56,7 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
+  ServeWorkflowActionInput,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -851,6 +852,53 @@ export interface BridgePendingUserQuestionInteraction {
   options: BridgePendingInteractionOption[];
 }
 
+export interface BridgeIdleChannelCandidate {
+  channelId: string;
+  runtimeEpoch: number;
+  lastUsedAt: number;
+}
+
+export interface BridgeRuntimeStopRequest {
+  confirmInterruptions: true;
+  expectedChannelId: string;
+  expectedRuntimeEpoch: number;
+  expectedStopToken: string;
+  expectedSessionIds: string[];
+}
+
+export interface BridgeRuntimeStopSession {
+  sessionId: string;
+  displayName?: string;
+  hasActivePrompt: boolean;
+  queuedPrompts: number;
+  isWaitingForPermission: boolean;
+  isWaitingForUserQuestion: boolean;
+  hasRunningBackgroundTasks?: boolean;
+}
+
+export interface BridgeRuntimeStopResult {
+  channelId: string;
+  runtimeEpoch: number;
+  stopToken: string;
+  state: 'stopping' | 'stopped' | 'incomplete' | 'failed';
+  stopped: boolean;
+  released: boolean;
+  affectedSessionIds: string[];
+  closedSessionIds: string[];
+  interruptedSessionIds: string[];
+  remainingSessionIds: string[];
+  error?: string;
+}
+
+export interface BridgeRuntimeStopSnapshot {
+  channelId?: string;
+  runtimeEpoch: number;
+  stopToken: string;
+  blockedReasons: string[];
+  sessions: BridgeRuntimeStopSession[];
+  lastStop?: BridgeRuntimeStopResult;
+}
+
 export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
   runtimeLive: boolean;
@@ -974,6 +1022,7 @@ export interface SessionMetadataUpdate {
 }
 
 export interface CloseSessionOpts {
+  cause?: 'workspace_runtime_stop';
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
   /**
@@ -2127,7 +2176,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
 
-  /** Control a run, delete history, or start a saved workflow definition. */
+  /**
+   * Control a run, delete history, or start a new one — from a saved
+   * definition (`run-saved`, where `taskId` is the definition name) or from a
+   * script the caller supplies (`run-script`, where `taskId` is the caller's
+   * own start key). `input` carries what the two start actions run with.
+   */
   controlSessionWorkflowTask(
     sessionId: string,
     taskId: string,
@@ -2137,8 +2191,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved',
+      | 'run-saved'
+      | 'run-script',
     context?: BridgeClientRequestContext,
+    input?: ServeWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: ServeSessionWorkflowTaskStatus['status'];
@@ -2612,6 +2668,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * workspace runtime control when it is absent.
    */
   getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
+
+  getRuntimeStopSnapshot?(): BridgeRuntimeStopSnapshot;
+  /** Captured cleanup completion; may outlive a failed stop response. */
+  getRuntimeStopCompletion?(): Promise<BridgeRuntimeStopResult> | undefined;
+  stopWorkspaceRuntime?(
+    request: BridgeRuntimeStopRequest,
+    timeoutMs?: number,
+  ): Promise<BridgeRuntimeStopResult>;
+
+  getIdleChannelCandidate?(): BridgeIdleChannelCandidate | undefined;
+  reclaimIdleChannel?(
+    candidate: BridgeIdleChannelCandidate,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;

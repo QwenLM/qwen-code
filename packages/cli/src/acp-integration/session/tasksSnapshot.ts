@@ -251,6 +251,7 @@ function serializeWorkflowSnapshot(
     kind: 'workflow',
     id: snapshot.runId,
     isHistorical: true,
+    ...optionalField('argsOmitted', snapshot.argsOmitted),
     ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),
     ...optionalField(

@@ -4,14 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const releaseWorkflow = readFileSync(
   '.github/workflows/desktop-release.yml',
   'utf8',
 );
+const releaseYaml = parse(releaseWorkflow);
 const syncWorkflow = readFileSync(
   '.github/workflows/sync-desktop-to-oss.yml',
   'utf8',
@@ -19,8 +31,259 @@ const syncWorkflow = readFileSync(
 const tauriConfig = JSON.parse(
   readFileSync('packages/desktop-shell/src-tauri/tauri.conf.json', 'utf8'),
 );
+const hasJq = (() => {
+  try {
+    execFileSync('jq', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const replayable = process.platform !== 'win32' && hasJq;
+
+function runAlreadyPublishedProbe(overrides = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'desktop-release-probe-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'output');
+  mkdirSync(bin);
+  writeFileSync(output, '');
+  writeFileSync(
+    join(bin, 'gh'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1 $2" = 'release view' ]; then
+  [ "$3" = 'desktop-v1.2.3' ]
+  [ "$4" = '--json' ]
+  [ "$5" = 'isDraft,isPrerelease' ]
+  case "$RELEASE_STATE" in
+    stable) printf '%s\n' '{"isDraft":false,"isPrerelease":false}' ;;
+    draft) printf '%s\n' '{"isDraft":true,"isPrerelease":false}' ;;
+    prerelease) printf '%s\n' '{"isDraft":false,"isPrerelease":true}' ;;
+    malformed) printf '%s\n' '{' ;;
+    missing) exit 1 ;;
+  esac
+  exit 0
+fi
+if [ "$1 $2" = 'release download' ]; then
+  [ "$3" = 'desktop-latest' ]
+  target=''
+  pattern=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = '--dir' ]; then
+      shift
+      target="$1/desktop-latest.json"
+    elif [ "$1" = '--pattern' ]; then
+      shift
+      pattern="$1"
+    fi
+    shift
+  done
+  [ "$pattern" = 'desktop-latest.json' ]
+  case "$GH_FEED_STATE" in
+    current) printf '%s\n' '{"version":"1.2.3"}' > "$target" ;;
+    different) printf '%s\n' '{"version":"1.2.2"}' > "$target" ;;
+    malformed) printf '%s\n' '{' > "$target" ;;
+    missing) exit 1 ;;
+  esac
+  exit 0
+fi
+exit 1
+`,
+  );
+  writeFileSync(
+    join(bin, 'curl'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+target=''
+url=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-o' ]; then
+    shift
+    target="$1"
+  elif [[ "$1" == https://* ]]; then
+    url="$1"
+  fi
+  shift
+done
+[ "$url" = 'https://assets.example.test/desktop/latest/desktop-latest.json' ]
+case "$OSS_FEED_STATE" in
+  current) printf '%s\n' '{"version":"1.2.3"}' > "$target" ;;
+  different) printf '%s\n' '{"version":"1.2.2"}' > "$target" ;;
+  malformed) printf '%s\n' '{' > "$target" ;;
+  missing) exit 1 ;;
+esac
+`,
+  );
+  chmodSync(join(bin, 'gh'), 0o755);
+  chmodSync(join(bin, 'curl'), 0o755);
+
+  const step = releaseYaml.jobs.prepare.steps.find(
+    ({ name }) => name === 'Check whether stable release is already published',
+  );
+  try {
+    const stdout = execFileSync('bash', ['-c', step.run], {
+      env: {
+        ...process.env,
+        ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+        FEED_TAG: 'desktop-latest',
+        GH_FEED_STATE: 'current',
+        GITHUB_EVENT_NAME: 'workflow_dispatch',
+        GITHUB_OUTPUT: output,
+        OSS_FEED_STATE: 'current',
+        PATH: `${bin}:${process.env.PATH}`,
+        RELEASE_CLOBBER: 'false',
+        RELEASE_DRAFT: 'false',
+        RELEASE_DRY_RUN: 'false',
+        RELEASE_ELECTRON_BRIDGE: 'false',
+        RELEASE_PRERELEASE: 'false',
+        RELEASE_STATE: 'stable',
+        RELEASE_TAG: 'desktop-v1.2.3',
+        RELEASE_VERSION: '1.2.3',
+        ...overrides,
+      },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return {
+      output: readFileSync(output, 'utf8').trim().split('\n').at(-1),
+      stdout,
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 describe('Desktop OSS mirror workflow', () => {
+  it('short-circuits only after the stable GitHub and OSS publication is complete', () => {
+    const prepare = releaseYaml.jobs.prepare;
+    const published = prepare.steps.find(
+      ({ name }) =>
+        name === 'Check whether stable release is already published',
+    );
+    expect(published.id).toBe('published');
+    expect(published.env).toMatchObject({
+      ALIYUN_OSS_PUBLIC_BASE_URL:
+        "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}",
+      FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}',
+      GH_TOKEN: '${{ github.token }}',
+      RELEASE_CLOBBER: '${{ inputs.clobber }}',
+      RELEASE_DRAFT: '${{ inputs.draft }}',
+      RELEASE_DRY_RUN: '${{ inputs.dry_run }}',
+      RELEASE_ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}',
+      RELEASE_PRERELEASE: '${{ inputs.prerelease }}',
+      RELEASE_TAG: '${{ steps.version.outputs.tag }}',
+      RELEASE_VERSION: '${{ steps.version.outputs.version }}',
+    });
+    expect(published.run).toContain(
+      '::notice::Desktop $RELEASE_VERSION is already published; skipping build, publish and sync-oss.',
+    );
+    expect(prepare.outputs.already_published).toBe(
+      '${{ steps.published.outputs.already_published }}',
+    );
+    expect(releaseYaml.jobs.build.needs).toBe('prepare');
+    expect(releaseYaml.jobs.build.if).toBe(
+      "${{ needs.prepare.outputs.already_published != 'true' }}",
+    );
+    expect(releaseYaml.jobs.publish.needs).toContain('prepare');
+    expect(releaseYaml.jobs.publish.if).toBe(
+      "${{ (github.event_name == 'release' || inputs.dry_run == false) && github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.already_published != 'true' }}",
+    );
+    expect(releaseYaml.jobs['sync-oss'].needs).toContain('prepare');
+    expect(releaseYaml.jobs['sync-oss'].if).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) && needs.prepare.outputs.already_published != 'true' }}",
+    );
+  });
+
+  it.skipIf(!replayable).each([
+    ['completed stable dispatch', {}, 'already_published=true'],
+    [
+      'completed stable release event with empty inputs',
+      {
+        GITHUB_EVENT_NAME: 'release',
+        RELEASE_CLOBBER: '',
+        RELEASE_DRAFT: '',
+        RELEASE_DRY_RUN: '',
+        RELEASE_PRERELEASE: '',
+      },
+      'already_published=true',
+    ],
+    [
+      'missing versioned release',
+      { RELEASE_STATE: 'missing' },
+      'already_published=false',
+    ],
+    [
+      'draft versioned release',
+      { RELEASE_STATE: 'draft' },
+      'already_published=false',
+    ],
+    [
+      'prerelease versioned release',
+      { RELEASE_STATE: 'prerelease' },
+      'already_published=false',
+    ],
+    [
+      'malformed versioned release metadata',
+      { RELEASE_STATE: 'malformed' },
+      'already_published=false',
+    ],
+    [
+      'missing GitHub feed',
+      { GH_FEED_STATE: 'missing' },
+      'already_published=false',
+    ],
+    [
+      'different GitHub feed',
+      { GH_FEED_STATE: 'different' },
+      'already_published=false',
+    ],
+    [
+      'malformed GitHub feed',
+      { GH_FEED_STATE: 'malformed' },
+      'already_published=false',
+    ],
+    [
+      'missing OSS feed',
+      { OSS_FEED_STATE: 'missing' },
+      'already_published=false',
+    ],
+    [
+      'different OSS feed',
+      { OSS_FEED_STATE: 'different' },
+      'already_published=false',
+    ],
+    [
+      'malformed OSS feed',
+      { OSS_FEED_STATE: 'malformed' },
+      'already_published=false',
+    ],
+    ['dry run', { RELEASE_DRY_RUN: 'true' }, 'already_published=false'],
+    ['draft dispatch', { RELEASE_DRAFT: 'true' }, 'already_published=false'],
+    [
+      'prerelease dispatch',
+      { RELEASE_PRERELEASE: 'true' },
+      'already_published=false',
+    ],
+    [
+      'clobber dispatch',
+      { RELEASE_CLOBBER: 'true' },
+      'already_published=false',
+    ],
+    [
+      'Electron bridge dispatch',
+      { RELEASE_ELECTRON_BRIDGE: 'true' },
+      'already_published=false',
+    ],
+  ])('reports %s conservatively', (_name, overrides, expected) => {
+    expect(runAlreadyPublishedProbe(overrides).output).toBe(expected);
+  });
+
+  it.skipIf(!replayable)('explains a successful short-circuit', () => {
+    expect(runAlreadyPublishedProbe().stdout).toContain(
+      '::notice::Desktop 1.2.3 is already published; skipping build, publish and sync-oss.',
+    );
+  });
+
   it('mirrors only published stable Desktop releases', () => {
     expect(syncWorkflow).not.toContain('pull_request:');
     expect(releaseWorkflow).toContain(
@@ -42,7 +305,7 @@ describe('Desktop OSS mirror workflow', () => {
 
     const syncOss = getWorkflowJob(releaseWorkflow, 'sync-oss');
     expect(syncOss).toContain(
-      "if: \"${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) }}\"",
+      "if: \"${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) && needs.prepare.outputs.already_published != 'true' }}\"",
     );
     expect(syncOss).toContain("- 'publish'");
     expect(syncOss).toContain("source: 'artifact'");
@@ -206,6 +469,18 @@ describe('Desktop OSS mirror workflow', () => {
 });
 
 describe('Desktop release event', () => {
+  it('installs historical Qwen Code refs with their available lockfile', () => {
+    const install = getWorkflowStep(
+      getWorkflowJob(releaseWorkflow, 'build'),
+      'Install Qwen Code dependencies',
+    );
+    expect(install).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(install).toContain(
+      'corepack pnpm install --frozen-lockfile --prefer-offline',
+    );
+    expect(install).toContain('npm ci --no-audit --progress=false');
+  });
+
   it('gates automatic publishing like the VS Code release workflow', () => {
     expect(releaseWorkflow).toContain("release:\n    types: ['published']");
     const prepare = getWorkflowJob(releaseWorkflow, 'prepare');

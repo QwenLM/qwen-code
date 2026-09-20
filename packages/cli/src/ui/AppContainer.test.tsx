@@ -174,6 +174,27 @@ function TestContextConsumer() {
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
+// Records what AppContainer hands `useDeleteCommand` without changing what the hook
+// does. The `logger,` wiring at the call site is the only thing that makes the log
+// purge live, and every use inside the hook is `logger?.` — so dropping it is silent
+// in all three suites unless something observes the call site itself.
+const { deleteCommandOptions } = vi.hoisted(() => ({
+  deleteCommandOptions: [] as Array<Record<string, unknown> | undefined>,
+}));
+vi.mock('./hooks/useDeleteCommand.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./hooks/useDeleteCommand.js')>();
+  return {
+    ...actual,
+    useDeleteCommand: (options?: Record<string, unknown>) => {
+      deleteCommandOptions.push(options);
+      return actual.useDeleteCommand(
+        options as Parameters<typeof actual.useDeleteCommand>[0],
+      );
+    },
+  };
+});
+
 vi.mock('./App.js', () => ({
   App: TestContextConsumer,
 }));
@@ -309,6 +330,27 @@ import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
+  it('hands the delete command the session logger, so the log purge is live', async () => {
+    deleteCommandOptions.length = 0;
+    const { unmount } = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    await act(async () => {});
+
+    const options = deleteCommandOptions.at(-1);
+    expect(options).toBeDefined();
+    expect(
+      (options?.['logger'] as { removeSessionsMessages?: unknown } | undefined)
+        ?.removeSessionsMessages,
+    ).toBeInstanceOf(Function);
+    unmount();
+  });
+
   // One test below runs the real config.initialize(), which warms the tool
   // registry; under heavy parallel CI load that can exceed the default
   // timeout without any real hang.
@@ -553,6 +595,9 @@ describe('AppContainer State Management', () => {
     mockedUseLogger.mockReturnValue({
       getPreviousUserMessages: vi.fn().mockResolvedValue([]),
       removeLastUserMessage: vi.fn().mockResolvedValue(false),
+      // `/delete` calls this through useDeleteCommand; without it a test that
+      // drives a successful delete reports "Failed to delete session." instead.
+      removeSessionsMessages: vi.fn().mockResolvedValue(false),
     });
     mockedRestorePromptStash.mockReturnValue(false);
     mockedUseLoadingIndicator.mockReturnValue({
@@ -7752,6 +7797,12 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'getExtensionContextFilePaths').mockReturnValue([
         'ext-context.md',
       ]);
+      const extensionRuleSources = [
+        { name: 'charts', dir: '/ext/charts/rules' },
+      ];
+      vi.spyOn(mockConfig, 'getExtensionRuleSources').mockReturnValue(
+        extensionRuleSources,
+      );
       vi.spyOn(mockConfig, 'getContextRuleExcludes').mockReturnValue([
         'exclude-rule',
       ]);
@@ -7789,7 +7840,7 @@ describe('AppContainer State Management', () => {
         true,
         expect.anything(),
         ['exclude-rule'],
-        expect.anything(),
+        expect.objectContaining({ extensionRuleSources }),
       );
       expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);
     });

@@ -518,6 +518,7 @@ describe('Session', () => {
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
+    recordGoalTurnEnd: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
@@ -554,6 +555,7 @@ describe('Session', () => {
     beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
@@ -712,6 +714,9 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    // Self-hosted CI runners export QWEN_RUNTIME_DIR; it outranks
+    // Storage.setRuntimeBaseDir, breaking the runtime-pinning assertions.
+    vi.stubEnv('QWEN_RUNTIME_DIR', '');
     originalProcessGuardMode =
       process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
     process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] = 'shadow';
@@ -753,10 +758,15 @@ describe('Session', () => {
       });
 
     const getHistoryMock = vi.fn().mockReturnValue([]);
+    let completedToolCallIds: readonly string[] = [];
     mockChat = {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
       getHistory: getHistoryMock,
+      setCompletedToolCallIds: vi.fn((ids: readonly string[]) => {
+        completedToolCallIds = ids;
+      }),
+      getCompletedToolCallIds: vi.fn(() => completedToolCallIds),
       // continueLastTurn classifies from a bounded tail; delegate to getHistory
       // so tests that set getHistory drive detection (fixtures are small).
       getHistoryTail: vi.fn(() => getHistoryMock()),
@@ -800,6 +810,7 @@ describe('Session', () => {
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       finishManagedAutoMemoryRecall: vi.fn(),
+      captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };
     mockMemoryManager = {
@@ -871,6 +882,7 @@ describe('Session', () => {
       recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
+      recordGoalTurnEnd: vi.fn().mockResolvedValue(undefined),
       recordMidTurnUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
@@ -1105,6 +1117,7 @@ describe('Session', () => {
     } else {
       process.env['QWEN_CODE_SERVE'] = originalServeStamp;
     }
+    vi.unstubAllEnvs();
     // Reset global runtime base dir state to prevent state leakage between tests
     core.Storage.setRuntimeBaseDir(null);
     // Clear session reference to allow garbage collection
@@ -2933,6 +2946,15 @@ describe('Session', () => {
         expect.any(AbortSignal),
       );
       expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      // Captured twice: once inside `#recordPromptCompletionEffects` (before
+      // `scheduleExtract`, pinned below) and once at the turn boundary that
+      // feeds the follow-up suggestion.
+      expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledTimes(2);
+      expect(
+        mockLlmClient.captureCacheSafeParams.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        mockMemoryManager.scheduleExtract.mock.invocationCallOrder[0]!,
+      );
       expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
         projectRoot: '/repo',
         sessionId: 'test-session-id',
@@ -3029,6 +3051,11 @@ describe('Session', () => {
       expect(mockLlmClient.beginManagedAutoMemoryRecall).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // A retry skips managed auto-memory, but the turn still ends `end_turn`,
+      // so the follow-up suggestion fires and reads the process-global
+      // cache-safe slot. The turn boundary has to refresh it anyway, or the
+      // suggestion is generated from a transcript missing this turn.
+      expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledOnce();
 
       mockChat.sendMessageStream = vi
         .fn()
@@ -3043,6 +3070,9 @@ describe('Session', () => {
       expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledOnce();
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // A failed turn never reaches the success path, so it must not publish
+      // its partial transcript as cache-safe.
+      expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledOnce();
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
@@ -5431,6 +5461,229 @@ describe('Session', () => {
         canContinue: false,
       });
       expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('reports clean for a restored session whose tail is an unanswered notification', async () => {
+      // The daemon persists every background notification before its automatic
+      // turn runs. When such a notification's turn never ran, a cold load
+      // projects it as a plain `role: 'user'` tail (the record's subtype and
+      // provenance do not survive into `Content`) that nothing will ever
+      // answer — so the session used to come back as `interrupted_prompt`, with
+      // the recovery banner pinned on a turn that had ended with `end_turn`.
+      // Drive the same projection `GeminiClient` seeds the live chat with on
+      // restore (`buildSessionHistoryFromConversation`).
+      const notificationRecord = (index: number, summary: string) => ({
+        uuid: `m-${index}`,
+        parentUuid: index === 0 ? null : `m-${index - 1}`,
+        sessionId: 'test-session-id',
+        timestamp: '2026-09-16T00:00:00.000Z',
+        type: 'user' as const,
+        subtype: 'notification' as const,
+        provenance: 'system' as const,
+        cwd: '/tmp/project',
+        version: 'test',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text:
+                `<task-notification><task-id>agent-1</task-id>` +
+                `<status>completed</status><summary>${summary}</summary>` +
+                `</task-notification>`,
+            },
+          ],
+        },
+        systemPayload: { displayText: 'Background task completed.' },
+      });
+      const restored = core.buildSessionHistoryFromConversation({
+        messages: [
+          {
+            uuid: 'm-0',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: '2026-09-16T00:00:00.000Z',
+            type: 'user' as const,
+            cwd: '/tmp/project',
+            version: 'test',
+            message: {
+              role: 'user',
+              parts: [{ text: 'run it in the background' }],
+            },
+          },
+          {
+            uuid: 'm-1',
+            parentUuid: 'm-0',
+            sessionId: 'test-session-id',
+            timestamp: '2026-09-16T00:00:01.000Z',
+            type: 'assistant' as const,
+            cwd: '/tmp/project',
+            version: 'test',
+            message: { role: 'model', parts: [{ text: 'all done' }] },
+          },
+          notificationRecord(2, 'Agent "explore" completed.'),
+          notificationRecord(3, 'Agent "build" completed.'),
+        ],
+      });
+      // Sanity: the projection really does end in unanswered user entries, so
+      // this exercises the classifier instead of an already-clean tail.
+      expect(restored.apiHistory.at(-1)?.role).toBe('user');
+      vi.mocked(mockChat.getHistory).mockReturnValue(restored.apiHistory);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects when an automatic notification turn is in flight', async () => {
+      // The harmful half: a notification turn runs under
+      // `notificationAbortController` and never installs `pendingPrompt`, so the
+      // re-entrancy guard used to miss it and report `canContinue: true`. The
+      // bridge then drives the continuation through the normal prompt-admission
+      // path, which aborts `notificationAbortController` — the recovery button
+      // killed a healthy turn.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as {
+        notificationAbortController: AbortController | null;
+        notificationProcessing: boolean;
+      };
+      const liveTurn = new AbortController();
+      internals.notificationAbortController = liveTurn;
+      internals.notificationProcessing = true;
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(promptSpy).not.toHaveBeenCalled();
+        expect(liveTurn.signal.aborted).toBe(false);
+      } finally {
+        internals.notificationAbortController = null;
+        internals.notificationProcessing = false;
+      }
+    });
+
+    it('rejects when an automatic cron turn is in flight', async () => {
+      // Same guard gap as the notification turn: cron runs under
+      // `cronAbortController`, which prompt admission aborts as well.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as {
+        cronAbortController: AbortController | null;
+        cronProcessing: boolean;
+      };
+      const liveTurn = new AbortController();
+      internals.cronAbortController = liveTurn;
+      internals.cronProcessing = true;
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(liveTurn.signal.aborted).toBe(false);
+      } finally {
+        internals.cronAbortController = null;
+        internals.cronProcessing = false;
+      }
+    });
+
+    it('rejects while a close gate is held even though no turn is in flight', async () => {
+      // `#hasActiveTurn()` has no member for `closing`, yet
+      // `assertCanStartTurn()` rejects on it as its FIRST statement. A close
+      // gate held while every turn has already settled (`beginClose()` across
+      // `waitForActiveTurnsToSettle()`, or a disposed session) therefore used
+      // to report `canContinue: true`: the banner offered Continue,
+      // `continueLastTurn()` accepted, and the bridge drove the continuation
+      // into `'Session is closing'` — the accept-then-fail round trip this
+      // guard exists to prevent. Set the private flag the way the sibling
+      // tests set `notificationProcessing`.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as { closing: boolean };
+      internals.closing = true;
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(promptSpy).not.toHaveBeenCalled();
+      } finally {
+        internals.closing = false;
+      }
+    });
+
+    it('recovers a FAILED automatic notification turn that carries reminders', async () => {
+      // Sibling of the in-flight case above, for the state where the turn is
+      // already over. A notification turn pushes its
+      // `[...systemReminders, ...notificationParts]` user entry into live
+      // history before any attempt; if the stream then fails mid-turn with no
+      // `functionCall` delivered, no model entry is pushed, so that entry IS
+      // the tail — and the `catch` does not re-queue while the `finally`
+      // clears `notificationAbortController`, so `#hasActiveTurn()` is false.
+      // Trimming that entry as structural certifies `clean` and leaves the
+      // turn with no re-drive at all (`persistedBackgroundNotificationTaskIds`
+      // already holds the taskId). Nothing is in flight here, on purpose.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier answer' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nplan mode is active\n</system-reminder>',
+            },
+            {
+              text:
+                `<task-notification><task-id>agent-1</task-id>` +
+                `<status>failed</status>` +
+                `<summary>Agent "explore" failed.</summary>` +
+                `</task-notification>`,
+            },
+          ],
+        },
+      ]);
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
     });
   });
 
@@ -10652,6 +10905,67 @@ describe('Session', () => {
         '<realtime_delegation>trusted model input</realtime_delegation>',
       ]);
     });
+
+    it.each(['read both', ''])(
+      'records original resource links independently of model expansion (%j)',
+      async (text) => {
+        const links = [
+          {
+            type: 'resource_link' as const,
+            uri: 'transit://resource-a',
+            name: 'notes.md',
+            mimeType: 'text/markdown',
+            size: 0,
+            title: 'First notes',
+            description: 'Original reference',
+            annotations: { audience: ['user' as const], priority: 0.5 },
+            _meta: { preview: { version: 1 } },
+          },
+          {
+            type: 'resource_link' as const,
+            uri: 'https://example.com/notes.md',
+            name: 'notes.md',
+          },
+        ];
+        const expectedLinks = structuredClone(links);
+        const trustedContext: core.InvocationContextV1 = {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'resource-prompt',
+        };
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              ...(text ? [{ type: 'text' as const, text }] : []),
+              ...links,
+            ],
+          },
+          trustedContext,
+          undefined,
+          'model-only instruction',
+        );
+        links[0]._meta!.preview.version = 2;
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          text,
+          undefined,
+          {
+            displayText: text,
+            hookContext: '',
+            resourceLinks: expectedLinks,
+          },
+          trustedContext.promptId,
+        );
+        expect(textParts(firstSentMessage())).toEqual([
+          'model-only instruction',
+        ]);
+      },
+    );
 
     it('records daemon attachment references for transcript replay', async () => {
       const imageReference = {
@@ -26456,6 +26770,54 @@ describe('Session', () => {
         );
       });
 
+      it('forwards export artifacts to live output and persisted command history', async () => {
+        const artifacts = [
+          {
+            kind: 'file' as const,
+            storage: 'workspace' as const,
+            title: 'export.md',
+            workspacePath: 'export.md',
+            mimeType: 'text/markdown; charset=utf-8',
+            sizeBytes: 42,
+          },
+        ];
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Exported.',
+          artifacts,
+        });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/export md' }],
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Exported.' },
+            _meta: { source: 'slash_command', sessionArtifacts: artifacts },
+          },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            phase: 'result',
+            rawCommand: '/export md',
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Exported.',
+                sessionArtifacts: artifacts,
+              },
+            ],
+          }),
+        );
+      });
+
       it('returns a structured standalone-policy error for a blocked slash command', async () => {
         session.dispose();
         vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
@@ -26855,6 +27217,184 @@ describe('Session', () => {
         });
       });
 
+      it('forwards the structured compression result and records it for replay', async () => {
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: true,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> ~100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The English sentence still reaches text-only ACP hosts; the payload
+        // rides alongside it for hosts that render the result themselves.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(2, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Context compressed (200 -> ~100).',
+            },
+            _meta: { source: 'slash_command', contextCompression: compression },
+          },
+        });
+        // Replay rebuilds the structured line from the record, so it travels
+        // with the joined text rather than replacing it.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> ~100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('carries a compression notice on its own meta key and record item', async () => {
+        const notice = { phase: 'notice' as const, instructionsLimit: 2000 };
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: false,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compression instructions were truncated to 2000 chars.',
+              contextCompressionNotice: notice,
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> 100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The notice rides its own `_meta` key: the reducer folds this turn into
+        // one block and spreads `_meta` key by key, so a shared key would hide
+        // the note behind the compression payload that follows.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Compression instructions were truncated to 2000 chars.',
+            },
+            _meta: {
+              source: 'slash_command',
+              contextCompressionNotice: notice,
+            },
+          },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                // Newline kept so the folded block still reads as two lines.
+                text: 'Compression instructions were truncated to 2000 chars.\n',
+                contextCompressionNotice: notice,
+              },
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> 100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('records a terminal no-op result for replay', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context (fast)...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'No compression needed.',
+              contextCompression: { phase: 'noop' as const },
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress-fast' }],
+        });
+
+        // The no-op is terminal, so it is recorded like the result: replay
+        // rebuilds the row in the client's language instead of leaving the
+        // joined English sentences.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context (fast)...\nNo compression needed.',
+                contextCompression: { phase: 'noop' },
+              },
+            ],
+          }),
+        );
+      });
+
       it('emits canonical Goal state for an ACP /goal status query', async () => {
         const snapshot: core.GoalSnapshotV2 = {
           v: 2,
@@ -27004,6 +27544,121 @@ describe('Session', () => {
         mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
         await session.publishRecoveredGoalState([]);
         expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      });
+
+      // A transcript from before Goal state was journaled restores with no
+      // Goal and no cause, and nothing corrects the legacy `set` card the
+      // replay ended on. The trailing `cleared` card says nothing drives it.
+      it('supersedes a replayed legacy goal card when the runtime recovered no Goal', async () => {
+        mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
+
+        await session.publishRecoveredGoalState([
+          {
+            uuid: 'legacy-goal',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: new Date(0).toISOString(),
+            type: 'system',
+            subtype: 'slash_command',
+            cwd: '/tmp',
+            version: 'test',
+            systemPayload: {
+              phase: 'result',
+              outputHistoryItems: [
+                {
+                  type: 'goal_status',
+                  kind: 'set',
+                  condition: 'ship the thing',
+                  iterations: 2,
+                  setAt: 1234,
+                },
+              ],
+            },
+          } as unknown as core.ChatRecord,
+        ]);
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                lastReason: expect.stringContaining(
+                  'recorded by an earlier version of Qwen Code',
+                ),
+              }),
+            },
+          },
+        });
+      });
+
+      // The live-restore path appends the same card from the runtime as it
+      // stands, without waiting for readiness, and only while the session
+      // drives no Goal.
+      it('renders the legacy supersession for a live replay only while no Goal is live', () => {
+        const legacyCard = {
+          uuid: 'legacy-goal',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: new Date(0).toISOString(),
+          type: 'system',
+          subtype: 'slash_command',
+          cwd: '/tmp',
+          version: 'test',
+          systemPayload: {
+            phase: 'result',
+            outputHistoryItems: [
+              {
+                type: 'goal_status',
+                kind: 'checking',
+                condition: 'ship the thing',
+                iterations: 3,
+              },
+            ],
+          },
+        } as unknown as core.ChatRecord;
+
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                iterations: 3,
+              }),
+            },
+          },
+        ]);
+        expect(
+          (
+            mockConfig as unknown as {
+              getGoalRuntimeReady: ReturnType<typeof vi.fn>;
+            }
+          ).getGoalRuntimeReady,
+        ).not.toHaveBeenCalled();
+
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'live-goal',
+            revision: 1,
+            objective: 'set after the resume',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        });
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([]);
       });
 
       // R3-6's second trigger: `recoverGoalFromRecords` returns
@@ -28199,63 +28854,215 @@ describe('Session', () => {
             },
           ]);
 
-        it('ends a Goal turn without another model request', async () => {
-          // The proposal only reaches the verifier at a turn boundary, so a
-          // continuation that keeps the turn alive parks it indefinitely:
-          // the objective is already met, and the runtime refuses every
-          // later proposal for the same turn.
+        it.each([false, true])(
+          'ends a Goal turn without another model request (recording fails: %s)',
+          async (recordingFails) => {
+            // The proposal only reaches the verifier at a turn boundary, so a
+            // continuation that keeps the turn alive parks it indefinitely:
+            // the objective is already met, and the runtime refuses every
+            // later proposal for the same turn.
+            const permit: core.GoalTurnPermit = {
+              goalId: 'goal-1',
+              revision: 1,
+              turnId: 'turn-terminating-tool',
+            };
+            const turnKey = 'goal-runtime:turn-terminating-tool';
+            mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+            mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+              key === turnKey ? permit : undefined,
+            );
+            agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+              agentTelemetry.span,
+            );
+            mockToolsWithTerminatingUpdateGoal();
+            if (recordingFails) {
+              let writeFailed = false;
+              mockChatRecordingService.recordGoalTurnEnd.mockImplementation(
+                async () => {
+                  writeFailed = true;
+                  throw new Error('writer failed');
+                },
+              );
+              mockGoalRuntime.finishTurn.mockImplementation(async () => {
+                if (writeFailed) throw new Error('writer failed');
+              });
+            }
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                streamCalling({ id: 'call-update', name: 'update_goal' }),
+              )
+              .mockResolvedValue(createEmptyStream());
+
+            expect(boundGoalHost).toBeDefined();
+            await boundGoalHost!.startGoalTurn({
+              permit,
+              continuationContext: 'write a poem',
+            });
+
+            await vi.waitFor(() => {
+              expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+            });
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+            // Settled as a completed iteration, not paused as a failure.
+            expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+            expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
+            // The turn ends, but its own tool response still has to reach the
+            // transcript, or the next request carries a call with no result.
+            expect(mockChat.addHistory).toHaveBeenCalledWith({
+              role: 'user',
+              parts: expect.arrayContaining([
+                expect.objectContaining({
+                  functionResponse: expect.objectContaining({
+                    id: 'call-update',
+                  }) as unknown,
+                }),
+              ]) as unknown,
+            });
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              expect.objectContaining({ reason: 'end_turn', source: 'goal' }),
+            );
+            expect(
+              agentTelemetry.captures[0]?.writeToSpan,
+            ).toHaveBeenCalledWith(agentTelemetry.span);
+            expect(
+              mockChatRecordingService.recordGoalTurnEnd,
+            ).toHaveBeenCalledWith('call-update', permit);
+            const history = vi
+              .mocked(mockChat.addHistory)
+              .mock.calls.map(([entry]) => entry);
+            vi.mocked(mockChat.getHistory).mockReturnValue(history);
+            expect(session.getRecoveryStatus()).toEqual({
+              kind: recordingFails ? 'interrupted_prompt' : 'clean',
+              canContinue: recordingFails,
+            });
+            expect(
+              mockChatRecordingService.recordGoalRuntimeMessage,
+            ).toHaveBeenCalledTimes(1);
+            history.push({
+              role: 'user',
+              parts: [{ text: 'new unanswered request' }],
+            });
+            expect(session.getRecoveryStatus()).toEqual({
+              kind: 'interrupted_prompt',
+              canContinue: true,
+            });
+          },
+        );
+
+        it('does not record a clean boundary when cancellation arrives during tool-result rewriting', async () => {
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',
             revision: 1,
-            turnId: 'turn-terminating-tool',
+            turnId: 'cancelled-tool-end',
           };
-          const turnKey = 'goal-runtime:turn-terminating-tool';
+          const turnKey = `goal-runtime:${permit.turnId}`;
           mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
           mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
             key === turnKey ? permit : undefined,
           );
-          agentTelemetry.getActiveInteractionSpan.mockReturnValue(
-            agentTelemetry.span,
-          );
           mockToolsWithTerminatingUpdateGoal();
+          let releaseRewrite!: () => void;
+          const waitForPendingRewrites = vi.fn(
+            () =>
+              new Promise<void>((resolve) => {
+                releaseRewrite = resolve;
+              }),
+          );
+          session.messageRewriter = {
+            interceptUpdate: vi.fn().mockResolvedValue(undefined),
+            flushTurn: vi.fn().mockResolvedValue(undefined),
+            waitForPendingRewrites,
+          } as unknown as Session['messageRewriter'];
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValueOnce(
               streamCalling({ id: 'call-update', name: 'update_goal' }),
-            )
-            .mockResolvedValue(createEmptyStream());
-
-          expect(boundGoalHost).toBeDefined();
+            );
           await boundGoalHost!.startGoalTurn({
             permit,
-            continuationContext: 'write a poem',
+            continuationContext: 'finish the goal',
           });
+          await vi.waitFor(() =>
+            expect(waitForPendingRewrites).toHaveBeenCalled(),
+          );
+          await session.cancelPendingPrompt();
+          releaseRewrite();
+          await vi.waitFor(() =>
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              expect.objectContaining({ reason: 'cancelled', source: 'goal' }),
+            ),
+          );
+          expect(
+            mockChatRecordingService.recordGoalTurnEnd,
+          ).not.toHaveBeenCalled();
+          expect(mockChat.setCompletedToolCallIds).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+          vi.mocked(mockChat.getHistory).mockReturnValue(
+            vi.mocked(mockChat.addHistory).mock.calls.map(([entry]) => entry),
+          );
+          expect(session.getRecoveryStatus()).toEqual({
+            kind: 'interrupted_prompt',
+            canContinue: true,
+          });
+        });
 
-          await vi.waitFor(() => {
-            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
-          });
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-          // Settled as a completed iteration, not paused as a failure.
-          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
-          // The turn ends, but its own tool response still has to reach the
-          // transcript, or the next request carries a call with no result.
-          expect(mockChat.addHistory).toHaveBeenCalledWith({
-            role: 'user',
-            parts: expect.arrayContaining([
-              expect.objectContaining({
-                functionResponse: expect.objectContaining({
-                  id: 'call-update',
-                }) as unknown,
-              }),
-            ]) as unknown,
-          });
-          expect(mockClient.extNotification).toHaveBeenCalledWith(
-            '_qwencode/end_turn',
-            expect.objectContaining({ reason: 'end_turn', source: 'goal' }),
+        it('does not record a clean boundary when cancellation arrives during settlement flush', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'cancelled-during-flush',
+          };
+          const turnKey = `goal-runtime:${permit.turnId}`;
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
           );
-          expect(agentTelemetry.captures[0]?.writeToSpan).toHaveBeenCalledWith(
-            agentTelemetry.span,
+          mockToolsWithTerminatingUpdateGoal();
+          const settlement = session as unknown as {
+            pendingPrompt: AbortController | null;
+            activeGoalTurn?: {
+              controller: AbortController;
+              endingToolCallId?: string;
+            };
+          };
+          let releaseFlush: (() => void) | undefined;
+          mockChatRecordingService.flush.mockImplementation(async () => {
+            if (
+              settlement.activeGoalTurn?.endingToolCallId &&
+              !settlement.pendingPrompt
+            ) {
+              await new Promise<void>((resolve) => {
+                releaseFlush = resolve;
+              });
+            }
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            );
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'finish the goal',
+          });
+          await vi.waitFor(() => expect(releaseFlush).toBeDefined());
+          settlement.activeGoalTurn!.controller.abort('qwen:user-cancel');
+          releaseFlush!();
+          await vi.waitFor(() =>
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              expect.objectContaining({ reason: 'end_turn', source: 'goal' }),
+            ),
           );
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          expect(
+            mockChatRecordingService.recordGoalTurnEnd,
+          ).not.toHaveBeenCalled();
+          expect(mockChat.setCompletedToolCallIds).not.toHaveBeenCalled();
         });
 
         it('runs managed memory effects after an early Goal turn end', async () => {
@@ -48157,7 +48964,7 @@ describe('Session', () => {
       let userInputDelivered = false;
       mockGuardBridge(() => {
         // The drain right after Stop 2 delivers user input, which discards
-        // that Stop's allow before it is applied.
+        // that Stop's block before it is applied.
         if (stopCalls === 2 && !userInputDelivered) {
           userInputDelivered = true;
           return {
@@ -48175,7 +48982,7 @@ describe('Session', () => {
           }
           stopCalls++;
           stopActiveFlags.push(request.input?.stop_hook_active);
-          return stopCalls === 1 || stopCalls === 3
+          return stopCalls <= 3
             ? {
                 success: true,
                 output: { decision: 'block', reason: `block ${stopCalls}` },
@@ -48191,7 +48998,7 @@ describe('Session', () => {
       await runGuardPrompt();
 
       expect(userInputDelivered).toBe(true);
-      expect(stopActiveFlags.slice(0, 3)).toEqual([false, true, false]);
+      expect(stopActiveFlags.slice(0, 4)).toEqual([false, true, false, true]);
       // Stop 3 blocked the user's turn: one block, not two consecutive ones.
       expect(stopCalls).toBeGreaterThanOrEqual(4);
       expect(agentMessageChunks()).not.toContain(

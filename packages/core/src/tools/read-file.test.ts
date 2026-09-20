@@ -113,6 +113,12 @@ describe('ReadFileTool', () => {
       getContentGeneratorConfig: () => ({
         modalities: { image: true, pdf: true, audio: true, video: true },
       }),
+      getEffectiveInputModalities: () => ({
+        image: true,
+        pdf: true,
+        audio: true,
+        video: true,
+      }),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: () => false,
     } as unknown as Config;
@@ -127,6 +133,35 @@ describe('ReadFileTool', () => {
   });
 
   describe('build', () => {
+    it('advertises audio and video support to the model', () => {
+      expect(tool.description).toContain('audio, video');
+      expect(tool.description).toContain(
+        'selected model to support the corresponding modality',
+      );
+    });
+
+    it('recomputes the schema description from live modalities', () => {
+      // The declaration the model actually receives comes from `schema`, which
+      // is recomputed on read — so it reflects the current model's modalities.
+      expect(tool.schema.description).toContain('audio, video');
+      expect(tool.schema.description).toContain('watch a video');
+    });
+
+    it('omits audio/video for a text-only model (no false clip-read promise)', () => {
+      const textOnlyConfig = {
+        getEffectiveInputModalities: () => ({ image: true, pdf: true }),
+      } as unknown as Config;
+      const textTool = new ReadFileTool(textOnlyConfig);
+      for (const desc of [textTool.description, textTool.schema.description]) {
+        expect(desc).toContain(
+          'text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files',
+        );
+        expect(desc).not.toContain('audio, video');
+        expect(desc).not.toContain('watch a video');
+        expect(desc).not.toContain('read_file on the resulting clip');
+      }
+    });
+
     it('should return an invocation for valid params (absolute path within root)', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),
@@ -546,7 +581,7 @@ describe('ReadFileTool', () => {
       );
     });
 
-    it('should handle image file and return appropriate content', async () => {
+    it('returns image content without tool guidance before the registry is available', async () => {
       const imagePath = path.join(tempRootDir, 'image.png');
       await sharp({
         create: {
@@ -567,9 +602,7 @@ describe('ReadFileTool', () => {
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toEqual([
         {
-          text: expect.stringMatching(
-            /Image overview: 20x10; oriented source: 20x10.*tool_search.*zoom_image.*0 to 1000/,
-          ),
+          text: 'Image overview: 20x10; oriented source: 20x10.',
         },
         {
           inlineData: {

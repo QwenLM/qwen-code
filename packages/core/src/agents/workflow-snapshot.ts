@@ -46,6 +46,13 @@ const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 /** Cap on snapshots retained on disk; oldest are pruned on write. */
 export const MAX_RETAINED_SNAPSHOTS = 30;
 
+/**
+ * Characters of serialized `args` a snapshot keeps. A run launched with more
+ * records `argsOmitted` instead: the value cannot be carried into a retry,
+ * and saying so beats a retry that silently runs without it.
+ */
+export const MAX_SNAPSHOT_ARGS_CHARS = 256 * 1024;
+
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
   sourceRef?: WorkflowSourceRef;
@@ -62,6 +69,20 @@ export interface WorkflowSnapshot {
   sourceRunId?: string;
   /** How this run was started from sourceRunId. */
   startMode?: WorkflowRunStartMode;
+  /**
+   * The `args` the run was launched with, so a run can be retried after the
+   * process that ran it is gone. Absent when the run had none, when they were
+   * too large to keep (then `argsOmitted`), and on older snapshots.
+   */
+  args?: unknown;
+  /** The run had `args` this snapshot could not keep. */
+  argsOmitted?: true;
+  /**
+   * The run's `args` are recorded as they were, `undefined` included. Absent
+   * only on a snapshot written before args were kept, where "no `args`
+   * field" cannot be told from "the run had none".
+   */
+  argsRecorded?: true;
   meta: WorkflowMeta | null;
   status: WorkflowTerminalStatus;
   script: string;
@@ -107,6 +128,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     sourceRunId: task.sourceRunId,
     startMode: task.startMode,
+    ...snapshotArgs(task.args),
     meta: task.meta,
     status: task.status,
     script: task.script ?? '',
@@ -131,6 +153,31 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     result: safeResult(task.result),
     error: task.error,
   };
+}
+
+/**
+ * `args` as a snapshot keeps them: the value when it serializes within
+ * {@link MAX_SNAPSHOT_ARGS_CHARS}, otherwise only the fact that there were
+ * some.
+ */
+export function snapshotArgs(
+  args: unknown,
+): Pick<WorkflowSnapshot, 'args' | 'argsOmitted' | 'argsRecorded'> {
+  // A run with no args says so, rather than looking like a snapshot from
+  // before args were kept: a retry reuses the journal, whose key chain is
+  // rooted in a hash of the args, so restarting with the wrong ones replays
+  // nothing and re-dispatches every agent under the old run id.
+  if (args === undefined) return { argsRecorded: true };
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(args);
+  } catch {
+    return { argsOmitted: true };
+  }
+  if (json === undefined || json.length > MAX_SNAPSHOT_ARGS_CHARS) {
+    return { argsOmitted: true };
+  }
+  return { args: JSON.parse(json) as unknown, argsRecorded: true };
 }
 
 /** A non-JSON-serializable result is replaced with a placeholder string. */
@@ -163,18 +210,68 @@ export async function writeWorkflowSnapshot(
     // entry across the fs awaits below — a post-await projection
     // froze the snapshot at an fs-timing-dependent point mid-drain.
     const snapshot = toSnapshot(task);
+    return await persistWorkflowSnapshot(config, snapshot);
+  } catch (e) {
+    debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
+    return false;
+  }
+}
+
+/**
+ * Write an already-projected snapshot and prune, with the same best-effort
+ * contract as {@link writeWorkflowSnapshot}. For a caller that has no live
+ * entry to project: a run whose process exited before it settled.
+ */
+export async function persistWorkflowSnapshot(
+  config: Config,
+  snapshot: WorkflowSnapshot,
+): Promise<boolean> {
+  const storage = config.storage;
+  if (!storage) return false;
+  try {
     const dir = storage.getWorkflowRunsDir();
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(
-      storage.getWorkflowRunSnapshotPath(task.runId),
+      storage.getWorkflowRunSnapshotPath(snapshot.runId),
       JSON.stringify(snapshot, null, 2),
       'utf8',
     );
     await pruneSnapshots(config, dir);
     return true;
   } catch (e) {
-    debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
+    debugLogger.warn(
+      `persistWorkflowSnapshot failed for ${snapshot.runId}: ${e}`,
+    );
     return false;
+  }
+}
+
+/**
+ * The persisted snapshot of one run, or `undefined` when there is none, it
+ * cannot be read, or it is not a snapshot. For a caller that has a run id and
+ * no registry entry to ask — a resume after a restart — and needs what the run
+ * recorded about itself.
+ */
+export async function readWorkflowSnapshot(
+  config: Config,
+  runId: string,
+): Promise<WorkflowSnapshot | undefined> {
+  const storage = config.storage;
+  if (!storage) return undefined;
+  try {
+    const file = storage.getWorkflowRunSnapshotPath(runId);
+    // The two checks the checkpoint reader makes, for the same reasons: the
+    // path is named by an id from outside the process, and what the file
+    // holds is now started as a run rather than only displayed. A symlink
+    // planted at the path would be read through to wherever it points, and
+    // a file that names another run would answer for this one.
+    if ((await fs.lstat(file)).isSymbolicLink()) return undefined;
+    const parsed: unknown = JSON.parse(await fs.readFile(file, 'utf8'));
+    return isWorkflowSnapshot(parsed) && parsed.runId === runId
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -263,7 +360,7 @@ function isStringArray(value: unknown): value is string[] {
   );
 }
 
-function isWorkflowMeta(value: unknown): value is WorkflowMeta | null {
+export function isWorkflowMeta(value: unknown): value is WorkflowMeta | null {
   if (value === null) return true;
   if (!isRecord(value)) return false;
   if (
@@ -437,6 +534,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     (value['startMode'] === undefined ||
       value['startMode'] === 'retry' ||
       value['startMode'] === 'rerun') &&
+    (value['argsOmitted'] === undefined || value['argsOmitted'] === true) &&
+    (value['argsRecorded'] === undefined || value['argsRecorded'] === true) &&
     isWorkflowMeta(value['meta']) &&
     (status === 'completed' || status === 'failed' || status === 'cancelled') &&
     typeof value['script'] === 'string' &&

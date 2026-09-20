@@ -12,10 +12,13 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
   toSnapshot,
+  readWorkflowSnapshot,
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
   deleteWorkflowSnapshot,
+  snapshotArgs,
   MAX_RETAINED_SNAPSHOTS,
+  MAX_SNAPSHOT_ARGS_CHARS,
 } from './workflow-snapshot.js';
 import {
   markWorkflowRunPersistenceActive,
@@ -197,6 +200,146 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
         at: 1_700_000_005_000,
       },
     ]);
+  });
+
+  // A resume after a restart has a run id and no registry entry, and the
+  // snapshot is what still says what the run recorded about itself.
+  it('reads one run back by id, its source reference included', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({
+        runId: 'wf_one',
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      }),
+    );
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_other' }));
+
+    const snapshot = await readWorkflowSnapshot(config, 'wf_one');
+    expect(snapshot?.runId).toBe('wf_one');
+    expect(snapshot?.sourceRef).toEqual({
+      id: 'definition-7',
+      revision: 'rev-3',
+    });
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_other'))?.sourceRef,
+    ).toBeUndefined();
+  });
+
+  it('reads nothing for a run with no snapshot, an unparseable one, or a file that is not one', async () => {
+    const config = fakeConfig(projectDir);
+    await expect(
+      readWorkflowSnapshot(config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+
+    const broken = config.storage.getWorkflowRunSnapshotPath('wf_broken');
+    await fs.mkdir(path.dirname(broken), { recursive: true });
+    await fs.writeFile(broken, '{not json', 'utf8');
+    await expect(
+      readWorkflowSnapshot(config, 'wf_broken'),
+    ).resolves.toBeUndefined();
+
+    await fs.writeFile(
+      config.storage.getWorkflowRunSnapshotPath('wf_other_shape'),
+      JSON.stringify({ sourceRef: { id: 'a', revision: 'b' } }),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_other_shape'),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      readWorkflowSnapshot({} as Config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+  });
+
+  // A retry keys its journal from a hash of the run's args, so "the run had
+  // none" has to be a recorded fact rather than the absence of a field: a
+  // snapshot from before args were kept looks the same and must be refused.
+  it('records that a run had no args, and rejects a marker that is not true', async () => {
+    expect(snapshotArgs(undefined)).toEqual({ argsRecorded: true });
+    expect(snapshotArgs({ q: 1 })).toEqual({
+      args: { q: 1 },
+      argsRecorded: true,
+    });
+    expect(snapshotArgs('x'.repeat(MAX_SNAPSHOT_ARGS_CHARS + 1))).toEqual({
+      argsOmitted: true,
+    });
+
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_none' }));
+    expect(await readWorkflowSnapshot(config, 'wf_none')).toMatchObject({
+      argsRecorded: true,
+    });
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_none'))?.args,
+    ).toBeUndefined();
+
+    const file = config.storage.getWorkflowRunSnapshotPath('wf_bad_marker');
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        ...JSON.parse(
+          await fs.readFile(
+            config.storage.getWorkflowRunSnapshotPath('wf_none'),
+            'utf8',
+          ),
+        ),
+        runId: 'wf_bad_marker',
+        argsRecorded: 'yes',
+      }),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_bad_marker'),
+    ).resolves.toBeUndefined();
+  });
+
+  // What a snapshot holds is started as a run, not only displayed, so the
+  // reader makes the two checks the checkpoint reader makes.
+  it('reads nothing through a symlink, or from a file that names another run', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_real' }));
+    const real = config.storage.getWorkflowRunSnapshotPath('wf_real');
+
+    // The shape that matters: the link points outside the runs directory at
+    // a file that does name this run, so only refusing the link refuses it.
+    const outside = path.join(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'wf-outside-')),
+      'planted.json',
+    );
+    await fs.writeFile(
+      outside,
+      JSON.stringify({
+        ...JSON.parse(await fs.readFile(real, 'utf8')),
+        runId: 'wf_planted',
+      }),
+      'utf8',
+    );
+    const planted = config.storage.getWorkflowRunSnapshotPath('wf_planted');
+    await fs.symlink(outside, planted);
+    await expect(
+      readWorkflowSnapshot(config, 'wf_planted'),
+    ).resolves.toBeUndefined();
+    // Reading it directly is what the link would have delivered.
+    expect(JSON.parse(await fs.readFile(planted, 'utf8')).runId).toBe(
+      'wf_planted',
+    );
+
+    // A file placed under one id that claims to be another run.
+    await fs.writeFile(
+      config.storage.getWorkflowRunSnapshotPath('wf_mismatch'),
+      await fs.readFile(real, 'utf8'),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_mismatch'),
+    ).resolves.toBeUndefined();
+
+    // The run's own snapshot still reads.
+    expect((await readWorkflowSnapshot(config, 'wf_real'))?.runId).toBe(
+      'wf_real',
+    );
   });
 
   it('loads a legacy snapshot without an event ledger', async () => {

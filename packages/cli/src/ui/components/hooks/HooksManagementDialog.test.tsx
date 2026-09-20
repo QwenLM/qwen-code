@@ -11,6 +11,7 @@ import { HooksManagementDialog } from './HooksManagementDialog.js';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { useSettings } from '../../contexts/SettingsContext.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import type { Key } from '../../contexts/KeypressContext.js';
 import { DISPLAY_HOOK_EVENTS } from './constants.js';
@@ -21,6 +22,7 @@ vi.mock('../../hooks/useKeypress.js', () => ({
 
 const mockedUseKeypress = vi.mocked(useKeypress);
 const mockedUseConfig = vi.mocked(useConfig);
+const mockedUseSettings = vi.mocked(useSettings);
 const mockedLoadSettings = vi.mocked(loadSettings);
 let keypressHandler: ((key: Key) => void) | null = null;
 
@@ -103,6 +105,12 @@ vi.mock('../../../config/settings.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../../contexts/SettingsContext.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../contexts/SettingsContext.js')>();
+  return { ...actual, useSettings: vi.fn() };
+});
+
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: {
@@ -147,12 +155,12 @@ function createKey(name: string, sequence = ''): Key {
 }
 
 function mockSettingsHooks(userHooks: Record<string, unknown>): void {
-  mockedLoadSettings.mockReturnValue({
+  mockedUseSettings.mockReturnValue({
     forScope: vi.fn((scope: SettingScope) => ({
       settings:
         scope === SettingScope.User ? { hooks: userHooks } : { hooks: {} },
     })),
-  } as unknown as ReturnType<typeof loadSettings>);
+  } as unknown as ReturnType<typeof useSettings>);
 }
 
 function pressKey(name: string, sequence = ''): void {
@@ -166,6 +174,7 @@ describe('HooksManagementDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSettingsHooks({});
     keypressHandler = null;
 
     mockedUseKeypress.mockImplementation((handler) => {
@@ -186,6 +195,26 @@ describe('HooksManagementDialog', () => {
     expect(lastFrame()).toContain('Loading hooks');
   });
 
+  it('uses live session settings without reading settings files again', async () => {
+    mockSettingsHooks({
+      PreToolUse: [
+        {
+          matcher: 'Read',
+          hooks: [{ type: 'command', command: 'echo session-settings' }],
+        },
+      ],
+    });
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('1 hook configured');
+    });
+    expect(mockedLoadSettings).not.toHaveBeenCalled();
+    expect(mockedUseSettings).toHaveBeenCalled();
+  });
+
   it('should allow Escape to close during loading state', () => {
     renderWithProviders(<HooksManagementDialog onClose={mockOnClose} />);
 
@@ -193,6 +222,24 @@ describe('HooksManagementDialog', () => {
     keypressHandler!(createKey('escape', '\x1b'));
 
     expect(mockOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not advertise reload when the session has no hook system', async () => {
+    const config = mockedUseConfig()!;
+    vi.mocked(config.getHookSystem).mockReturnValue(undefined);
+    await mockedUseConfig.withImplementation(
+      () => config,
+      async () => {
+        const { lastFrame } = renderWithProviders(
+          <HooksManagementDialog onClose={mockOnClose} />,
+        );
+
+        await vi.waitFor(() => {
+          expect(lastFrame()).toContain('This menu is read-only.');
+        });
+        expect(lastFrame()).not.toContain('Reopen this menu');
+      },
+    );
   });
 
   it('should register the keypress handler with isActive: true', () => {
