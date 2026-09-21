@@ -189,6 +189,39 @@ return x;`;
     const { meta } = compileWorkflowScript(src);
     expect(meta).toEqual({ name: 'real', description: 'real' });
   });
+
+  // Reported in PR #12245 review: the anchor must tolerate every
+  // whitespace spelling Claude Code accepts (`export  const`,
+  // `export const meta=`, tabs and newlines around `=`).
+  it.each([
+    [
+      'single space',
+      `export const meta = { name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'double space after export',
+      `export  const meta = { name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'double space after equals',
+      `export const meta =  { name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'no space around equals',
+      `export const meta={ name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'tab before brace',
+      `export const meta =\t{ name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'newline before brace',
+      `export const meta =\n{ name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+  ])('accepts the anchor spelling: %s', (_label, src) => {
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toEqual({ name: 'x', description: 'd' });
+  });
 });
 
 describe('extractAndStripMeta', () => {

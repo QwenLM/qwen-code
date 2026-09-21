@@ -97,9 +97,16 @@ function findMetaBlockBounds(source: string): {
   //    wholesale, including any `export const meta = {...}` it
   //    contains, then continues.
   const exportIdx = skipTrivia(source, 0);
-  const ANCHOR = 'export const meta = ';
-  if (!source.startsWith(ANCHOR, exportIdx)) return null;
-  const startBrace = exportIdx + ANCHOR.length;
+  // Match the meta anchor at the trivia offset. The walk already skipped
+  // leading whitespace and comments, so this is anchored at a single
+  // position and cannot extend through a `*/` inside a template
+  // literal. Whitespace between `export`/`const`/`meta`/`=`/`{` is
+  // tolerated to match the spellings Claude Code accepts.
+  const anchor = /^export\s+const\s+meta\s*=\s*\{/.exec(
+    source.slice(exportIdx),
+  );
+  if (!anchor) return null;
+  const startBrace = exportIdx + anchor[0].length - 1;
   let depth = 1;
   let i = startBrace + 1;
   while (i < source.length && depth > 0) {
