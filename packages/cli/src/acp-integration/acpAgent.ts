@@ -161,6 +161,7 @@ import {
   isWorkflowRunId,
   readWorkflowCheckpoint,
   readWorkflowSnapshot,
+  WorkflowCheckpointUnwritableError,
   WorkflowJournalUnavailableError,
   type WorkflowStatus,
   type TurnResultRecordPayload,
@@ -572,6 +573,17 @@ async function startSessionOwnedWorkflow(
         error.reason === 'missing'
           ? `Workflow run ${error.runId} has no journal on disk, so a retry has nothing to resume; rerun it to start it from the beginning.`
           : `The journal of workflow run ${error.runId} could not be read, so a retry cannot resume it; rerun it to start it from the beginning.`,
+      );
+    }
+    // The run is recorded as running again before it registers, because a
+    // retry from history refuses a run whose checkpoint is still there. When
+    // that record cannot be written the resume does not start, and the
+    // caller is told so rather than being handed a daemon fault.
+    if (error instanceof WorkflowCheckpointUnwritableError) {
+      debugLogger.debug(error.message);
+      throw RequestError.invalidParams(
+        { errorKind: 'workflow_not_recorded' },
+        error.message,
       );
     }
     throw error;
