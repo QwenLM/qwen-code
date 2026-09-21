@@ -56,6 +56,22 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 组件包会自动注入自身的 CSS（包括 Tailwind 编译产物），接入方不需要配置
 Tailwind 或额外引入全局 CSS。
 
+### Browser Support Matrix
+
+- Chrome / Edge 111+
+- Firefox 128+
+- Safari / iOS 16.4+
+- Android System WebView 111+
+
+最低版本覆盖 Tailwind v4 的生成 CSS；JavaScript 构建目标单独设置为 ES2021。
+独立页面在不支持的浏览器显示升级提示，嵌入式组件由宿主保证该支持约定。
+此矩阵不是所有最低版本真机均已验证的声明。
+
+独立生产页面在 HTTPS 或可信 loopback origin 下注册 service worker。
+仅带内容哈希的构建资源使用 worker 缓存；manifest、公开图标、API、令牌和
+事件流不缓存。HTML 连接失败时显示 503 重试页，不支持离线会话。
+安装入口由浏览器决定，不保证自动弹出安装提示。
+
 ## 浏览器任务通知
 
 通过 `qwen serve` 打开的独立 Web Shell 可在 **Settings → UI → 浏览器任务通知**
@@ -352,6 +368,35 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
 | `settings`             | `WebShellSettingsOptions`             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
 
+### Workspace 会话创建超时
+
+Workspace 创建由 SDK 分别约束能力查询和创建请求，WebShell 另设 75 秒的
+兜底总超时，覆盖常见的单次能力预检与创建两个默认 30 秒请求，并留出 15 秒余量。冷缓存或缓存过期时，
+能力查询 20 秒、创建请求 15 秒可以在约 35 秒后成功，无需调整配置。
+此规则也适用于已有会话时创建新会话；SDK standalone 创建保持原有超时行为。
+并发能力刷新可能取代原预检并延长请求链；即使每个请求都未超过自身截止时间，
+创建动作仍可能先触及 75 秒上限。
+
+| 配置／机制                  | 默认值     | 作用与边界                                                           |
+| --------------------------- | ---------- | -------------------------------------------------------------------- |
+| WebShell workspace 创建动作 | `75000` ms | 兜底限制不响应 SDK 取消信号的传输；超时后成功返回的会话会被 detach。 |
+| `onSessionCreated` 回调     | `30000` ms | 创建完成后才开始计时的独立宿主回调限制；没有公开的超时配置属性。     |
+
+WebShell Provider 不透传 SDK 的
+[`fetchTimeoutMs`](../../docs/developers/daemon/13-sdk-daemon-client.md#configuration)，
+能力预检和创建请求使用 SDK 默认请求预算；提高 daemon 的初始化超时不会提高这两类请求的 SDK 超时。
+load/resume 使用独立预算；服务端优先级、客户端覆盖顺序、能力缓存前提和缺失时的回退值见
+[restore 超时契约](../../docs/design/2026-08-07-safe-session-restore-timeout.md#timeout-contract)，
+SDK 和 WebShell 的 restore 余量见
+[serve 协议文档](../../docs/developers/qwen-serve-protocol.md#capabilities)。
+
+SDK `query()` 的 `timeout.controlRequest` 等参数属于
+子进程接口，不控制 daemon HTTP 请求。兜底超时限制 WebShell 的等待时间，不保证
+底层传输立即取消；迟到结果仍按原有机制清理。其他动作、会话清理和回调仍使用各自的超时。
+
+daemon 参数的完整含义和配置方式见
+[daemon 配置文档](../../docs/developers/daemon/17-configuration.md)。
+
 ### WebShell
 
 | 属性                       | 类型                                                                                                                                  | 说明                                                                                                                                           |
@@ -368,6 +413,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `onBrandResolved`          | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon |
 | `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                             |
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
+| `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
 | `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文

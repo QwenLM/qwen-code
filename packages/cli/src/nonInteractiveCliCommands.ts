@@ -15,6 +15,7 @@ import {
   type Config,
   type GoalStateCause,
   type GoalStateResponse,
+  type ToolArtifact,
   createDebugLogger,
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
@@ -39,7 +40,11 @@ import {
   type NonInteractiveSlashCommandPolicy,
 } from './ui/commands/types.js';
 import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js';
-import type { HistoryItemWithoutId } from './ui/types.js';
+import type {
+  ContextCompressionMeta,
+  ContextCompressionNotice,
+  HistoryItemWithoutId,
+} from './ui/types.js';
 import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
@@ -90,12 +95,20 @@ export type NonInteractiveSlashCommandResult = (
       type: 'message';
       messageType: 'info' | 'warning' | 'error';
       content: string;
+      artifacts?: ToolArtifact[];
       outputHistoryItems?: HistoryItemWithoutId[];
     }
   | {
       type: 'stream_messages';
       messages: AsyncGenerator<
-        { messageType: 'info' | 'warning' | 'error'; content: string },
+        {
+          messageType: 'info' | 'warning' | 'error';
+          content: string;
+          /** See {@link ContextCompressionMeta}; set by the compression commands. */
+          contextCompression?: ContextCompressionMeta;
+          /** See {@link ContextCompressionNotice}; the note keeps its own key. */
+          contextCompressionNotice?: ContextCompressionNotice;
+        },
         void,
         unknown
       >;
@@ -167,6 +180,7 @@ function handleCommandResult(
         type: 'message',
         messageType: result.messageType,
         content: result.content,
+        ...(result.artifacts?.length ? { artifacts: result.artifacts } : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 

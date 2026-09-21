@@ -23,6 +23,7 @@ afterEach(() => {
   vi.useRealTimers();
   sessionStorage.clear();
   localStorage.clear();
+  window.history.replaceState(null, '', '/');
 });
 async function mount(
   initialToken?: string,
@@ -30,7 +31,13 @@ async function mount(
   theme?: WebShellTheme,
   invalidTarget?: boolean,
   initialAddress?: string,
-  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void,
+  onChangeTarget?: (
+    daemonOrigin: string,
+    token?: string,
+    options?: {
+      continueFlow?: 'workspace' | 'connection';
+    },
+  ) => boolean | void,
 ) {
   await act(async () =>
     root.render(
@@ -98,7 +105,7 @@ async function submitForm() {
     .querySelector('form')!
     .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
 }
-it('retries an invalid token and stores the accepted token per tab', async () => {
+it('retries with the typed token, stores it per tab, and creates no connection', async () => {
   const fetch = vi
     .fn()
     .mockResolvedValueOnce(stubResponse({ status: 401 }))
@@ -121,6 +128,7 @@ it('retries an invalid token and stores the accepted token per tab', async () =>
   expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
     'good',
   );
+  expect(localStorage.getItem('qwen-remote-connections')).toBeNull();
   expect(fetch.mock.calls[1][1].headers).toEqual({
     Authorization: 'Bearer good',
   });
@@ -182,6 +190,48 @@ it('lets an invalid target be replaced from the connection form', async () => {
     'remote-token',
   );
   expect(fetch).not.toHaveBeenCalled();
+});
+it('preserves remote-add continuation when correcting the daemon target', async () => {
+  window.history.replaceState(null, '', '/?addRemoteWorkspace=browse');
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn();
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    false,
+    'http://replacement.example:4170',
+    onChangeTarget,
+  );
+
+  expect(container.textContent).toContain('Cancel adding workspace');
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://replacement.example:4170',
+    undefined,
+    { continueFlow: 'workspace' },
+  );
+});
+it('preserves connection-add verification when correcting the daemon target', async () => {
+  window.history.replaceState(null, '', '/?addRemoteConnection=verify');
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn();
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    false,
+    'http://replacement.example:4170',
+    onChangeTarget,
+  );
+
+  expect(container.textContent).toContain('Cancel adding connection');
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://replacement.example:4170',
+    undefined,
+    { continueFlow: 'connection' },
+  );
 });
 it('asks before probing a daemon this browser has not connected to', async () => {
   const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));

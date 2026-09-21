@@ -44,3 +44,23 @@ export function isAcpChildCapacityError(error: unknown): boolean {
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+export function isRecoverableAcpCapacityError(error: unknown): boolean {
+  if (
+    !isAcpChildCapacityError(error) ||
+    !(error instanceof DaemonHttpError) ||
+    !isRecord(error.body)
+  )
+    return false;
+  const body = error.body;
+  const payload = isRecord(body['data']) ? body['data'] : body;
+  const code =
+    typeof body['code'] === 'string'
+      ? body['code']
+      : (payload['errorKind'] ?? payload['code']);
+  return (
+    code === 'acp_child_capacity_exhausted' ||
+    (code === 'standalone_creation_rolled_back' &&
+      payload['retryable'] === true)
+  );
+}

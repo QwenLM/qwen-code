@@ -1138,6 +1138,13 @@ export default {
   'Clear Authentication': 'Authentifizierung löschen',
   disabled: 'deaktiviert',
   enabled: 'aktiviert',
+  'disabled (bare mode)': 'deaktiviert (Bare-Modus)',
+  'disabled (safe mode)': 'deaktiviert (Sicherheitsmodus)',
+  'disabled (disableAllHooks)': 'deaktiviert (disableAllHooks)',
+  'disabled (folder not trusted)':
+    'deaktiviert (Ordner nicht vertrauenswürdig)',
+  'disabled (turned off for this session)':
+    'deaktiviert (für diese Sitzung ausgeschaltet)',
   'Server:': 'Server:',
   Reconnect: 'Neu verbinden',
   'View tools': 'Werkzeuge anzeigen',
@@ -1858,6 +1865,9 @@ export default {
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
+  'Startup context': 'Startkontext',
+  Unattributed: 'Nicht zugeordnet',
+  'Cached prefix': 'Zwischengespeichertes Präfix',
   'Run /context detail for per-item breakdown.':
     'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
   active: 'aktiv',

@@ -872,72 +872,75 @@ describe('runForkedAgent (cache path)', () => {
     expect(sendParams.config!.tools).toEqual([]);
   });
 
-  it('filters out functionCall parts when preserveTools is true', async () => {
-    saveCacheSafeParams(
-      {
-        systemInstruction: 'You are helpful',
-        tools: [
-          {
-            functionDeclarations: [
-              { name: 'edit', description: 'Edit a file' },
-            ],
-          },
-        ],
-      },
-      [],
-      'test-model',
-    );
-
-    const mockSendMessageStream = vi.fn(
-      (_model: string, _params: unknown, _promptId: string) => {
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [
-                      { text: 'some text' },
-                      {
-                        functionCall: {
-                          name: 'edit',
-                          args: { file: 'a.ts' },
-                        },
-                      },
-                    ],
-                  },
-                },
+  it.each([undefined, 'container'] as const)(
+    'filters out functionCall parts with preserveTools and operator backend %s',
+    async (backend) => {
+      saveCacheSafeParams(
+        {
+          systemInstruction: 'You are helpful',
+          tools: [
+            {
+              functionDeclarations: [
+                { name: 'edit', description: 'Edit a file' },
               ],
-              usageMetadata: {
-                promptTokenCount: 10,
-                candidatesTokenCount: 5,
-                totalTokenCount: 15,
-              },
             },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
+          ],
+        },
+        [],
+        'test-model',
+      );
 
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
+      const mockSendMessageStream = vi.fn(
+        (_model: string, _params: unknown, _promptId: string) => {
+          async function* generate() {
+            yield {
+              type: StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      role: 'model',
+                      parts: [
+                        { text: 'some text' },
+                        {
+                          functionCall: {
+                            name: 'edit',
+                            args: { file: 'a.ts' },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+                usageMetadata: {
+                  promptTokenCount: 10,
+                  candidatesTokenCount: 5,
+                  totalTokenCount: 15,
+                },
+              },
+            };
+          }
+          return Promise.resolve(generate());
+        },
+      );
 
-    const result = await runForkedAgent({
-      config: {} as Config,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      preserveTools: true,
-    });
+      vi.mocked(LlmChat).mockImplementation(
+        () =>
+          ({
+            sendMessageStream: mockSendMessageStream,
+          }) as unknown as LlmChat,
+      );
 
-    expect(result.text).toBe('some text');
-  });
+      const result = await runForkedAgent({
+        config: { getAgentExecutionBackend: () => backend } as Config,
+        userMessage: 'suggest something',
+        cacheSafeParams: getCacheSafeParams()!,
+        preserveTools: true,
+      });
+
+      expect(result.text).toBe('some text');
+    },
+  );
 
   it('returns null text when response contains only functionCall parts', async () => {
     saveCacheSafeParams(

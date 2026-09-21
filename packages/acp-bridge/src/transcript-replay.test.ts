@@ -14,6 +14,11 @@ import {
 } from './transcript-replay.js';
 import type { TranscriptRecordInput } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  EVENT_API_ERROR,
+  EVENT_API_RESPONSE,
+  EVENT_TOOL_CALL,
+} from '@qwen-code/qwen-code-core/telemetryConstants';
+import {
   GOAL_PAUSE_REASON_COMMAND,
   type GoalRecord,
   type GoalStateCause,
@@ -81,6 +86,34 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('replays exported artifact descriptors with the slash command result', () => {
+    const sessionArtifacts = [
+      {
+        kind: 'html',
+        storage: 'workspace',
+        title: 'export.html',
+        workspacePath: 'export.html',
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('export-result', {
+        type: 'assistant',
+        text: 'Session exported to HTML: export.html',
+        sessionArtifacts,
+      }),
+    );
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'agent_message_chunk',
+        _meta: expect.objectContaining({
+          source: 'slash_command',
+          sessionArtifacts,
+        }),
+      }),
+    ]);
+  });
+
   it('projects the daemon identity on every user block before a turn result', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -396,7 +429,7 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
-  it('emits legacy goalTerminal metadata for a terminal goal_state', () => {
+  it('emits one achieved card for a terminal goal_state, with no terminal twin', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       goalStateRecord('goal-complete', 'complete', {
@@ -406,14 +439,104 @@ describe('createTranscriptReplayMachine', () => {
     );
 
     expect(projected[0]?._meta).toMatchObject({
-      goalStatus: { kind: 'achieved', condition: GOAL.objective },
-      goalTerminal: {
+      goalStatus: {
         kind: 'achieved',
         condition: GOAL.objective,
         iterations: GOAL.turnCount,
         durationMs: GOAL.activeTimeMs,
       },
     });
+    expect(projected[0]?._meta).not.toHaveProperty('goalTerminal');
+  });
+
+  it('carries a recorded compression payload back through replay', () => {
+    const contextCompression = {
+      phase: 'done',
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('compress-1', {
+        type: 'assistant',
+        text: 'Compressing context...\nContext compressed (200 -> ~100).',
+        contextCompression,
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: {
+        type: 'text',
+        text: 'Compressing context...  \nContext compressed (200 -> ~100).',
+      },
+    });
+    expect(projected[0]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompression,
+    });
+  });
+
+  it('replays a recorded notice on its own key', () => {
+    const notice = { phase: 'notice', instructionsLimit: 2000 };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord(
+        'compress-notice-1',
+        {
+          type: 'assistant',
+          text: 'Compression instructions were truncated to 2000 characters.\n',
+          contextCompressionNotice: notice,
+        },
+        {
+          type: 'assistant',
+          text: 'Context compressed (200 -> 100).',
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 200,
+            newTokenCount: 100,
+          },
+        },
+      ),
+    );
+
+    // Both keys replay exactly as recorded, so the folded block keeps the note
+    // beside the result without borrowing a marker other clients interpret.
+    expect(projected).toHaveLength(2);
+    expect(projected[0]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompressionNotice: notice,
+    });
+    expect(projected[0]?._meta).not.toHaveProperty('qwenDiscreteMessage');
+    expect(projected[0]?._meta).not.toHaveProperty('contextCompression');
+    expect(
+      projected
+        .map((update) =>
+          update.sessionUpdate === 'agent_message_chunk' &&
+          update.content.type === 'text'
+            ? update.content.text
+            : '',
+        )
+        .join(''),
+    ).toBe(
+      'Compression instructions were truncated to 2000 characters.  \nContext compressed (200 -> 100).',
+    );
+    expect(projected[1]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompression: { phase: 'done' },
+    });
+  });
+
+  it('keeps a slash-command record without a compression payload unchanged', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('command-1', { type: 'assistant', text: 'Plain output.' }),
+    );
+
+    expect(projected[0]?._meta).not.toHaveProperty('contextCompression');
   });
 
   it('skips checkpoint bookkeeping goal_state records during replay', () => {
@@ -434,7 +557,9 @@ describe('createTranscriptReplayMachine', () => {
       updates(machine, goalStateRecord('goal-turn', 'turn_finished', turned)),
     ).toHaveLength(1);
 
-    const checkpointed: GoalRecord = {
+    // As a build that still compressed evidence into checkpoints journaled
+    // it: the parser accepts the old key and leaves it behind.
+    const checkpointed: GoalRecord & { evidenceCheckpoint: unknown } = {
       ...turned,
       evidenceCursor: { recordId: 'checkpoint-1' },
       evidenceCheckpoint: {
@@ -460,7 +585,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    const rejected: GoalRecord = {
+    const rejected = {
       ...checkpointed,
       lastReason: 'More work remains',
     };
@@ -471,7 +596,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toHaveLength(1);
 
-    const recommitted: GoalRecord = {
+    const recommitted = {
       ...rejected,
       activeTimeMs: 2900,
       tokensUsed: 0,
@@ -488,7 +613,8 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+    const { evidenceCheckpoint: _legacy, ...parsed } = recommitted;
+    expect(machine.snapshot().goalState?.goal).toEqual(parsed);
   });
 
   it('persists goalCause so bookkeeping suppression survives a page boundary', () => {
@@ -2039,5 +2165,713 @@ describe('createTranscriptReplayMachine', () => {
         },
       },
     });
+  });
+});
+
+describe('ui_telemetry timing frames', () => {
+  const API_RESPONSE_EVENT = {
+    'event.name': EVENT_API_RESPONSE,
+    'event.timestamp': '2026-07-14T00:00:06.544Z',
+    response_id: 'chatcmpl-abc',
+    model: 'qwen3.8-max',
+    status_code: 200,
+    duration_ms: 6544,
+    ttft_ms: 2344,
+    input_token_count: 21309,
+    output_token_count: 252,
+    total_token_count: 21561,
+    prompt_id: 'session-1########0',
+    auth_type: 'openai',
+    response_text: 'a long response body that must not ride along',
+  };
+
+  const TOOL_CALL_EVENT = {
+    'event.name': EVENT_TOOL_CALL,
+    'event.timestamp': '2026-07-14T00:00:06.560Z',
+    call_id: 'call_glob_1',
+    function_name: 'glob',
+    function_args: { pattern: 'must not ride along' },
+    duration_ms: 16,
+    status: 'success',
+    execution_status: 'success',
+    success: true,
+    prompt_id: 'session-1########0',
+    response_id: 'chatcmpl-abc',
+    tool_type: 'native',
+  };
+
+  function telemetry(
+    uuid: string,
+    uiEvent: Record<string, unknown>,
+  ): TranscriptRecordInput {
+    return record(uuid, 'system', {
+      subtype: 'ui_telemetry',
+      systemPayload: { uiEvent },
+    });
+  }
+
+  function timingMachine() {
+    return createTranscriptReplayMachine({ includeTiming: true });
+  }
+
+  function timings(
+    machine: ReturnType<typeof createTranscriptReplayMachine>,
+    item: TranscriptRecordInput,
+  ) {
+    return updates(machine, item).map(
+      (update) =>
+        (update as unknown as { _meta?: { timing?: Record<string, unknown> } })
+          ._meta?.timing,
+    );
+  }
+
+  function assistantWithToolCall(
+    uuid: string,
+    callId: string,
+  ): TranscriptRecordInput {
+    return record(uuid, 'assistant', {
+      message: {
+        role: 'model',
+        parts: [{ functionCall: { id: callId, name: 'glob', args: {} } }],
+      },
+    });
+  }
+
+  it('emits nothing for telemetry records unless timing is requested', () => {
+    const machine = createTranscriptReplayMachine();
+    const diagnostics: unknown[] = [];
+    const watched = createTranscriptReplayMachine({
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    expect(updates(machine, telemetry('t1', API_RESPONSE_EVENT))).toEqual([]);
+    expect(updates(watched, telemetry('t2', TOOL_CALL_EVENT))).toEqual([]);
+    expect(
+      updates(
+        createTranscriptReplayMachine({ includeTiming: false }),
+        telemetry('t3', API_RESPONSE_EVENT),
+      ),
+    ).toEqual([]);
+    expect(diagnostics).toEqual([]);
+  });
+
+  it('leaves the projection byte-identical when timing is off', () => {
+    const conversation = [
+      record('user-1', 'user', {
+        message: { role: 'user', parts: [{ text: 'hi' }] },
+      }),
+      telemetry('tel-1', API_RESPONSE_EVENT),
+      record('assistant-1', 'assistant', {
+        message: { role: 'model', parts: [{ text: 'hello' }] },
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+      }),
+    ];
+    const withTelemetry = createTranscriptReplayMachine();
+    const withoutTelemetry = createTranscriptReplayMachine();
+
+    const projectedWith = conversation.flatMap((item) =>
+      updates(withTelemetry, item),
+    );
+    const projectedWithout = conversation
+      .filter((item) => item.subtype !== 'ui_telemetry')
+      .flatMap((item) => updates(withoutTelemetry, item));
+
+    expect(projectedWith).toEqual(projectedWithout);
+    expect(withTelemetry.snapshot()).toEqual(withoutTelemetry.snapshot());
+  });
+
+  it('projects a model request as an inert empty-text frame', () => {
+    const projected = updates(
+      timingMachine(),
+      telemetry('tel-1', API_RESPONSE_EVENT),
+    );
+
+    expect(projected).toHaveLength(1);
+    const update = projected[0] as unknown as {
+      sessionUpdate: string;
+      content: { type: string; text: string };
+      _meta: Record<string, unknown>;
+    };
+    expect(update.sessionUpdate).toBe('agent_message_chunk');
+    expect(update.content).toEqual({ type: 'text', text: '' });
+    // The live-vs-replay discriminator must stay absent, or the daemon
+    // metrics ring would count these replayed frames as live rounds.
+    expect(update._meta['usage']).toBeUndefined();
+    expect(update._meta['timing']).toEqual({
+      kind: 'request',
+      status: 'ok',
+      durationMs: 6544,
+      ttftMs: 2344,
+      // event.timestamp marks the end of the span.
+      startedAt: Date.parse('2026-07-14T00:00:06.544Z') - 6544,
+      responseId: 'chatcmpl-abc',
+      promptId: 'session-1########0',
+      model: 'qwen3.8-max',
+    });
+  });
+
+  it('carries the telemetry record as the emission source', () => {
+    const emissions = [
+      ...timingMachine().project(telemetry('tel-1', API_RESPONSE_EVENT)),
+    ];
+
+    expect(emissions).toHaveLength(1);
+    expect(emissions[0]!.sourceRecordId).toBe('tel-1');
+    expect(
+      (
+        emissions[0]!.update as unknown as {
+          _meta: { qwenTranscript: { sourceRecordIds: string[] } };
+        }
+      )._meta.qwenTranscript.sourceRecordIds,
+    ).toEqual(['tel-1']);
+  });
+
+  it('projects a tool call with its correlation keys', () => {
+    expect(
+      timings(timingMachine(), telemetry('tel-1', TOOL_CALL_EVENT)),
+    ).toEqual([
+      {
+        kind: 'tool',
+        durationMs: 16,
+        callId: 'call_glob_1',
+        toolName: 'glob',
+        toolStatus: 'success',
+        responseId: 'chatcmpl-abc',
+        promptId: 'session-1########0',
+      },
+    ]);
+  });
+
+  it('omits bulky recorded fields the conversation already carries', () => {
+    const [requestTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', API_RESPONSE_EVENT),
+    );
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-2', TOOL_CALL_EVENT),
+    );
+
+    expect(requestTiming).not.toHaveProperty('response_text');
+    expect(requestTiming).not.toHaveProperty('input_token_count');
+    expect(toolTiming).not.toHaveProperty('function_args');
+  });
+
+  it('marks a failed request without inventing a TTFT', () => {
+    expect(
+      timings(
+        timingMachine(),
+        telemetry('tel-1', {
+          'event.name': EVENT_API_ERROR,
+          'event.timestamp': '2026-07-14T00:00:02.000Z',
+          response_id: 'chatcmpl-err',
+          model: 'qwen3.8-max',
+          duration_ms: 1200,
+          prompt_id: 'session-1########0',
+          error_message: 'Request failed with status 429',
+          status_code: 429,
+        }),
+      ),
+    ).toEqual([
+      {
+        kind: 'request',
+        status: 'error',
+        durationMs: 1200,
+        startedAt: Date.parse('2026-07-14T00:00:02.000Z') - 1200,
+        responseId: 'chatcmpl-err',
+        promptId: 'session-1########0',
+        model: 'qwen3.8-max',
+      },
+    ]);
+  });
+
+  it('keeps a subagent identity so nesting can be decoded downstream', () => {
+    const subagentPromptId = 'session-1#general-purpose-call_parent#0';
+    const [requestTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', {
+        ...API_RESPONSE_EVENT,
+        prompt_id: subagentPromptId,
+        subagent_id: 'general-purpose-call_parent',
+        subagent_name: 'general-purpose',
+        subagent_type: 'general-purpose',
+      }),
+    );
+
+    expect(requestTiming).toMatchObject({
+      kind: 'request',
+      promptId: subagentPromptId,
+      subagentId: 'general-purpose-call_parent',
+    });
+  });
+
+  it('re-points a tool frame at a rewritten call id', () => {
+    const machine = timingMachine();
+    // Two assistant records reusing one recorded call id: the second
+    // allocation collides and the machine rewrites it. Once the first call's
+    // result has closed it out, the rewritten one is the only holder of the
+    // recorded id left, so the frame must follow it.
+    updates(machine, assistantWithToolCall('assistant-1', 'call_dup'));
+    const rewritten = updates(
+      machine,
+      assistantWithToolCall('assistant-2', 'call_dup'),
+    );
+    const rewrittenCallId = (rewritten[0] as unknown as { toolCallId: string })
+      .toolCallId;
+    expect(rewrittenCallId).not.toBe('call_dup');
+    updates(
+      machine,
+      record('result-1', 'tool_result', {
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: { id: 'call_dup', name: 'glob', response: {} },
+            },
+          ],
+        },
+        toolCallResult: { callId: 'call_dup', status: 'success' },
+      }),
+    );
+
+    const [toolTiming] = timings(
+      machine,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    expect(toolTiming).toMatchObject({ callId: rewrittenCallId });
+  });
+
+  it('passes a subagent tool id through untouched', () => {
+    const machine = timingMachine();
+    updates(machine, assistantWithToolCall('assistant-1', 'call_parent'));
+
+    const [toolTiming] = timings(
+      machine,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_subagent_own' }),
+    );
+
+    expect(toolTiming).toMatchObject({ callId: 'call_subagent_own' });
+  });
+
+  it('never lets a subagent tool claim a main-session call', () => {
+    // The shape real data has: `logToolCall` attaches no subagent identity, so
+    // only the prompt id marks the round as a subagent's. With a provider that
+    // reuses `call_0`, the Agent call is rewritten to `call_0:2` and a tool
+    // inside the subagent reports plain `call_0` first.
+    const machine = timingMachine();
+    updates(machine, assistantWithToolCall('assistant-1', 'call_0'));
+    const agentCall = updates(
+      machine,
+      assistantWithToolCall('assistant-2', 'call_0'),
+    );
+    const agentCallId = (agentCall[0] as unknown as { toolCallId: string })
+      .toolCallId;
+
+    const [subagentTiming] = timings(
+      machine,
+      telemetry('tel-1', {
+        ...TOOL_CALL_EVENT,
+        call_id: 'call_0',
+        prompt_id: 'session-1#general-purpose-call_0#0',
+      }),
+    );
+
+    expect(subagentTiming).toMatchObject({ callId: 'call_0' });
+    expect(subagentTiming).not.toMatchObject({ callId: agentCallId });
+
+    // And the Agent call's own frame is still free to claim it afterwards.
+    const [mainTiming] = timings(
+      machine,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_0' }),
+    );
+    expect(mainTiming).toMatchObject({ callId: 'call_0' });
+  });
+
+  it('requires the tool name to agree before claiming a call', () => {
+    const machine = timingMachine();
+    updates(machine, assistantWithToolCall('assistant-1', 'call_0'));
+    const second = updates(
+      machine,
+      assistantWithToolCall('assistant-2', 'call_0'),
+    );
+    const rewrittenCallId = (second[0] as unknown as { toolCallId: string })
+      .toolCallId;
+
+    const [other] = timings(
+      machine,
+      telemetry('tel-1', {
+        ...TOOL_CALL_EVENT,
+        call_id: 'call_0',
+        function_name: 'run_shell_command',
+      }),
+    );
+
+    // Neither allocation is a `run_shell_command`, so nothing is claimed.
+    expect(other).toMatchObject({ callId: 'call_0' });
+    const [glob] = timings(
+      machine,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_0' }),
+    );
+    expect(glob).toMatchObject({ callId: 'call_0' });
+    const [nextGlob] = timings(
+      machine,
+      telemetry('tel-3', { ...TOOL_CALL_EVENT, call_id: 'call_0' }),
+    );
+    expect(nextGlob).toMatchObject({ callId: rewrittenCallId });
+  });
+
+  it.each([
+    ['a missing duration', { duration_ms: undefined }],
+    ['a non-numeric duration', { duration_ms: '6544' }],
+    ['a negative duration', { duration_ms: -1 }],
+    ['a NaN duration', { duration_ms: Number.NaN }],
+  ])('emits no frame for %s', (_label, overrides) => {
+    expect(
+      updates(
+        timingMachine(),
+        telemetry('tel-1', { ...API_RESPONSE_EVENT, ...overrides }),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['an unknown event name', { 'event.name': 'qwen-code.user_prompt' }],
+    ['a missing event name', { 'event.name': undefined }],
+  ])('emits no frame for %s', (_label, overrides) => {
+    const diagnostics: unknown[] = [];
+    const machine = createTranscriptReplayMachine({
+      includeTiming: true,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    expect(
+      updates(
+        machine,
+        telemetry('tel-1', { ...API_RESPONSE_EVENT, ...overrides }),
+      ),
+    ).toEqual([]);
+    expect(diagnostics).toEqual([]);
+  });
+
+  it.each([
+    ['a missing payload', undefined],
+    ['a payload without uiEvent', {}],
+    ['a non-object uiEvent', { uiEvent: 'nope' }],
+  ])('emits no frame for %s', (_label, systemPayload) => {
+    expect(
+      updates(
+        timingMachine(),
+        record('tel-1', 'system', { subtype: 'ui_telemetry', systemPayload }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('emits no frame for a tool call without a call id', () => {
+    expect(
+      updates(
+        timingMachine(),
+        telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: undefined }),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['a TTFT longer than the request', 9000],
+    ['a negative TTFT', -5],
+    ['a non-numeric TTFT', '2344'],
+  ])('drops %s but keeps the frame', (_label, ttft) => {
+    const [requestTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...API_RESPONSE_EVENT, ttft_ms: ttft }),
+    );
+
+    expect(requestTiming).toMatchObject({ kind: 'request', durationMs: 6544 });
+    expect(requestTiming).not.toHaveProperty('ttftMs');
+  });
+
+  it('drops an unparsable end time but keeps the frame', () => {
+    const [requestTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...API_RESPONSE_EVENT, 'event.timestamp': 'nope' }),
+    );
+
+    expect(requestTiming).toMatchObject({ kind: 'request', durationMs: 6544 });
+    expect(requestTiming).not.toHaveProperty('startedAt');
+  });
+
+  it.each([
+    ['an unknown tool status', 'timed_out'],
+    ['a non-string tool status', 7],
+  ])('drops %s but keeps the frame', (_label, status) => {
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, status }),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', callId: 'call_glob_1' });
+    expect(toolTiming).not.toHaveProperty('toolStatus');
+  });
+
+  it('survives a page split between a request and its assistant record', () => {
+    // A backward page may start exactly at the assistant record, stranding
+    // its api_response record on the older page. Frames are emitted in place,
+    // so splitting there must lose nothing.
+    const page = [
+      telemetry('tel-1', API_RESPONSE_EVENT),
+      record('assistant-1', 'assistant', {
+        message: { role: 'model', parts: [{ text: 'hello' }] },
+      }),
+      telemetry('tel-2', TOOL_CALL_EVENT),
+    ];
+
+    const whole = timingMachine();
+    const wholeTimings = page.flatMap((item) => timings(whole, item));
+
+    const older = timingMachine();
+    const newer = timingMachine();
+    const splitTimings = [
+      ...timings(older, page[0]!),
+      ...page.slice(1).flatMap((item) => timings(newer, item)),
+    ];
+
+    expect(splitTimings).toEqual(wholeTimings);
+    expect(wholeTimings.filter(Boolean)).toHaveLength(2);
+  });
+
+  it('does not break the assistant text segment it sits inside', () => {
+    const conversation = (machine: ReturnType<typeof timingMachine>) => [
+      ...updates(
+        machine,
+        record('assistant-1', 'assistant', {
+          message: { role: 'model', parts: [{ text: 'first' }] },
+        }),
+      ),
+      ...updates(machine, telemetry('tel-1', API_RESPONSE_EVENT)),
+      ...updates(
+        machine,
+        record('assistant-2', 'assistant', {
+          message: { role: 'model', parts: [{ text: 'second' }] },
+        }),
+      ),
+    ];
+    const segmentIds = (projected: ReturnType<typeof conversation>) =>
+      projected
+        .filter(
+          (update) =>
+            (update as unknown as { content?: { text?: string } }).content
+              ?.text,
+        )
+        .map(
+          (update) =>
+            (
+              update as unknown as {
+                _meta?: { qwenTranscript?: { segmentId?: string } };
+              }
+            )._meta?.qwenTranscript?.segmentId,
+        );
+
+    const withTiming = segmentIds(conversation(timingMachine()));
+    const withoutTiming = segmentIds(
+      conversation(
+        createTranscriptReplayMachine() as ReturnType<typeof timingMachine>,
+      ).filter((update) => {
+        const meta = (update as unknown as { _meta?: { timing?: unknown } })
+          ._meta;
+        return meta?.timing === undefined;
+      }),
+    );
+
+    expect(withTiming).toEqual(withoutTiming);
+  });
+
+  it('keeps timing frames out of the replay state when it is off', () => {
+    const conversation = [
+      telemetry('tel-1', API_RESPONSE_EVENT),
+      assistantWithToolCall('assistant-1', 'call_glob_1'),
+      telemetry('tel-2', TOOL_CALL_EVENT),
+    ];
+    const off = createTranscriptReplayMachine();
+    const withoutTelemetry = createTranscriptReplayMachine();
+    for (const item of conversation) {
+      updates(off, item);
+      if (item.subtype !== 'ui_telemetry') updates(withoutTelemetry, item);
+    }
+
+    expect(off.snapshot()).toEqual(withoutTelemetry.snapshot());
+  });
+
+  it('records only the claim flag in the replay state when it is on', () => {
+    // The one state change timing makes: the claimed call is flagged so a
+    // later page cannot hand the same allocation a second frame.
+    const conversation = [
+      telemetry('tel-1', API_RESPONSE_EVENT),
+      assistantWithToolCall('assistant-1', 'call_glob_1'),
+      telemetry('tel-2', TOOL_CALL_EVENT),
+    ];
+    const on = timingMachine();
+    const off = createTranscriptReplayMachine();
+    for (const item of conversation) {
+      updates(on, item);
+      updates(off, item);
+    }
+    const base = off.snapshot();
+
+    expect(on.snapshot()).toEqual({
+      ...base,
+      pendingToolCalls: base.pendingToolCalls.map((pending) => ({
+        ...pending,
+        timingMatched: true,
+      })),
+    });
+  });
+
+  it('gives a tool frame no start time, because none was recorded', () => {
+    // logToolCall runs in one loop after the whole batch settles, so the
+    // recorded timestamp is the batch's end for every tool in it. Subtracting
+    // a fast tool's own duration from that would place it just before the
+    // batch ended rather than when it ran.
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', TOOL_CALL_EVENT),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });
+    expect(toolTiming).not.toHaveProperty('startedAt');
+  });
+
+  it('still derives a start time for a request', () => {
+    // A request is logged the moment its own stream ends, so the subtraction
+    // is sound there.
+    const [requestTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', API_RESPONSE_EVENT),
+    );
+
+    expect(requestTiming).toMatchObject({
+      startedAt: Date.parse('2026-07-14T00:00:06.544Z') - 6544,
+    });
+  });
+
+  it.each([
+    ['denied at confirmation', 'error'],
+    ['cancelled before it ran', 'cancelled'],
+    ['an unrecognized status', 'timed_out'],
+  ])('emits no tool frame for a zero duration on %s', (_label, status) => {
+    // `ToolCallEvent` writes 0 when a call never ran, so a zero on anything
+    // but a success is a placeholder rather than a measurement.
+    expect(
+      updates(
+        timingMachine(),
+        telemetry('tel-1', {
+          ...TOOL_CALL_EVENT,
+          duration_ms: 0,
+          status,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps a zero duration reported by a successful tool', () => {
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, duration_ms: 0 }),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 0 });
+  });
+
+  it('consumes duplicate recorded ids in allocation order', () => {
+    // Two calls recorded under one id: the first keeps it, the second is
+    // rewritten. Each telemetry record must claim its own allocation.
+    const machine = timingMachine();
+    updates(machine, assistantWithToolCall('assistant-1', 'call_dup'));
+    const second = updates(
+      machine,
+      assistantWithToolCall('assistant-2', 'call_dup'),
+    );
+    const rewrittenCallId = (second[0] as unknown as { toolCallId: string })
+      .toolCallId;
+    expect(rewrittenCallId).not.toBe('call_dup');
+
+    const first = timings(
+      machine,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+    const next = timings(
+      machine,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    expect(first[0]).toMatchObject({ callId: 'call_dup' });
+    expect(next[0]).toMatchObject({ callId: rewrittenCallId });
+  });
+
+  it('resolves a rewritten id from a telemetry record on a later page', () => {
+    // A page can end right after the assistant record, leaving the tool's
+    // telemetry for the next one, which replays from the serialized state.
+    const first = timingMachine();
+    updates(first, assistantWithToolCall('assistant-1', 'call_dup'));
+    const rewritten = updates(
+      first,
+      assistantWithToolCall('assistant-2', 'call_dup'),
+    );
+    const rewrittenCallId = (rewritten[0] as unknown as { toolCallId: string })
+      .toolCallId;
+
+    const carried = JSON.parse(
+      JSON.stringify(first.snapshot()),
+    ) as TranscriptReplayStateV1;
+    expect(carried.pendingToolCalls).toContainEqual(
+      expect.objectContaining({ rawCallId: 'call_dup' }),
+    );
+
+    const next = createTranscriptReplayMachine({
+      includeTiming: true,
+      initialState: carried,
+    });
+    const firstFrame = timings(
+      next,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+    const secondFrame = timings(
+      next,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    expect(firstFrame[0]).toMatchObject({ callId: 'call_dup' });
+    expect(secondFrame[0]).toMatchObject({ callId: rewrittenCallId });
+  });
+
+  it('does not re-claim a call already matched on an earlier page', () => {
+    const first = timingMachine();
+    updates(first, assistantWithToolCall('assistant-1', 'call_dup'));
+    updates(first, assistantWithToolCall('assistant-2', 'call_dup'));
+    timings(
+      first,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    const carried = JSON.parse(
+      JSON.stringify(first.snapshot()),
+    ) as TranscriptReplayStateV1;
+    const next = createTranscriptReplayMachine({
+      includeTiming: true,
+      initialState: carried,
+    });
+    const [later] = timings(
+      next,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    expect(later).not.toMatchObject({ callId: 'call_dup' });
+  });
+
+  it('pins the telemetry event names to core', () => {
+    expect([EVENT_API_RESPONSE, EVENT_API_ERROR, EVENT_TOOL_CALL]).toEqual([
+      'qwen-code.api_response',
+      'qwen-code.api_error',
+      'qwen-code.tool_call',
+    ]);
   });
 });

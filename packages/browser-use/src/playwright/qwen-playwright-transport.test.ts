@@ -84,18 +84,17 @@ class FakeBridge implements ChromeBridge {
 }
 
 describe('QwenPlaywrightTransport', () => {
-  it('enables CDP download events when attaching a tab', async () => {
+  it('registers tabs without changing the browser download policy', async () => {
     const bridge = new FakeBridge();
-    const transport = new QwenPlaywrightTransport(bridge);
-    await transport.registerTab(7);
-    expect(bridge.calls).toContainEqual({
-      method: 'cdp.send',
-      params: {
-        tabId: 7,
-        method: 'Page.setDownloadBehavior',
-        params: { behavior: 'default', eventsEnabled: true },
-      },
+    const request = bridge.request.bind(bridge);
+    vi.spyOn(bridge, 'request').mockImplementation(async (method, params) => {
+      if (params?.['method'] === 'Page.setDownloadBehavior') {
+        throw new Error('Cannot not access browser-level commands');
+      }
+      return await request(method, params);
     });
+    const transport = new QwenPlaywrightTransport(bridge);
+    await expect(transport.registerTab(7)).resolves.toBe('target-7');
     await transport.close();
   });
 
