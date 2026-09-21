@@ -15370,6 +15370,43 @@ describe('Session', () => {
         expect(taskIds).toContain('worker-0');
       });
 
+      it('protects the right result while the guard defers unrelated work', async () => {
+        // The admission rule is asked about the entries that can absorb
+        // the overflow, and answers about them by index. Read as an
+        // index into the queue itself, a message sitting ahead of them
+        // shifts every one, and the protection meant for one result is
+        // applied to another.
+        await queuePeer('msg-ahead');
+        await queueResult('worker-related');
+        for (let index = 0; index < 19; index++) {
+          await queueResult(`worker-${index}`);
+        }
+        const queue = (
+          session as unknown as {
+            notificationQueue: Array<{
+              taskId: string;
+              continuesTodoStopGuardWorkChain: boolean;
+            }>;
+          }
+        ).notificationQueue;
+        // The one entry that can release the guard is protected; the
+        // unrelated ones absorb the overflow.
+        queue.find(
+          (item) => item.taskId === 'worker-related',
+        )!.continuesTodoStopGuardWorkChain = true;
+        (
+          session as unknown as { todoStopGuardQueuedPromptPriority: boolean }
+        ).todoStopGuardQueuedPromptPriority = true;
+
+        await queueResult('worker-newcomer');
+
+        const taskIds = queue.map((item) => item.taskId);
+        expect(taskIds).toContain('worker-related');
+        expect(taskIds).toContain('msg-ahead');
+        // The oldest unrelated one went instead.
+        expect(taskIds).not.toContain('worker-0');
+      });
+
       it('turns a sender away once the allowance is full', async () => {
         for (let index = 0; index < 20; index++) {
           expect(session.hasRoomForPeerMessage()).toBe(true);

@@ -527,7 +527,7 @@ export class PeerMessaging {
    * its own with `reportExpired` instead.
    */
   setQueuedPeerCount(fn: () => number): void {
-    if (this.resolveSessionId) {
+    if (this.hostSettlesUnread) {
       throw new Error(
         'PeerMessaging: a host of several sessions settles unconsumed messages with reportExpired, not setQueuedPeerCount',
       );
@@ -780,11 +780,10 @@ export class PeerMessaging {
    */
   private async settleUnconsumed(): Promise<void> {
     const queued = this.queuedPeerCount?.() ?? 0;
-    // A host of several sessions settles what reached a session itself,
-    // per session, because only it knows which queue read what. What is
-    // still buffered here reached no session at all, so it is this
-    // method's either way.
-    const dropped = this.resolveSessionId
+    // What is still buffered here reached no session at all, so it is
+    // this method's either way; what reached one is the host's when the
+    // host settles its own.
+    const dropped = this.hostSettlesUnread
       ? this.buffered.map((delivery) => delivery.frame)
       : this.outstanding.slice(
           Math.max(0, this.outstanding.length - this.buffered.length - queued),
@@ -990,6 +989,20 @@ export class PeerMessaging {
   }
 
   /**
+   * Whether the host settles the receipts of messages its sessions took
+   * and never read.
+   *
+   * A host of several sessions does: their queues drain independently,
+   * so the order messages were handed over in says nothing about which
+   * are still waiting, and only the host knows which queue read what.
+   * One session's process leaves it to `settleUnconsumed`. Asked in one
+   * place so the two sides of that split cannot drift apart.
+   */
+  private get hostSettlesUnread(): boolean {
+    return this.resolveSessionId !== null;
+  }
+
+  /**
    * The host's own name for the session `id` names, or undefined when it
    * holds no such session.
    *
@@ -1038,10 +1051,10 @@ export class PeerMessaging {
   }
 
   private trackOutstanding(frame: PeerUserFrame): void {
-    // Kept for the one-session inference in `settleUnconsumed`. A host of
-    // several does not use it — it settles per session — so it is not
-    // retained there either.
-    if (this.resolveSessionId) return;
+    // Only the one-session inference in `settleUnconsumed` reads this,
+    // and a frame's content can be a megabyte, so a host that settles
+    // its own does not retain what nothing will read.
+    if (this.hostSettlesUnread) return;
     this.outstanding.push(frame);
     // Only the unconsumed tail can ever matter, and it is bounded: at
     // most MAX_ACCEPTED_BACKLOG frames wait here and another
