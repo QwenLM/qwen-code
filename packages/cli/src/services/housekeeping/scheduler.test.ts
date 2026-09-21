@@ -103,6 +103,10 @@ describe('_runHousekeepingForTesting', () => {
     qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
     fileHistoryRoot = path.join(qwenHome, FILE_HISTORY_DIR);
     vi.stubEnv('QWEN_HOME', qwenHome);
+    // runHousekeeping also runs the debug-log sweep, whose root prefers
+    // QWEN_RUNTIME_DIR over QWEN_HOME — pin both so an ambient value can
+    // never redirect the sweep (or these fixtures) at the real debug dir.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
   });
 
   afterEach(() => {
@@ -241,6 +245,10 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
     qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
     logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-openai-logs-'));
     vi.stubEnv('QWEN_HOME', qwenHome);
+    // getFirstPassDelay keys the debug-logs marker on
+    // Storage.getGlobalDebugDir(), which prefers QWEN_RUNTIME_DIR — keep the
+    // marker root and the fixture root coincident under an ambient value.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
   });
 
   afterEach(() => {
@@ -495,6 +503,15 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
 
   it('uses catch-up delay when the OpenAI marker is missing', async () => {
     fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+    // Fresh debug marker so only the missing OpenAI marker forces catch-up —
+    // without it this test passes regardless of what the OpenAI marker does.
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(qwenHome, DEBUG_DIR),
+      ),
+      '',
+    );
 
     await expect(
       _getFirstPassDelayForTesting(
@@ -530,6 +547,14 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
     );
     const openaiMarker = _getOpenAILogsMarkerPathForTesting(qwenHome, logDir);
     fs.writeFileSync(fileHistoryMarker, '');
+    // Fresh debug marker so only the stale OpenAI marker forces catch-up.
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(qwenHome, DEBUG_DIR),
+      ),
+      '',
+    );
     fs.writeFileSync(openaiMarker, '');
     const stale = new Date(Date.now() - 8 * MS_PER_DAY);
     fs.utimesSync(openaiMarker, stale, stale);
@@ -567,6 +592,10 @@ describe('_runHousekeepingForTesting (debug-logs cleanup)', () => {
     qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
     debugRoot = path.join(qwenHome, DEBUG_DIR);
     vi.stubEnv('QWEN_HOME', qwenHome);
+    // cleanupOldDebugLogs resolves its root via Storage.getGlobalDebugDir(),
+    // which prefers QWEN_RUNTIME_DIR — pin it so fixtures and the sweep
+    // agree under an ambient value. Individual tests re-stub as needed.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
   });
 
   afterEach(() => {
@@ -600,6 +629,24 @@ describe('_runHousekeepingForTesting (debug-logs cleanup)', () => {
     expect(
       fs.existsSync(_getDebugLogsMarkerPathForTesting(qwenHome, debugRoot)),
     ).toBe(true);
+  });
+
+  it('sweeps pseudo-session debug logs but keeps unrelated files', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    // Fixed-name files the ACP layer appends to under non-UUID session-id
+    // contexts — sweepable via the call-site allowlist.
+    const replay = mkDebugLog('transcript-replay', old);
+    const discovery = mkDebugLog('workspace-mcp-discovery', old);
+    // Genuinely unrelated files still fail the real isValidSessionId and
+    // must survive — this pins that the scheduler passes a real predicate
+    // (goes red if the call site ever substitutes `() => true`).
+    const stray = mkDebugLog('notes', old);
+
+    await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
+
+    expect(fs.existsSync(replay)).toBe(false);
+    expect(fs.existsSync(discovery)).toBe(false);
+    expect(fs.existsSync(stray)).toBe(true);
   });
 
   it('throttles cleanup independently for different runtime directories', async () => {

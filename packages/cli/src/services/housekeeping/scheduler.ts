@@ -52,6 +52,18 @@ const SUBAGENT_MARKER = '.subagent-cleanup';
 const OPENAI_LOGS_MARKER = '.openai-logs-cleanup';
 const DEBUG_LOGS_MARKER = '.debug-logs-cleanup';
 
+// ACP binds two fixed non-UUID session-id contexts whose debug logs land in
+// the same sweep directory: sessionIdContext.run('workspace-mcp-discovery')
+// and the 'transcript-replay' fallback (acpAgent.ts). Those stems fail
+// isValidSessionId, and each is one fixed-name file appended across every
+// run with no rotation — so they would grow unbounded in exactly the
+// directory this pass keeps bounded. Sweep them by name; the mtime cutoff
+// already protects a file still being appended to.
+const PSEUDO_DEBUG_SESSION_STEMS: ReadonlySet<string> = new Set([
+  'transcript-replay',
+  'workspace-mcp-discovery',
+]);
+
 let started = false;
 
 interface NonInteractiveOpenAILogJob {
@@ -484,6 +496,12 @@ async function runHousekeeping(
   // file-history using the same cutoff; the sweeper skips the `latest` symlink
   // and the size-rotated `daemon/` subdir. Runs unconditionally so residue
   // from earlier debugging sessions is cleaned even when logging is now off.
+  // Interactive sessions only: the sole caller startBackgroundHousekeeping is
+  // gated on config.isInteractive(), so headless/ACP/serve processes never
+  // sweep (and per-workspace runtime dirs are never resolved here). The
+  // shared ~/.qwen/debug backlog is self-healing — the next interactive run
+  // in the same runtime dir sweeps it. Non-interactive coverage is a
+  // recorded follow-up (the #8860 → #8893 precedent).
   const debugLogsMarkerPath = getDebugLogsMarkerPath(
     qwenDir,
     Storage.getGlobalDebugDir(),
@@ -498,7 +516,8 @@ async function runHousekeeping(
       const r = await cleanupOldDebugLogs({
         cutoffDate: cutoff,
         excludeSessionIds: new Set([currentSessionId]),
-        isValidSessionId,
+        isValidSessionId: (v) =>
+          isValidSessionId(v) || PSEUDO_DEBUG_SESSION_STEMS.has(v),
       });
       debugLogger.debug(`debug-logs: removed=${r.removed} errors=${r.errors}`);
     },

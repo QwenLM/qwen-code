@@ -40,7 +40,13 @@ export interface SubagentCleanupOptions extends CleanupOptions {
   subagentsRoot: string;
 }
 
-export interface DebugLogCleanupOptions extends CleanupOptions {
+// Deliberately does not extend CleanupOptions: removeEmptyRoot is never
+// honored here — the debug root must survive the sweep, because
+// debugLogger memoizes its ensure-dir step per path and would silently
+// drop the rest of the session's debug output after an rmdir.
+export interface DebugLogCleanupOptions {
+  cutoffDate: Date;
+  excludeSessionIds?: ReadonlySet<string>;
   isValidSessionId: (value: string) => boolean;
 }
 

@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { OpenAILogger } from '@qwen-code/qwen-code-core';
+import { OpenAILogger, Storage } from '@qwen-code/qwen-code-core';
 import {
   cleanupOldDebugLogs,
   cleanupOldFileHistoryBackups,
@@ -512,6 +512,10 @@ describe('cleanupOldDebugLogs', () => {
     qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-debug-cleanup-'));
     debugRoot = path.join(qwenHome, DEBUG_DIR);
     vi.stubEnv('QWEN_HOME', qwenHome);
+    // cleanupOldDebugLogs resolves its root via Storage.getGlobalDebugDir(),
+    // which prefers QWEN_RUNTIME_DIR — pin it so an ambient value can never
+    // redirect the sweep at the real debug dir.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
     cutoff = new Date(Date.now() - 30 * MS_PER_DAY);
   });
 
@@ -523,6 +527,16 @@ describe('cleanupOldDebugLogs', () => {
   function mkDebugLog(name: string, mtime: Date): string {
     fs.mkdirSync(debugRoot, { recursive: true });
     const p = path.join(debugRoot, name);
+    fs.writeFileSync(p, 'log');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  // Valid-session fixtures go through core's writer-side path builder so the
+  // suite goes red if the sweeper's suffix/stem contract drifts from core's.
+  function mkSessionLog(sessionId: string, mtime: Date): string {
+    const p = Storage.getDebugLogPath(sessionId);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, 'log');
     fs.utimesSync(p, mtime, mtime);
     return p;
@@ -543,18 +557,12 @@ describe('cleanupOldDebugLogs', () => {
   });
 
   it('removes session logs older than the cutoff, keeping recent ones', async () => {
-    const old = mkDebugLog(
-      `${UUID_A}.txt`,
+    const old = mkSessionLog(UUID_A, new Date(Date.now() - 60 * MS_PER_DAY));
+    const agent = mkSessionLog(
+      AGENT_SESSION_ID,
       new Date(Date.now() - 60 * MS_PER_DAY),
     );
-    const agent = mkDebugLog(
-      `${AGENT_SESSION_ID}.txt`,
-      new Date(Date.now() - 60 * MS_PER_DAY),
-    );
-    const fresh = mkDebugLog(
-      `${UUID_B}.txt`,
-      new Date(Date.now() - 1 * MS_PER_DAY),
-    );
+    const fresh = mkSessionLog(UUID_B, new Date(Date.now() - 1 * MS_PER_DAY));
 
     const r = await cleanupDebugLogs({ cutoffDate: cutoff });
     expect(r).toEqual({ removed: 2, errors: 0 });
@@ -566,14 +574,11 @@ describe('cleanupOldDebugLogs', () => {
   });
 
   it('preserves session ids listed in excludeSessionIds even if old', async () => {
-    const current = mkDebugLog(
-      `${UUID_A}.txt`,
+    const current = mkSessionLog(
+      UUID_A,
       new Date(Date.now() - 60 * MS_PER_DAY),
     );
-    const other = mkDebugLog(
-      `${UUID_B}.txt`,
-      new Date(Date.now() - 60 * MS_PER_DAY),
-    );
+    const other = mkSessionLog(UUID_B, new Date(Date.now() - 60 * MS_PER_DAY));
 
     const r = await cleanupDebugLogs({
       cutoffDate: cutoff,
@@ -593,7 +598,7 @@ describe('cleanupOldDebugLogs', () => {
     for (let i = 0; i < 25; i++) {
       const id = `${i.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
       ids.add(id);
-      mkDebugLog(`${id}.txt`, old);
+      mkSessionLog(id, old);
     }
 
     const r = await cleanupOldDebugLogs({
@@ -601,14 +606,15 @@ describe('cleanupOldDebugLogs', () => {
       isValidSessionId: (sessionId) => ids.has(sessionId),
     });
     expect(r).toEqual({ removed: 25, errors: 0 });
+    // The debug root itself must survive even when the sweep empties it —
+    // debugLogger memoizes its ensure-dir step per path and would silently
+    // drop the rest of a session's debug output after an rmdir.
+    expect(fs.existsSync(debugRoot)).toBe(true);
     expect(fs.readdirSync(debugRoot)).toEqual([]);
   });
 
   it('leaves the latest symlink and the daemon subdir untouched', async () => {
-    const old = mkDebugLog(
-      `${UUID_A}.txt`,
-      new Date(Date.now() - 60 * MS_PER_DAY),
-    );
+    const old = mkSessionLog(UUID_A, new Date(Date.now() - 60 * MS_PER_DAY));
 
     // `latest` symlink → an old target: it must not be swept even though its
     // target is aged, because it is a symlink, not a `<uuid>.txt` file.
@@ -649,12 +655,9 @@ describe('cleanupOldDebugLogs', () => {
   it.skipIf(process.platform === 'win32')(
     'counts errors and continues when a file cannot be unlinked',
     async () => {
-      const good = mkDebugLog(
-        `${UUID_A}.txt`,
-        new Date(Date.now() - 60 * MS_PER_DAY),
-      );
-      mkDebugLog(`${UUID_B}.txt`, new Date(Date.now() - 60 * MS_PER_DAY));
-      mkDebugLog(`${UUID_C}.txt`, new Date(Date.now() - 60 * MS_PER_DAY));
+      const good = mkSessionLog(UUID_A, new Date(Date.now() - 60 * MS_PER_DAY));
+      mkSessionLog(UUID_B, new Date(Date.now() - 60 * MS_PER_DAY));
+      mkSessionLog(UUID_C, new Date(Date.now() - 60 * MS_PER_DAY));
 
       // Drop the write bit on the dir so unlink of any child fails (EACCES)
       // while readdir/stat still work.
