@@ -756,6 +756,7 @@ export class SessionArtifactStore {
             .map(cloneStoredArtifact)
         : [];
       let restoredCount = 0;
+      let expectedExpiredDrops = 0;
       this.artifacts.clear();
       this.tombstonedIds.clear();
       this.tombstonedClientIds.clear();
@@ -790,6 +791,15 @@ export class SessionArtifactStore {
         }
       }
       for (const artifact of snapshot?.artifacts ?? []) {
+        if (isExpectedExpiredLocalPublishedArtifact(artifact)) {
+          expectedExpiredDrops++;
+          writeStderrLine(
+            `[artifacts] session=${this.sessionId} ` +
+              'action=legacy_local_published_dropped ' +
+              `artifactId=${artifact.id}`,
+          );
+          continue;
+        }
         try {
           const input = persistedArtifactToInput(artifact);
           if (input.retention === 'pinned') {
@@ -880,7 +890,10 @@ export class SessionArtifactStore {
           );
         }
       }
-      if (snapshot.artifacts.length > 0 && restoredCount === 0) {
+      if (
+        snapshot.artifacts.length - expectedExpiredDrops > 0 &&
+        restoredCount === 0
+      ) {
         this.restoreState(previousState);
         const rollbackWarnings = [
           ...baselineWarnings,
@@ -987,6 +1000,14 @@ export class SessionArtifactStore {
     warnings: string[],
     metadataOnly = false,
   ): Promise<PersistedSessionArtifact | undefined> {
+    if (isExpectedExpiredLocalPublishedArtifact(artifact)) {
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} ` +
+          'action=legacy_local_published_dropped ' +
+          `artifactId=${artifact.id}`,
+      );
+      return undefined;
+    }
     try {
       const input = persistedArtifactToInput(artifact);
       if (input.retention === 'pinned') {
@@ -1678,9 +1699,10 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
 
-    const retention = normalizeRetention(input.retention, {
+    let retention = normalizeRetention(input.retention, {
       persistenceAvailable: this.persistence !== undefined,
     });
+    let retentionExplicit = input.retention !== undefined;
     const workspaceStatus = workspacePath
       ? options.workspaceAccess === 'metadata-only'
         ? {
@@ -1719,12 +1741,27 @@ export class SessionArtifactStore {
       url,
     });
     const id = stableSessionArtifactId(this.sessionId, identityKey);
+    const toolName = normalizeString(input.toolName, 'toolName', 200, false);
+    if (
+      isNonSnapshotPublishedFileUrl({
+        kind,
+        storage,
+        url,
+        managedId,
+        metadata,
+        source,
+        toolName,
+      })
+    ) {
+      retention = 'ephemeral';
+      retentionExplicit = true;
+    }
 
     return {
       id,
       identityKey,
       receivedSeq,
-      retentionExplicit: input.retention !== undefined,
+      retentionExplicit,
       retentionSource: source,
       trustedPublisher,
       kind,
@@ -1760,7 +1797,7 @@ export class SessionArtifactStore {
       createdAt: now,
       updatedAt: now,
       toolCallId: normalizeString(input.toolCallId, 'toolCallId', 200, false),
-      toolName: normalizeString(input.toolName, 'toolName', 200, false),
+      toolName,
       hookEventName: normalizeString(
         input.hookEventName,
         'hookEventName',
@@ -2742,6 +2779,27 @@ function isFileArtifactUrl(raw: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+function isNonSnapshotPublishedFileUrl(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return (
+    artifact.storage === 'published' &&
+    isFileArtifactUrl(artifact.url) &&
+    !getWebPreviewSnapshotId(artifact)
+  );
+}
+
+function isExpectedExpiredLocalPublishedArtifact(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return (
+    isNonSnapshotPublishedFileUrl(artifact) &&
+    artifact.kind === 'html' &&
+    artifact.source === 'tool' &&
+    artifact.toolName?.toLowerCase() === 'artifact'
+  );
 }
 
 function isArtifactSnapshotCompletenessWarning(warning: string): boolean {
