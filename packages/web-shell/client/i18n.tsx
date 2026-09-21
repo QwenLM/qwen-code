@@ -3204,6 +3204,8 @@ const EN: Messages = {
   'workflow.action.retry': 'Retry failed path',
   'workflow.action.rerun': 'Rerun all',
   'workflow.action.unavailable': 'Workflow state changed before the action.',
+  'workflow.action.argsUnavailable':
+    'No restart: its history does not have the args it was launched with.',
   'workflow.action.failed': 'Could not update the workflow.',
   'workflow.history.retry': (v) => `Retried from ${v?.runId ?? ''}`,
   'workflow.history.rerun': (v) => `Rerun from ${v?.runId ?? ''}`,
@@ -6909,6 +6911,7 @@ const ZH: Messages = {
   'workflow.action.retry': '重试失败路径',
   'workflow.action.rerun': '全部重跑',
   'workflow.action.unavailable': '操作前工作流状态已发生变化。',
+  'workflow.action.argsUnavailable': '无法重启：历史里没有它启动时用的参数。',
   'workflow.action.failed': '无法更新工作流状态。',
   'workflow.history.retry': (v) => `从 ${v?.runId ?? ''} 续跑`,
   'workflow.history.rerun': (v) => `从 ${v?.runId ?? ''} 全部重跑`,
@@ -7613,7 +7616,7 @@ const ZH: Messages = {
     '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用。桥接的查看与调用保持工具声明列表稳定——桥接不会把 reveal 的工具重新声明——从而减少提示词大小且不触碰 prompt-cache 前缀。但声明列表并非不可变：会话仍会在以下情况重新声明——恢复会话时；工具集刷新（MCP 发现、会话中首次进入计划模式、子代理定义变更）在实时历史中发现对某个仍隐藏的 deferred 工具的直接调用时；子代理定义变更改写 agent 工具自身描述时；以及 MCP server 在会话中以 alwaysLoadTools: true 注册时。',
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
-    '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
+    '使用 node-pty 提供交互式 shell 体验。未设置时，明确的单次 prompt 默认使用 child_process；交互式和输入驱动模式默认使用 PTY。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',

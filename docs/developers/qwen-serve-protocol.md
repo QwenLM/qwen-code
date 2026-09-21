@@ -617,10 +617,23 @@ operator diagnostic snapshot documented below.
 | `browser_automation_mcp`            | ACP HTTP is enabled, `cdp_tunnel_over_ws` is active, no bearer token blocks `/cdp`, and `QWEN_CDP_MCP_COMMAND` names an external stdio MCP adapter. The main CLI package does not bundle a browser automation adapter; without this tag, Chrome extension side-panel chat may still work, but console/network/screenshot/click tools are not registered by default.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `voice_transcribe`                  | the Voice WebSocket endpoint is mounted; a configured Voice model is still required for a successful transcription.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `realtime_voice`                    | the macOS WebShell daemon has Live Voice enabled and native Host integration active. `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `realtime_voice_web`                | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform (the native Host and `realtime_voice` stay macOS-only). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture is unavailable in that mode, and a shortcut change is stored for the next native Host rather than registered.                     |
+| `realtime_voice_web`                | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform (the native Host and `realtime_voice` stay macOS-only). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture needs a shared screen (below), and a shortcut change is stored for the next native Host rather than registered.                   |
 | `web_terminal`                      | ACP HTTP is enabled, so the authenticated Web Terminal endpoint is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 <!-- conditional-serve-features:end -->
+
+A browser Host answers `host.capture_visual` only while the user is sharing a
+screen with the page, which the page reports in its hello as
+`selfChecks.screenShare`. Sharing is a separate, explicit act — the model asks
+mid-turn, and `getDisplayMedia` needs a user gesture — so the page holds the
+stream and takes one frame per request. With nothing shared it answers
+`success: false` immediately rather than letting the request time out.
+
+Because a page cannot write to the daemon's filesystem, it sends only the JPEG.
+The daemon ignores any `screenshotPath` a browser lease reports and stores the
+image itself, under a name it chooses, in the same private capture directory a
+native Host writes to. A native Host still persists its own PNG and passes the
+path, as before.
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
@@ -821,10 +834,19 @@ issue code `channel_worker_exited`.
 
 Daemon-managed channel worker startup from an explicit `qwen serve --channel
 ...` remains fail-fast and takes precedence over persisted startup settings.
-A flagless boot restores `serve.channels` from the trusted primary workspace.
-Secondary workspaces do not independently restore their own `serve.channels`.
-With no explicit or primary-workspace selection, channel runtime loading stays
-lazy.
+A flagless boot restores `serve.channels` from every trusted registered
+workspace, each contributing the list in its own workspace-scope settings. The
+restored names form one selection whose owners are resolved as usual, with the
+workspace that listed a name breaking an otherwise ambiguous ownership tie.
+That boot attribution lasts as long as the daemon runs: a `PUT
+/workspace/channel` re-enabling such a name resolves it the way boot did, even
+after the selection was stopped in between. A name a non-primary workspace
+contributed is dropped, with a log identifying it, when it cannot be resolved,
+so one workspace's stale entry does not strand the others; a name the primary
+workspace listed still fails the restore as a whole, whether or not another
+workspace lists it too.
+`all` remains primary-only: it is ignored, and reported, anywhere else. With no
+explicit or configured selection, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
@@ -2302,7 +2324,11 @@ with `args` too large to keep, so neither action applies to it. Neither does a
 snapshot written before `args` were kept, which carries neither `argsOmitted`
 nor `argsRecorded`: a run's journal is keyed from a hash of its `args`, so
 restarting one whose `args` its history cannot name would replay nothing and
-re-dispatch every agent. Both refusals are `workflow_args_unavailable`.
+re-dispatch every agent. Both refusals are `workflow_args_unavailable`, and
+`GET /session/:id/tasks` reports both as `argsUnavailable` on the entry, so a
+client can withhold the two actions instead of discovering the refusal by
+making the call. `argsOmitted` stays beside it as the reason, for a client
+that wants to say which. The `args` themselves are never put on the wire.
 
 `run-script` passes no definition name, so the run is labelled by the script's own
 `export const meta` — a compiled script should declare one, or the run shows
@@ -2337,7 +2363,7 @@ not be written.
 | `code` / `errorKind`           | HTTP  | When                                                                                                                                                          | What to do                                                     |
 | ------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | `workflow_journal_unavailable` | `409` | a `retry` whose run has no journal on disk, or one that cannot be read                                                                                        | `rerun` it, which starts it from the beginning                 |
-| `workflow_args_unavailable`    | `409` | a `retry` or `rerun` of a history entry that carries `argsOmitted`                                                                                            | start it again with `run-saved` or `run-script` and its `args` |
+| `workflow_args_unavailable`    | `409` | a `retry` or `rerun` of a history entry marked `argsUnavailable`: its `args` were too large to keep, or its snapshot predates keeping them                    | start it again with `run-saved` or `run-script` and its `args` |
 | `workflow_run_live_elsewhere`  | `409` | a `retry` of a run whose checkpoint records a process that has not been seen to exit — one still running, one on another machine, or one whose pid was reused | `rerun` it, which takes a new run id                           |
 | `workflow_not_recorded`        | `503` | a `retry` whose record that the run is running again could not be written, so it did not start                                                                | make the same call again; the run is untouched                 |
 
