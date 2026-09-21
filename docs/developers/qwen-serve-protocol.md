@@ -837,10 +837,14 @@ Daemon-managed channel worker startup from an explicit `qwen serve --channel
 A flagless boot restores `serve.channels` from every trusted registered
 workspace, each contributing the list in its own workspace-scope settings. The
 restored names form one selection whose owners are resolved as usual, with the
-workspace that listed a name breaking an otherwise ambiguous ownership tie. A
-name a non-primary workspace contributed is dropped, with a log identifying it,
-when it cannot be resolved, so one workspace's stale entry does not strand the
-others; the primary workspace's own names still fail the restore as a whole.
+workspace that listed a name breaking an otherwise ambiguous ownership tie.
+That boot attribution lasts as long as the daemon runs: a `PUT
+/workspace/channel` re-enabling such a name resolves it the way boot did, even
+after the selection was stopped in between. A name a non-primary workspace
+contributed is dropped, with a log identifying it, when it cannot be resolved,
+so one workspace's stale entry does not strand the others; a name the primary
+workspace listed still fails the restore as a whole, whether or not another
+workspace lists it too.
 `all` remains primary-only: it is ignored, and reported, anywhere else. With no
 explicit or configured selection, channel runtime loading stays lazy.
 

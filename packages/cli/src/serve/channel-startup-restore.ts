@@ -204,9 +204,11 @@ export function resolveStartupChannelSelection(
           .join(', ')}); its owner is resolved from the channel config alone.`,
       });
     }
-    // Only the primary workspace's own names keep the existing fail-fast
-    // behavior; a name any other workspace asked for is droppable.
-    if (claims.some((claim) => !claim.primary)) tolerantNames.add(name);
+    // Only a name no primary claim covers is droppable. A name the primary
+    // listed keeps the existing fail-fast behavior even when another workspace
+    // lists it too, so copying `serve.channels` into a second workspace cannot
+    // quietly turn the primary's own restore into a skip.
+    if (claims.every((claim) => !claim.primary)) tolerantNames.add(name);
     if (claims.length === 1 && !claims[0]!.primary) {
       ownerHints.set(name, claims[0]!.workspaceCwd);
     }

@@ -59,9 +59,10 @@ ready 状态。控制结果报告 `partial`，daemon 状态继续发出
 ready 后才报告启动成功的行为。不带频道参数启动时，daemon 从每个可信已注册 workspace
 恢复 `serve.channels`，各自贡献本 workspace 作用域设置里的名单。启动选择使用
 持久化的文件夹信任设置；worker 启动前会再次检查 workspace 归属和信任。名字由
-哪个 workspace 列出，就在归属本来有歧义时判给它；非主 workspace 贡献的名字若
-解析不了，只记日志跳过，而不是让整份恢复失败。`all` 仍然只对主 workspace 生效，
-配在别处会被跳过并记录。
+哪个 workspace 列出，就在归属本来有歧义时判给它，并在 daemon 整个生命周期内
+一直按此判定，所以停掉后再启用仍然落回启动时那个 workspace；只由非主 workspace
+贡献的名字若解析不了，只记日志跳过，而不是让整份恢复失败，而主 workspace 列出的
+名字仍然会让整份恢复失败。`all` 仍然只对主 workspace 生效，配在别处会被跳过并记录。
 没有显式或持久化选择时，daemon 直到首次运行时变更才会预留频道服务或加载较重的
 频道 runtime。
 

@@ -194,7 +194,7 @@ describe('resolveStartupChannelSelection', () => {
     ]);
   });
 
-  it('treats a name the primary also claims as droppable but unhinted', () => {
+  it('keeps a name the primary also claims fail-fast, and unhinted', () => {
     const result = resolveStartupChannelSelection({
       workspaces,
       loadStartupChannels: loader({
@@ -204,7 +204,9 @@ describe('resolveStartupChannelSelection', () => {
     });
     expect(result.selection).toEqual({ mode: 'names', names: ['telegram'] });
     expect([...result.ownerHints]).toEqual([]);
-    expect([...result.tolerantNames]).toEqual(['telegram']);
+    // Another workspace naming the channel must not downgrade the primary's
+    // own restore to a droppable one.
+    expect([...result.tolerantNames]).toEqual([]);
     expect(result.diagnostics.map((item) => item.code)).toEqual([
       'claimed_by_multiple_workspaces',
     ]);

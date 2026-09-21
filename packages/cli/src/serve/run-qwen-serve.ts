@@ -4060,9 +4060,15 @@ async function runQwenServeImpl(
   loggerLifecycle.initialized(daemonLog);
   let channelSelectionFromSettings = false;
   // Which workspace a channel name belongs to when ownership is otherwise
-  // ambiguous: seeded at boot from the workspace that listed the name in its
-  // own `serve.channels`, then kept equal to the committed groups so a later
-  // runtime change resolves the same way this boot did.
+  // ambiguous. Two layers: the boot hints record the workspace that listed the
+  // name in its own `serve.channels` and never change, and the committed groups
+  // layer over them so a later runtime change resolves the way the running
+  // groups do. A commit only overrides the names it carries, so a channel
+  // toggled off and back on still resolves the way it did at boot instead of
+  // turning ambiguous until the next restart. A boot hint naming a workspace
+  // that is no longer registered is inert: `resolveChannelWorkspaceGroups` only
+  // takes a hint that matches one of the live owners.
+  let bootChannelOwnerHints: ReadonlyMap<string, string> = new Map();
   let channelOwnerHints: ReadonlyMap<string, string> = new Map();
   // Names a non-primary workspace contributed, which may be dropped instead of
   // stranding the other workspaces. Empty for an explicit `--channel`
@@ -4095,6 +4101,19 @@ async function runQwenServeImpl(
       // Matches the pre-multi-workspace behavior: a single unusable entry is
       // an operator typo, not something worth a boot banner.
       daemonLog.warn(detail, { workspaceCwd: diagnostic.workspaceCwd });
+      return;
+    }
+    if (diagnostic.code === 'claimed_by_multiple_workspaces') {
+      // Two workspaces listing the same name is what the per-workspace toggle
+      // produces, and ownership still resolves from the channel config alone,
+      // so the channel usually starts exactly as configured. Only a resolution
+      // that actually fails costs the operator a channel, and that reports
+      // itself; this one stays out of the boot banner.
+      daemonLog.warn(detail, {
+        code: diagnostic.code,
+        workspaceCwd: diagnostic.workspaceCwd,
+        ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
+      });
       return;
     }
     writeStderrLine(
@@ -4138,6 +4157,7 @@ async function runQwenServeImpl(
       opts.channelSelection = restored.selection;
       if (opts.channelSelection) {
         channelSelectionFromSettings = true;
+        bootChannelOwnerHints = restored.ownerHints;
         channelOwnerHints = restored.ownerHints;
         channelStartupTolerantNames = restored.tolerantNames;
         channelRuntime = await ensureChannelRuntime();
@@ -9276,15 +9296,16 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
-              channelOwnerHints = new Map(
-                groups.flatMap((group) =>
+              channelOwnerHints = new Map([
+                ...bootChannelOwnerHints,
+                ...groups.flatMap((group) =>
                   group.selection.mode === 'names'
                     ? group.selection.names.map(
                         (name) => [name, group.workspaceCwd] as const,
                       )
                     : [],
                 ),
-              );
+              ]);
               channelWebhookConfigVersion += 1;
               refreshChannelWebhookConfigs?.();
             },
