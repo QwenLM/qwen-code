@@ -5,14 +5,9 @@
  */
 
 import { execSync } from 'node:child_process';
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { INDEPENDENT_PACKAGES } from './release-packages.mjs';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -39,41 +34,15 @@ if (!versionType) {
   process.exit(1);
 }
 
-// 2. Bump the version in the root and all workspace package.json files.
-// --no-workspaces-update stops npm from reifying node_modules after each bump:
-// the tree is pnpm's, and an npm reify would silently rewrite it into npm's own
-// layout. pnpm-lock.yaml needs no refresh either: .pnpmfile.mjs rewrites every
-// internal dependency to workspace:*, so a version bump leaves it unchanged.
+// Resolve patch/minor/etc. once, then align all release workspaces to it.
 run(
-  `npm version ${versionType} --no-git-tag-version --allow-same-version --no-workspaces-update`,
+  `corepack pnpm version ${versionType} --no-git-tag-version --allow-same-version --no-git-checks`,
 );
-
-// 3. Get all workspaces and filter out the one we don't want to version.
-// We intend to maintain sdk, mobile-mcp, node-repl, and qwen-live versions
-// independently.
-const workspacesToExclude = [
-  '@qwen-code/sdk',
-  '@qwen-code/mobile-mcp',
-  '@qwen-code/node-repl-mcp',
-  '@qwen-code/qwen-live',
-];
-const workspaceNames = JSON.parse(
-  execSync('npm pkg get name --workspaces --json').toString(),
-);
-const allWorkspaces = Object.keys(workspaceNames);
-const workspacesToVersion = allWorkspaces.filter(
-  (wsName) => !workspacesToExclude.includes(wsName),
-);
-
-for (const workspaceName of workspacesToVersion) {
-  run(
-    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version --no-workspaces-update`,
-  );
-}
-
-// 4. Get the new version number from the root package.json
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
+run(
+  `corepack pnpm -r ${INDEPENDENT_PACKAGES.map((name) => `--filter='!${name}'`).join(' ')} version ${newVersion} --no-git-tag-version --allow-same-version --no-git-checks`,
+);
 
 // 5. Keep the published Mem0 Extension manifest aligned with its package.
 const mem0ManifestPath = resolve(
@@ -126,17 +95,6 @@ for (const entry of readdirSync(channelsDir)) {
       `Pinned @qwen-code/channel-base to ${newVersion} in ${pkg.name}`,
     );
   }
-}
-
-// 9. An npm reify can nest a stale registry copy of channel-base under an
-// adapter while ranges briefly mismatch, where it shadows the workspace link
-// during tsc. Nothing above reifies any more, but a tree an earlier npm install
-// left behind can still carry that directory, so remove it.
-for (const entry of readdirSync(channelsDir)) {
-  rmSync(join(channelsDir, entry, 'node_modules', '@qwen-code'), {
-    recursive: true,
-    force: true,
-  });
 }
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

@@ -24,6 +24,7 @@ import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
+import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -842,14 +843,8 @@ describe('package scripts', () => {
       'utf8',
     );
 
-    expect(versionScript).toContain(
-      'const workspacesToExclude = [\n' +
-        "  '@qwen-code/sdk',\n" +
-        "  '@qwen-code/mobile-mcp',\n" +
-        "  '@qwen-code/node-repl-mcp',\n" +
-        "  '@qwen-code/qwen-live',\n" +
-        '];',
-    );
+    expect(versionScript).toContain('INDEPENDENT_PACKAGES.map((name)');
+    expect(INDEPENDENT_PACKAGES).toContain('@qwen-code/node-repl-mcp');
   });
 
   it('smoke-tests the real worktree bootstrap on every supported host', () => {
@@ -1542,10 +1537,10 @@ describe('package scripts', () => {
     expect(releaseStepScript).toContain('already published; skipping');
     expect(releaseStepScript).toContain('exit 0');
     expect(releaseStepScript).toContain(
-      'npm publish --provenance "${publish_args[@]}"',
+      'corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
-      'Every channel package was already published; nothing shipped',
+      'corepack pnpm -r publish "${publish_args[@]}"',
     );
   });
 
