@@ -395,6 +395,10 @@ describe('POST /sessions/catalog', () => {
           const runtime = h.runtimes[1]!;
           const entry = h.registry.getEntryByWorkspaceId(runtime.workspaceId)!;
           const generation = entry.current!;
+          const observed: {
+            generationIdChanged?: boolean;
+            guardClosed?: boolean;
+          } = {};
           const changeLifecycle = () => {
             if (change === 'replace') {
               h.registry.beginReplacement(entry, 'replacement-policy');
@@ -403,12 +407,11 @@ describe('POST /sessions/catalog', () => {
                 { ...runtime, trusted: false },
                 'replacement-policy',
               );
-              expect(entry.current?.generationId).not.toBe(
-                generation.generationId,
-              );
+              observed.generationIdChanged =
+                entry.current?.generationId !== generation.generationId;
             } else {
               h.registry.beginDrain(runtime);
-              expect(generation.guard.closed).toBe(false);
+              observed.guardClosed = generation.guard.closed;
               if (change === 'remove') h.registry.completeDrain(runtime);
             }
           };
@@ -428,6 +431,11 @@ describe('POST /sessions/catalog', () => {
               includeGroups: true,
             });
 
+          if (change === 'replace') {
+            expect(observed.generationIdChanged).toBe(true);
+          } else {
+            expect(observed.guardClosed).toBe(false);
+          }
           expect(res.status).toBe(200);
           expect(res.body.workspaces[0].error).toMatchObject({
             status: 503,

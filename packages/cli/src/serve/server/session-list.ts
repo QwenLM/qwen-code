@@ -164,6 +164,8 @@ function parseSessionCursor(cursor: string): number | undefined {
 }
 
 interface OrganizedCursor {
+  catalogKind?: 'organized';
+  paginateMerged?: boolean;
   group: string;
   archiveState: SessionArchiveState;
   sourceType?: string;
@@ -204,6 +206,7 @@ function parseOrganizedCursor(
   expected: {
     group: string;
     archiveState: SessionArchiveState;
+    paginateMerged: boolean;
     sourceType?: string;
     sourceId?: string;
     conversationKind?: 'standalone-top-level';
@@ -226,6 +229,11 @@ function parseOrganizedCursor(
       !Number.isFinite(last.activityTime) ||
       typeof last.sessionId !== 'string' ||
       last.sessionId.length === 0 ||
+      ((parsed as OrganizedCursor).catalogKind !== undefined &&
+        (parsed as OrganizedCursor).catalogKind !== 'organized') ||
+      ((parsed as OrganizedCursor).paginateMerged !== undefined &&
+        (parsed as OrganizedCursor).paginateMerged !==
+          expected.paginateMerged) ||
       (parsed as OrganizedCursor).group !== expected.group ||
       (parsed as OrganizedCursor).archiveState !== expected.archiveState ||
       (parsed as OrganizedCursor).sourceType !== expected.sourceType ||
@@ -248,6 +256,7 @@ function encodeOrganizedCursor(
   last: OrganizedCursorKey,
   group: string,
   archiveState: SessionArchiveState,
+  paginateMerged: boolean,
   sourceType?: string,
   sourceId?: string,
   conversationKind?: 'standalone-top-level',
@@ -255,6 +264,8 @@ function encodeOrganizedCursor(
 ): string {
   return Buffer.from(
     JSON.stringify({
+      catalogKind: 'organized',
+      paginateMerged,
       group,
       archiveState,
       sourceType,
@@ -332,7 +343,10 @@ function matchesSessionMetadataSource(
 
 function parseMetadataSessionCursor(
   cursor: string,
-  expected: SessionMetadataFilter & { archiveState: SessionArchiveState },
+  expected: SessionMetadataFilter & {
+    archiveState: SessionArchiveState;
+    paginateMerged: boolean;
+  },
 ): { last: LiveSessionCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
   try {
@@ -351,6 +365,11 @@ function parseMetadataSessionCursor(
       !Number.isFinite(last.activityTime) ||
       typeof last.sessionId !== 'string' ||
       last.sessionId.length === 0 ||
+      ((parsed as { catalogKind?: unknown }).catalogKind !== undefined &&
+        (parsed as { catalogKind?: unknown }).catalogKind !== 'metadata') ||
+      ((parsed as { paginateMerged?: unknown }).paginateMerged !== undefined &&
+        (parsed as { paginateMerged?: unknown }).paginateMerged !==
+          expected.paginateMerged) ||
       (parsed as { parentSessionId?: unknown }).parentSessionId !==
         expected.parentSessionId ||
       (parsed as { sourceType?: unknown }).sourceType !== expected.sourceType ||
@@ -384,10 +403,13 @@ function encodeMetadataSessionCursor(
   last: LiveSessionCursorKey,
   filter: SessionMetadataFilter,
   archiveState: SessionArchiveState,
+  paginateMerged: boolean,
   emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
     JSON.stringify({
+      catalogKind: 'metadata',
+      paginateMerged,
       ...filter,
       archiveState,
       last,
@@ -967,6 +989,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const cursor =
     options.cursor !== undefined
       ? parseOrganizedCursor(options.cursor, {
+          paginateMerged: readOptions.paginateMerged === true,
           group,
           archiveState,
           sourceType: options.sourceType,
@@ -1133,6 +1156,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       boundary,
       group,
       archiveState,
+      readOptions.paginateMerged === true,
       options.sourceType,
       options.sourceId,
       options.conversationKind,
@@ -1280,6 +1304,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const cursor =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
+          paginateMerged: readOptions.paginateMerged === true,
           ...filter,
           archiveState,
         })
@@ -1321,6 +1346,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
       boundary,
       filter,
       archiveState,
+      readOptions.paginateMerged === true,
       emitted,
     );
   }

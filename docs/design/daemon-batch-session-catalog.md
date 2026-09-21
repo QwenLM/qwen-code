@@ -73,9 +73,12 @@ validation or change that recovery policy.
 
 Continue pagination by sending explicit members with each returned `cwd` and
 `nextCursor`. Cursors remain opaque and retain the existing filter semantics;
-clients must reuse the same filters. The batch default uses the existing merged
-activity paginator with an empty metadata filter, so live-only rows also respect
-the page size. Its cursors are not interchangeable with legacy numeric cursors.
+clients must reuse the same filters, view, and pagination mode. New opaque
+cursors bind the catalog family and merged-pagination mode; crossing either
+boundary returns `invalid_cursor`. Pre-upgrade cursors without these markers
+remain accepted under the existing filter checks. The batch default uses the
+existing merged activity paginator with an empty metadata filter, so live-only
+rows also respect the page size. Its cursors are not interchangeable with legacy numeric cursors.
 SDK `listSessionsCatalog` exposes the same
 shape, mapping its existing `pageSize` convention to wire `size`. Clients discover
 the capability once and use workspace-qualified APIs for older daemons; catalog
@@ -98,6 +101,15 @@ small envelope/error overhead. Oversized members fail explicitly so callers can
 reduce the page size or omit groups. Request bodies retain the existing daemon
 JSON parser limit. Client disconnect aborts pending session reads and prevents
 new members from starting. Existing persisted scan/cache bounds remain in force.
+
+Even an unfiltered batch member uses the full persisted catalog to sort the
+merged rows before slicing the page. On a cold cache, each member scans up to
+50,000 persisted summaries and performs up to two sidecar reads per summary
+(worktree and PR metadata), even for a small requested page. The existing
+persisted snapshot cache is shared with organized reads and expires after two
+seconds; a two-second polling interval does not guarantee cache hits. In contrast,
+the legacy unfiltered GET reads only its bounded persisted page (up to 100 rows).
+Batching reduces HTTP round trips, but does not bound storage work to page size.
 
 Add a dedicated route module, reuse the existing session-list and organization
 services, and extract only the pure workspace selector resolution from its HTTP

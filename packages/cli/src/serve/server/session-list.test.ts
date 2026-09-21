@@ -201,6 +201,147 @@ describe('merged session catalog pagination', () => {
     ).rejects.toThrow('not a valid metadata cursor');
   });
 
+  it('rejects an organized cursor when switching to activity ordering', async () => {
+    await Promise.all([0, 1, 2].map((index) => persist(summary(index))));
+    vi.spyOn(
+      SessionOrganizationService.prototype,
+      'readSnapshot',
+    ).mockResolvedValue({
+      groups: [],
+      sessions: new Map([
+        [
+          summary(0).sessionId,
+          {
+            groupId: null,
+            color: null,
+            isPinned: true,
+            updatedAt: summary(0).createdAt,
+          },
+        ],
+      ]),
+    });
+    const { bridge } = bridgeFor([]);
+    const readOptions = { runtimeBaseDir, paginateMerged: true };
+    const first = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1, view: 'organized' },
+      readOptions,
+    );
+    expect(first.sessions.map((row) => row.sessionId)).toEqual([
+      summary(0).sessionId,
+    ]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    await expect(
+      listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { size: 1, cursor: first.nextCursor },
+        readOptions,
+      ),
+    ).rejects.toThrow('not a valid metadata cursor');
+  });
+
+  describe.each(['organized', 'metadata'] as const)(
+    '%s cursor context',
+    (kind) => {
+      it.each([true, false])(
+        'rejects a change from paginateMerged=%s',
+        async (paginateMerged) => {
+          const { bridge } = bridgeFor([summary(0), summary(1), summary(2)]);
+          const options =
+            kind === 'organized'
+              ? { size: 1, view: 'organized' as const }
+              : { size: 1, sourceType: 'default' };
+          const first = await listWorkspaceSessionsForResponse(
+            bridge,
+            workspaceCwd,
+            options,
+            { runtimeBaseDir, paginateMerged },
+          );
+          expect(first.nextCursor).toEqual(expect.any(String));
+          await expect(
+            listWorkspaceSessionsForResponse(
+              bridge,
+              workspaceCwd,
+              { ...options, cursor: first.nextCursor },
+              { runtimeBaseDir, paginateMerged: !paginateMerged },
+            ),
+          ).rejects.toThrow(`not a valid ${kind} cursor`);
+        },
+      );
+
+      it('rejects a foreign family marker even when the cursor structure matches', async () => {
+        const { bridge } = bridgeFor([summary(0), summary(1)]);
+        const options =
+          kind === 'organized'
+            ? { size: 1, view: 'organized' as const }
+            : { size: 1 };
+        const readOptions = { runtimeBaseDir, paginateMerged: true };
+        const first = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          readOptions,
+        );
+        expect(first.nextCursor).toEqual(expect.any(String));
+        const payload = JSON.parse(
+          Buffer.from(first.nextCursor!, 'base64url').toString('utf8'),
+        );
+        payload.catalogKind = kind === 'organized' ? 'metadata' : 'organized';
+        const cursor = Buffer.from(JSON.stringify(payload)).toString(
+          'base64url',
+        );
+        await expect(
+          listWorkspaceSessionsForResponse(
+            bridge,
+            workspaceCwd,
+            { ...options, cursor },
+            readOptions,
+          ),
+        ).rejects.toThrow(`not a valid ${kind} cursor`);
+      });
+
+      it.each([true, false])(
+        'accepts marker-free pre-upgrade cursors with paginateMerged=%s',
+        async (paginateMerged) => {
+          await Promise.all([0, 1, 2].map((index) => persist(summary(index))));
+          const { bridge } = bridgeFor([]);
+          const options =
+            kind === 'organized'
+              ? { size: 1, view: 'organized' as const }
+              : { size: 1, sourceType: 'default' };
+          const readOptions = { runtimeBaseDir, paginateMerged };
+          const first = await listWorkspaceSessionsForResponse(
+            bridge,
+            workspaceCwd,
+            options,
+            readOptions,
+          );
+          expect(first.nextCursor).toEqual(expect.any(String));
+          const payload = JSON.parse(
+            Buffer.from(first.nextCursor!, 'base64url').toString('utf8'),
+          );
+          delete payload.catalogKind;
+          delete payload.paginateMerged;
+          const cursor = Buffer.from(JSON.stringify(payload)).toString(
+            'base64url',
+          );
+          const second = await listWorkspaceSessionsForResponse(
+            bridge,
+            workspaceCwd,
+            { ...options, cursor },
+            readOptions,
+          );
+          expect(second.sessions.map((row) => row.sessionId)).toEqual([
+            summary(1).sessionId,
+          ]);
+          expect(second.nextCursor).toEqual(expect.any(String));
+        },
+      );
+    },
+  );
+
   it('returns groups from the same snapshot used to organize rows', async () => {
     await persist(summary(0));
     const { bridge } = bridgeFor([]);
