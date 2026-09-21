@@ -129,7 +129,6 @@ afterEach(() => {
 
 async function render(
   loadPage: TrajectoryPageLoader | undefined,
-  options?: { pageSize?: number },
 ): Promise<HTMLElement> {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -138,7 +137,7 @@ async function render(
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <TrajectoryPanel loadPage={loadPage} windowOptions={options} />
+        <TrajectoryPanel loadPage={loadPage} />
       </I18nProvider>,
     );
   });

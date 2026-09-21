@@ -43,8 +43,6 @@ export interface TrajectoryPanelProps {
    * tab is waiting to be rewired, which renders as the loading state.
    */
   loadPage?: TrajectoryPageLoader;
-  /** Test seam for the page size; production uses the hook's default. */
-  windowOptions?: { pageSize?: number };
 }
 
 type VisualRow =
@@ -262,15 +260,10 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
   );
 }
 
-export function TrajectoryPanel({
-  loadPage,
-  windowOptions,
-}: TrajectoryPanelProps) {
+export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const { t } = useI18n();
-  const { trajectory, status, error, truncated, refresh } = useTrajectoryWindow(
-    loadPage,
-    windowOptions ?? {},
-  );
+  const { trajectory, status, error, truncated, refresh } =
+    useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement | null>(null);
