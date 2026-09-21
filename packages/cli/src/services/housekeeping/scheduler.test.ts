@@ -641,12 +641,18 @@ describe('_runHousekeepingForTesting (debug-logs cleanup)', () => {
     // must survive — this pins that the scheduler passes a real predicate
     // (goes red if the call site ever substitutes `() => true`).
     const stray = mkDebugLog('notes', old);
+    // Near-miss names: the allowlist is exact-match, so prefix or case
+    // widenings must not make these sweepable.
+    const prefixed = mkDebugLog('workspace-mcp-discovery-old', old);
+    const recased = mkDebugLog('Transcript-Replay', old);
 
     await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
 
     expect(fs.existsSync(replay)).toBe(false);
     expect(fs.existsSync(discovery)).toBe(false);
     expect(fs.existsSync(stray)).toBe(true);
+    expect(fs.existsSync(prefixed)).toBe(true);
+    expect(fs.existsSync(recased)).toBe(true);
   });
 
   it('throttles cleanup independently for different runtime directories', async () => {
