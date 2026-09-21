@@ -268,11 +268,20 @@ describe('smoke lane browser projects', () => {
   // collects fewer tests — so deleting or re-scoping the WebKit project would
   // silently drop the repo's only WebKit execution while the separately
   // pinned WebKit install steps (scripts/tests/no-ak-integration-ci.test.js)
-  // keep every gate green.
+  // keep every gate green. A covering `testIgnore` or `grepInvert` on the
+  // project loses the lane the same way, so those are rejected too.
   it('keeps a WebKit and a Chromium mobile project intersecting --grep @smoke', () => {
     const projects = smokeConfig.projects ?? [];
     const coversMobileSpecs = (project: (typeof projects)[number]) =>
       [project.testMatch ?? []]
+        .flat()
+        .some((pattern) =>
+          typeof pattern === 'string'
+            ? pattern.includes('*.mobile.spec.ts')
+            : pattern.test('fake.mobile.spec.ts'),
+        );
+    const excludesMobileSpecs = (project: (typeof projects)[number]) =>
+      [project.testIgnore ?? []]
         .flat()
         .some((pattern) =>
           typeof pattern === 'string'
@@ -286,17 +295,40 @@ describe('smoke lane browser projects', () => {
         greps.some((grep) => new RegExp(grep).test('@smoke'))
       );
     };
+    const excludesSmokeGrep = (project: (typeof projects)[number]) =>
+      [project.grepInvert ?? []]
+        .flat()
+        .some((grep) => new RegExp(grep).test('@smoke'));
     for (const browserType of ['chromium', 'webkit'] as const) {
       const matching = projects.filter(
         (project) =>
           project.use?.defaultBrowserType === browserType &&
           coversMobileSpecs(project) &&
-          intersectsSmokeGrep(project),
+          !excludesMobileSpecs(project) &&
+          intersectsSmokeGrep(project) &&
+          !excludesSmokeGrep(project),
       );
       expect(
         matching.length,
         `playwright.config.ts must keep a ${browserType} mobile project reachable from --grep @smoke`,
       ).toBeGreaterThan(0);
     }
+  });
+
+  it('keeps the smoke script selecting across every configured project', () => {
+    // The projects above are reached only because `test:e2e:smoke` greps
+    // across all of them; a `--project` flag on the script would drop the
+    // WebKit lane while every gate stays green.
+    const { scripts } = JSON.parse(
+      readFileSync(join(HERE, '..', 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, string> };
+    const smoke = scripts?.['test:e2e:smoke'] ?? '';
+    expect(smoke, 'test:e2e:smoke must select by grep').toContain(
+      '--grep @smoke',
+    );
+    expect(
+      smoke,
+      'test:e2e:smoke must not narrow selection to a subset of projects',
+    ).not.toMatch(/--project\b/);
   });
 });

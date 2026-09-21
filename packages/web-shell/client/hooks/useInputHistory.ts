@@ -127,6 +127,10 @@ export function useInputHistory(
     (text: string) => {
       const h = readCurrentHistory();
       if (h[h.length - 1] === text) {
+        // Adopt the fresh read only outside an active browse, where it would
+        // desync the browse index from the array it points into; otherwise
+        // entries written behind this hook would drop out of memory.
+        if (indexRef.current === -1) historyRef.current = h;
         if (
           unsavedHistoryRef.current ||
           (fallbackStorageKeyRef.current &&

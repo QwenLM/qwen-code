@@ -88,6 +88,9 @@ it('keeps a browsing snapshot and draft until the next navigation cycle', () => 
   act(() => expect(history.navigateUp('working draft')).toBe('third'));
 });
 
+// Live production route: commitAccepted's source-changed branch
+// (useComposerCore) pushes without reset(); the plain submit path resets
+// the browse index right after push, so it cannot arrive here mid-browse.
 it('returns to the draft when a duplicate push arrives mid-browse', () => {
   pushInputHistoryEntry('workspace', 'a');
   pushInputHistoryEntry('workspace', 'b');
@@ -97,6 +100,24 @@ it('returns to the draft when a duplicate push arrives mid-browse', () => {
   act(() => history.push('x'));
   act(() => expect(history.navigateDown()).toBe('my draft'));
   act(() => expect(history.navigateDown()).toBeNull());
+});
+
+it('keeps entries written behind the hook when a duplicate push fails to save', () => {
+  pushInputHistoryEntry('legacy', 'a');
+  render('workspace', 'legacy');
+  pushInputHistoryEntry('legacy', 'b');
+  const save = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    throw new DOMException('Quota exceeded', 'QuotaExceededError');
+  });
+  act(() => history.push('b'));
+  expect(history.getReverseMatches('')).toEqual(['b', 'a']);
+  save.mockRestore();
+  act(() => history.push('later input'));
+  expect(JSON.parse(localStorage.getItem('workspace')!)).toEqual([
+    'a',
+    'b',
+    'later input',
+  ]);
 });
 
 it('uses workspace history ahead of fallback and respects disabled fallback', () => {
