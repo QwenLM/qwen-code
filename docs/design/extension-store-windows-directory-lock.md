@@ -442,7 +442,8 @@ the tree behind it intact; a junctioned destination replaced by the restore rath
 than written through; recovery reading its journals through a linked transactions
 root; a copy-mode uninstall restoring the installed tree when its wipe is blocked,
 including a child the wipe had already deleted; a non-lock rollback
-failure still reaching the caller; an entry whose type changes
+failure still reaching the caller with the journal quarantined so the doomed
+restore does not re-enter on every later operation; an entry whose type changes
 between versions being reconciled so the copy runs; an interrupted backup's `.partial` tree being removed by
 recovery; the staging tree being gone after a copy swap; quarantining a journal whose strategy is unrecognised; and the pre-existing
 journals without the new fields keeping their current behaviour. What is not
@@ -478,7 +479,10 @@ Acceptance:
   mutation, a genuinely unresolved one is refused, a rollback whose retry cannot
   produce a loadable artifact stops the caller, and a blocked rollback is retried on
   a deferred window); newest-first replay on a generation key no pass can move,
-  shared with the commit guard; lock-classified retries on the
+  shared with the commit guard; older journals of a destination whose newer was
+  deferred this pass are not allowed to apply, and a non-lock restore failure
+  quarantines the journal so the doomed restore is not re-attempted on every
+  later operation; lock-classified retries on the
   removals a rollback and a journal teardown perform, with one allowance per store
   operation; the `.partial` sibling those teardowns remove; and the refusal, with
   the locked-directory text, that a blocked rollback leaves on Windows.

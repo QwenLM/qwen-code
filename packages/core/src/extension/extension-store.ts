@@ -159,6 +159,38 @@ function isNotFoundError(error: unknown): boolean {
   return isNodeError(error) && error.code === 'ENOENT';
 }
 
+// Synthetic lock error for marking an older journal whose newer was deferred
+// this pass: no real lock happened, but the owed step needs its window.
+function lockErrorFor(path: string): NodeJS.ErrnoException {
+  const error = new Error('EPERM') as NodeJS.ErrnoException;
+  error.code = 'EPERM';
+  error.path = path;
+  return error;
+}
+
+// Move a journal whose restore is unrecoverable aside so the next pass
+// does not re-enter the doomed branch.
+async function quarantineJournal(
+  journalPath: string,
+  cause: unknown,
+): Promise<boolean> {
+  const quarantinePath = `${journalPath}.corrupt-${crypto.randomUUID()}`;
+  try {
+    await fsp.rename(journalPath, quarantinePath);
+    debugLogger.warn(
+      `Quarantined unrecoverable transaction journal at ${quarantinePath}:`,
+      cause,
+    );
+    return true;
+  } catch (renameError) {
+    debugLogger.warn(
+      `Extension transaction journal could not be quarantined at ${journalPath}:`,
+      renameError,
+    );
+    return false;
+  }
+}
+
 /**
  * Whether a transaction no longer needs its rollback: its state is committed,
  * or a rollback already restored the destination and only left its backup
@@ -1756,40 +1788,82 @@ export class ExtensionStore {
     // One allowance per recovery pass, so stacked journals cannot multiply it.
     const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
     const snapshot = await this.readSnapshotUnlocked();
-    for (const {
-      journalPath,
-      journal,
-    } of await this.orderedPendingTransactions(transactionsDir)) {
-      if (isTransactionResolved(journal, snapshot)) {
-        if (this.retryDue(journal)) {
-          try {
-            await this.removeTransactionTeardown(journal, journalPath, budget);
-          } catch (error: unknown) {
-            // The destination is already settled. Keep the journal so a later
-            // operation can retry cleanup, and hand a held removal its window
-            // back so the retry does not tax every operation in the meantime.
-            if (isDirectoryLockError(error)) {
-              await this.recordPendingStep(
+    const groups = new Map<
+      string,
+      Array<{ journalPath: string; journal: ExtensionTransactionJournal }>
+    >();
+    for (const entry of await this.orderedPendingTransactions(
+      transactionsDir,
+    )) {
+      const destination = path.resolve(entry.journal.destinationDirectory);
+      if (!groups.has(destination)) groups.set(destination, []);
+      groups.get(destination)!.push(entry);
+    }
+    let firstUnrecoverable: unknown = null;
+    for (const journals of groups.values()) {
+      let decided: 'deferred' | 'unrecoverable' | null = null;
+      for (const { journalPath, journal } of journals) {
+        if (isTransactionResolved(journal, snapshot)) {
+          if (this.retryDue(journal)) {
+            try {
+              await this.removeTransactionTeardown(
                 journal,
                 journalPath,
-                'cleanup',
-                error,
+                budget,
               );
+            } catch (error: unknown) {
+              if (isDirectoryLockError(error)) {
+                await this.recordPendingStep(
+                  journal,
+                  journalPath,
+                  'cleanup',
+                  error,
+                );
+              }
             }
           }
+          continue;
         }
-        continue;
-      }
-      if (journal.rollbackBlocked && !this.retryDue(journal)) {
-        // Not its turn to retry - unless retrying could not produce a
-        // loadable artifact, which still refuses without touching the tree.
-        if (!(await this.canRetryRollback(journal))) {
-          throw this.windowRefusal(journal);
+        if (decided === 'deferred') {
+          // Newer journal owns the restore until its window; older ones wait.
+          await this.recordPendingStep(
+            journal,
+            journalPath,
+            'rollback',
+            lockErrorFor(journal.backupDirectory),
+          );
+          continue;
         }
-        continue;
+        if (decided === 'unrecoverable') {
+          // Newer journal was quarantined - this one is now the newest owed step.
+          decided = null;
+        }
+        if (journal.rollbackBlocked && !this.retryDue(journal)) {
+          if (!(await this.canRetryRollback(journal))) {
+            throw this.windowRefusal(journal);
+          }
+          decided = 'deferred';
+          continue;
+        }
+        try {
+          if (!(await this.attemptRollback(journal, journalPath, budget))) {
+            decided = 'deferred';
+          }
+        } catch (error: unknown) {
+          // Lock-classified errors already carry their window; only a true
+          // non-lock failure needs quarantine.
+          if (
+            !isDirectoryLockError(error) &&
+            !(error instanceof ExtensionDirectoryLockedError)
+          ) {
+            await quarantineJournal(journalPath, error);
+          }
+          decided = 'unrecoverable';
+          if (firstUnrecoverable === null) firstUnrecoverable = error;
+        }
       }
-      await this.attemptRollback(journal, journalPath, budget);
     }
+    if (firstUnrecoverable !== null) throw firstUnrecoverable;
   }
 
   /** The refusal for a blocked rollback whose retry could not leave a loadable
@@ -1804,9 +1878,9 @@ export class ExtensionStore {
 
   /** Rolls a journal back and tears it down, reporting whether the transaction
    *  is now gone. A lock-defeated restore that got its mark and can still
-   *  recover returns false - deferred, not resolved. A non-lock failure, an
-   *  un-landable marker, and a restore that cannot leave a loadable artifact
-   *  all throw. */
+   *  recover returns false - deferred, not resolved. A non-lock failure,
+   *  an un-landable marker, and a restore that cannot leave a loadable
+   *  artifact all throw - the recovery loop decides whether to quarantine. */
   private async attemptRollback(
     journal: ExtensionTransactionJournal,
     journalPath: string,
@@ -1917,9 +1991,9 @@ export class ExtensionStore {
     const transactionsDir = path.join(this.storeDir, 'transactions');
     const snapshot = await this.readSnapshotUnlocked();
     const resolvedDestination = path.resolve(destinationDirectory);
-    // One allowance per guard pass, matching recovery's rule: stacked
-    // journals must not multiply it.
     const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
+    let decided: 'deferred' | 'unrecoverable' | null = null;
+    let deferredJournal: ExtensionTransactionJournal | null = null;
     for (const {
       journalPath,
       journal,
@@ -1930,17 +2004,40 @@ export class ExtensionStore {
       ) {
         continue;
       }
-      // The retry window defers reads, not a mutation of the very directory
-      // it waits on: this destination gets its owed rollbacks right now, in
-      // the same newest-first order recovery would replay.
-      if (!(await this.attemptRollback(journal, journalPath, budget))) {
-        // Still blocked after a fresh attempt, so the diagnosis is current.
-        throw process.platform === 'win32'
-          ? new ExtensionDirectoryLockedError(journal.destinationDirectory)
-          : new ExtensionConflictError(
-              `Extension transaction ${journal.transactionId} for ${destinationDirectory} is still unresolved.`,
-            );
+      if (decided === 'deferred') {
+        await this.recordPendingStep(
+          journal,
+          journalPath,
+          'rollback',
+          lockErrorFor(journal.backupDirectory),
+        );
+        continue;
       }
+      if (decided === 'unrecoverable') {
+        decided = null;
+      }
+      try {
+        if (!(await this.attemptRollback(journal, journalPath, budget))) {
+          decided = 'deferred';
+          deferredJournal = journal;
+        }
+      } catch (error: unknown) {
+        if (
+          !isDirectoryLockError(error) &&
+          !(error instanceof ExtensionDirectoryLockedError)
+        ) {
+          await quarantineJournal(journalPath, error);
+        }
+        throw error;
+      }
+    }
+    if (decided === 'deferred') {
+      // Still blocked after a fresh attempt, so the diagnosis is current.
+      throw process.platform === 'win32'
+        ? new ExtensionDirectoryLockedError(destinationDirectory)
+        : new ExtensionConflictError(
+            `Extension transaction ${deferredJournal!.transactionId} for ${destinationDirectory} is still unresolved.`,
+          );
     }
   }
 
@@ -2067,21 +2164,13 @@ export class ExtensionStore {
       return await this.readJournalUnlocked(journalPath);
     } catch (error) {
       if (!(error instanceof ExtensionStoreCorruptError)) throw error;
-      const quarantinePath = `${journalPath}.corrupt-${crypto.randomUUID()}`;
-      try {
-        await fsp.rename(journalPath, quarantinePath);
-      } catch (quarantineError) {
+      const quarantined = await quarantineJournal(journalPath, error);
+      if (!quarantined) {
         throw new ExtensionStoreCorruptError(
           `Extension transaction journal is corrupt and could not be quarantined at ${journalPath}.`,
-          {
-            cause: new AggregateError([error, quarantineError]),
-          },
+          { cause: error },
         );
       }
-      debugLogger.warn(
-        `Quarantined corrupt extension transaction journal at ${quarantinePath}:`,
-        error,
-      );
       return undefined;
     }
   }

@@ -5069,9 +5069,75 @@ describe('ExtensionStore', () => {
         expect(await fsp.readFile(path.join(otherDir, 'version'), 'utf8')).toBe(
           'b-old',
         );
+
+        // Older journal of a deferred destination must not apply: hold only T2's
+        // restore, T1 stays marked but untouched and its backup survives.
+        await plantStackedPair(store);
+        const internals2 = store as unknown as {
+          copyTree: (
+            source: string,
+            target: string,
+            budget: unknown,
+          ) => Promise<void>;
+        };
+        const copyTree2 = internals2.copyTree.bind(store);
+        const rollbackRoot2 = path.join(storeDir, 'rollback');
+        vi.spyOn(internals2, 'copyTree').mockImplementation(
+          async (source: string, target: string, budget: unknown) => {
+            if (source === path.join(rollbackRoot2, 'stack-t2')) {
+              throw lockError(source);
+            }
+            return await copyTree2(source, target, budget);
+          },
+        );
+        await store.readSnapshot();
+        expect((await leftoverJournals()).sort()).toEqual([
+          'stack-t1.json',
+          'stack-t2.json',
+        ]);
+        expect(
+          await fsp.stat(path.join(rollbackRoot2, 'stack-t1')),
+        ).toBeDefined();
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('three');
       } finally {
         vi.restoreAllMocks();
       }
+    });
+
+    it('quarantines a journal whose restore fails for a non-lock reason', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      await plantStackedPair(store);
+      const rollbackRoot = path.join(storeDir, 'rollback');
+      const internals = store as unknown as {
+        copyTree: (
+          source: string,
+          target: string,
+          budget: unknown,
+        ) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string, budget: unknown) => {
+          if (source === path.join(rollbackRoot, 'stack-t2')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            error.path = source;
+            throw error;
+          }
+          return await copyTree(source, target, budget);
+        },
+      );
+      // The first caller sees the raw errno; the doomed journal is quarantined,
+      // so the next caller heals T1 in the same pass.
+      const first: unknown = await store
+        .readSnapshot()
+        .catch((error: unknown) => error);
+      expect((first as NodeJS.ErrnoException).code).toBe('ENOENT');
+      expect(await leftoverJournals()).toEqual([]);
+      await store.readSnapshot();
     });
 
     // The gate's question is the backup comparison, not the manifest name:
