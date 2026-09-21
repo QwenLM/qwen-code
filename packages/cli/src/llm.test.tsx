@@ -37,7 +37,12 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, InputFormat, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  InputFormat,
+  OutputFormat,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
