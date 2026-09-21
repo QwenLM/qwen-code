@@ -1559,7 +1559,14 @@ describe('fetch-pr report assembly', () => {
       // Nothing was created through the link — no mkdir, no worktree add —
       // and the fetched ref survives the refusal for the next run's
       // cleanStale to sweep (the arm sits outside the rollback try).
-      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      //
+      // ONE mkdir, not none: the entry guard creates `.qwen/tmp` before any
+      // of this, while the mock still answers ENOENT for the relative
+      // spelling it asks about — the link this test plants is the one that
+      // appears afterwards. Step 4's `mkdirSync(dirname(wt))` takes the very
+      // same arguments, so the count is what tells them apart: a second call
+      // is the create through the link.
+      expect(producerMocks.mkdirSync).toHaveBeenCalledTimes(1);
       expect(producerMocks.git).not.toHaveBeenCalledWith(
         'worktree',
         'add',
@@ -1596,7 +1603,8 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         /refusing to create a review worktree at .*is a symlink/,
       );
-      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      // The entry guard's mkdir only — see the ancestor test above.
+      expect(producerMocks.mkdirSync).toHaveBeenCalledTimes(1);
       expect(producerMocks.git).not.toHaveBeenCalledWith(
         'worktree',
         'add',

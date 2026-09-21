@@ -724,6 +724,24 @@ describe('ensureReviewTmpDir — the guarded set is pinned, not documented', () 
           'cwd-scoped guard cannot check; its only writing caller is ' +
           'fetch-pr, which guards the cwd it then passes',
       ],
+      [
+        'commands/review/lib/local-diff.ts',
+        'names the directory to filter review plumbing out of a captured ' +
+          'diff, writes none',
+      ],
+      [
+        'commands/review/lib/worktree.ts',
+        'names the directory to tell whether a path is inside a review ' +
+          'mount; what it writes lands in an OS temp dir or inside a ' +
+          'worktree fetch-pr created under the guard',
+      ],
+      [
+        'commands/review/revert-hunk.ts',
+        'names the directory to bound its --tree ancestor walk; its patch ' +
+          'goes to an OS temp dir, and its --out report needs the --diff a ' +
+          'capture wrote and the --tree fetch-pr created, so it is never a ' +
+          'round first writer',
+      ],
     ]);
     const root = join(dirname(fileURLToPath(import.meta.url)), '../../..');
     const walk = (rel: string): string[] =>
