@@ -35,12 +35,12 @@ text and injected notes become part of that provider's input.
 
 The inspected source separates four capabilities:
 
-| Capability              | Confirmed behavior                                                                                                                           | Qwen Code adaptation                                                               |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `get_context_remaining` | Reports runtime-accounted remaining tokens; it can return an unknown value.                                                                  | Reuse Qwen Code's per-chat, per-route prompt accounting and threshold calculation. |
-| `new_context`           | Sets a pending request; the runtime installs a fresh window without summarization. It does not write or validate notes.                      | Require a valid persisted notes revision and commit at a safe send boundary.       |
-| `notes.*`               | Dedicated tools call `alpha/notes/v2/*`; file paths are virtual. The extension requires the appropriate provider and backend authentication. | Store session-scoped notes locally, behind a small built-in tool.                  |
-| `history.*`             | Dedicated tools query normalized backend history.                                                                                            | Query the existing local session transcript through its validated active branch.   |
+| Capability              | Confirmed behavior                                                                                                                                                                                                            | Qwen Code adaptation                                                                                  |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `get_context_remaining` | Reports runtime-accounted remaining tokens; it can return an unknown value.                                                                                                                                                   | Reuse Qwen Code's per-chat, per-route prompt accounting and threshold calculation.                    |
+| `new_context`           | Sets a pending request; the runtime installs a fresh window without summarization. It does not write or validate notes.                                                                                                       | Require the latest persisted active-branch notes revision; validate the reset observation separately. |
+| `notes.*`               | Notes persist across progress and windows without a source-leaf freshness check. Dedicated tools call `alpha/notes/v2/*`; file paths are virtual. The extension requires the appropriate provider and backend authentication. | Store session-scoped notes locally, behind a small built-in tool.                                     |
+| `history.*`             | Dedicated tools query normalized backend history.                                                                                                                                                                             | Query the existing local session transcript through its validated active branch.                      |
 
 Codex retains budget reminders and a forced-rollover threshold. Its notes hint
 is capped at 4,000 bytes and supplies an entry point rather than automatically
@@ -180,7 +180,7 @@ queued steering, before tool execution; the OpenTUI delivery boundary includes
 its deferred recordings. ACP binds the persisted user record UUID to resolved
 input parts so images, hooks and expanded commands do not break coverage.
 A cancelled or locally handled input releases its pending delivery marker; it
-does not make an old note fresh. The built-in ACP `/compress` is recorded as
+does not retroactively extend an old note’s coverage. The built-in ACP `/compress` is recorded as
 existing slash-command bookkeeping rather than a new model-facing user request. Use relative record references; never persist a parent
 session ID or an absolute notes path inside this payload.
 
@@ -188,9 +188,10 @@ Derive the current `windowId` from the latest compression checkpoint UUID on
 the active chain, or its first substantive record UUID before the first compression.
 Creation metadata is excluded because forks can replace it. A new
 window uses its committed compression record UUID. These identities survive
-resume and fork without another window ledger. Notes from the preceding window
-remain readable, but only a fresh write in the current window can authorize
-the next notes rollover.
+resume and fork without another window ledger. The latest saved notes on the
+active branch remain usable after ordinary progress and across windows. Their
+original window and covered leaf remain unchanged; they describe coverage, not
+an expiry condition.
 
 Write the canonical record through a strict recorder method, then atomically
 materialize the Markdown sidecar using a temporary sibling and rename. The tool
@@ -225,7 +226,8 @@ can use the same contract. They operate on the current session only.
 | `new_context`           | Requires `notes_revision` from a successful notes write. Validates eligibility and queues one request. The result says that the transition is pending; it must not claim that the new context is already installed.                                                                 |
 
 Notes writes and reset requests are serialized. A model must await the notes
-write before requesting rollover. In the first release, both a notes write and
+write before using its revision for rollover, but it need not immediately
+precede the reset or occur in the same window. In the first release, both a notes write and
 `new_context` must each be the sole call in a tool-only response, with no ordinary
 assistant text; this also avoids advancing the observed frontier with that
 response's own work output. Reject a mixed batch. All four tools are direct-only in code mode: their ordinary declarations remain
@@ -268,21 +270,23 @@ estimate. Include pending user input, tool declarations, previous output, and
 restoration content through the existing accounting rules. Do not use the
 process-global telemetry total or copy Codex's model-specific constants.
 
-| Situation                                    | Notes-mode behavior                                                                                                                                                                                                     |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Normal work                                  | The model updates notes at useful milestones and may request an early rollover.                                                                                                                                         |
-| Warning threshold                            | Add one bounded reminder per window to refresh notes and retain useful history references.                                                                                                                              |
-| Automatic threshold or screenshot trigger    | At a safe boundary, use a fresh valid note; otherwise use existing summary compression. The initial release adds no emergency note-writing model loop.                                                                  |
-| Hard threshold or reactive provider overflow | Apply existing output/body guards. Attempt notes rollover only if it is already safe; otherwise use the existing bounded summary rescue.                                                                                |
-| `/compress`                                  | Use the selected strategy. If its note is missing/stale, fall back to summary. `/compress <instructions>` uses summary so those instructions keep their existing meaning. `/compress-fast` keeps its explicit behavior. |
+| Situation                                    | Notes-mode behavior                                                                                                                                                                                                             |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Normal work                                  | The model updates notes at useful milestones and may request an early rollover.                                                                                                                                                 |
+| Warning threshold                            | Add one bounded reminder per window to refresh notes and retain useful history references.                                                                                                                                      |
+| Automatic threshold or screenshot trigger    | At a safe boundary, use the latest bounded, persisted active-branch note; otherwise use existing summary compression. The initial release adds no emergency note-writing model loop.                                            |
+| Hard threshold or reactive provider overflow | Apply existing output/body guards. Attempt notes rollover only if it is already safe; otherwise use the existing bounded summary rescue.                                                                                        |
+| `/compress`                                  | Use the selected strategy. If its note is missing or ineligible, fall back to summary. `/compress <instructions>` uses summary so those instructions keep their existing meaning. `/compress-fast` keeps its explicit behavior. |
 
-A notes revision is fresh when it belongs to the active chain and window and
-covers the latest substantive transcript state. Pure notes/history/budget/reset
-bookkeeping does not advance that state. A new real user message, ordinary tool
-result, assistant work output, or actionable runtime event does. A mixed tool
-batch containing ordinary work invalidates an earlier note; metadata tools must
-not be a way to hide subsequent work. Freshness is a mechanical guard, not proof
-that the prose accurately captures the task.
+Saved notes availability is separate from observation freshness. Ordinary
+assistant output, consumed user input, tool results, and a new window do not
+invalidate the latest persisted active-branch revision. The model should update
+notes at meaningful milestones and recover omitted progress through history.
+A notes write still requires an exact observation of the current substantive
+frontier. A reset request validates and captures its own current observation,
+then rechecks it after reading notes and before consuming the pending reset.
+Later input cancels that request; earlier notes coverage does not. These checks
+prevent input loss and do not prove that the prose accurately captures the task.
 
 The common transition follows this order:
 
@@ -298,6 +302,11 @@ The common transition follows this order:
 4. Strictly append one `system/chat_compression` checkpoint with the complete
    `compressedHistory`, existing completion metadata, and additive notes metadata:
    `strategy: notes`, new/previous window IDs, notes revision, and covered leaf.
+   The previous window is the actual window being replaced; the covered leaf
+   remains the note’s original coverage. Recheck the attempt frontier and latest
+   active-branch revision, and ensure all unobserved input is included in the
+   actual pending message appended to the candidate. Previewing that coverage
+   does not mark the input consumed.
    Confirm this specific append; `recordChatCompression(); await flush()` is
    insufficient because an inactive recorder can silently skip the append.
 5. Once the commit is durable, install that exact history, update per-chat token
@@ -324,7 +333,7 @@ cancels the pending reset; the next attempt must capture the new state. Once
 that append starts, do not cancel or roll back its write: input/abort arriving
 during I/O is handled after the commit boundary, or under write-failure handling
 if the append fails. A bare `new_context` with missing
-or stale notes returns an actionable error and leaves history intact.
+or superseded/abandoned notes returns an actionable error and leaves history intact.
 
 ### 4.5 New-window content
 
@@ -332,14 +341,15 @@ Rebuild the existing system instructions, effective tools, permissions, and
 environment. The replacement conversation contains:
 
 - A recognized compression/restoration wrapper with the bounded checkpoint
-  text, previous window ID, notes revision, and history-retrieval hint. The new
+  text, note-writing window ID, covered leaf, notes revision, and history-retrieval
+  hint. The hint explains that later progress may be absent from the notes. The new
   window ID is the committed compression record UUID and is available through
   `get_context_remaining`.
-- The latest actual user request already consumed by the old window, selected
-  from recorded provenance and including consumed mid-turn steering, preserved
-  verbatim with its source UUID inside the synthetic
-  restoration prefix. Do not duplicate it as another ordinary user turn.
-  Pending input is appended exactly once. Older user requests
+- The latest actual user request, selected from recorded provenance and
+  including mid-turn steering. If already consumed by the old window, preserve
+  it verbatim with its source UUID inside the synthetic restoration prefix.
+  If it is pending, preserve it only in the pending input appended exactly once.
+  Do not duplicate a pending user request in the restoration prefix. Older user requests
   remain addressable through history and must be represented in the notes when
   still relevant.
 - Existing required runtime reminders, active plan/goal state, tool-discovery
@@ -354,9 +364,11 @@ a new session, reset usage budgets, or cancel background tasks.
 Exactly-once pending input must hold in the persisted checkpoint, live history,
 and cold replay. A pending user message or ordinary tool result may have been
 recorded before the checkpoint even though it has not yet been sent. Such unseen
-input invalidates a proactive notes reset. If compression falls back to summary,
-the candidate must contain that pending content once, retain the matching call
-for a pending tool result, and tell the caller it has already included it.
+input invalidates a proactive reset requested before it arrived. An automatic
+notes handoff can proceed if all unobserved input is included in the actual
+pending message. Unrelated queued input prevents that handoff. Both notes and
+summary candidates must contain the pending content once, retain the matching
+call for a pending tool result, and tell the caller it has already included it.
 Appending it only to memory after commit loses it on
 resume; selecting it as the old window's latest user request duplicates it.
 
@@ -367,17 +379,17 @@ constraint or a note silently to report a successful transition.
 
 ### 4.6 Failure, resume, fork, and cleanup
 
-| Condition                                                       | Required outcome                                                                                                                                                                                             |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Notes are missing, stale, oversize, or projection repair fails  | Explicit reset fails without changing history; automatic/manual compression uses summary while the recorder is healthy.                                                                                      |
-| Recording is disabled from session start                        | Use existing summary mode. Do not create notes/history storage against the user's setting.                                                                                                                   |
-| Writer is lost, inactive, or has failed after notes mode starts | Preserve the active history and stop the transition under existing session-write failure semantics. Do not bypass the failed writer with a summary reset.                                                    |
-| Neither notes nor summary can produce an admissible request     | Surface the existing recoverable compression failure; retain history and notes. No empty-window fallback or unbounded retry.                                                                                 |
-| Process dies during commit or Markdown rename                   | Replay the last complete valid canonical record, repair the projection, and use existing partial-tail/integrity handling. Never prefer a newer orphan sidecar.                                               |
-| Resume                                                          | Restore compressed history, window metadata, and latest valid notes on the active branch. Include notes in selective cold restore used by ACP/daemon, not only the full-file loader.                         |
-| Fork                                                            | Copy canonical records using existing fork rules, retain stable record references, and materialize an independent sidecar in the destination session. No writes flow back to the parent.                     |
-| Rewind                                                          | Use existing supported targets, clear pending resets, invalidate cursors, and regenerate notes from the resulting branch. Do not resurrect post-target notes or relax current compressed-turn restrictions.  |
-| Archive/delete/retention                                        | Move or delete the Markdown sidecar with its transcript through existing session maintenance ownership. Clear in-memory cursors/caches. Rebuildable sidecars do not justify an independent retention system. |
+| Condition                                                                      | Required outcome                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Notes are missing, superseded, abandoned, oversize, or projection repair fails | Explicit reset fails without changing history; automatic/manual compression uses summary while the recorder is healthy.                                                                                      |
+| Recording is disabled from session start                                       | Use existing summary mode. Do not create notes/history storage against the user's setting.                                                                                                                   |
+| Writer is lost, inactive, or has failed after notes mode starts                | Preserve the active history and stop the transition under existing session-write failure semantics. Do not bypass the failed writer with a summary reset.                                                    |
+| Neither notes nor summary can produce an admissible request                    | Surface the existing recoverable compression failure; retain history and notes. No empty-window fallback or unbounded retry.                                                                                 |
+| Process dies during commit or Markdown rename                                  | Replay the last complete valid canonical record, repair the projection, and use existing partial-tail/integrity handling. Never prefer a newer orphan sidecar.                                               |
+| Resume                                                                         | Restore compressed history, window metadata, and latest valid notes on the active branch. Include notes in selective cold restore used by ACP/daemon, not only the full-file loader.                         |
+| Fork                                                                           | Copy canonical records using existing fork rules, retain stable record references, and materialize an independent sidecar in the destination session. No writes flow back to the parent.                     |
+| Rewind                                                                         | Use existing supported targets, clear pending resets, invalidate cursors, and regenerate notes from the resulting branch. Do not resurrect post-target notes or relax current compressed-turn restrictions.  |
+| Archive/delete/retention                                                       | Move or delete the Markdown sidecar with its transcript through existing session maintenance ownership. Clear in-memory cursors/caches. Rebuildable sidecars do not justify an independent retention system. |
 
 Old transcripts have no notes metadata and retain existing replay behavior.
 The additive checkpoint still carries ordinary `Content[]`, allowing an older
@@ -412,19 +424,21 @@ only registers tools on the normal path does not meet this contract.
 
 ## 6. Decisions and tradeoffs
 
-| Decision                                           | Reason                                                                                                   |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| One bounded checkpoint                             | Enough for goals, state, next steps, and history references; avoids a second file-management product.    |
-| Canonical log plus generated Markdown              | Supports inspection and branch-correct recovery using one replay authority.                              |
-| Inject checkpoint text on reset                    | Removes a recovery tool round trip and a fragile dependency on model compliance.                         |
-| Dedicated scoped tools                             | Work with hosted, sandboxed, and read-only-workspace flows without granting arbitrary filesystem access. |
-| No final summarizer on a successful notes rollover | The main model maintains state incrementally; no repeated full-history summary is needed.                |
-| Summary default and fallback                       | Notes quality and retrieval behavior must be measured across models before changing the default.         |
-| Reuse existing thresholds initially                | Preserves established safety margins while the new handoff behavior is evaluated.                        |
+| Decision                                           | Reason                                                                                                       |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Saved notes survive progress and windows           | Coverage records what the model saw; history recovers later work without forcing a notes rewrite every turn. |
+| One bounded checkpoint                             | Enough for goals, state, next steps, and history references; avoids a second file-management product.        |
+| Canonical log plus generated Markdown              | Supports inspection and branch-correct recovery using one replay authority.                                  |
+| Inject checkpoint text on reset                    | Removes a recovery tool round trip and a fragile dependency on model compliance.                             |
+| Dedicated scoped tools                             | Work with hosted, sandboxed, and read-only-workspace flows without granting arbitrary filesystem access.     |
+| No final summarizer on a successful notes rollover | The main model maintains state incrementally; no repeated full-history summary is needed.                    |
+| Summary default and fallback                       | Notes quality and retrieval behavior must be measured across models before changing the default.             |
+| Reuse existing thresholds initially                | Preserves established safety margins while the new handoff behavior is evaluated.                            |
 
 ## 7. Constraints and risks
 
-- A fresh note can still be inaccurate. The transcript and explicit references
+- Saved notes can omit progress since their covered leaf, and even newly written
+  notes can be inaccurate. The transcript and explicit references
   make omissions recoverable, but do not prove that the model will recover them.
 - Notes writes, retrieval calls, and extra tool schemas consume tokens. Removing
   summarization calls alone does not establish a total cost or latency benefit.
@@ -444,6 +458,7 @@ only registers tools on the normal path does not meet this contract.
 ## 8. Validation and acceptance criteria
 
 The E2E plan and results are in `.qwen/e2e-tests/local-notes-compaction.md`;
+the notes-reuse regression plan is `.qwen/e2e-tests/notes-reuse-after-progress.md`;
 the deterministic localhost-model fixture is
 `.qwen/scripts/local-notes-compaction-e2e.mjs`. The global CLI baseline was
 verified before implementation. Runtime verification uses the local build,
@@ -470,9 +485,12 @@ Required evidence:
    and crash points around note/checkpoint writes and projection rename. Confirm
    that no uncommitted candidate replaces the active context and restart selects
    the committed branch state.
-3. **Concurrency and topology:** test a notes write followed by user steering,
+3. **Concurrency and topology:** reuse one saved revision after ordinary work
+   and across multiple windows, including cold replay. Verify pending input is
+   retained exactly once and its preview does not mark it consumed. Test a notes
+   write followed by user steering,
    a mixed parallel tool batch, abort, rewind, fork, and session rotation. Reject
-   stale revisions and branch-invalid history cursors; parent and child notes
+   superseded/abandoned revisions and branch-invalid history cursors; parent and child notes
    must remain independent.
 4. **Bounded retrieval:** test long and CJK-heavy logs, tool-call/result pairing,
    large truncated outputs, unavailable media/artifacts, partial scans, and

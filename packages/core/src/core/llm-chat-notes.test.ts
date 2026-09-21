@@ -29,8 +29,8 @@ describe('notes compaction commit boundary', () => {
       text: '# Goal\nKeep <analysis>literal notes</analysis>. Next: inspect the output.',
     };
     const state = {
-      windowId: 'window',
-      sourceLeafUuid: 'source',
+      windowId: 'later-window',
+      sourceLeafUuid: 'later-source',
       notes: revision,
       latestUser: {
         uuid: 'request',
@@ -93,7 +93,10 @@ describe('notes compaction commit boundary', () => {
     ];
     const chat = new LlmChat(config, {}, original, recorder);
     chat.setLastPromptTokenCount(22000, false);
-    vi.spyOn(SessionNotesService.prototype, 'getFreshNotes').mockResolvedValue({
+    vi.spyOn(
+      SessionNotesService.prototype,
+      'getNotesForHandoff',
+    ).mockResolvedValue({
       notes: revision,
       latestUser: state.latestUser,
     });
@@ -133,10 +136,17 @@ describe('notes compaction commit boundary', () => {
     expect(history).toContain('<analysis>literal notes</analysis>');
     expect(history).toContain('Preserve the exact user constraint.');
     expect(history).toContain('Preserve the hook context.');
+    expect(history).toContain(
+      'written in window window, covers through source',
+    );
+    expect(history).toContain('These notes may predate later work.');
     expect(history).not.toContain('past evidence');
     expect(chat.getHistory().at(-1)).toEqual(pending);
     expect(history.match(/"functionResponse"/gu)).toHaveLength(1);
     expect(included).toHaveBeenCalledOnce();
+    expect(
+      SessionNotesService.prototype.getNotesForHandoff,
+    ).toHaveBeenCalledWith(pending);
     const committed = vi.mocked(recorder.recordChatCompressionStrict).mock
       .calls[0][0];
     expect(committed.compressedHistory).toEqual(chat.getHistory());
@@ -176,7 +186,7 @@ describe('notes compaction commit boundary', () => {
     expect(post).not.toHaveBeenCalled();
     await expect(
       chat.tryCompress('prompt', true, undefined, { notesRevision: 'old' }),
-    ).rejects.toThrow('stale');
+    ).rejects.toThrow('unavailable');
     expect(chat.getHistory()).toEqual(original);
   });
 

@@ -9,7 +9,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { createUserContent } from '../core/genai-compat.js';
@@ -92,6 +92,18 @@ describe('local session notes', () => {
     text = '# Goal\nKeep the constraint. Next: inspect evidence.',
   ) {
     return notes.write(text, respond(ToolNames.SESSION_NOTES), signal);
+  }
+
+  function makeCheckpoint(compressedHistory: Content[]) {
+    return {
+      info: {
+        originalTokenCount: 10000,
+        newTokenCount: 100,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        strategy: 'notes' as const,
+      },
+      compressedHistory,
+    };
   }
 
   it('persists a bounded canonical revision before projecting Markdown and restores it cold', async () => {
@@ -203,7 +215,7 @@ describe('local session notes', () => {
 
   it('accepts consumed, guarded tool results by call identity and ignores maintenance traffic', async () => {
     recorder.recordUserMessage('keep the constraint');
-    await write();
+    const revision = await write();
     recorder.recordToolResult([
       {
         functionResponse: {
@@ -213,26 +225,19 @@ describe('local session notes', () => {
         },
       },
     ]);
-    expect(await notes.getFreshNotes()).toBeUndefined();
-    const observed = recorder.observeNotesInput(
-      createUserContent([
-        {
-          functionResponse: {
-            id: 'ordinary',
-            name: ToolNames.READ_FILE,
-            response: { output: 'guarded evidence' },
-          },
+    expect(await notes.getNotesForHandoff()).toBeUndefined();
+    const pending = createUserContent([
+      {
+        functionResponse: {
+          id: 'ordinary',
+          name: ToolNames.READ_FILE,
+          response: { output: 'guarded evidence' },
         },
-      ]),
-    );
-    expect(observed).toBeDefined();
-    notes.beginResponse(observed);
-    notes.finishResponse([{ functionCall: { name: ToolNames.SESSION_NOTES } }]);
-    const revision = await notes.write(
-      'updated checkpoint',
-      notes.captureResponse(),
-      signal,
-    );
+      },
+    ]);
+    expect((await notes.getNotesForHandoff(pending))?.notes).toEqual(revision);
+    expect(await notes.getNotesForHandoff()).toBeUndefined();
+    expect(recorder.observeNotesInput(pending)).toBeDefined();
     recorder.recordToolResult([
       {
         functionResponse: {
@@ -242,7 +247,141 @@ describe('local session notes', () => {
         },
       },
     ]);
-    expect((await notes.getFreshNotes())?.notes).toEqual(revision);
+    expect((await notes.getNotesForHandoff())?.notes).toEqual(revision);
+    await notes.requestReset(
+      revision.revision,
+      respond(ToolNames.NEW_CONTEXT, ''),
+      signal,
+    );
+    expect(notes.takePendingReset()).toBe(revision.revision);
+  });
+
+  it('reuses saved notes after ordinary assistant progress without changing their coverage', async () => {
+    recorder.recordUserMessage('keep the constraint');
+    const revision = await write();
+    recorder.recordAssistantTurn({
+      model: 'test',
+      message: [{ text: 'Completed the next step.' }],
+    });
+    expect(recorder.getSessionNotesState().sourceLeafUuid).not.toBe(
+      revision.sourceLeafUuid,
+    );
+    expect((await notes.getNotesForHandoff())?.notes).toEqual(revision);
+    await notes.requestReset(
+      revision.revision,
+      respond(ToolNames.NEW_CONTEXT, ''),
+      signal,
+    );
+    expect(notes.takePendingReset()).toBe(revision.revision);
+  });
+
+  it('requires all pending input in the actual checkpoint without consuming it or duplicating the latest user', async () => {
+    recorder.recordUserMessage('keep the constraint');
+    const revision = await write();
+    recorder.recordUserMessage('new steering');
+    const pending = createUserContent('new steering');
+    const state = recorder.getSessionNotesState();
+    expect(await notes.getNotesForHandoff()).toBeUndefined();
+    expect(await notes.getNotesForHandoff(pending)).toEqual({
+      notes: revision,
+      latestUser: undefined,
+    });
+    expect(await notes.getNotesForHandoff()).toBeUndefined();
+    await expect(
+      recorder.recordChatCompressionStrict(
+        makeCheckpoint([
+          createUserContent('checkpoint'),
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ]),
+        revision,
+        signal,
+        state,
+      ),
+    ).rejects.toThrow('pending session input');
+    await recorder.recordChatCompressionStrict(
+      makeCheckpoint([
+        createUserContent('checkpoint'),
+        { role: 'model', parts: [{ text: 'ack' }] },
+        pending,
+      ]),
+      revision,
+      signal,
+      state,
+    );
+    const restored = await reader.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(
+      JSON.stringify(restored?.runtime.apiHistory).match(/new steering/gu),
+    ).toHaveLength(1);
+    expect(await notes.getNotesForHandoff()).toBeUndefined();
+    expect(recorder.observeNotesInput(pending)?.latestUser?.text).toBe(
+      'new steering',
+    );
+    expect((await notes.getNotesForHandoff())?.notes).toEqual(revision);
+    recorder.recordUserMessage('same');
+    recorder.recordUserMessage('same');
+    expect(
+      await notes.getNotesForHandoff(createUserContent('same')),
+    ).toBeUndefined();
+    expect(
+      (
+        await notes.getNotesForHandoff(
+          createUserContent([{ text: 'same' }, { text: 'same' }]),
+        )
+      )?.notes,
+    ).toEqual(revision);
+  });
+
+  it('rejects concurrent input during handoff and does not revive a superseded revision', async () => {
+    recorder.recordUserMessage('keep the constraint');
+    const revision = await write();
+    const state = recorder.getSessionNotesState();
+    recorder.recordUserMessage('steering during compression');
+    await expect(
+      recorder.recordChatCompressionStrict(
+        makeCheckpoint([createUserContent('checkpoint')]),
+        revision,
+        signal,
+        state,
+      ),
+    ).rejects.toThrow('New session input arrived');
+    recorder.observeNotesInput(
+      createUserContent('steering during compression'),
+    );
+    await write('updated task');
+    await expect(
+      recorder.recordChatCompressionStrict(
+        makeCheckpoint([createUserContent('checkpoint')]),
+        revision,
+        signal,
+        recorder.getSessionNotesState(),
+      ),
+    ).rejects.toThrow('revision changed');
+    await expect(
+      notes.requestReset(
+        revision.revision,
+        respond(ToolNames.NEW_CONTEXT, ''),
+        signal,
+      ),
+    ).rejects.toThrow('missing or changed');
+  });
+
+  it('rechecks the reset observation after reading notes', async () => {
+    recorder.recordUserMessage('keep the constraint');
+    const revision = await write();
+    const response = respond(ToolNames.NEW_CONTEXT, '');
+    const read = notes.read.bind(notes);
+    vi.spyOn(notes, 'read').mockImplementationOnce(async () => {
+      const result = await read();
+      recorder.recordUserMessage('arrived during reset');
+      recorder.observeNotesInput(createUserContent('arrived during reset'));
+      return result;
+    });
+    await expect(
+      notes.requestReset(revision.revision, response, signal),
+    ).rejects.toThrow('observation is stale');
+    expect(notes.takePendingReset()).toBeUndefined();
   });
 
   it('rejects oversized ASCII and CJK notes, and cancels a pending reset on new input or abort', async () => {
@@ -287,7 +426,9 @@ describe('local session notes', () => {
     });
 
     expect(await notes.read()).toEqual(revision);
-    await expect(notes.getFreshNotes()).rejects.toThrow('819 estimated tokens');
+    await expect(notes.getNotesForHandoff()).rejects.toThrow(
+      '819 estimated tokens',
+    );
     await expect(
       notes.requestReset(
         revision.revision,
@@ -300,7 +441,7 @@ describe('local session notes', () => {
     const shortened = await write(
       'Keep the constraint. Next: inspect evidence.',
     );
-    expect((await notes.getFreshNotes())?.notes).toEqual(shortened);
+    expect((await notes.getNotesForHandoff())?.notes).toEqual(shortened);
     await notes.requestReset(
       shortened.revision,
       respond(ToolNames.NEW_CONTEXT, ''),
@@ -331,7 +472,7 @@ describe('local session notes', () => {
       new Error('sync failed'),
     );
     await expect(write('not committed')).rejects.toThrow('sync failed');
-    await expect(notes.getFreshNotes()).rejects.toThrow('sync failed');
+    await expect(notes.getNotesForHandoff()).rejects.toThrow('sync failed');
     expect((await reader.readNotesState(sessionId)).notes?.revision).toBe(
       recovered?.revision,
     );
@@ -341,7 +482,7 @@ describe('local session notes', () => {
     recorder.recordUserMessage('keep the constraint');
     const first = await write('first branch checkpoint');
     recorder.recordUserMessage('second user task');
-    await notes.write(
+    const abandoned = await notes.write(
       'abandoned checkpoint',
       respond(ToolNames.SESSION_NOTES, 'second user task'),
       signal,
@@ -364,6 +505,16 @@ describe('local session notes', () => {
     );
     const again = await reader.readNotesState(sessionId);
     expect(again.notes?.revision).toBe(first.revision);
+    expect((await notes.getNotesForHandoff())?.notes.revision).toBe(
+      first.revision,
+    );
+    await expect(
+      notes.requestReset(
+        abandoned.revision,
+        respond(ToolNames.NEW_CONTEXT, ''),
+        signal,
+      ),
+    ).rejects.toThrow('missing or changed');
   });
 
   it('does not overwrite a newer owner projection after losing the writer lease', async () => {
@@ -387,7 +538,7 @@ describe('local session notes', () => {
     expect(await fs.readFile(projection, 'utf8')).toBe('new owner checkpoint');
   });
 
-  it('commits pending input once and makes the preceding window notes stale after cold replay', async () => {
+  it('reuses the same notes across windows and cold replay while recording the actual preceding window', async () => {
     recorder.recordUserMessage('keep the constraint');
     const revision = await write();
     const pending = createUserContent([
@@ -429,7 +580,37 @@ describe('local session notes', () => {
     expect(
       JSON.stringify(restored.runtime.apiHistory).match(/"id":"reset"/gu),
     ).toHaveLength(1);
-    expect(await notes.getFreshNotes()).toBeUndefined();
+    recorder = new ChatRecordingService(
+      config,
+      undefined,
+      false,
+      restored.runtime.recording,
+    );
+    notes = new SessionNotesService(config, recorder);
+    expect((await notes.getNotesForHandoff())?.notes).toEqual(revision);
+    await notes.requestReset(
+      revision.revision,
+      respond(ToolNames.NEW_CONTEXT, ''),
+      signal,
+    );
+    expect(notes.takePendingReset()).toBe(revision.revision);
+    const payload = makeCheckpoint([createUserContent('checkpoint')]);
+    const next = await recorder.recordChatCompressionStrict(
+      payload,
+      revision,
+      signal,
+      recorder.getSessionNotesState(),
+    );
+    const records = await jsonl.read<ChatRecord>(transcriptPath);
+    expect(records.at(-1)?.systemPayload).toMatchObject({
+      notes: {
+        revision: revision.revision,
+        sourceLeafUuid: revision.sourceLeafUuid,
+        previousWindowId: window,
+        windowId: next,
+      },
+    });
+    expect((await notes.getNotesForHandoff())?.notes).toEqual(revision);
   });
 
   it('forks independent projections and moves/removes them with session lifecycle', async () => {

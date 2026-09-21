@@ -1639,7 +1639,7 @@ export class LlmClient {
         )
       ) {
         base +=
-          '\n\nMaintain session_notes as a compact working checkpoint during long tasks: goal, current user constraints, decisions, completed work, failed approaches, next steps, and useful session_history references. Use session_history to recover earlier recorded evidence. Before context fills, write fresh notes alone in a tool-only response, then call new_context alone with the returned revision. Do not mix either call with other tools or assistant text. Notes and history are local to this session; new_context keeps the notes and necessary runtime state without generating a summary. These tools remain direct calls in code mode.';
+          '\n\nMaintain session_notes as a compact working checkpoint during long tasks: goal, current user constraints, decisions, completed work, failed approaches, next steps, and useful session_history references. Saved notes remain usable after later work and across context windows. Update them at meaningful milestones and before context fills when important state has changed. Use session_history to recover recorded progress omitted from the notes. Write notes alone in a tool-only response; call new_context alone with the latest saved revision when ready to switch. Do not mix either call with other tools or assistant text. Notes and history are local to this session; new_context keeps the notes and necessary runtime state without generating a summary. These tools remain direct calls in code mode.';
       }
     }
     const stableLayers = {

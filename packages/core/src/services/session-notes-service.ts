@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -51,7 +51,11 @@ export async function writeNotesProjection(
 export class SessionNotesService {
   readonly sessionId: string;
   private response?: NotesModelResponse;
-  private pendingReset?: { revision: string; signal: AbortSignal };
+  private pendingReset?: {
+    revision: string;
+    signal: AbortSignal;
+    observed: SessionNotesState;
+  };
   private projectedRevision?: string;
   private projectionInitialized = false;
 
@@ -116,7 +120,7 @@ export class SessionNotesService {
         'Write notes and request a new context in separate tool-only responses, with no other tools or assistant text. Read pending input first.',
       );
     }
-    this.recorder.assertNotesFresh(response.observed);
+    this.recorder.assertNotesObservationCurrent(response.observed);
     return response.observed;
   }
 
@@ -189,7 +193,7 @@ export class SessionNotesService {
     return notes;
   }
 
-  async getFreshNotes(): Promise<
+  async getNotesForHandoff(pendingInput?: Content): Promise<
     | {
         notes: SessionNotesRevision;
         latestUser?: SessionNotesState['latestUser'];
@@ -201,15 +205,13 @@ export class SessionNotesService {
     if (!notes) return undefined;
     this.validateText(notes.text);
     try {
-      this.recorder.assertNotesFresh(notes);
+      const state = this.recorder.getNotesHandoffState(pendingInput);
+      if (state.notes?.revision !== notes.revision) return undefined;
+      return { notes, latestUser: state.latestUser };
     } catch {
       this.assertAvailable();
       return undefined;
     }
-    return {
-      notes,
-      latestUser: this.recorder.getSessionNotesState().latestUser,
-    };
   }
 
   async requestReset(
@@ -217,14 +219,20 @@ export class SessionNotesService {
     response: NotesModelResponse | undefined,
     signal: AbortSignal,
   ): Promise<void> {
-    await this.observedResponse(response, ToolNames.NEW_CONTEXT, signal);
-    const current = await this.getFreshNotes();
+    const observed = await this.observedResponse(
+      response,
+      ToolNames.NEW_CONTEXT,
+      signal,
+    );
+    const current = await this.getNotesForHandoff();
     if (!current || current.notes.revision !== revision) {
       throw new Error(
-        'The notes revision is missing or stale. Write fresh notes, then pass the returned revision.',
+        'The notes revision is missing or changed. Read the current notes, or write them if missing, then pass the returned revision.',
       );
     }
-    this.pendingReset = { revision, signal };
+    signal.throwIfAborted();
+    this.recorder.assertNotesObservationCurrent(observed);
+    this.pendingReset = { revision, signal, observed };
   }
 
   takePendingReset(): string | undefined {
@@ -235,7 +243,7 @@ export class SessionNotesService {
     try {
       if (!state.notes || state.notes.revision !== reset.revision)
         return undefined;
-      this.recorder.assertNotesFresh(state.notes);
+      this.recorder.assertNotesObservationCurrent(reset.observed);
       return reset.revision;
     } catch {
       this.assertAvailable();

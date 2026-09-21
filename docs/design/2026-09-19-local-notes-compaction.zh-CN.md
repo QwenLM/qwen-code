@@ -31,12 +31,12 @@ Qwen Code 目前在压缩对话时生成新摘要。反复摘要可能遗漏早�
 
 所检查的源码将机制拆成四项能力：
 
-| 能力                    | 已确认的行为                                                                          | Qwen Code 的适配                                            |
-| ----------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `get_context_remaining` | 返回运行时计算的剩余 token，也可能返回未知。                                          | 复用 Qwen Code 按 chat、按 route 的 prompt 计数和阈值计算。 |
-| `new_context`           | 设置待处理请求，由运行时安装新窗口，不生成摘要；它不会写入或验证 notes。              | 要求有效且已持久化的 notes revision，在安全的发送边界提交。 |
-| `notes.*`               | 专用工具调用 `alpha/notes/v2/*`，路径是虚拟路径；扩展要求相应的 provider 和后端认证。 | 通过一个小型内建工具维护本地、当前会话范围的 notes。        |
-| `history.*`             | 专用工具查询后端规范化历史。                                                          | 沿已验证的当前有效分支查询本地 session transcript。         |
+| 能力                    | 已确认的行为                                                                                                                                         | Qwen Code 的适配                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `get_context_remaining` | 返回运行时计算的剩余 token，也可能返回未知。                                                                                                         | 复用 Qwen Code 按 chat、按 route 的 prompt 计数和阈值计算。                |
+| `new_context`           | 设置待处理请求，由运行时安装新窗口，不生成摘要；它不会写入或验证 notes。                                                                             | 要求有效分支上最新持久化的 notes revision；单独校验 reset 的当前观察状态。 |
+| `notes.*`               | Notes 在普通进展和跨窗口后仍可复用，不检查 source-leaf 新鲜度。专用工具调用 `alpha/notes/v2/*`，路径是虚拟路径；扩展要求相应的 provider 和后端认证。 | 通过一个小型内建工具维护本地、当前会话范围的 notes。                       |
+| `history.*`             | 专用工具查询后端规范化历史。                                                                                                                         | 沿已验证的当前有效分支查询本地 session transcript。                        |
 
 Codex 仍保留预算提醒和强制换窗口阈值。它的 notes hint 上限为 4,000 bytes，
 提供笔记入口，不会自动加载全部笔记。只开启底层 token-budget 功能，
@@ -161,7 +161,7 @@ payload 包含 `version: 1`、`windowId`、`sourceLeafUuid` 和完整 checkpoint
 CLI 在接受排队的 steering 之后、执行工具之前，观察原始请求；
 OpenTUI 的 delivery 边界补充延后写入的记录。ACP 将持久化用户记录 UUID
 绑定到展开后的实际输入 parts，兼容图片、hook 和命令展开。
-取消或本地处理的输入会释放其待交付标记，但不会把旧 notes 变新鲜。
+取消或本地处理的输入会释放其待交付标记，但不会追溯扩大旧 notes 的覆盖范围。
 ACP 的内置 `/compress` 使用现有 slash-command 元信息记录，不作为新的模型用户输入。
 引用使用相对的 record 标识；payload 不保存父 session ID 或绝对 notes 路径。
 
@@ -169,7 +169,8 @@ ACP 的内置 `/compress` 使用现有 slash-command 元信息记录，不作为
 第一次压缩前使用该链的首条实质性记录 UUID；创建元信息可能在 fork 时替换，
 因此不作为初始窗口身份。新窗口使用本次已提交压缩记录的 UUID。
 这样 resume 和 fork 可以保留身份，无需另建 window ledger。
-上一窗口的 notes 仍可读取，但只有当前窗口内新鲜写入的版本才能授权下一次 notes 换窗口。
+有效分支上最新保存的 notes 在普通进展和跨窗口后仍可用于换窗口。
+笔记原始 window 和 covered leaf 保持不变；它们描述覆盖位置，不作为失效条件。
 
 先通过 recorder 的严格方法写入权威记录，再用同目录临时文件和 rename
 原子生成 Markdown sidecar。两步都成功后工具才返回成功。
@@ -201,7 +202,8 @@ Checkpoint 正文同时受 16 KiB UTF-8 和
 | `get_context_remaining` | 无参数。返回当前窗口 ID、估算输入用量、距自动压缩的剩余 token、距 hard limit 的余量以及估算来源；未知值明确标注。                                                                           |
 | `new_context`           | 必须传入成功写 notes 后得到的 `notes_revision`；检查资格后排队一个请求。结果只表示等待切换，不能声称新上下文已经安装。                                                                      |
 
-Notes 写入和 reset 请求串行执行，模型必须等写入成功再请求换窗口。
+Notes 写入和 reset 请求串行执行，模型必须等写入成功才能用该 revision 请求换窗口；
+但写入不必紧邻 reset，也不必发生在同一窗口。
 首版要求 notes 写入和 `new_context` 各自独占一个不带普通 assistant 文本的
 tool-only response，也避免本响应自己的工作输出推进已观察边界。
 遇到混合 batch 直接拒绝。四个工具在 code mode 中均为 direct-only：
@@ -240,19 +242,20 @@ Cursor 绑定冻结的源快照和有效分支；rewind 或 transcript 替换使
 沿现有计数规则包含待发送用户输入、工具声明、上一轮输出以及恢复内容。
 不使用进程级 telemetry 总量，也不复制 Codex 特定模型的常量。
 
-| 情况                                   | Notes 模式行为                                                                                                                             |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| 正常工作                               | 模型在有价值的阶段更新 notes，并可提前请求换窗口。                                                                                         |
-| Warning 阈值                           | 每个窗口注入一次有长度上限的提醒，要求刷新 notes 并保留有用的历史引用。                                                                    |
-| Automatic 阈值或 screenshot trigger    | 在安全边界使用新鲜有效的 notes，否则走现有 summary。首版不增加紧急写笔记的模型循环。                                                       |
-| Hard 阈值或 provider reactive overflow | 继续应用现有输出/请求体保护。只有条件已满足时尝试 notes 换窗口，否则走现有有界 summary rescue。                                            |
-| `/compress`                            | 使用所选策略；notes 缺失或过期时回退 summary。`/compress <instructions>` 使用 summary，保留指令原有含义。`/compress-fast` 保持其显式行为。 |
+| 情况                                   | Notes 模式行为                                                                                                                                       |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 正常工作                               | 模型在有价值的阶段更新 notes，并可提前请求换窗口。                                                                                                   |
+| Warning 阈值                           | 每个窗口注入一次有长度上限的提醒，要求刷新 notes 并保留有用的历史引用。                                                                              |
+| Automatic 阈值或 screenshot trigger    | 在安全边界使用有效分支上最新、符合大小限制的持久 notes，否则走现有 summary。首版不增加紧急写笔记的模型循环。                                         |
+| Hard 阈值或 provider reactive overflow | 继续应用现有输出/请求体保护。只有条件已满足时尝试 notes 换窗口，否则走现有有界 summary rescue。                                                      |
+| `/compress`                            | 使用所选策略；notes 缺失或不满足换窗条件时回退 summary。`/compress <instructions>` 使用 summary，保留指令原有含义。`/compress-fast` 保持其显式行为。 |
 
-当 revision 属于当前有效链和窗口，并覆盖最新的实质性 transcript 状态时，
-才认为 notes 新鲜。纯 notes/history/budget/reset 维护记录不推进这个状态；
-新真实用户消息、普通工具结果、assistant 工作输出和需要处理的 runtime event 会推进。
-包含普通工作的混合工具 batch 会使更早的 notes 过期，不能利用 metadata 工具
-掩盖后续工作。新鲜度只是机械检查，不证明笔记准确概括了任务。
+已保存 notes 的可用性与观察状态的新鲜度分开判断。普通 assistant 输出、
+已消费的用户输入、工具结果及进入新窗口，都不会使有效分支上的最新持久 revision 失效。
+模型应在重要阶段更新 notes，并通过 history 找回遗漏的进展。
+写入 notes 仍必须准确观察当前实质性边界。Reset 请求校验并捕获自己的当前观察状态，
+在读取 notes 后及消费 pending reset 前重新检查。之后到达的新输入会取消请求，
+笔记覆盖位置较早则不会。这些检查用于防止输入丢失，不证明笔记准确概括了任务。
 
 统一的切换顺序如下：
 
@@ -267,6 +270,9 @@ Cursor 绑定冻结的源快照和有效分支；rewind 或 transcript 替换使
 4. 严格追加一条 `system/chat_compression`，保存完整 `compressedHistory`、
    既有 completion metadata，以及新增 notes metadata：`strategy: notes`、
    新/旧窗口 ID、notes revision 和已覆盖 leaf。
+   旧窗口指本次实际替换的窗口；covered leaf 仍为笔记原始覆盖位置。
+   再次检查本次尝试的边界和有效分支上的最新 revision，确认所有未观察输入
+   都包含在候选末尾实际追加的 pending message 中。预检查不将输入标记为已消费。
    必须确认本次具体 append；`recordChatCompression(); await flush()` 不足以证明成功，
    因为 inactive recorder 可能静默跳过 append。
 5. Durable commit 完成后安装这份完全一致的历史，更新 per-chat token 估算，
@@ -288,7 +294,7 @@ Commit 必须处于现有 session 串行操作边界内。
 Strict append 被接受前到达的新输入或 abort 取消 pending reset，下一次尝试重新捕获状态。
 Append 开始后不能取消或回滚该写入；I/O 期间到达的输入/abort 在 commit 边界后处理，
 若 append 失败则进入写入失败处理。
-缺失或过期 notes 对应的 `new_context` 返回可操作的错误，保留原历史。
+缺失、被新版本替代或属于废弃分支的 notes 对应的 `new_context` 返回可操作的错误，保留原历史。
 
 ### 4.5 新窗口的内容
 
@@ -296,12 +302,13 @@ Append 开始后不能取消或回滚该写入；I/O 期间到达的输入/abort
 替换后的对话包含：
 
 - 可被现有逻辑识别的 compression/restoration wrapper，其中包含有界 checkpoint
-  正文、上一窗口 ID、notes revision 和历史检索入口说明。新窗口 ID 是已提交
+  正文、笔记写入时的窗口 ID、covered leaf、notes revision 和历史检索入口说明。
+  提示明确指出 notes 可能未包含之后的进展。新窗口 ID 是已提交
   compression record 的 UUID，可通过 `get_context_remaining` 获取。
-- 从记录 provenance 确认、且已被旧窗口消费的最后一条真实用户请求，
-  包括已消费的 mid-turn steering；
-  在 synthetic restoration prefix 中原文保留并附 source UUID，不能再复制成一个
-  普通 user turn。待发送的新输入仅追加一次。更早的请求可通过 history 寻址，
+- 从记录 provenance 确认的最后一条真实用户请求，包括 mid-turn steering。
+  若已被旧窗口消费，在 synthetic restoration prefix 中原文保留并附 source UUID；
+  若仍待发送，只在末尾追加一次的 pending input 中保留，不能在 restoration prefix 中重复。
+  更早的请求可通过 history 寻址，
   其中仍然有效的要求必须由模型写进 notes。
 - 现有必要的 runtime reminders、active plan/goal 状态、工具发现状态，
   以及按当前策略、有上限地恢复最近文件/图片。
@@ -313,8 +320,9 @@ Append 开始后不能取消或回滚该写入；I/O 期间到达的输入/abort
 
 Pending input 的 exactly-once 必须同时适用于持久化 checkpoint、实时 history 和冷回放。
 待发送用户消息或普通工具结果可能已录制在 checkpoint 前，但尚未发给模型。
-这类未见输入会使主动 notes reset 失效。若压缩回退到 summary，
-候选必须包含该 pending 内容一次，为待发送工具结果保留匹配的调用，
+若这类输入在主动 reset 请求后到达，会使该请求失效。自动 notes handoff 可以继续，
+前提是所有未观察输入都包含在实际 pending message 中；其他排队输入仍会阻止交接。
+Notes 和 summary 候选都必须包含该 pending 内容一次，为待发送工具结果保留匹配的调用，
 并告知调用方已经包含，避免再次追加。
 只在 commit 后追加到内存会使 resume 丢失输入；
 把它当成旧窗口最后用户请求保留，则会造成重复。
@@ -325,17 +333,17 @@ Pending input 的 exactly-once 必须同时适用于持久化 checkpoint、实�
 
 ### 4.6 失败、恢复、fork 和清理
 
-| 条件                                          | 必须得到的结果                                                                                                                                         |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Notes 缺失、过期、超限，或物化修复失败        | 显式 reset 失败且不改变历史；recorder 健康时，自动/手动压缩走 summary。                                                                                |
-| Session 启动时关闭了 recording                | 使用现有 summary，不绕过用户设置创建 notes/history 存储。                                                                                              |
-| Notes 模式启动后 writer 丢失、inactive 或失败 | 保留当前历史，沿既有 session 写入失败语义停止切换；不能用 summary reset 绕过坏掉的 writer。                                                            |
-| Notes 和 summary 都无法构造可发送的请求       | 报告既有可恢复 compression failure，保留历史和 notes；不回退到空窗口，也不无限重试。                                                                   |
-| Commit 或 Markdown rename 期间进程退出        | 回放最后完整有效的 canonical record，修复物化文件，并沿用既有 partial-tail/integrity 处理；不能优先采用更新的孤立 sidecar。                            |
-| Resume                                        | 恢复压缩历史、窗口 metadata，以及有效分支上最新的有效 notes。ACP/daemon 的选择性冷恢复也必须读取 notes，不能只改全文件 loader。                        |
-| Fork                                          | 沿既有规则复制 canonical records，保留稳定引用，在目标 session 物化独立 sidecar；写入不能影响父会话。                                                  |
-| Rewind                                        | 使用现有支持的 target，清空 pending reset，使 cursor 失效，并从结果分支重新生成 notes；不能复活 target 之后的笔记，也不放宽现有 compressed-turn 限制。 |
-| Archive/delete/retention                      | 通过既有 session maintenance 所有权，与 transcript 一起移动或删除 Markdown sidecar，清理内存 cursor/cache；可重建文件不另设一套 retention 系统。       |
+| 条件                                                   | 必须得到的结果                                                                                                                                         |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Notes 缺失、被替代、属于废弃分支、超限，或物化修复失败 | 显式 reset 失败且不改变历史；recorder 健康时，自动/手动压缩走 summary。                                                                                |
+| Session 启动时关闭了 recording                         | 使用现有 summary，不绕过用户设置创建 notes/history 存储。                                                                                              |
+| Notes 模式启动后 writer 丢失、inactive 或失败          | 保留当前历史，沿既有 session 写入失败语义停止切换；不能用 summary reset 绕过坏掉的 writer。                                                            |
+| Notes 和 summary 都无法构造可发送的请求                | 报告既有可恢复 compression failure，保留历史和 notes；不回退到空窗口，也不无限重试。                                                                   |
+| Commit 或 Markdown rename 期间进程退出                 | 回放最后完整有效的 canonical record，修复物化文件，并沿用既有 partial-tail/integrity 处理；不能优先采用更新的孤立 sidecar。                            |
+| Resume                                                 | 恢复压缩历史、窗口 metadata，以及有效分支上最新的有效 notes。ACP/daemon 的选择性冷恢复也必须读取 notes，不能只改全文件 loader。                        |
+| Fork                                                   | 沿既有规则复制 canonical records，保留稳定引用，在目标 session 物化独立 sidecar；写入不能影响父会话。                                                  |
+| Rewind                                                 | 使用现有支持的 target，清空 pending reset，使 cursor 失效，并从结果分支重新生成 notes；不能复活 target 之后的笔记，也不放宽现有 compressed-turn 限制。 |
+| Archive/delete/retention                               | 通过既有 session maintenance 所有权，与 transcript 一起移动或删除 Markdown sidecar，清理内存 cursor/cache；可重建文件不另设一套 retention 系统。       |
 
 旧 transcript 不含 notes metadata，继续按现有方式回放。
 新增 checkpoint 仍包含普通 `Content[]`，较旧 reader 即使不提供 notes 工具，
@@ -368,19 +376,20 @@ Strategy 字段缺失时沿用已有 summary/fast marker 行为，
 
 ## 6. 决策与取舍
 
-| 决策                                     | 原因                                                         |
-| ---------------------------------------- | ------------------------------------------------------------ |
-| 单份有界 checkpoint                      | 足以存放目标、状态、下一步和历史引用，避免另做文件管理产品。 |
-| Canonical log 加生成的 Markdown          | 既可查看，又能以一个回放权威来源完成分支正确的恢复。         |
-| Reset 时直接注入 checkpoint 正文         | 减少一次恢复工具往返，降低对模型主动读取笔记的依赖。         |
-| 专用且限制作用域的工具                   | 在托管、sandbox 和只读工作区中可用，无需放开任意文件访问。   |
-| 成功 notes 换窗口不再调用最终 summarizer | 由主模型增量维护状态，不必重复摘要完整历史。                 |
-| Summary 默认及回退                       | 更改默认前必须测量各模型的 notes 质量与检索行为。            |
-| 初期复用现有阈值                         | 在评估新交接机制时保留已经建立的安全余量。                   |
+| 决策                                     | 原因                                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------- |
+| 已保存笔记在进展和跨窗口后继续可用       | 覆盖位置记录模型当时所见，之后的工作通过 history 恢复，无需每轮重写 notes。 |
+| 单份有界 checkpoint                      | 足以存放目标、状态、下一步和历史引用，避免另做文件管理产品。                |
+| Canonical log 加生成的 Markdown          | 既可查看，又能以一个回放权威来源完成分支正确的恢复。                        |
+| Reset 时直接注入 checkpoint 正文         | 减少一次恢复工具往返，降低对模型主动读取笔记的依赖。                        |
+| 专用且限制作用域的工具                   | 在托管、sandbox 和只读工作区中可用，无需放开任意文件访问。                  |
+| 成功 notes 换窗口不再调用最终 summarizer | 由主模型增量维护状态，不必重复摘要完整历史。                                |
+| Summary 默认及回退                       | 更改默认前必须测量各模型的 notes 质量与检索行为。                           |
+| 初期复用现有阈值                         | 在评估新交接机制时保留已经建立的安全余量。                                  |
 
 ## 7. 约束与风险
 
-- 新鲜笔记也可能写错。Transcript 和精确引用让遗漏有机会被找回，
+- 已保存笔记可能遗漏 covered leaf 之后的进展，即使刚写入的笔记也可能写错。Transcript 和精确引用让遗漏有机会被找回，
   但不能保证模型一定会回查。
 - 写 notes、查询历史和增加工具 schema 都消耗 tokens。
   仅仅去掉摘要调用，不足以证明总成本或延迟更优。
@@ -397,6 +406,7 @@ Strategy 字段缺失时沿用已有 summary/fast marker 行为，
 ## 8. 验证与验收标准
 
 E2E 计划和结果位于 `.qwen/e2e-tests/local-notes-compaction.md`，
+notes 复用回归计划见 `.qwen/e2e-tests/notes-reuse-after-progress.md`；
 确定性的本地模型测试脚本位于 `.qwen/scripts/local-notes-compaction-e2e.mjs`。
 实现前已验证全局 CLI 基线；实现后使用本地构建、定向 package 测试、
 build 和 typecheck 验证协议与持久化。这些检查不代表模型质量或总成本有改善。
@@ -417,8 +427,10 @@ OpenTUI 测试覆盖交付后的 steering 记录与观察。
 2. **持久化：** 在 notes/checkpoint 写入与物化 rename 前后注入 inactive writer、
    sync failure、disk-full、partial-tail 和 crash。
    确认未提交候选不会替换当前上下文，重启选择已提交的分支状态。
-3. **并发与拓扑：** 覆盖 notes 写入后到达用户 steering、混合并行工具 batch、abort、
-   rewind、fork 和 session rotation。拒绝过期 revision 和分支失效 cursor；
+3. **并发与拓扑：** 普通进展、多次换窗口及冷回放后复用同一 revision。
+   验证 pending input 恰好保留一次，预检查不将它标记为已消费。
+   覆盖 notes 写入后到达用户 steering、混合并行工具 batch、abort、
+   rewind、fork 和 session rotation。拒绝被替代或属于废弃分支的 revision，以及分支失效 cursor；
    父子会话 notes 必须独立。
 4. **有界检索：** 覆盖长日志、CJK 密集日志、tool-call/result 配对、大型截断输出、
    不可用媒体/artifact、部分扫描及分页。验证 byte/token 上限，且无废弃分支结果。

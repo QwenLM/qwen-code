@@ -41,7 +41,7 @@ const definitions = {
   [ToolNames.SESSION_NOTES]: {
     display: ToolDisplayNames.SESSION_NOTES,
     description:
-      'Read or replace this session’s local working notes. Preserve the goal, user constraints, decisions, completed work, failed approaches, next steps and history references. Writes must be the only call in a tool-only response, with no assistant text. Write at milestones and before new_context. Notes are limited to 16 KiB and at most 2,048 estimated tokens. The generated Markdown file is inspectable; direct edits are not imported.',
+      'Read or replace this session’s local working notes. Preserve the goal, user constraints, decisions, completed work, failed approaches, next steps and history references. Writes must be the only call in a tool-only response, with no assistant text. Update at meaningful milestones and before new_context when important state has changed. Saved notes remain usable after later work and across context windows. Notes are limited to 16 KiB and at most 2,048 estimated tokens. The generated Markdown file is inspectable; direct edits are not imported.',
     kind: Kind.Think,
     schema: {
       type: 'object',
@@ -86,7 +86,7 @@ const definitions = {
   [ToolNames.NEW_CONTEXT]: {
     display: ToolDisplayNames.NEW_CONTEXT,
     description:
-      'Request a smaller context using a fresh, successfully written session_notes revision. Call alone in a tool-only response, after the notes write succeeds; do not add assistant text. The result means pending, not already switched. The runtime commits the new history at the next safe boundary, preserves notes and current task state, and keeps earlier evidence available through session_history.',
+      'Request a smaller context using the latest successfully saved session_notes revision. A saved revision remains usable after later work and across windows; update notes first if important state is missing. Call alone in a tool-only response with no assistant text. The result means pending, not already switched. The runtime commits the new history at the next safe boundary, preserves notes and the current user request, and keeps other recorded progress available through session_history.',
     kind: Kind.Think,
     schema: {
       type: 'object',

@@ -1744,8 +1744,15 @@ export class ChatRecordingService {
   }
 
   observeNotesInput(content: Content): SessionNotesState | undefined {
-    let available = [...(content.parts ?? [])];
-    this.unobservedNotesInputs = this.unobservedNotesInputs.filter((input) => {
+    this.unobservedNotesInputs = this.remainingNotesInputs(content);
+    return this.unobservedNotesInputs.length === 0
+      ? this.getSessionNotesState()
+      : undefined;
+  }
+
+  private remainingNotesInputs(content?: Content) {
+    let available = [...(content?.parts ?? [])];
+    return this.unobservedNotesInputs.filter((input) => {
       const remaining = [...available];
       for (const part of input.parts) {
         const index = remaining.findIndex((candidate) =>
@@ -1759,9 +1766,28 @@ export class ChatRecordingService {
       available = remaining;
       return false;
     });
-    return this.unobservedNotesInputs.length === 0
-      ? this.getSessionNotesState()
-      : undefined;
+  }
+
+  getNotesHandoffState(pendingInput?: Content): SessionNotesState {
+    this.assertNotesWriterReady();
+    if (
+      this.notesStateDirty ||
+      !this.sessionNotesState.windowId ||
+      this.remainingNotesInputs(pendingInput).length > 0
+    ) {
+      throw new Error(
+        'Process pending session input before switching context.',
+      );
+    }
+    const state = this.getSessionNotesState();
+    if (
+      this.unobservedNotesInputs.some(
+        (input) => input.uuid === state.latestUser?.uuid,
+      )
+    ) {
+      state.latestUser = undefined;
+    }
+    return state;
   }
 
   bindNotesInput(recordUuid: string, content: Content): void {
@@ -1777,7 +1803,7 @@ export class ChatRecordingService {
     );
   }
 
-  assertNotesFresh(observed: SessionNotesState): void {
+  assertNotesObservationCurrent(observed: SessionNotesState): void {
     this.assertNotesWriterReady();
     if (
       !observed.windowId ||
@@ -1788,7 +1814,7 @@ export class ChatRecordingService {
       this.unobservedNotesInputs.length > 0
     ) {
       throw new Error(
-        'Session notes are stale. Read the latest input and write fresh notes.',
+        'The model observation is stale. Read the latest input before writing notes or switching context.',
       );
     }
   }
@@ -1797,7 +1823,7 @@ export class ChatRecordingService {
     payload: SessionNotesPayload,
     signal?: AbortSignal,
   ): Promise<SessionNotesRevision> {
-    this.assertNotesFresh(payload);
+    this.assertNotesObservationCurrent(payload);
     signal?.throwIfAborted();
     const record: ChatRecord = {
       ...this.createBaseRecord('system'),
@@ -1824,7 +1850,17 @@ export class ChatRecordingService {
         'New session input arrived before compression committed. Retry with the updated history.',
       );
     }
-    if (notes) this.assertNotesFresh(notes);
+    if (notes) {
+      const pending = payload.compressedHistory.at(-1);
+      const state = this.getNotesHandoffState(
+        pending?.role === 'user' ? pending : undefined,
+      );
+      if (state.notes?.revision !== notes.revision) {
+        throw new Error(
+          'The notes revision changed. Read the current notes and retry.',
+        );
+      }
+    }
     signal?.throwIfAborted();
     const record: ChatRecord = {
       ...this.createBaseRecord('system'),
@@ -1835,7 +1871,7 @@ export class ChatRecordingService {
       payload.notes = {
         revision: notes.revision,
         sourceLeafUuid: notes.sourceLeafUuid,
-        previousWindowId: notes.windowId,
+        previousWindowId: this.sessionNotesState.windowId!,
         windowId: record.uuid,
       };
     }

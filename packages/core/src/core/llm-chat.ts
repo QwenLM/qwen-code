@@ -2809,12 +2809,16 @@ export class LlmChat {
         : undefined;
     await notesRecorder?.refreshSessionNotesState();
     const notesAttemptState = notesRecorder?.getSessionNotesState();
-    let notesHandoff: Awaited<ReturnType<SessionNotesService['getFreshNotes']>>;
+    let notesHandoff: Awaited<
+      ReturnType<SessionNotesService['getNotesForHandoff']>
+    >;
     if (notesService) {
       notesService.assertAvailable();
       if (!options?.customInstructions) {
         try {
-          notesHandoff = await notesService.getFreshNotes();
+          notesHandoff = await notesService.getNotesForHandoff(
+            options?.pendingUserMessage,
+          );
         } catch (error) {
           notesService.assertAvailable();
           debugLogger.warn(`Notes unavailable for this compression: ${error}`);
@@ -2826,7 +2830,7 @@ export class LlmChat {
       notesHandoff?.notes.revision !== options.notesRevision
     ) {
       throw new Error(
-        'The requested notes handoff is stale. Process the latest input and write fresh notes.',
+        'The requested notes handoff is unavailable. Process pending input and read the current notes revision before retrying.',
       );
     }
     const service = new ChatCompressionService();
