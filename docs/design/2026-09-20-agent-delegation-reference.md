@@ -44,13 +44,13 @@ Description length read off the constructed tool, with the two subagent entries 
 | After, pointer (a session that can load skills)                                   | 7,386  | 1,847   |
 | After, pointer + bridge note (a `tools.eager` allowlist withholds the Skill tool) | 7,504  | 1,876   |
 | After, reference withheld by `skills.disabled`                                    | 7,192  | 1,798   |
-| After, reference inlined (no route to any skill)                                  | 10,377 | 2,594   |
+| After, reference inlined (no route to any skill)                                  | 10,412 | 2,603   |
 
 So the normal case saves **2,344 characters ≈ 586 tokens per request**, against a 192-character pointer. The new skill costs one entry in the `<available_skills>` listing, which the session-start prelude carries in a user-role message rather than in the system prompt. That entry renders at **371 characters, ≈93 tokens** — measured through `renderAvailableSkillsBlock`, not the 247 of the frontmatter `description` alone, because the render adds the `<skill>` / `<name>` / `<description>` / `<location>` wrapper, a ` (bundled)` suffix, and XML-escapes the apostrophe in "the Agent tool's" to `&apos;`. The net is therefore **≈493 tokens per request**, recovered on every turn of every session including the ones that never delegate.
 
 The bridge variant costs 118 characters more than the plain pointer: one sentence telling the model to review the Skill tool's schema with `tool_search` and then invoke it with `tool_call`. (It cost 77 while that sentence still said "reveal it with ToolSearch first"; main reworded it to name both halves of the bridge, because `tool_search` alone can review a schema but never invoke it, and this reference inherits the shared wording.)
 
-The inline shape is 647 characters larger than today's description, and that 647 decomposes exactly: 92 for the inline preamble and its `---` separator, 265 for the reference's own title and framing paragraph, and 465 for the precedence rule with its blank line, less 175 because the relocated prose reads shorter inside the reference than it did in the description's bullet list. Only the precedence rule is new text rather than relocated text. The total is the deliberate price for sessions that cannot load a skill — a pointer there would name something the model cannot reach — and a pointer-shaped session pays none of it, because only the inline shape carries the reference body at all.
+The inline shape is 682 characters larger than today's description, and that 682 decomposes exactly: 127 for the inline preamble and its `---` separator, 265 for the reference's own title and framing paragraph, and 465 for the precedence rule with its blank line, less 175 because the relocated prose reads shorter inside the reference than it did in the description's bullet list. Only the precedence rule is new text rather than relocated text. The total is the deliberate price for sessions that cannot load a skill — a pointer there would name something the model cannot reach — and a pointer-shaped session pays none of it, because only the inline shape carries the reference body at all.
 
 ## 4. How the route is decided
 
@@ -62,6 +62,8 @@ The inline shape is 647 characters larger than today's description, and that 647
 | `skill-via-tool-search` | the Skill tool's schema can be withheld by a `tools.eager` allowlist, and **both** `tool_search` and `tool_call` are registered | pointer + the bridge sentence |
 | `inline`                | no route to any skill (skills off, Skill tool denied, or deferred without the full bridge)                                      | the reference in full         |
 | `withheld`              | the user turned this reference off by name or disabled the whole bundled level                                                  | nothing                       |
+
+The bridge row is decided on reachability, not registration: under `ToolMode.CodeModeOnly` both bridge tools are hidden (`code-mode.ts` `HIDDEN_TOOLS`), so the deferral arm is skipped and the route stays `skill` — a plain pointer stays honest there because a deferred Skill tool remains callable through the `exec` binding.
 
 The bridge route requires both halves because `tool_search` only reviews a schema — invoking still goes through `tool_call`, so a session with `tool_search` alone has no usable route and must be given the reference inline. That gate came from main after this branch was cut; because the decision now lives in one shared module, both references picked it up in the same merge rather than drifting.
 

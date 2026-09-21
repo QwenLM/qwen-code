@@ -28,7 +28,6 @@ import {
   readBundledReference,
   resolveBundledReferenceSurface,
   toolSearchBridgeSentence,
-  type BundledReference,
   type BundledReferenceSurface,
 } from './bundled-reference.js';
 
@@ -48,12 +47,18 @@ Before writing a delegation prompt, load the \`${AGENT_DELEGATION_SKILL_NAME}\` 
 /**
  * Leads the inlined reference, mirroring the workflow reference's note: the
  * body is written for sessions that can load skills, so say up front that the
- * pointers inside it do not apply here. A rule separator follows, because the
- * body opens with its own title and would otherwise read as a continuation of
- * the fork section above it.
+ * pointers inside it do not apply here. The "even one named in a skill
+ * listing" clause is load-bearing, not courtesy: a session whose
+ * `tools.eager` allowlist withholds the Skill tool still gets an
+ * `<available_skills>` prelude naming this skill in the same request, and
+ * without the clause the description contradicts the listing. The workflow
+ * note's second clause ("Where it points at another skill…") is dropped on
+ * purpose: this reference names no other skill. A rule separator follows,
+ * because the body opens with its own title and would otherwise read as a
+ * continuation of the fork section above it.
  */
 const INLINE_NOTE =
-  'Skills cannot be loaded in this session, so the delegation reference follows in full.';
+  'Skills cannot be loaded in this session, even one named in a skill listing, so the delegation reference follows in full.';
 
 /**
  * The Agent tool's prompt-writing section for this session.
@@ -63,22 +68,22 @@ const INLINE_NOTE =
  */
 export function buildAgentDelegationSection(
   surface: BundledReferenceSurface,
-  // Defaults to the real file read so that, in a session where skills are
-  // enabled but the file is somehow missing, the caller still gets a pointer
-  // rather than nothing. Tests can inject a stub.
-  reference: BundledReference | null = readBundledReference(
-    AGENT_DELEGATION_SKILL_NAME,
-  ),
 ): string {
   switch (surface) {
     case 'pointer':
       return POINTER;
     case 'pointer-via-tool-search':
       return `${POINTER} ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
-    case 'inline':
+    case 'inline': {
+      // resolveBundledReferenceSurface returns 'inline' only when this same
+      // read was truthy, and the read is memoized for the process — but that
+      // coupling is another module's promise, so fall back to the pointer
+      // rather than emit the note over no body.
+      const reference = readBundledReference(AGENT_DELEGATION_SKILL_NAME);
       return reference
         ? `${INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`
         : POINTER;
+    }
     case 'withheld':
       return '';
     default: {

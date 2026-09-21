@@ -59,6 +59,12 @@ interface Shape {
    * inlined, which is the largest shape this description ever takes (#12054).
    */
   skills?: boolean;
+  /**
+   * Whether a `tools.eager` allowlist withholds the Skill tool's schema,
+   * leaving it reachable through the tool_search + tool_call bridge. The
+   * pointer then carries one bridge sentence.
+   */
+  skillDeferred?: boolean;
 }
 
 /**
@@ -71,6 +77,7 @@ async function buildTool({
   team = false,
   todo = true,
   skills = true,
+  skillDeferred = false,
 }: Shape = {}): Promise<AgentTool> {
   const subagentManager = {
     listSubagents: vi.fn().mockResolvedValue(subagents),
@@ -90,7 +97,17 @@ async function buildTool({
       ? {
           getSkillManager: () => ({}),
           getToolRegistry: () => ({
-            getAllToolNames: () => [ToolNames.AGENT, ToolNames.SKILL],
+            getAllToolNames: () =>
+              skillDeferred
+                ? [
+                    ToolNames.AGENT,
+                    ToolNames.SKILL,
+                    ToolNames.TOOL_SEARCH,
+                    ToolNames.TOOL_CALL,
+                  ]
+                : [ToolNames.AGENT, ToolNames.SKILL],
+            isPermissionDeferred: (name: string) =>
+              skillDeferred && name === ToolNames.SKILL,
           }),
         }
       : {}),
@@ -134,6 +151,22 @@ describe('AgentTool per-turn size budgets', () => {
     expect(tool.description.length).toBeLessThanOrEqual(7_750);
   });
 
+  it('keeps the description within its budget when the Skill tool is behind the bridge', async () => {
+    // A `tools.eager` allowlist withholds the Skill tool's schema; the
+    // pointer grows by the one-sentence tool_search + tool_call bridge note.
+    // Measured at 7,504 — 118 more than the plain pointer. A separate row so
+    // the bridge sentence's own growth is visible, not absorbed into the
+    // pointer row's headroom.
+    const tool = await buildTool({ skillDeferred: true });
+    expect(tool.description.length).toBeLessThanOrEqual(7_900);
+    // The bridge sentence is the only difference from the pointer shape, so
+    // assert the delta too: a reworded or duplicated bridge sentence moves it.
+    const pointer = await buildTool();
+    expect(
+      tool.description.length - pointer.description.length,
+    ).toBeLessThanOrEqual(160);
+  });
+
   it('keeps the description within its budget with no subagents configured', async () => {
     // The skeleton on its own — the catalogue collapses to a one-line
     // "no subagents are configured" placeholder. Measured at 7,083.
@@ -156,8 +189,8 @@ describe('AgentTool per-turn size budgets', () => {
    * body is visible here rather than only in a session that has no skills.
    */
   it('keeps the description within its budget when the reference is inlined', async () => {
-    // Default shape, no route to any skill. Measured at 10,377 — 647 more
-    // than the description carried before the move: 92 for the inline
+    // Default shape, no route to any skill. Measured at 10,412 — 682 more
+    // than the description carried before the move: 127 for the inline
     // preamble and its separator, 265 for the reference's own title and
     // framing paragraph, and 465 for the definition-outranks-the-prompt rule
     // with its blank line, less 175 because the relocated prose itself

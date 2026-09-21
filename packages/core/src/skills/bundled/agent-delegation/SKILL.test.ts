@@ -10,10 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../../config/config.js';
 import type { SubagentManager } from '../../../subagents/subagent-manager.js';
-import { ToolNames } from '../../../tools/tool-names.js';
+import { ToolDisplayNames, ToolNames } from '../../../tools/tool-names.js';
 import { AgentTool } from '../../../tools/agent/agent.js';
 import { parseSkillContent } from '../../skill-load.js';
 import { AGENT_DELEGATION_SKILL_NAME } from '../../agent-delegation-skill.js';
+import { toolSearchBridgeSentence } from '../../bundled-reference.js';
 
 function loadSkill() {
   const skillPath = path.join(
@@ -36,14 +37,21 @@ function skillProse(): string {
  * The Agent tool's description in a session that can load skills — the shape
  * almost every session sends, and the one the moved guidance must be gone
  * from. `skills: false` models a session with no route to any skill, where the
- * reference travels inside the description instead. `bundledDisabled: true`
+ * reference travels inside the description instead. `skillDeferred: true`
+ * models a `tools.eager` allowlist withholding the Skill tool, reachable only
+ * through the tool_search + tool_call bridge. `bundledDisabled: true`
  * models a user who turned the reference off, where the description carries
  * neither.
  */
 async function agentDescription({
   skills = true,
   bundledDisabled = false,
-}: { skills?: boolean; bundledDisabled?: boolean } = {}): Promise<string> {
+  skillDeferred = false,
+}: {
+  skills?: boolean;
+  bundledDisabled?: boolean;
+  skillDeferred?: boolean;
+} = {}): Promise<string> {
   const subagentManager = {
     listSubagents: vi.fn().mockResolvedValue([]),
     addChangeListener: vi.fn().mockReturnValue(() => {}),
@@ -63,7 +71,17 @@ async function agentDescription({
       ? {
           getSkillManager: () => ({}),
           getToolRegistry: () => ({
-            getAllToolNames: () => [ToolNames.AGENT, ToolNames.SKILL],
+            getAllToolNames: () =>
+              skillDeferred
+                ? [
+                    ToolNames.AGENT,
+                    ToolNames.SKILL,
+                    ToolNames.TOOL_SEARCH,
+                    ToolNames.TOOL_CALL,
+                  ]
+                : [ToolNames.AGENT, ToolNames.SKILL],
+            isPermissionDeferred: (name: string) =>
+              skillDeferred && name === ToolNames.SKILL,
           }),
         }
       : {}),
@@ -157,6 +175,26 @@ describe('bundled agent-delegation skill', () => {
   });
 
   /**
+   * A `tools.eager` allowlist that withholds the Skill tool leaves it
+   * registered behind the tool_search + tool_call bridge, and the pointer has
+   * to say so — otherwise the model tries the Skill tool by name and gets
+   * EXECUTION_DENIED. The Workflow side pins the same sentence in
+   * workflow-description.test.ts. Mutation check: returning POINTER for the
+   * 'pointer-via-tool-search' surface, or passing the bare tool name instead
+   * of ToolDisplayNames.SKILL, turns this red.
+   */
+  it('names the tool_search + tool_call bridge when the Skill tool is deferred', async () => {
+    const description = await agentDescription({ skillDeferred: true });
+
+    expect(description).toContain(
+      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
+    );
+    expect(description).toContain(
+      toolSearchBridgeSentence(ToolDisplayNames.SKILL),
+    );
+  });
+
+  /**
    * A dispatch must not try to override the subagent it names. #12142's review
    * threads carry a real one that asked a read-only, single-file subagent to
    * search the whole repository. The rule sits in this reference rather than in
@@ -180,6 +218,11 @@ describe('bundled agent-delegation skill', () => {
     const description = await agentDescription({ skills: false });
 
     expect(description).toContain('Skills cannot be loaded in this session');
+    // The clause that reconciles this preamble with the same request's
+    // <available_skills> prelude, which lists this skill by name: without it
+    // the description denies a skill the listing just offered, and the model
+    // spends a call finding out. Dropping it from INLINE_NOTE turns this red.
+    expect(description).toContain('even one named in a skill listing');
     expect(description).toContain('Never delegate understanding');
     expect(description).not.toContain(
       `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
