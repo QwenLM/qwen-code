@@ -30,8 +30,14 @@ interface MockGoal {
       evidenceCursor: { recordId: string | null };
       turnCount: number;
       activeTimeMs: number;
+      turnBudget?: number;
+      activeTimeBudgetMs?: number;
+      tokensUsed?: number;
+      tokenBudget?: number;
       createdAt: number;
       updatedAt: number;
+      checkpointStalls?: number;
+      lastCheckpointFailure?: string;
       lastReason?: string;
       limitKind?: 'evidence_catalog' | 'checkpoint_request';
     };
@@ -202,6 +208,92 @@ describe('GoalsDialog', () => {
     expect(document.querySelector('[data-testid="goals-dropped"]')).toBeNull();
   });
 
+  const withSpend = (over: Partial<MockGoal['snapshot']['goal']>): MockGoal => {
+    const base = baseGoal();
+    return {
+      ...base,
+      snapshot: {
+        ...base.snapshot,
+        goal: { ...base.snapshot.goal, ...over },
+      },
+    };
+  };
+
+  it('shows turn and active-time budgets on stopped Goals', async () => {
+    await mount([
+      withSpend({
+        status: 'paused',
+        turnCount: 3,
+        turnBudget: 20,
+        activeTimeMs: 723_000,
+        activeTimeBudgetMs: 1_800_000,
+      }),
+    ]);
+    expect(
+      document.querySelector('[data-testid="goal-turns"]')?.textContent,
+    ).toBe('3 / 20 turns');
+    expect(
+      document.querySelector('[data-testid="goal-elapsed"]')?.textContent,
+    ).toBe('12m 3s / 30m 0s');
+  });
+
+  it('keeps usage without budgets unchanged', async () => {
+    await mount([
+      withSpend({ status: 'paused', turnCount: 1, activeTimeMs: 723_000 }),
+    ]);
+    expect(
+      document.querySelector('[data-testid="goal-turns"]')?.textContent,
+    ).toBe('1 turn');
+    expect(
+      document.querySelector('[data-testid="goal-elapsed"]')?.textContent,
+    ).toBe('12m 3s');
+  });
+
+  it('hides unused budgets', async () => {
+    await mount([
+      withSpend({
+        status: 'paused',
+        turnCount: 0,
+        turnBudget: 20,
+        activeTimeMs: 0,
+        activeTimeBudgetMs: 1_800_000,
+      }),
+    ]);
+    expect(
+      document.querySelector('[data-testid="goal-turns"]')?.textContent,
+    ).not.toContain('/');
+    expect(document.querySelector('[data-testid="goal-elapsed"]')).toBeNull();
+  });
+
+  it('shows spend against the budget once a turn has billed', async () => {
+    await mount([withSpend({ tokensUsed: 1_234, tokenBudget: 30_000_000 })]);
+
+    expect(
+      document.querySelector('[data-testid="goal-tokens"]')?.textContent,
+    ).toBe('1.2k / 30.0M tokens');
+  });
+
+  it('shows spend alone when the Goal has no budget', async () => {
+    await mount([withSpend({ tokensUsed: 1_234 })]);
+
+    expect(
+      document.querySelector('[data-testid="goal-tokens"]')?.textContent,
+    ).toBe('1.2k tokens');
+  });
+
+  it('shows nothing for a Goal that has not billed a turn', async () => {
+    await mount([withSpend({ tokensUsed: 0, tokenBudget: 30_000_000 })]);
+
+    expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
+  });
+
+  it('shows nothing for a daemon that does not report spend', async () => {
+    // An older daemon's snapshot carries neither field.
+    await mount([baseGoal()]);
+
+    expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
+  });
+
   const stopped = (
     over: Partial<MockGoal['snapshot']['goal']> = {},
   ): MockGoal => {
@@ -243,6 +335,49 @@ describe('GoalsDialog', () => {
       }),
     ]);
     expect(resumeButton()).not.toBeNull();
+  });
+
+  const checkpointLine = () =>
+    document.querySelector('[data-testid="goal-checkpoint"]')?.textContent;
+
+  it('hides a stall-free failure once the Goal stopped for another reason', async () => {
+    await mount([stopped({ lastCheckpointFailure: 'Error: provider failed' })]);
+
+    expect(checkpointLine()).toBeUndefined();
+  });
+
+  it('reads a diagnostic made only of control characters as no failure, as core does', async () => {
+    // Sanitizing escapes a lone control character rather than removing it, so
+    // the gate has to read the raw value.
+    await mount([withSpend({ lastCheckpointFailure: '\r' })]);
+
+    expect(checkpointLine()).toBeUndefined();
+  });
+
+  it('hides checkpoint health on a completed Goal that still carries it', async () => {
+    await mount([
+      withSpend({
+        status: 'complete',
+        checkpointStalls: 3,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    ]);
+
+    expect(checkpointLine()).toBeUndefined();
+  });
+
+  it('shows no checkpoint line, even for a snapshot an older daemon filled in', async () => {
+    // Goals no longer run evidence checkpoints; a daemon that predates that
+    // can still send the two fields, and they are not drawn.
+    await mount([
+      withSpend({
+        checkpointStalls: 2,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    ]);
+
+    expect(checkpointLine()).toBeUndefined();
+    expect(document.body.textContent).not.toContain('provider failed');
   });
 
   it('renders a goal with its condition, turn count and judge verdict', async () => {

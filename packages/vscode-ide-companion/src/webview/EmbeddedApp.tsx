@@ -206,6 +206,13 @@ interface RuntimeConfig {
   token?: string;
   clientId?: string;
   workspaceCwd?: string;
+  /**
+   * The workspace path as VS Code spells it, sent only when it differs from
+   * the canonical `workspaceCwd` (a symlinked folder). Every
+   * `activeEditorChanged` payload carries a raw `uri.fsPath`, so relativizing
+   * the active file has to accept either spelling.
+   */
+  editorWorkspaceCwd?: string;
   sessionId?: string;
   hostKind?: 'view' | 'panel';
 }
@@ -331,6 +338,7 @@ export function EmbeddedApp() {
     | undefined
   >(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
+  const sessionHistoryRequestRef = useRef(0);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
@@ -340,10 +348,14 @@ export function EmbeddedApp() {
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
+  // The request whose host-owned diff the user closed without voting. While it
+  // is set, the host does not reopen that diff and hands the edit preview back
+  // to the web shell, which renders it inline (#10557).
+  const dismissedPermissionDiffIdRef = useRef<string | undefined>(undefined);
+  const [hostOwnsEditDiffPreview, setHostOwnsEditDiffPreview] = useState(true);
   const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
-  const previousActiveFilePathRef = useRef<string | undefined>(undefined);
   const daemonBaseUrl = runtime?.baseUrl;
   const daemonToken = runtime?.token;
   const daemonClient = useMemo(
@@ -407,7 +419,10 @@ export function EmbeddedApp() {
 
   const loadSessionHistory = useCallback(
     async (cursor?: string) => {
-      if (!daemonClient || !runtime?.workspaceCwd || sessionListLoading) return;
+      if (!daemonClient || !runtime?.workspaceCwd || sessionListLoading) {
+        return;
+      }
+      const requestId = ++sessionHistoryRequestRef.current;
       setSessionListLoading(true);
       setSessionListError(undefined);
       try {
@@ -417,15 +432,32 @@ export function EmbeddedApp() {
             pageSize: 20,
             cursor,
             archiveState: 'active',
-            // Only conversations started from VS Code. The daemon is shared
-            // with the CLI and the browser Web Shell for this workspace, so an
-            // unfiltered page lists sessions the user never opened here.
-            sourceType: VSCODE_SESSION_SOURCE_TYPE,
+            view: 'organized',
+            group: 'all',
           });
-        const pageSessions = Array.isArray(page.sessions) ? page.sessions : [];
+        const pageSessions = (
+          Array.isArray(page.sessions) ? page.sessions : []
+        ).filter(
+          (session) =>
+            !session.parentSessionId &&
+            // Live voice threads are ordinary 'default' sessions carrying a
+            // sourceId built from LIVE_SESSION_SOURCE_PREFIX in packages/cli;
+            // the literal is inlined since the CLI is not a bundle dependency.
+            !(
+              session.sourceType === 'default' &&
+              session.sourceId?.startsWith('realtime_voice:')
+            ) &&
+            !['scheduled_task', 'side_task', 'channel', 'qwen-live'].includes(
+              session.sourceType ?? '',
+            ),
+        );
+        if (requestId !== sessionHistoryRequestRef.current) return;
         setSessions((current) => {
           const merged = new Map(
-            current.map((session) => [session.sessionId, session]),
+            (cursor ? current : []).map((session) => [
+              session.sessionId,
+              session,
+            ]),
           );
           for (const session of pageSessions) {
             merged.set(session.sessionId, session);
@@ -444,12 +476,18 @@ export function EmbeddedApp() {
           return Array.from(merged.values());
         });
         setSessionCursor(page.nextCursor);
+        setSessionListError(
+          page.truncated ? t('session.historyIncomplete') : undefined,
+        );
       } catch (error) {
+        if (requestId !== sessionHistoryRequestRef.current) return;
         setSessionListError(
           error instanceof Error ? error.message : t('session.loadFailed'),
         );
       } finally {
-        setSessionListLoading(false);
+        if (requestId === sessionHistoryRequestRef.current) {
+          setSessionListLoading(false);
+        }
       }
     },
     [
@@ -497,6 +535,8 @@ export function EmbeddedApp() {
       vscode.postMessage({ type: 'closeDiff', data: { path, requestId } });
     }
     openPermissionDiffsRef.current.clear();
+    dismissedPermissionDiffIdRef.current = undefined;
+    setHostOwnsEditDiffPreview(true);
     if (webShellPermissionRequestIdRef.current) {
       webShellPermissionRequestIdRef.current = undefined;
       vscode.postMessage({
@@ -523,7 +563,8 @@ export function EmbeddedApp() {
           const { path, oldText, newText } = diff;
           pendingIds.add(pendingPermission.requestId);
           if (
-            !openPermissionDiffsRef.current.has(pendingPermission.requestId)
+            !openPermissionDiffsRef.current.has(pendingPermission.requestId) &&
+            dismissedPermissionDiffIdRef.current !== pendingPermission.requestId
           ) {
             openPermissionDiffsRef.current.set(
               pendingPermission.requestId,
@@ -549,6 +590,13 @@ export function EmbeddedApp() {
           type: 'closeDiff',
           data: { path, requestId },
         });
+      }
+      if (
+        dismissedPermissionDiffIdRef.current !== undefined &&
+        dismissedPermissionDiffIdRef.current !== permissionToFocus
+      ) {
+        dismissedPermissionDiffIdRef.current = undefined;
+        setHostOwnsEditDiffPreview(true);
       }
       const pendingDiffRequestId = pendingIds.values().next().value as
         | string
@@ -668,9 +716,16 @@ export function EmbeddedApp() {
         message.type === 'webShellBootstrap' &&
         typeof message.data?.baseUrl === 'string'
       ) {
-        setRuntime(
-          message.data as NonNullable<ReturnType<typeof readRuntimeConfig>>,
-        );
+        const nextRuntime = message.data as NonNullable<
+          ReturnType<typeof readRuntimeConfig>
+        >;
+        sessionHistoryRequestRef.current++;
+        setSessionHistoryOpen(false);
+        setSessions([]);
+        setSessionCursor(undefined);
+        setSessionListLoading(false);
+        setSessionListError(undefined);
+        setRuntime(nextRuntime);
       } else if (message.type === 'webShellBootstrapError') {
         const errorMessage = (message.data as { message?: unknown } | null)
           ?.message;
@@ -681,6 +736,20 @@ export function EmbeddedApp() {
         // it, `runtime` is set and that branch is gone, so the same failure
         // would be invisible — show it over the transcript instead.
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
+      } else if (message.type === 'permissionDiffClosed') {
+        const requestId = (message.data as { requestId?: unknown } | null)
+          ?.requestId;
+        // Same source gate as the decision handler below: MCP apps and artifact
+        // previews run in scriptable sandboxed iframes inside this webview and
+        // can postMessage here. This is not a vote, but it does flip who owns
+        // the edit preview, so only the preload parent frame may send it.
+        if (typeof requestId === 'string' && event.source === window.parent) {
+          openPermissionDiffsRef.current.delete(requestId);
+          if (webShellPermissionRequestIdRef.current === requestId) {
+            dismissedPermissionDiffIdRef.current = requestId;
+            setHostOwnsEditDiffPreview(false);
+          }
+        }
       } else if (message.type === 'webShellPermissionDecision') {
         const decisionData = message.data as {
           decision?: unknown;
@@ -842,16 +911,8 @@ export function EmbeddedApp() {
             filePath: data.filePath,
             selection: data.selection,
           });
-          // The host fires this on every selection change, including plain
-          // cursor moves; only an actual file change may re-arm inclusion,
-          // or a click silently undoes the user's explicit exclusion.
-          if (previousActiveFilePathRef.current !== data.filePath) {
-            setIncludeActiveFile(true);
-          }
-          previousActiveFilePathRef.current = data.filePath;
         } else {
           setActiveFile(undefined);
-          previousActiveFilePathRef.current = undefined;
         }
       } else if (
         message.type === 'modeChanged' ||
@@ -978,7 +1039,9 @@ export function EmbeddedApp() {
             });
           }}
           onRename={async (session, title) => {
-            if (!daemonClient || !runtime.workspaceCwd) return;
+            if (!daemonClient || !runtime.workspaceCwd) {
+              return;
+            }
             setSessionListError(undefined);
             try {
               const result = await daemonClient
@@ -1375,7 +1438,9 @@ export function EmbeddedApp() {
           style={SHELL_STYLE}
           theme={theme}
           language={language}
-          sessionSourceType={VSCODE_SESSION_SOURCE_TYPE}
+          sessionSourceType={
+            runtime.sessionId ? undefined : VSCODE_SESSION_SOURCE_TYPE
+          }
           shellRef={shellRef}
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
@@ -1385,7 +1450,10 @@ export function EmbeddedApp() {
             setEditingMessage(undefined);
             vscode.postMessage({
               type: 'webShellSessionChanged',
-              data: { sessionId, workspaceCwd: runtime.workspaceCwd },
+              data: {
+                sessionId,
+                workspaceCwd: runtime.workspaceCwd,
+              },
             });
             setRuntime((current) =>
               current && current.sessionId !== sessionId
@@ -1423,7 +1491,7 @@ export function EmbeddedApp() {
           sidebar={false}
           compactThinking
           collapseCompletedTurns
-          hostOwnsEditDiffPreview
+          hostOwnsEditDiffPreview={hostOwnsEditDiffPreview}
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
           mainModelFilter={isVsCodeModelVisible}
           compactComposerOverlays
@@ -1505,8 +1573,15 @@ export function EmbeddedApp() {
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
-              const { snapshots } =
-                await daemonClient.getRewindSnapshots(sessionId);
+              let snapshots: Awaited<
+                ReturnType<typeof daemonClient.getRewindSnapshots>
+              >['snapshots'];
+              try {
+                ({ snapshots } =
+                  await daemonClient.getRewindSnapshots(sessionId));
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               const snapshot =
                 editingMessage.turnIndex === undefined
                   ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
@@ -1522,25 +1597,40 @@ export function EmbeddedApp() {
               if (!snapshot) {
                 throw new Error(t('composer.editExpired'));
               }
-              await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                clientId: runtime.clientId,
-                rewindFiles: false,
-              });
+              try {
+                await daemonClient.rewindSession(sessionId, snapshot.promptId, {
+                  clientId: runtime.clientId,
+                  rewindFiles: false,
+                });
+              } catch (err) {
+                throw new Error(t('composer.editFailed'), { cause: err });
+              }
               setEditingMessage(undefined);
               clearInsight();
             }
 
             if (!activeFile || !includeActiveFile) return undefined;
-            const normalizedWorkspace = runtime.workspaceCwd?.replace(
-              /\\/g,
-              '/',
-            );
             const normalizedFile = activeFile.filePath.replace(/\\/g, '/');
-            const relativePath =
-              normalizedWorkspace &&
-              normalizedFile.startsWith(`${normalizedWorkspace}/`)
-                ? normalizedFile.slice(normalizedWorkspace.length + 1)
-                : activeFile.fileName;
+            // `workspaceCwd` is canonical — the daemon matches workspaces by
+            // realpath — while `activeFile.filePath` is VS Code's raw
+            // `uri.fsPath`, so in a symlinked folder the two sit in different
+            // path spaces. Try both spellings: on a miss the strip silently
+            // degrades to a bare basename, the prompt says `@foo.ts` instead
+            // of `@src/foo.ts`, and the picker-annotation dedup below misses
+            // with it.
+            const workspacePrefixes = [
+              runtime.workspaceCwd,
+              runtime.editorWorkspaceCwd,
+            ]
+              .filter((cwd): cwd is string => Boolean(cwd))
+              .map((cwd) => cwd.replace(/\\/g, '/'));
+            let relativePath = activeFile.fileName;
+            for (const prefix of workspacePrefixes) {
+              if (normalizedFile.startsWith(`${prefix}/`)) {
+                relativePath = normalizedFile.slice(prefix.length + 1);
+                break;
+              }
+            }
             const reference = `@${relativePath}`;
             const selectedLines = activeFile.selection
               ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`

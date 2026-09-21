@@ -14,6 +14,21 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
+import {
+  liveMessage,
+  liveText,
+  type LiveMessageKey,
+  type LiveMessageParams,
+} from '../i18n/messages.js';
+
+class InstallerError extends Error {
+  constructor(
+    readonly messageKey: LiveMessageKey,
+    readonly messageParams: LiveMessageParams = {},
+  ) {
+    super(liveText('en', messageKey, messageParams));
+  }
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -70,6 +85,7 @@ export interface LiveHostReleaseManifest {
 
 interface InstalledLiveHost {
   version: string;
+  protocolVersion: number;
 }
 
 export interface LiveHostInstallerDeps {
@@ -94,7 +110,7 @@ export function isExpectedLiveHostSignature(output: string): boolean {
 
 function architecture(value: string): LiveHostArchitecture {
   if (value === 'arm64' || value === 'x64') return value;
-  throw new Error(`Qwen Live Host is unavailable for architecture ${value}.`);
+  throw new InstallerError('installer.architecture', { architecture: value });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -105,7 +121,7 @@ function parseAsset(
   value: unknown,
   expectedName: string,
 ): LiveHostReleaseAsset {
-  if (!isRecord(value)) throw new Error('Live Host manifest asset is invalid.');
+  if (!isRecord(value)) throw new InstallerError('installer.assetInvalid');
   const name = value['name'];
   const size = value['size'];
   const sha256 = value['sha256'];
@@ -117,7 +133,7 @@ function parseAsset(
     typeof sha256 !== 'string' ||
     !SHA256_PATTERN.test(sha256)
   ) {
-    throw new Error('Live Host manifest asset is invalid.');
+    throw new InstallerError('installer.assetInvalid');
   }
   return { name, size: Number(size), sha256 };
 }
@@ -126,7 +142,7 @@ export function parseLiveHostReleaseManifest(
   value: unknown,
 ): LiveHostReleaseManifest {
   if (!isRecord(value) || !isRecord(value['assets'])) {
-    throw new Error('Live Host manifest is invalid.');
+    throw new InstallerError('installer.manifestInvalid');
   }
   const version = value['version'];
   if (
@@ -136,7 +152,7 @@ export function parseLiveHostReleaseManifest(
     value['protocolVersion'] !== LIVE_HOST_PROTOCOL_VERSION ||
     value['bundleId'] !== LIVE_HOST_BUNDLE_ID
   ) {
-    throw new Error('Live Host manifest is incompatible.');
+    throw new InstallerError('installer.manifestIncompatible');
   }
   return {
     schemaVersion: 1,
@@ -173,16 +189,21 @@ async function readBundleValue(appPath: string, key: string): Promise<string> {
 async function inspectApp(appPath: string): Promise<InstalledLiveHost> {
   const stat = await fsp.lstat(appPath);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error('Qwen Live Host installation is not a regular app bundle.');
+    throw new InstallerError('installer.bundleInvalid');
   }
   const bundleId = await readBundleValue(appPath, 'CFBundleIdentifier');
   if (bundleId !== LIVE_HOST_BUNDLE_ID) {
-    throw new Error('Qwen Live Host bundle identity is invalid.');
+    throw new InstallerError('installer.identityInvalid');
   }
   const version = await readBundleValue(appPath, 'CFBundleShortVersionString');
   if (!VERSION_PATTERN.test(version)) {
-    throw new Error('Qwen Live Host version is invalid.');
+    throw new InstallerError('installer.versionInvalid');
   }
+  const rawProtocolVersion = await readBundleValue(
+    appPath,
+    'QwenLiveProtocolVersion',
+  ).catch(() => '0');
+  const protocolVersion = Number(rawProtocolVersion);
   await run('/usr/bin/codesign', [
     '--verify',
     '--deep',
@@ -201,10 +222,19 @@ async function inspectApp(appPath: string): Promise<InstalledLiveHost> {
   );
   const signatureOutput = `${signature.stdout}${signature.stderr}`;
   if (!isExpectedLiveHostSignature(signatureOutput)) {
-    throw new Error('Qwen Live Host signing identity is invalid.');
+    throw new InstallerError('installer.signatureInvalid');
   }
   await run('/usr/sbin/spctl', ['-a', '-t', 'exec', appPath]);
-  return { version };
+  return {
+    version,
+    protocolVersion: Number.isSafeInteger(protocolVersion)
+      ? protocolVersion
+      : 0,
+  };
+}
+
+function isCompatibleInstalledHost(host: InstalledLiveHost): boolean {
+  return host.protocolVersion === LIVE_HOST_PROTOCOL_VERSION;
 }
 
 async function inspectInstalledHost(): Promise<InstalledLiveHost | undefined> {
@@ -242,7 +272,9 @@ async function fetchManifest(
   });
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
-    throw new Error(`Live Host manifest download failed (${response.status}).`);
+    throw new InstallerError('installer.manifestDownload', {
+      status: response.status,
+    });
   }
   return parseLiveHostReleaseManifest(await response.json());
 }
@@ -259,7 +291,9 @@ async function downloadAsset(
   });
   if (!response.ok || !response.body) {
     await response.body?.cancel().catch(() => {});
-    throw new Error(`Live Host download failed (${response.status}).`);
+    throw new InstallerError('installer.downloadStatus', {
+      status: response.status,
+    });
   }
   const contentLength = Number(response.headers.get('content-length'));
   if (
@@ -268,7 +302,7 @@ async function downloadAsset(
     contentLength !== asset.size
   ) {
     await response.body.cancel().catch(() => {});
-    throw new Error('Live Host download size does not match its manifest.');
+    throw new InstallerError('installer.sizeMismatch');
   }
   const hash = createHash('sha256');
   let received = 0;
@@ -276,7 +310,7 @@ async function downloadAsset(
     transform(chunk: Buffer, _encoding, callback) {
       received += chunk.byteLength;
       if (received > asset.size || received > MAX_DOWNLOAD_BYTES) {
-        callback(new Error('Live Host download exceeded its manifest size.'));
+        callback(new InstallerError('installer.sizeExceeded'));
         return;
       }
       hash.update(chunk);
@@ -290,7 +324,7 @@ async function downloadAsset(
     fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
   );
   if (received !== asset.size || hash.digest('hex') !== asset.sha256) {
-    throw new Error('Live Host checksum verification failed.');
+    throw new InstallerError('installer.checksum');
   }
 }
 
@@ -319,7 +353,10 @@ export async function downloadLiveHostRelease(
       return { manifest, asset };
     } catch (error) {
       errors.push(
-        new Error(`${labels[index]}: ${errorMessage(error)}`, { cause: error }),
+        new Error(
+          `${labels[index]}: ${error instanceof Error ? error.message : liveText('en', 'installer.setupFailed')}`,
+          { cause: error },
+        ),
       );
     }
   }
@@ -327,9 +364,9 @@ export async function downloadLiveHostRelease(
   await fsp.rm(destination, { force: true });
   throw new AggregateError(
     errors,
-    `Qwen Live Host download failed. ${errors
-      .map((error) => error.message)
-      .join(' ')}`,
+    liveText('en', 'installer.downloadFailed', {
+      details: errors.map((error) => error.message).join(' '),
+    }),
   );
 }
 
@@ -360,8 +397,11 @@ async function installLatestHost(
     await fsp.mkdir(extractedPath, { mode: 0o700 });
     await run('/usr/bin/ditto', ['-x', '-k', archivePath, extractedPath]);
     const candidate = await inspectApp(candidatePath);
-    if (candidate.version !== manifest.version) {
-      throw new Error('Live Host package version does not match its manifest.');
+    if (
+      candidate.version !== manifest.version ||
+      !isCompatibleInstalledHost(candidate)
+    ) {
+      throw new InstallerError('installer.packageVersion');
     }
     onStatus({ state: 'installing', version: manifest.version });
     await run('/usr/bin/ditto', [candidatePath, stagingPath]);
@@ -375,8 +415,11 @@ async function installLatestHost(
     await fsp.rename(stagingPath, LIVE_HOST_APP_PATH);
     installedCandidate = true;
     const installed = await inspectApp(LIVE_HOST_APP_PATH);
-    if (installed.version !== manifest.version) {
-      throw new Error('Installed Live Host version is invalid.');
+    if (
+      installed.version !== manifest.version ||
+      !isCompatibleInstalledHost(installed)
+    ) {
+      throw new InstallerError('installer.installedVersion');
     }
     if (movedExisting) {
       await fsp.rm(backupPath, { recursive: true, force: true });
@@ -401,8 +444,22 @@ async function launchInstalledHost(): Promise<void> {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof InstallerError)
+    return liveMessage(error.messageKey, error.messageParams);
+  if (error instanceof AggregateError && error.errors.length === 2) {
+    const detail = (entry: unknown) => {
+      const cause = entry instanceof Error ? (entry.cause ?? entry) : entry;
+      return cause instanceof Error
+        ? cause.message
+        : liveText('en', 'installer.setupFailed');
+    };
+    return liveMessage('installer.sourcesFailed', {
+      oss: detail(error.errors[0]),
+      github: detail(error.errors[1]),
+    });
+  }
   if (error instanceof Error && error.message) return error.message;
-  return 'Qwen Live Host setup failed.';
+  return liveMessage('installer.setupFailed');
 }
 
 export class LiveHostInstaller {
@@ -433,14 +490,15 @@ export class LiveHostInstaller {
   async refresh(): Promise<LiveHostInstallStatus> {
     if (this.operation) return await this.operation;
     if (this.platform !== 'darwin') {
-      return this.setError('Qwen Live Host is available only on macOS.', false);
+      return this.setError(liveMessage('installer.macOnly'), false);
     }
     this.status = { state: 'checking' };
     try {
       const installed = await this.inspectInstalled();
-      this.status = installed
-        ? { state: 'installed', version: installed.version }
-        : { state: 'missing' };
+      this.status =
+        installed && isCompatibleInstalledHost(installed)
+          ? { state: 'installed', version: installed.version }
+          : { state: 'missing' };
     } catch (error) {
       this.setError(errorMessage(error), true);
     }
@@ -458,13 +516,22 @@ export class LiveHostInstaller {
 
   async launch(): Promise<LiveHostInstallStatus> {
     if (this.platform !== 'darwin') {
-      return this.setError('Qwen Live Host is available only on macOS.', false);
+      return this.setError(liveMessage('installer.macOnly'), false);
     }
     if (this.operation) return await this.operation;
     try {
       const installed = await this.inspectInstalled();
       if (!installed)
-        return this.setError('Qwen Live Host is not installed.', true);
+        return this.setError(liveMessage('installer.notInstalled'), true);
+      if (!isCompatibleInstalledHost(installed)) {
+        return this.setError(
+          liveMessage('installer.protocol', {
+            installed: installed.protocolVersion,
+            required: LIVE_HOST_PROTOCOL_VERSION,
+          }),
+          true,
+        );
+      }
       this.status = { state: 'launching', version: installed.version };
       await this.launchHost();
       this.status = { state: 'installed', version: installed.version };
@@ -476,7 +543,7 @@ export class LiveHostInstaller {
 
   private async runInstall(force: boolean): Promise<LiveHostInstallStatus> {
     if (this.platform !== 'darwin') {
-      return this.setError('Qwen Live Host is available only on macOS.', false);
+      return this.setError(liveMessage('installer.macOnly'), false);
     }
     let currentArchitecture: LiveHostArchitecture;
     try {
@@ -484,7 +551,9 @@ export class LiveHostInstaller {
       this.status = { state: 'checking' };
       const installed = force ? undefined : await this.inspectInstalled();
       const ready =
-        installed ??
+        (installed && isCompatibleInstalledHost(installed)
+          ? installed
+          : undefined) ??
         (await this.installLatest(currentArchitecture, (status) => {
           this.status = { ...status };
         }));

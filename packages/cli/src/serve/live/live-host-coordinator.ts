@@ -6,16 +6,26 @@
 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
+import { getErrorMessage } from '../../utils/errors.js';
+import {
+  LiveVisualCaptureStore,
+  type LiveVisualCaptureSink,
+} from './visual-capture-store.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
+  LIVE_WEB_HOST_BUNDLE_ID,
   LIVE_INPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_HEADER_BYTES,
   type LiveAppshotReadiness,
   type LiveDaemonMessage,
   type LiveHostAction,
   type LiveHostHello,
+  type LiveHostKind,
   type LiveHostShortcutResult,
-  type LiveHostScreenContextResult,
+  type LiveHostVisualCaptureResult,
   type LiveHostStatus,
   type LiveHostMessage,
   type LiveMuteUpdate,
@@ -30,8 +40,11 @@ const DEFAULT_HELLO_TIMEOUT_MS = 5_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 15_000;
 const DEFAULT_SHORTCUT_TIMEOUT_MS = 5_000;
-const MAX_HOST_TEXT_BYTES = 64 * 1024;
+const MAX_HOST_TEXT_BYTES = 512 * 1024;
 const MAX_HOST_AUDIO_BYTES = 64 * 1024;
+const MAX_HOST_VISUAL_IMAGE_BYTES = 190 * 1024;
+const MAX_HOST_VISUAL_BASE64_LENGTH =
+  Math.ceil(MAX_HOST_VISUAL_IMAGE_BYTES / 3) * 4;
 const MAX_HOST_AUDIO_WIRE_BYTES =
   LIVE_INPUT_AUDIO_EPOCH_BYTES + MAX_HOST_AUDIO_BYTES;
 const MAX_DAEMON_AUDIO_BYTES = 256 * 1024;
@@ -74,6 +87,7 @@ interface LiveCall {
 }
 
 interface HostLease {
+  kind: LiveHostKind;
   socket: WebSocket;
   hello?: LiveHostHello;
   helloTimer: NodeJS.Timeout;
@@ -83,6 +97,7 @@ interface HostLease {
 }
 
 export interface LiveCallHandlers {
+  beforeStart?: () => Promise<void>;
   onHostReady?: () => void | Promise<void>;
   onStart?: (call: {
     epoch: number;
@@ -109,10 +124,11 @@ export interface LiveHostCoordinatorOptions {
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
   appshotTimeoutMs?: number;
+  visualCaptures?: LiveVisualCaptureSink;
   now?: () => number;
 }
 
-export interface LiveScreenContextCapture {
+export interface LiveVisualCapture {
   appName: string;
   windowTitle?: string;
   accessibilityText: string;
@@ -122,7 +138,7 @@ export interface LiveScreenContextCapture {
 interface PendingAppshot {
   epoch: number;
   timer: NodeJS.Timeout;
-  resolve: (capture: LiveScreenContextCapture) => void;
+  resolve: (capture: LiveVisualCapture) => void;
   reject: (error: Error) => void;
 }
 
@@ -143,6 +159,19 @@ export class LiveUnavailableError extends Error {
   }
 }
 
+export class LiveBrowserHostUnsupportedError extends Error {
+  readonly code = 'live_browser_host_unsupported' as const;
+
+  constructor(readonly feature: 'screen' | 'camera') {
+    super(
+      feature === 'camera'
+        ? 'Camera capture is unavailable in browser Live sessions.'
+        : 'This browser cannot share a screen with Live Voice.',
+    );
+    this.name = 'LiveBrowserHostUnsupportedError';
+  }
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -153,24 +182,102 @@ function isBoundedString(value: unknown, maxLength = MAX_ID_LENGTH): boolean {
   );
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function isPermissionState(value: unknown): value is LivePermissionState {
   return (
     value === 'granted' || value === 'denied' || value === 'not_determined'
   );
 }
 
-function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
+function isHostKind(value: unknown): value is LiveHostKind {
+  return value === 'native' || value === 'browser';
+}
+
+/**
+ * A browser Host owns only the microphone and the audio devices. It has no
+ * Accessibility, Screen Recording, global shortcut or Appshot surface, so its
+ * hello may omit them; they are normalized to the fail-closed value. The shape
+ * is selected by bundle id here and re-checked against the ingress route's
+ * kind in `handleHello`.
+ */
+function parseBrowserHello(
+  value: Record<string, unknown>,
+): LiveHostHello | undefined {
+  const protocolVersion = value['protocolVersion'];
   const permissions = value['permissions'];
   const selfChecks = value['selfChecks'];
+  const kind = value['kind'];
+  if (
+    typeof protocolVersion !== 'number' ||
+    !Number.isInteger(protocolVersion) ||
+    !isBoundedString(value['hostVersion'], MAX_VERSION_LENGTH) ||
+    !isBoundedString(value['instanceNonce']) ||
+    (kind !== undefined && !isHostKind(kind)) ||
+    !isObject(permissions) ||
+    !isPermissionState(permissions['microphone']) ||
+    !isObject(selfChecks) ||
+    typeof selfChecks['audioInput'] !== 'boolean' ||
+    typeof selfChecks['audioOutput'] !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return {
+    type: 'host.hello',
+    ...(kind !== undefined ? { kind } : {}),
+    protocolVersion,
+    hostVersion: value['hostVersion'] as string,
+    bundleId: LIVE_WEB_HOST_BUNDLE_ID,
+    instanceNonce: value['instanceNonce'] as string,
+    permissions: {
+      microphone: permissions['microphone'],
+      camera: 'not_determined',
+      accessibility: 'not_determined',
+      screenRecording: 'not_determined',
+    },
+    selfChecks: {
+      audioInput: selfChecks['audioInput'],
+      audioOutput: selfChecks['audioOutput'],
+      globalShortcut: false,
+      appshot: false,
+      // Absent on a Host that predates the field, which then never gets asked
+      // for a screen.
+      screenShare: selfChecks['screenShare'] === true,
+    },
+  };
+}
+
+function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
+  if (
+    value['type'] === 'host.hello' &&
+    value['bundleId'] === LIVE_WEB_HOST_BUNDLE_ID
+  ) {
+    return parseBrowserHello(value);
+  }
+  const protocolVersion = value['protocolVersion'];
+  const permissions = value['permissions'];
+  const selfChecks = value['selfChecks'];
+  if (value['kind'] !== undefined && !isHostKind(value['kind'])) {
+    return undefined;
+  }
+  const cameraPermission = isObject(permissions)
+    ? permissions['camera']
+    : undefined;
+  const legacyHelloWithoutCamera =
+    protocolVersion !== LIVE_HOST_PROTOCOL_VERSION &&
+    cameraPermission === undefined;
   if (
     value['type'] !== 'host.hello' ||
-    typeof value['protocolVersion'] !== 'number' ||
-    !Number.isInteger(value['protocolVersion']) ||
+    typeof protocolVersion !== 'number' ||
+    !Number.isInteger(protocolVersion) ||
     !isBoundedString(value['hostVersion'], MAX_VERSION_LENGTH) ||
     !isBoundedString(value['bundleId']) ||
     !isBoundedString(value['instanceNonce']) ||
     !isObject(permissions) ||
     !isPermissionState(permissions['microphone']) ||
+    (!isPermissionState(cameraPermission) && !legacyHelloWithoutCamera) ||
     !isPermissionState(permissions['accessibility']) ||
     !isPermissionState(permissions['screenRecording']) ||
     !isObject(selfChecks) ||
@@ -181,7 +288,15 @@ function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
   ) {
     return undefined;
   }
-  return value as unknown as LiveHostHello;
+  return {
+    ...(value as unknown as LiveHostHello),
+    permissions: {
+      ...permissions,
+      camera: isPermissionState(cameraPermission)
+        ? cameraPermission
+        : 'not_determined',
+    } as LiveHostHello['permissions'],
+  };
 }
 
 function parseAction(
@@ -224,6 +339,90 @@ function parseAction(
   return undefined;
 }
 
+function isBoundedVisualImage(image: unknown): image is string {
+  if (
+    typeof image !== 'string' ||
+    image.length === 0 ||
+    image.length > MAX_HOST_VISUAL_BASE64_LENGTH ||
+    image.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(image)
+  ) {
+    return false;
+  }
+  const jpeg = Buffer.from(image, 'base64');
+  return (
+    jpeg.byteLength >= 4 &&
+    jpeg.byteLength <= MAX_HOST_VISUAL_IMAGE_BYTES &&
+    jpeg[0] === 0xff &&
+    jpeg[1] === 0xd8 &&
+    jpeg[jpeg.byteLength - 2] === 0xff &&
+    jpeg[jpeg.byteLength - 1] === 0xd9 &&
+    jpeg.toString('base64') === image
+  );
+}
+
+function parseVisualCaptureResult(
+  value: Record<string, unknown>,
+): LiveHostVisualCaptureResult | undefined {
+  const requestId = value['requestId'];
+  if (
+    value['type'] !== 'host.visual_capture_result' ||
+    !isBoundedString(requestId)
+  ) {
+    return undefined;
+  }
+  if (value['success'] === false && isBoundedString(value['error'], 1_024)) {
+    return {
+      type: 'host.visual_capture_result',
+      requestId: requestId as string,
+      success: false,
+      error: value['error'] as string,
+    };
+  }
+  const width = value['width'];
+  const height = value['height'];
+  if (
+    value['success'] !== true ||
+    value['source'] !== 'screen' ||
+    !isBoundedVisualImage(value['image']) ||
+    typeof width !== 'number' ||
+    !Number.isSafeInteger(width) ||
+    width <= 0 ||
+    typeof height !== 'number' ||
+    !Number.isSafeInteger(height) ||
+    height <= 0 ||
+    !isBoundedString(value['appName'], 512) ||
+    (value['windowTitle'] !== undefined &&
+      !isBoundedString(value['windowTitle'], 2_048)) ||
+    typeof value['accessibilityText'] !== 'string' ||
+    value['accessibilityText'].length > MAX_APPSHOT_TEXT_LENGTH ||
+    // A browser Host has no filesystem on this machine and sends no path; the
+    // daemon persists the image itself. Which Hosts may omit it is decided in
+    // `handleVisualCaptureResult`, where the lease kind is known.
+    (value['screenshotPath'] !== undefined &&
+      !isBoundedString(value['screenshotPath'], 4_096))
+  ) {
+    return undefined;
+  }
+  return {
+    type: 'host.visual_capture_result',
+    requestId: requestId as string,
+    success: true,
+    source: 'screen',
+    image: value['image'],
+    width,
+    height,
+    appName: value['appName'] as string,
+    ...(value['windowTitle']
+      ? { windowTitle: value['windowTitle'] as string }
+      : {}),
+    accessibilityText: value['accessibilityText'],
+    ...(value['screenshotPath'] !== undefined
+      ? { screenshotPath: value['screenshotPath'] as string }
+      : {}),
+  };
+}
+
 function parseHostMessage(text: string): LiveHostMessage | undefined {
   let value: unknown;
   try {
@@ -234,6 +433,9 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
   if (!isObject(value)) return undefined;
   if (value['type'] === 'host.hello') return parseHello(value);
   if (value['type'] === 'host.action') return parseAction(value);
+  if (value['type'] === 'host.visual_capture_result') {
+    return parseVisualCaptureResult(value);
+  }
   if (value['type'] === 'host.pong' && isBoundedString(value['pingId'])) {
     return { type: 'host.pong', pingId: value['pingId'] as string };
   }
@@ -259,50 +461,27 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
       };
     }
   }
-  if (value['type'] === 'host.screen_context_result') {
-    const requestId = value['requestId'];
-    if (!isBoundedString(requestId)) return undefined;
-    if (value['success'] === false && isBoundedString(value['error'], 1_024)) {
-      return {
-        type: 'host.screen_context_result',
-        requestId: requestId as string,
-        success: false,
-        error: value['error'] as string,
-      };
-    }
-    if (
-      value['success'] === true &&
-      isBoundedString(value['appName'], 512) &&
-      (value['windowTitle'] === undefined ||
-        isBoundedString(value['windowTitle'], 2_048)) &&
-      typeof value['accessibilityText'] === 'string' &&
-      value['accessibilityText'].length <= MAX_APPSHOT_TEXT_LENGTH &&
-      isBoundedString(value['screenshotPath'], 4_096)
-    ) {
-      return {
-        type: 'host.screen_context_result',
-        requestId: requestId as string,
-        success: true,
-        appName: value['appName'] as string,
-        ...(value['windowTitle']
-          ? { windowTitle: value['windowTitle'] as string }
-          : {}),
-        accessibilityText: value['accessibilityText'],
-        screenshotPath: value['screenshotPath'] as string,
-      };
-    }
-  }
   if (
     value['type'] === 'host.playback_started' &&
-    typeof value['epoch'] === 'number'
+    isNonNegativeSafeInteger(value['epoch']) &&
+    isNonNegativeSafeInteger(value['outputId'])
   ) {
-    return { type: 'host.playback_started', epoch: value['epoch'] };
+    return {
+      type: 'host.playback_started',
+      epoch: value['epoch'],
+      outputId: value['outputId'],
+    };
   }
   if (
     value['type'] === 'host.playback_completed' &&
-    typeof value['epoch'] === 'number'
+    isNonNegativeSafeInteger(value['epoch']) &&
+    isNonNegativeSafeInteger(value['outputId'])
   ) {
-    return { type: 'host.playback_completed', epoch: value['epoch'] };
+    return {
+      type: 'host.playback_completed',
+      epoch: value['epoch'],
+      outputId: value['outputId'],
+    };
   }
   return undefined;
 }
@@ -362,11 +541,15 @@ export class LiveHostCoordinator {
   };
   private call?: LiveCall;
   private pendingStartMode?: 'new';
+  private actionGeneration = 0;
   private nextEpoch = 0;
+  private nextOutputId = 0;
+  private activeOutputId?: number;
   private inputMuted = false;
   private outputMuted = false;
   private lastCallError?: string;
   private readonly pendingAppshots = new Map<string, PendingAppshot>();
+  private readonly visualCaptures: LiveVisualCaptureSink;
   private pendingShortcut?: PendingShortcut;
   private readonly inactiveWaiters = new Set<() => void>();
 
@@ -381,6 +564,8 @@ export class LiveHostCoordinator {
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
     this.appshotTimeoutMs =
       options.appshotTimeoutMs ?? DEFAULT_APPSHOT_TIMEOUT_MS;
+    this.visualCaptures =
+      options.visualCaptures ?? new LiveVisualCaptureStore();
     const shortcut = options.shortcut?.trim();
     this.shortcut =
       shortcut && shortcut.length <= MAX_SHORTCUT_LENGTH
@@ -403,6 +588,7 @@ export class LiveHostCoordinator {
   }
 
   async deactivate(): Promise<void> {
+    ++this.actionGeneration;
     this.pendingStartMode = undefined;
     if (this.call) {
       const stopped = new Promise<void>((resolve) => {
@@ -429,13 +615,50 @@ export class LiveHostCoordinator {
       socket.close(4003, 'Invalid daemon instance nonce.');
       return;
     }
-    if (this.host && this.isLeaseHealthy(this.host)) {
-      socket.close(4009, 'A Live Host is already connected.');
-      return;
+    this.acquireLease(socket, 'native', false);
+  }
+
+  /**
+   * Admits the Web Shell as the audio endpoint. The daemon-instance nonce is a
+   * request header browsers cannot set; this ingress is authenticated by the
+   * WS upgrade listener (bearer subprotocol, loopback/CSRF) instead, and the
+   * page is served by this very daemon, so there is no other instance to
+   * confuse it with.
+   */
+  attachBrowserHost(socket: WebSocket, options: { takeover?: boolean } = {}) {
+    this.acquireLease(socket, 'browser', options.takeover === true);
+  }
+
+  private acquireLease(
+    socket: WebSocket,
+    kind: LiveHostKind,
+    takeover: boolean,
+  ): void {
+    const current = this.host;
+    if (current && this.isLeaseHealthy(current)) {
+      // Single lease. A native Host is a superset (visual context, global
+      // shortcut) the user installed on purpose, so it supersedes a browser
+      // tab; a browser never displaces a native Host, and displaces another
+      // browser only when the user explicitly asked to take over.
+      const supersedes =
+        current.kind === 'browser' && (kind === 'native' || takeover);
+      if (!supersedes) {
+        socket.close(4009, 'A Live Host is already connected.');
+        return;
+      }
+      this.disconnectHost(
+        current,
+        4010,
+        kind === 'native'
+          ? 'Superseded by native Live Host.'
+          : 'Superseded by another Web Shell tab.',
+      );
+    } else if (current) {
+      this.disconnectHost(current, 4008, 'Host lease expired.');
     }
-    if (this.host) this.disconnectHost(this.host, 4008, 'Host lease expired.');
 
     const lease: HostLease = {
+      kind,
       socket,
       lastPongAt: this.now(),
       helloTimer: setTimeout(() => {
@@ -488,6 +711,16 @@ export class LiveHostCoordinator {
       requirements.microphone = permissionRequirement(
         hello.permissions.microphone,
       );
+    }
+    if (hello && this.host?.kind === 'browser') {
+      requirements.audioInput = hello.selfChecks.audioInput
+        ? 'ready'
+        : 'unavailable';
+      requirements.audioOutput = hello.selfChecks.audioOutput
+        ? 'ready'
+        : 'unavailable';
+      requirements.appshot = appshot.state;
+    } else if (hello) {
       requirements.accessibility = permissionRequirement(
         hello.permissions.accessibility,
       );
@@ -559,10 +792,26 @@ export class LiveHostCoordinator {
             host: {
               version: hello.hostVersion,
               protocolVersion: hello.protocolVersion,
+              ...(this.host?.kind === 'browser'
+                ? { kind: 'browser' as const }
+                : {}),
             },
           }
         : {}),
     };
+  }
+
+  async requestStart(mode: 'resume' | 'new'): Promise<LiveStatus> {
+    const generation = ++this.actionGeneration;
+    this.pendingStartMode = undefined;
+    try {
+      await this.handlers.beforeStart?.();
+    } catch (error) {
+      if (generation !== this.actionGeneration) return this.getStatus();
+      throw error;
+    }
+    if (generation !== this.actionGeneration) return this.getStatus();
+    return this.start(mode).status;
   }
 
   start(mode: 'resume' | 'new'): {
@@ -626,6 +875,7 @@ export class LiveHostCoordinator {
   }
 
   stop(): LiveStatus {
+    ++this.actionGeneration;
     this.pendingStartMode = undefined;
     if (this.call) this.beginCallStop(this.call);
     return this.getStatus();
@@ -661,6 +911,12 @@ export class LiveHostCoordinator {
       return Promise.reject(
         new Error('Qwen Live Host must be connected to change the shortcut.'),
       );
+    }
+    if (host.kind === 'browser') {
+      // A page cannot register a global shortcut, so there is nothing to
+      // confirm. The value is still the user's setting: keep it, and the next
+      // native Host picks it up from its welcome.
+      return Promise.resolve(this.setConfiguredShortcut(normalized));
     }
     const requestId = randomUUID();
     return new Promise<LiveStatus>((resolve, reject) => {
@@ -757,19 +1013,26 @@ export class LiveHostCoordinator {
     );
   }
 
-  captureScreenContext(
-    callerSessionId: string,
-  ): Promise<LiveScreenContextCapture> {
+  captureVisualContext(callerSessionId: string): Promise<LiveVisualCapture> {
     const call = this.call;
     const host = this.host;
+    const browser = host?.kind === 'browser';
+    if (browser && host?.hello && !host.hello.selfChecks.screenShare) {
+      return Promise.reject(new LiveBrowserHostUnsupportedError('screen'));
+    }
     if (
       !call ||
       call.coordinator?.sessionId !== callerSessionId ||
       !host?.hello ||
       !this.isLeaseHealthy(host) ||
-      host.hello.permissions.accessibility !== 'granted' ||
-      host.hello.permissions.screenRecording !== 'granted' ||
-      !host.hello.selfChecks.appshot
+      // Accessibility, Screen Recording and the Appshot self-check describe the
+      // native Host's macOS surface. A browser has none of them: the user's own
+      // grant is the screen it chose to share, and it reports that it can be
+      // asked through `selfChecks.screenShare`.
+      (!browser &&
+        (host.hello.permissions.accessibility !== 'granted' ||
+          host.hello.permissions.screenRecording !== 'granted' ||
+          !host.hello.selfChecks.appshot))
     ) {
       return Promise.reject(
         new Error(
@@ -778,7 +1041,7 @@ export class LiveHostCoordinator {
       );
     }
     const requestId = randomUUID();
-    return new Promise<LiveScreenContextCapture>((resolve, reject) => {
+    return new Promise<LiveVisualCapture>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingAppshots.delete(requestId);
         reject(new Error('Live Host Appshot timed out.'));
@@ -792,9 +1055,10 @@ export class LiveHostCoordinator {
       });
       if (
         !this.sendHost({
-          type: 'host.capture_screen_context',
+          type: 'host.capture_visual',
           requestId,
           epoch: call.epoch,
+          source: 'screen',
         })
       ) {
         this.rejectPendingAppshot(
@@ -844,9 +1108,18 @@ export class LiveHostCoordinator {
     ) {
       return false;
     }
-    socket.send(pcm16, { binary: true });
+    const outputId = this.activeOutputId ?? this.allocateOutputId();
+    const frame = Buffer.allocUnsafe(
+      LIVE_OUTPUT_AUDIO_HEADER_BYTES + pcm16.byteLength,
+    );
+    frame.writeBigUInt64BE(BigInt(epoch), 0);
+    frame.writeBigUInt64BE(BigInt(outputId), LIVE_OUTPUT_AUDIO_EPOCH_BYTES);
+    frame.set(pcm16, LIVE_OUTPUT_AUDIO_HEADER_BYTES);
+    socket.send(frame, { binary: true });
+    this.activeOutputId = outputId;
     writeLiveHostDiagnostic('output_audio_sent', {
       epoch,
+      outputId,
       bytes: pcm16.byteLength,
       socketBufferedBytes: socket.bufferedAmount,
     });
@@ -855,11 +1128,13 @@ export class LiveHostCoordinator {
 
   clearOutput(epoch: number): void {
     if (this.call && this.call.epoch !== epoch) return;
+    this.activeOutputId = undefined;
     writeLiveHostDiagnostic('clear_output_sent', { epoch });
     this.sendHost({ type: 'host.clear_output', epoch });
   }
 
   dispose(): void {
+    ++this.actionGeneration;
     this.pendingStartMode = undefined;
     if (this.call) this.finishCall(this.call);
     if (this.host) {
@@ -872,6 +1147,7 @@ export class LiveHostCoordinator {
     }
     this.rejectPendingAppshots(new Error('Live Voice is shutting down.'));
     this.rejectPendingShortcut(new Error('Live Voice is shutting down.'));
+    this.visualCaptures.dispose();
     this.notifyInactive();
   }
 
@@ -903,6 +1179,15 @@ export class LiveHostCoordinator {
     if (hello.permissions.microphone !== 'granted') {
       return 'microphone_permission';
     }
+    if (this.host?.kind === 'browser') {
+      if (!hello.selfChecks.audioInput) return 'audio_input';
+      if (!hello.selfChecks.audioOutput) return 'audio_output';
+      // `appshot` readiness doubles as "the Live conversation runtime is
+      // bound"; that still gates a browser call. Only the Host-side
+      // self-check is native-only.
+      if (appshot.state !== 'ready') return 'appshot';
+      return undefined;
+    }
     if (hello.permissions.accessibility !== 'granted') {
       return 'accessibility_permission';
     }
@@ -929,7 +1214,13 @@ export class LiveHostCoordinator {
     ) {
       return provider.message;
     }
-    if (blocker === 'appshot' && hello?.selfChecks.appshot && appshot.message) {
+    if (
+      blocker === 'appshot' &&
+      (hello?.selfChecks.appshot || this.host?.kind === 'browser') &&
+      appshot.message
+    ) {
+      // A browser Host has no self-check to fail: for it this blocker only
+      // ever means the daemon-side Live runtime is not ready yet.
       return appshot.message;
     }
     const messages: Record<NonNullable<LiveStatus['blocker']>, string> = {
@@ -937,6 +1228,7 @@ export class LiveHostCoordinator {
       host_disconnected: 'Qwen Live Host disconnected.',
       host_version: 'Qwen Live Host is not protocol-compatible.',
       microphone_permission: 'Microphone permission is required.',
+      camera_permission: 'Camera permission is required.',
       accessibility_permission: 'Accessibility permission is required.',
       screen_recording_permission: 'Screen Recording permission is required.',
       audio_input: 'Live Host audio input self-check failed.',
@@ -987,20 +1279,22 @@ export class LiveHostCoordinator {
       }
       return;
     }
-    if (message.type === 'host.screen_context_result') {
-      this.handleScreenContextResult(message);
+    if (message.type === 'host.visual_capture_result') {
+      this.handleVisualCaptureResult(lease, message);
       return;
     }
     if (message.type === 'host.shortcut_result') {
       this.handleShortcutResult(message);
       return;
     }
-    // v7 playback receipts: accepted but not forwarded to the built-in
-    // Live session coordinator (which uses byte estimation). The
-    // standalone qwen-live daemon wires these to its injector.
+    // Standalone extensions are not advertised by the built-in Live daemon
+    // and are unreachable because this parser intentionally omits them.
     if (
       message.type === 'host.playback_started' ||
-      message.type === 'host.playback_completed'
+      message.type === 'host.playback_completed' ||
+      message.type === 'host.visual_frame' ||
+      message.type === 'host.visual_settings' ||
+      message.type === 'host.memory_action'
     ) {
       return;
     }
@@ -1032,8 +1326,9 @@ export class LiveHostCoordinator {
     pending.resolve(status);
   }
 
-  private handleScreenContextResult(
-    message: LiveHostScreenContextResult,
+  private handleVisualCaptureResult(
+    lease: HostLease,
+    message: LiveHostVisualCaptureResult,
   ): void {
     const pending = this.pendingAppshots.get(message.requestId);
     if (!pending) return;
@@ -1051,23 +1346,57 @@ export class LiveHostCoordinator {
       pending.reject(new Error(message.error));
       return;
     }
-    pending.resolve({
+    if (message.source !== 'screen') {
+      pending.reject(
+        new Error('Qwen Live Host returned a non-screen Appshot.'),
+      );
+      return;
+    }
+    const describe = (screenshotPath: string): LiveVisualCapture => ({
       appName: message.appName,
       ...(message.windowTitle ? { windowTitle: message.windowTitle } : {}),
       accessibilityText: message.accessibilityText,
-      screenshotPath: message.screenshotPath,
+      screenshotPath,
     });
+    if (lease.kind === 'browser') {
+      // Whatever path a browser names would be a path on *this* machine that a
+      // remote page chose, so it is dropped unread. The daemon writes the image
+      // it has already bounded and checked, and owns the only path that leaves
+      // here.
+      this.visualCaptures
+        .store(Buffer.from(message.image, 'base64'))
+        .then((screenshotPath) => pending.resolve(describe(screenshotPath)))
+        .catch((error: unknown) =>
+          pending.reject(
+            new Error(
+              `The shared screen could not be saved: ${getErrorMessage(error)}`,
+            ),
+          ),
+        );
+      return;
+    }
+    if (!message.screenshotPath) {
+      pending.reject(
+        new Error('Qwen Live Host did not persist the requested Appshot.'),
+      );
+      return;
+    }
+    pending.resolve(describe(message.screenshotPath));
   }
 
   private handleHello(lease: HostLease, hello: LiveHostHello): void {
     if (
       hello.protocolVersion !== LIVE_HOST_PROTOCOL_VERSION ||
-      hello.bundleId !== LIVE_HOST_BUNDLE_ID ||
+      hello.bundleId !==
+        (lease.kind === 'browser'
+          ? LIVE_WEB_HOST_BUNDLE_ID
+          : LIVE_HOST_BUNDLE_ID) ||
+      (hello.kind !== undefined && hello.kind !== lease.kind) ||
       (lease.hello && lease.hello.instanceNonce !== hello.instanceNonce)
     ) {
       this.lastHostFailure = 'host_version';
-      lease.socket.close(4006, 'Incompatible Live Host.');
       this.detachHost(lease, 'host_version');
+      lease.socket.close(4006, 'Incompatible Live Host.');
       return;
     }
     lease.hello = hello;
@@ -1129,19 +1458,17 @@ export class LiveHostCoordinator {
   }
 
   private startFromHost(mode: 'resume' | 'new'): void {
-    try {
-      this.start(mode);
-    } catch (error) {
+    void this.requestStart(mode).catch((error: unknown) => {
       if (error instanceof LiveUnavailableError) {
         this.sendState(error.status);
         return;
       }
-      this.sendState({
-        ...this.getStatus(),
-        state: 'error',
-        message: 'Live Voice failed to start.',
-      });
-    }
+      this.lastCallError =
+        error instanceof ConversationRuntimeOwnershipError
+          ? error.message
+          : 'Live Voice failed to start.';
+      this.sendState(this.buildStatus(false));
+    });
   }
 
   private handleAudioFrame(lease: HostLease, data: RawData): void {
@@ -1291,9 +1618,10 @@ export class LiveHostCoordinator {
   }
 
   private stopForReadinessLoss(): void {
+    ++this.actionGeneration;
+    this.pendingStartMode = undefined;
     const call = this.call;
     if (!call) return;
-    this.pendingStartMode = undefined;
     this.beginCallStop(call);
   }
 
@@ -1374,6 +1702,14 @@ export class LiveHostCoordinator {
     }
     socket.send(JSON.stringify(message));
     return true;
+  }
+
+  private allocateOutputId(): number {
+    if (this.nextOutputId >= Number.MAX_SAFE_INTEGER) {
+      this.nextOutputId = 0;
+    }
+    this.nextOutputId += 1;
+    return this.nextOutputId;
   }
 
   private notifyInactive(): void {

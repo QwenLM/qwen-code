@@ -174,6 +174,7 @@ describe('no-AK integration CI wiring', () => {
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
         './skill-hooks-invocation-parity.test.ts',
+        './skill-hooks-resume.test.ts',
         './qwen-live-m4-acp-call.test.ts',
         './qwen-live-m4-acp-permission.test.ts',
         './qwen-live-m4-acp-steering.test.ts',
@@ -184,9 +185,11 @@ describe('no-AK integration CI wiring', () => {
         './qwen-live-m2-steering.test.ts',
         './cli/_prompt-latency-policy.test.ts',
         './cli/daemon-invocation-context.test.ts',
+        './cli/headless-workflow-skill.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
+        './cli/qwen-serve-standalone-concurrency.test.ts',
         './sdk-typescript/abort-and-lifecycle.test.ts',
         './sdk-typescript/permission-control.test.ts',
         './sdk-typescript/sdk-mcp-server.test.ts',
@@ -848,53 +851,56 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('does not install Linux packages on self-hosted Playwright runners', () => {
+  it('installs Playwright system dependencies only on hosted runners', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain('ubuntu_runner');
+    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
     const hostedInstall = getWorkflowStep(
       webShellJob,
-      'Install Playwright Chromium (hosted)',
+      'Install Playwright Chromium and WebKit (hosted)',
     );
     const selfHostedInstall = getWorkflowStep(
       webShellJob,
-      'Install Playwright Chromium (self-hosted)',
+      'Install Playwright Chromium and WebKit (self-hosted)',
     );
 
     expect(hostedInstall).toContain(
-      'node node_modules/playwright/cli.js install --with-deps chromium',
+      'node node_modules/playwright/cli.js install --with-deps chromium webkit',
     );
     expect(selfHostedInstall).toContain(
-      'node node_modules/playwright/cli.js install chromium',
+      'node node_modules/playwright/cli.js install chromium webkit',
     );
     expect(selfHostedInstall).not.toContain('install --with-deps chromium');
     for (const step of [hostedInstall, selfHostedInstall]) {
       expect(step).toContain(
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
       );
-      expect(step).toContain('node "${nested_cli}" install chromium');
+      expect(step).toContain('node "${nested_cli}" install chromium webkit');
     }
   });
 
-  it('installs both Playwright Chromium revisions in the nightly browser gate', () => {
+  it('installs Chromium and WebKit for both Playwright revisions in the nightly browser gate', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/e2e.yml'),
       'utf8',
     );
     const browserJob = getWorkflowJob(workflow, 'web-shell-browser-regression');
-    const install = getWorkflowStep(browserJob, 'Install Playwright Chromium');
+    const install = getWorkflowStep(
+      browserJob,
+      'Install Playwright Chromium and WebKit',
+    );
 
     expect(install).toContain(
-      'node node_modules/playwright/cli.js install --with-deps chromium',
+      'node node_modules/playwright/cli.js install --with-deps chromium webkit',
     );
     expect(install).toContain(
       "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
     );
-    expect(install).toContain('node "${nested_cli}" install chromium');
+    expect(install).toContain('node "${nested_cli}" install chromium webkit');
   });
 });
 
@@ -978,6 +984,6 @@ describe('Windows temp short-alias guard', () => {
     // configure-windows-runner and the hosted redirect both set TEMP and TMP,
     // so an unset value means one of them stopped running — a clear message
     // beats realpathSync(undefined)'s TypeError.
-    expect(() => runGuard({})).toThrow(/TEMP is not set/);
+    expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
 });

@@ -75,7 +75,7 @@ test('the runner configuration decides which lane runs what', () => {
 
 test('the manifests change what each lane executes', () => {
   assert.equal(classifyChangedFiles(['package.json']), PLATFORM_SENSITIVE);
-  assert.equal(classifyChangedFiles(['package-lock.json']), PLATFORM_SENSITIVE);
+  assert.equal(classifyChangedFiles(['pnpm-lock.yaml']), PLATFORM_SENSITIVE);
   // A workspace manifest is not the root one; it reaches the lanes through
   // the subsystem rules or not at all.
   assert.equal(
@@ -124,6 +124,7 @@ test('platform-coupled subsystems match on segments, not substrings', () => {
     'packages/core/src/telemetry/uploader.ts',
     'packages/cli/src/services/plateauDetector.ts',
     'packages/web-shell/client/components/Shellfish.tsx',
+    'packages/cli/src/ui/hooks/shellCommandProcessor.ts',
   ]) {
     assert.equal(classifyChangedFiles([file]), PLATFORM_INSENSITIVE, file);
   }

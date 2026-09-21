@@ -322,6 +322,18 @@ const useResultDisplayRenderer = (
       };
     }
 
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      (resultDisplay.type === 'ask_user_question_answers' ||
+        resultDisplay.type === 'shell_result') &&
+      'text' in resultDisplay &&
+      typeof resultDisplay.text === 'string'
+    ) {
+      return { type: 'string', data: resultDisplay.text };
+    }
+
     // Default to string — safeguard against non-string objects
     return {
       type: 'string',
@@ -1146,7 +1158,35 @@ export const TOOL_ARGS_INLINE_MAX_LINES = 2;
 
 /**
  * One-line JSON for the `ui.showToolCallArgs` row, or undefined when there is
- * nothing worth adding.
+ * nothing worth adding. Serializes `args`, then defers to
+ * {@link formatInlineToolArgsJson} for the row itself.
+ */
+export function formatInlineToolArgs(
+  args: Record<string, unknown> | undefined,
+  description: string,
+  uncapped: boolean,
+  rowWidth?: number,
+): string | undefined {
+  if (!args || Object.keys(args).length === 0) {
+    return undefined;
+  }
+
+  let json: string;
+  try {
+    json = JSON.stringify(args);
+  } catch {
+    // Circular or otherwise unserializable args — the header line is all we
+    // can honestly show.
+    return undefined;
+  }
+
+  return formatInlineToolArgsJson(json, description, uncapped, rowWidth);
+}
+
+/**
+ * The `ui.showToolCallArgs` row over an already-serialized `json`, so a renderer
+ * that carries the call's arguments as text (OpenTUI's `tool-args` event) draws
+ * the same row as this one rather than keeping a second copy of the policy.
  *
  * Skipped when `description` already IS the args JSON: MCP invocations return
  * `safeJsonStringify(params)` from `getDescription()`, so rendering both would
@@ -1168,25 +1208,12 @@ export const TOOL_ARGS_INLINE_MAX_LINES = 2;
  * component). When given, the row is bounded to `TOOL_ARGS_INLINE_MAX_LINES`
  * wrapped rows rather than by character count alone — see that constant.
  */
-export function formatInlineToolArgs(
-  args: Record<string, unknown> | undefined,
+export function formatInlineToolArgsJson(
+  json: string,
   description: string,
   uncapped: boolean,
   rowWidth?: number,
 ): string | undefined {
-  if (!args || Object.keys(args).length === 0) {
-    return undefined;
-  }
-
-  let json: string;
-  try {
-    json = JSON.stringify(args);
-  } catch {
-    // Circular or otherwise unserializable args — the header line is all we
-    // can honestly show.
-    return undefined;
-  }
-
   const trimmedDescription = description.trim();
   if (trimmedDescription.startsWith('{')) {
     try {

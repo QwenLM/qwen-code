@@ -15,13 +15,30 @@ import type {
   AcpSessionBridge,
   BridgeWorkspaceRuntimeLifecycleSnapshot,
 } from './acp-session-bridge.js';
-import { WorkspaceDrainingError } from './acp-session-bridge.js';
+import {
+  AcpChildCapacityExceededError,
+  WorkspaceDrainingError,
+} from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const DEFAULT_ENSURE_TIMEOUT_MS = 60_000;
-const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
+export const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
 const MCP_PREPARE_TIMEOUT_MS = 2 * 60_000;
 const MCP_POLL_INTERVAL_MS = 250;
+
+export type EnsureOptions = {
+  timeoutMs?: number;
+  keepAliveMs?: number;
+  /**
+   * Skip keep-alive preheat when the runtime is already live.
+   * Object-form `ensure({})` defaults this to true unless `keepAliveMs` is
+   * set. Numeric `ensure()` / `ensure(timeoutMs)` never skip. Daemon boot
+   * after ACP warm-up must pass `keepAliveMs` so the default
+   * `channelIdleTimeoutMs=0` policy does not reap the child before MCP
+   * prepare finishes.
+   */
+  skipKeepAlivePreheat?: boolean;
+};
 
 type LifecycleAcpSessionBridge = AcpSessionBridge & {
   getWorkspaceRuntimeLifecycleSnapshot(): BridgeWorkspaceRuntimeLifecycleSnapshot;
@@ -67,6 +84,32 @@ export class WorkspaceRuntimeCoordinator {
   private disposed = false;
 
   private draining = false;
+  private stopping: symbol | undefined;
+
+  private get admissionPaused(): boolean {
+    return this.draining || this.stopping !== undefined;
+  }
+
+  hasManagementWork(): boolean {
+    return (
+      this.activeManagementOperations > 0 ||
+      this.skillsQueuedWork > 0 ||
+      this.mcpQueuedWork > 0
+    );
+  }
+
+  beginStop(): () => boolean {
+    this.assertAcceptingWork();
+    const token = Symbol('workspace-stop');
+    this.stopping = token;
+    return () => {
+      if (this.stopping !== token) return false;
+      this.stopping = undefined;
+      if (this.disposed || this.draining) return false;
+      this.resumeDeferredWork();
+      return true;
+    };
+  }
 
   private activeManagementOperations = 0;
 
@@ -114,6 +157,10 @@ export class WorkspaceRuntimeCoordinator {
   cancelDrain(): void {
     if (this.disposed) return;
     this.draining = false;
+    if (!this.admissionPaused) this.resumeDeferredWork();
+  }
+
+  private resumeDeferredWork(): void {
     if (this.skillsReconcileDeferred) {
       this.skillsReconcileDeferred = false;
       this.scheduleSkillsReconciliation();
@@ -170,26 +217,54 @@ export class WorkspaceRuntimeCoordinator {
     };
   }
 
+  /**
+   * `ensure(timeoutMs)` always keep-alive preheats. `ensure({ ... })` skips
+   * that preheat on a live runtime unless `skipKeepAlivePreheat` is false or
+   * `keepAliveMs` is set. Boot discovery must pass `keepAliveMs` so the
+   * already-warm child stays held through `initializeWorkspaceMcp`.
+   */
   async ensure(
-    timeoutMs = DEFAULT_ENSURE_TIMEOUT_MS,
+    timeoutMsOrOptions: number | EnsureOptions = DEFAULT_ENSURE_TIMEOUT_MS,
   ): Promise<ServeWorkspaceRuntimeStatus> {
+    const options =
+      typeof timeoutMsOrOptions === 'number'
+        ? { timeoutMs: timeoutMsOrOptions }
+        : timeoutMsOrOptions;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_ENSURE_TIMEOUT_MS;
     this.assertAcceptingWork();
     const deadline = Date.now() + timeoutMs;
-    try {
-      await withTimeout(
-        this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS }),
-        timeoutMs,
-      );
-    } catch (error) {
-      this.assertAcceptingWork(error);
-      if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
-      throw new WorkspaceRuntimeInitializationError(error);
+    const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    const skipKeepAlivePreheat =
+      snapshot.runtimeLive &&
+      options.keepAliveMs === undefined &&
+      (options.skipKeepAlivePreheat ?? typeof timeoutMsOrOptions !== 'number');
+    if (!skipKeepAlivePreheat) {
+      try {
+        await withTimeout(
+          this.bridge.preheat({
+            keepAliveMs: options.keepAliveMs ?? ENSURE_KEEP_ALIVE_MS,
+          }),
+          timeoutMs,
+        );
+      } catch (error) {
+        this.assertAcceptingWork(error);
+        if (
+          error instanceof WorkspaceRuntimeStillStartingError ||
+          error instanceof AcpChildCapacityExceededError
+        )
+          throw error;
+        throw new WorkspaceRuntimeInitializationError(error);
+      }
     }
     this.assertAcceptingWork();
     const status = this.status();
     if (!status.runtimeLive) {
       throw new WorkspaceRuntimeInitializationError(
-        new Error('ACP preheat completed without a live runtime'),
+        new Error(
+          skipKeepAlivePreheat
+            ? 'Runtime is not live after skipping keep-alive preheat'
+            : 'ACP preheat completed without a live runtime',
+        ),
       );
     }
     const skillsReady =
@@ -250,8 +325,9 @@ export class WorkspaceRuntimeCoordinator {
 
   private scheduleSkillsReconciliation(): 'deferred' | 'reconciling' {
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
-    if (!snapshot.runtimeLive || this.draining || this.disposed) {
-      this.skillsReconcileDeferred ||= snapshot.runtimeLive && this.draining;
+    if (!snapshot.runtimeLive || this.admissionPaused || this.disposed) {
+      this.skillsReconcileDeferred ||=
+        snapshot.runtimeLive && this.admissionPaused;
       if (snapshot.state === 'starting') {
         this.skillsRefreshRetryRevision = this.skillsRevision;
       }
@@ -278,9 +354,10 @@ export class WorkspaceRuntimeCoordinator {
       await this.refreshSkillsRevision(revision);
       await this.prepareSkillsRevision(revision);
     }).catch((error: unknown) => {
-      if (this.draining && !this.disposed) this.skillsReconcileDeferred = true;
+      if (this.admissionPaused && !this.disposed)
+        this.skillsReconcileDeferred = true;
       if (
-        !this.draining &&
+        !this.admissionPaused &&
         !this.disposed &&
         revision === this.skillsRevision
       ) {
@@ -299,8 +376,9 @@ export class WorkspaceRuntimeCoordinator {
 
   private scheduleMcpReconciliation(): 'deferred' | 'reconciling' {
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
-    if (!snapshot.runtimeLive || this.draining || this.disposed) {
-      this.mcpReconcileDeferred ||= snapshot.runtimeLive && this.draining;
+    if (!snapshot.runtimeLive || this.admissionPaused || this.disposed) {
+      this.mcpReconcileDeferred ||=
+        snapshot.runtimeLive && this.admissionPaused;
       this.mcpStatus = {
         state:
           this.mcpStatus.runtimeEpoch === undefined ? 'not_started' : 'stale',
@@ -323,7 +401,8 @@ export class WorkspaceRuntimeCoordinator {
       await this.bridge.reloadWorkspaceMcp();
       await this.prepareMcpRevision(revision);
     }).catch((error: unknown) => {
-      if (this.draining && !this.disposed) this.mcpReconcileDeferred = true;
+      if (this.admissionPaused && !this.disposed)
+        this.mcpReconcileDeferred = true;
       this.recordMcpError(revision, snapshot.runtimeEpoch, error);
     });
     return 'reconciling';
@@ -397,7 +476,10 @@ export class WorkspaceRuntimeCoordinator {
           try {
             await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
           } catch (error) {
-            if (error instanceof WorkspaceRuntimeStillStartingError)
+            if (
+              error instanceof WorkspaceRuntimeStillStartingError ||
+              error instanceof AcpChildCapacityExceededError
+            )
               throw error;
             throw new WorkspaceRuntimeInitializationError(error);
           }
@@ -444,7 +526,8 @@ export class WorkspaceRuntimeCoordinator {
       return await operation;
     } catch (error) {
       if (!started) {
-        if (this.draining && !this.disposed) this.mcpReconcileDeferred = true;
+        if (this.admissionPaused && !this.disposed)
+          this.mcpReconcileDeferred = true;
         this.recordMcpError(revision, initial.runtimeEpoch, error);
       }
       throw error;
@@ -514,7 +597,7 @@ export class WorkspaceRuntimeCoordinator {
       const current = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
       if (revision !== this.skillsRevision) return;
       if (
-        this.draining ||
+        this.admissionPaused ||
         !current.runtimeLive ||
         current.runtimeEpoch !== runtimeEpoch ||
         status.runtimeEpoch !== runtimeEpoch
@@ -545,7 +628,11 @@ export class WorkspaceRuntimeCoordinator {
       try {
         await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
       } catch (error) {
-        if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
+        if (
+          error instanceof WorkspaceRuntimeStillStartingError ||
+          error instanceof AcpChildCapacityExceededError
+        )
+          throw error;
         throw new WorkspaceRuntimeInitializationError(error);
       }
       snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
@@ -563,13 +650,13 @@ export class WorkspaceRuntimeCoordinator {
         if (revision !== this.mcpRevision) return;
         const current = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
         if (
-          this.draining ||
+          this.admissionPaused ||
           this.disposed ||
           !current.runtimeLive ||
           current.runtimeEpoch !== epoch
         ) {
           if (
-            this.draining &&
+            this.admissionPaused &&
             !this.disposed &&
             current.runtimeLive &&
             current.runtimeEpoch === epoch
@@ -627,7 +714,7 @@ export class WorkspaceRuntimeCoordinator {
     const current = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     if (revision !== this.skillsRevision) return;
     if (
-      this.draining ||
+      this.admissionPaused ||
       !current.runtimeLive ||
       current.runtimeEpoch !== runtimeEpoch
     ) {
@@ -653,7 +740,7 @@ export class WorkspaceRuntimeCoordinator {
     const current = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     if (revision !== this.mcpRevision) return;
     if (
-      this.draining ||
+      this.admissionPaused ||
       !current.runtimeLive ||
       current.runtimeEpoch !== runtimeEpoch
     ) {
@@ -676,7 +763,7 @@ export class WorkspaceRuntimeCoordinator {
 
   private assertAcceptingWork(cause?: unknown): void {
     this.runtime.generationGuard?.assertOpen();
-    if (this.disposed || this.draining) {
+    if (this.disposed || this.admissionPaused) {
       throw new WorkspaceDrainingError(this.runtime.workspaceCwd, cause);
     }
   }

@@ -15,6 +15,7 @@ import type {
   WorkflowSnapshot,
   WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import { snapshotArgsUnavailable } from '@qwen-code/qwen-code-core';
 import {
   buildSessionAgentsStatus,
   buildSessionTasksStatus,
@@ -435,6 +436,7 @@ function workflowSnapshot(
     dispatches: [],
     agentsDispatched: 2,
     agentsCompleted: 1,
+    agentsRespawned: 1,
     tokensSpent: 900,
     tokenBudgetTotal: 4_000,
     perPhaseTokens: [],
@@ -548,6 +550,58 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
+  it('preserves independent correlation records in historical task snapshots', () => {
+    const source = workflowSnapshot({
+      toolUseId: 'exact-tool-call',
+      sourceRef: { id: 'flow', revision: 'rev-1' },
+      workflowCalls: [
+        {
+          id: 'call-1',
+          stepId: 'outer',
+          workflowName: 'ext:check',
+          status: 'completed',
+          startedAt: 500,
+          endedAt: 900,
+        },
+      ],
+      workflowCallsTruncated: true,
+      dispatches: [
+        {
+          id: 'dispatch-1',
+          phaseVisitId: null,
+          label: 'check',
+          prompt: 'check',
+          status: 'cached',
+          stepId: 'inner',
+          workflowCallId: 'call-1',
+          dependsOn: [],
+          queuedAt: 600,
+        },
+      ],
+    });
+    const snapshot = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [source],
+      { includeWorkflows: true },
+    );
+    const entry = snapshot.tasks.find((task) => task.kind === 'workflow');
+    expect(entry).toMatchObject({
+      id: source.runId,
+      toolUseId: 'exact-tool-call',
+      sourceRef: { id: 'flow', revision: 'rev-1' },
+      workflowCalls: [{ id: 'call-1', stepId: 'outer', status: 'completed' }],
+      workflowCallsTruncated: true,
+      dispatches: [
+        { stepId: 'inner', workflowCallId: 'call-1', status: 'cached' },
+      ],
+    });
+    expect(entry?.sourceRef).not.toBe(source.sourceRef);
+    expect(entry?.workflowCalls?.[0]).not.toBe(source.workflowCalls?.[0]);
+    expect(entry?.dispatches[0]).not.toBe(source.dispatches?.[0]);
+  });
+
   it('omits workflow tasks unless the caller opts in', () => {
     const snapshot = buildSessionTasksStatus(
       'session-1',
@@ -609,6 +663,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       ],
       agentsDispatched: 2,
       agentsCompleted: 1,
+      agentsRespawned: 3,
       recentLogs: ['Review started'],
       events: [
         {
@@ -669,6 +724,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       currentPhase: 'Review',
       agentsDispatched: 2,
       agentsCompleted: 1,
+      agentsRespawned: 3,
       tokensSpent: 1_200,
       tokenBudgetTotal: 8_000,
       sourceRunId: 'wf_source',
@@ -740,6 +796,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
         isHistorical: true,
         agentsDispatched: 2,
         agentsCompleted: 1,
+        agentsRespawned: 1,
         tokensSpent: 900,
         events: [
           {
@@ -751,6 +808,73 @@ describe('buildSessionTasksStatus workflow graph', () => {
         ],
       }),
     ]);
+  });
+
+  // A host decides before asking whether a history entry can be restarted;
+  // the args themselves stay on disk, since they can be large.
+  it('says when a history entry could not keep its args, and never carries the args', () => {
+    const { tasks } = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [
+        workflowSnapshot({
+          runId: 'wf_kept',
+          args: { prompt: 'secret' },
+          argsRecorded: true,
+        }),
+        workflowSnapshot({ runId: 'wf_none', argsRecorded: true }),
+        workflowSnapshot({ runId: 'wf_omitted', argsOmitted: true }),
+        // Written before args were kept: it cannot say whether there were any.
+        workflowSnapshot({ runId: 'wf_legacy' }),
+      ],
+      { includeWorkflows: true },
+    );
+    const at = (id: string) => tasks.find((task) => task.id === id);
+
+    expect(at('wf_kept')).not.toHaveProperty('args');
+    expect(at('wf_kept')).not.toHaveProperty('argsOmitted');
+    expect(at('wf_kept')).not.toHaveProperty('argsUnavailable');
+    expect(at('wf_none')).not.toHaveProperty('argsUnavailable');
+    // `argsOmitted` stays as the reason; `argsUnavailable` is the answer.
+    expect(at('wf_omitted')).toMatchObject({
+      id: 'wf_omitted',
+      argsOmitted: true,
+      argsUnavailable: true,
+    });
+    expect(at('wf_omitted')).not.toHaveProperty('args');
+    expect(at('wf_legacy')).toMatchObject({ argsUnavailable: true });
+    expect(at('wf_legacy')).not.toHaveProperty('argsOmitted');
+  });
+
+  // The other end of the contract `acpAgent.test.ts` pins: the daemon
+  // refuses on `snapshotArgsUnavailable`, and what a client sees has to be
+  // that same answer rather than a second spelling of the question.
+  it('puts the daemon-side predicate on the wire, computed rather than restated', () => {
+    const snapshots = [
+      workflowSnapshot({ runId: 'wf_a', args: { q: 1 }, argsRecorded: true }),
+      workflowSnapshot({ runId: 'wf_b', argsRecorded: true }),
+      workflowSnapshot({ runId: 'wf_c', argsOmitted: true }),
+      workflowSnapshot({ runId: 'wf_d' }),
+    ];
+    const { tasks } = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      snapshots,
+      { includeWorkflows: true },
+    );
+
+    for (const snapshot of snapshots) {
+      const task = tasks.find((entry) => entry.id === snapshot.runId);
+      expect({
+        runId: snapshot.runId,
+        marked: (task as { argsUnavailable?: true }).argsUnavailable === true,
+      }).toEqual({
+        runId: snapshot.runId,
+        marked: snapshotArgsUnavailable(snapshot) !== undefined,
+      });
+    }
   });
 
   it('prefers the in-memory workflow task over a persisted duplicate', () => {

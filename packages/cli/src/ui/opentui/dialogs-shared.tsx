@@ -55,6 +55,26 @@ export function useDialogFrameKeys(handlers: {
 }
 
 /**
+ * Width ink gives every popup: the terminal minus the two-column margins the
+ * dialog wrapper adds, capped at 100 so wide terminals keep a readable measure
+ * instead of stretching bordered boxes edge to edge. The cap is what makes the
+ * border stop at column 97 rather than the last column.
+ */
+export function dialogAreaWidth(terminalWidth: number): number {
+  return Math.min(terminalWidth - 4, 100);
+}
+
+/**
+ * Columns available inside a `DialogFrame` at the given terminal width: the
+ * popup area minus one column of border and one of padding on each side. A
+ * full-width rule has to be spelled out to this many characters because
+ * OpenTUI has no single-sided border to draw one with.
+ */
+export function dialogContentWidth(terminalWidth: number): number {
+  return Math.max(0, dialogAreaWidth(terminalWidth) - 4);
+}
+
+/**
  * Dialog frame matching the ink dialogs' chrome: `borderStyle="round"` +
  * padding 1 (OpenTUI spells the rounded border style "rounded").
  */

@@ -21,7 +21,7 @@
   border-radius: 12px;
   margin: 0;
   cursor: text;
-  --chat-editor-min-height: 140px;
+  --chat-editor-min-height: 116px;
   --chat-editor-max-height: min(350px, 40vh);
   --chat-editor-input-min-height: 44px;
   --chat-editor-input-max-height: 300px;
@@ -45,7 +45,7 @@
   z-index: 2;
   display: flex;
   box-sizing: border-box;
-  min-height: var(--chat-editor-min-height, 140px);
+  min-height: var(--chat-editor-min-height, 116px);
   max-height: var(--chat-editor-max-height, min(350px, 40vh));
   flex-direction: column;
   overflow: visible;
@@ -58,6 +58,17 @@
 
 .editorShell[data-web-shell-compact-composer] .content {
   padding: 10px;
+}
+
+.container:focus-within .content,
+.container[data-at-panel-open] .content {
+  border-color: var(--chat-editor-accent-color);
+}
+
+@supports (selector(:has(*))) {
+  .container:has([aria-expanded='true']) .content {
+    border-color: var(--chat-editor-accent-color);
+  }
 }
 
 .container[data-image-drag-active] .content {
@@ -888,6 +899,15 @@
   white-space: normal;
 }
 
+@supports (height: 100dvh) {
+  .tagTooltip {
+    max-height: min(
+      calc(100dvh - 16px),
+      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
+    );
+  }
+}
+
 .tagLabel,
 .tagValue {
   color: var(--chat-editor-text-primary);
@@ -1058,6 +1078,43 @@
 
 .editorShell[data-web-shell-compact-composer] .toolbar {
   gap: 4px;
+}
+
+/* The workspace and git chips, moved out of the toolbar into their own row
+   under the composer box so the composer stays about the prompt itself. The
+   4px inset plus the workspace chip's 8px padding lines their content up with the
+   editor's text. */
+.contextRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin-top: -12px;
+  padding: 18px 4px 6px;
+  border-radius: 0 0 12px 12px;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.contextRow button[data-web-shell-git-branch] {
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.contextRow button[data-web-shell-git-branch]:hover,
+.contextRow button[data-web-shell-git-branch]:focus-visible {
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+
+.contextRow button[data-web-shell-git-branch] > svg {
+  display: none;
 }
 
 .toolbarLeading,
@@ -1566,9 +1623,132 @@
   min-width: 0;
 }
 
-.toolBtn:hover {
+.toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.planControl {
+  flex: 0 0 auto;
+}
+
+.planControl[data-disabled] {
+  cursor: default;
+}
+
+/* Shown only while Plan is on: the state has to stay visible even though the
+   entry itself is tucked into the add menu. */
+.planChip {
+  flex: 0 0 auto;
+  background: var(--subtle-bg-strong);
+  color: var(--chat-editor-text-primary);
+}
+
+/* Not the shorter `.toolBtn.planChip:hover`: this ties the generic toolbar
+   hover above on specificity and wins by coming later, which the shorter
+   selector would not. The chip is never natively disabled, so the tint does
+   not drop under the pointer during the request the click itself starts. */
+.toolBtn.planChip:not(:disabled):hover {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-text-primary) 12%,
+    transparent
+  );
+  color: var(--chat-editor-text-primary);
+}
+
+.planChip .toolBtnText {
+  color: inherit;
+}
+
+/* No dimming: like every other .toolBtn, including the permission button
+   beside it, the chip keeps its appearance while mode controls are busy. That
+   state is brief, and dimming one control of the pair would flicker. */
+.planChip[aria-disabled='true'] {
+  cursor: default;
+}
+
+/* At rest the chip shows the Plan icon and no close mark. The mark shares the
+   icon slot and takes it over on hover or keyboard focus, so revealing it
+   never changes how wide the chip is. */
+.planChipIcon {
+  position: relative;
+}
+
+.planChipIcon > .planChipClose {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+}
+
+.planChipIcon > .planChipClose svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* None of the reveals is limited to an enabled chip: it is inert for the
+   length of the request its own click starts, and swapping back under the
+   pointer would read as the click having been refused. */
+.planChip:focus-visible .planChipIcon > :not(.planChipClose) {
+  opacity: 0;
+}
+
+.planChip:focus-visible .planChipClose {
+  opacity: 1;
+}
+
+/* Only where the pointer really hovers. A touch browser keeps :hover on the
+   last thing tapped, which would leave the mark stuck on a chip whose tap did
+   nothing. */
+@media (hover: hover) {
+  .planChip:hover .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip:hover .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Without hover only keyboard focus would ever reveal the mark, so it stays
+   shown — but only beside the label. A chip too narrow for its label keeps the Plan icon
+   instead: a bare × would name nothing, and a pressed button that a tap
+   releases needs no mark to work. Keyed on the primary pointer, so a
+   touchscreen laptop driven by a mouse still gets the quiet chip. */
+@media (hover: none) {
+  .planChip[data-labelled] .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip[data-labelled] .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Forced colours repaint a masked background away, which would leave a chip
+   without its label blank at rest. Painting the mask with a system colour
+   keeps the icon. Every mode icon has the same gap; this covers only the one
+   this chip depends on. */
+@media (forced-colors: active) {
+  .planChipIcon > span:not(.planChipClose) {
+    forced-color-adjust: none;
+    background: ButtonText;
+  }
+}
+
+.addMenuPlanIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
 }
 
 .workspaceSelectTrigger {
@@ -1696,6 +1876,102 @@
   padding: 0 4px;
 }
 
+.contextUsagePercentage {
+  display: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextUsagePercentage[data-level='normal'] {
+  color: var(--chat-editor-text-secondary);
+}
+
+.contextUsagePercentage[data-level='warning'] {
+  color: var(--warning-color);
+}
+
+.contextUsagePercentage[data-level='error'] {
+  color: var(--error-color);
+}
+
+.contextTooltip {
+  --muted-foreground: var(--chat-editor-text-secondary);
+  --destructive: var(--error-color);
+
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: 280px;
+  max-width: calc(100vw - 24px);
+  padding: 12px;
+  white-space: normal;
+}
+
+.contextTooltipHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
+.contextTooltipHeader strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextTooltipMeter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.contextTooltipMeter > span {
+  display: block;
+  height: 100%;
+  background: var(--agent-blue-500);
+}
+
+.contextTooltipMeter > span[data-level='warning'] {
+  background: var(--warning-color);
+}
+
+.contextTooltipMeter > span[data-level='error'] {
+  background: var(--error-color);
+}
+
+.contextTooltipStats {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.contextTooltipStats dt,
+.contextTooltipHint {
+  color: var(--chat-editor-text-secondary);
+}
+
+.contextTooltipStats dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextTooltipHint {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+@supports (container-type: inline-size) {
+  @container (min-width: 521px) {
+    .contextUsagePercentage {
+      display: inline;
+    }
+  }
+}
+
 .contextRingTrack {
   stroke: var(--border);
 }
@@ -1720,15 +1996,6 @@
 }
 
 .widthModeBtn .toolBtnIcon svg {
-  width: 18px;
-  height: 18px;
-}
-
-.quickActionsBtn {
-  display: inline-flex;
-}
-
-.quickActionsBtn .toolBtnIcon svg {
   width: 18px;
   height: 18px;
 }
@@ -1778,121 +2045,6 @@
   display: block;
   width: 16px;
   height: 16px;
-}
-
-.quickActionsPanel {
-  display: block;
-  position: relative;
-  z-index: 2;
-  margin-top: 8px;
-  padding: 8px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 12px;
-  background: var(--background);
-  box-shadow: 0 8px 24px color-mix(in srgb, #000 12%, transparent);
-  cursor: default;
-}
-
-.quickActionsHeader {
-  padding: 6px 2px;
-  color: var(--chat-editor-text-dimmed);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.quickActionsLayout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(104px, 0.7fr);
-  gap: 7px;
-  align-items: stretch;
-}
-
-.quickActionsGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-rows: minmax(22px, auto);
-  gap: 3px;
-  padding-right: 6px;
-  border-right: 1px solid var(--chat-editor-border-color);
-}
-
-.quickAction {
-  display: flex;
-  min-width: 0;
-  min-height: 22px;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 5px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--chat-editor-text-primary);
-  font-family: var(--font-sans, system-ui, sans-serif);
-  text-align: center;
-  cursor: pointer;
-}
-
-.quickAction:hover,
-.quickAction:focus-visible {
-  background: var(--chat-editor-bg-tertiary);
-  outline: none;
-}
-
-.quickActionLabel {
-  display: -webkit-box;
-  overflow: hidden;
-  max-width: 100%;
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 10px;
-  line-height: 1.15;
-  text-overflow: ellipsis;
-  white-space: normal;
-  word-break: keep-all;
-  overflow-wrap: anywhere;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.quickKeysGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-  align-self: stretch;
-  gap: 4px;
-  height: 100%;
-  min-height: 100%;
-}
-
-.quickKey {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 4px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--chat-editor-text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1;
-  text-align: center;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.quickKeyLabel {
-  overflow: hidden;
-  max-width: 100%;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quickKey:hover,
-.quickKey:focus-visible {
-  background: var(--chat-editor-bg-tertiary);
-  outline: none;
 }
 
 .sendBtn {
@@ -2150,17 +2302,121 @@
   flex-wrap: wrap;
 }
 
+/* Two classes so this wins over `.fileChip`'s fixed width, which is declared
+   later in this file: a text card sizes to its own content. */
+.fileChip.fileChipText {
+  width: auto;
+  min-width: min(264px, 100%);
+  max-width: min(100%, 360px);
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fileChipIcon {
+  display: flex;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fileChipBody {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+}
+
+.fileChipTitle {
+  overflow: hidden;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipTitle:disabled {
+  cursor: default;
+}
+
+.fileChipTitle:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+.fileChipTitle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  /* The row is nowrap, so at the narrowest panes let the size drop to its own
+     line rather than escaping the card. */
+  flex-wrap: wrap;
+}
+
+.fileChipExpand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fileChipExpand:not(:disabled):hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
+.fileChipExpand:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipExpand:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .fileChip {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  max-width: 240px;
-  padding: 4px 8px;
+  box-sizing: border-box;
+  width: 272px;
+  max-width: 100%;
+  padding: 8px 32px 8px 8px;
   border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  font-size: 12px;
-  line-height: 16px;
+  border-radius: 16px;
   color: var(--chat-editor-text-primary);
 }
 
@@ -2176,8 +2432,9 @@
 .fileChipPreview {
   display: inline-flex;
   min-width: 0;
+  width: 100%;
   align-items: center;
-  gap: 6px;
+  gap: 12px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -2190,37 +2447,15 @@
   cursor: default;
 }
 
-.fileChipIcon {
-  flex: 0 0 auto;
-  color: var(--chat-editor-text-secondary, currentColor);
-}
-
-.fileChipName {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .fileChipRemove {
   position: absolute;
-  top: 50%;
-  right: 4px;
+  top: 8px;
+  right: 8px;
   z-index: 1;
-  transform: translateY(-50%);
-  pointer-events: none;
-}
-
-.fileChip:hover .fileChipRemove:not(:disabled),
-.fileChipRemove:focus-visible {
+  width: 20px;
+  height: 20px;
+  opacity: 1;
   pointer-events: auto;
-}
-
-@media (hover: none) {
-  .fileChipRemove:not(:disabled) {
-    opacity: 1;
-    pointer-events: auto;
-  }
 }
 
 .searchPanel {
@@ -2341,22 +2576,16 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  padding: 8px;
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 10px;
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) 8%,
-    var(--chat-editor-bg-primary)
-  );
+  background: var(--chat-editor-bg-primary);
   color: var(--chat-editor-text-primary);
   font-size: 12px;
   line-height: 1.4;
-}
-
-.uploadRow[data-status='done'] {
-  border-color: color-mix(in srgb, var(--success-color) 24%, transparent);
-  background: var(--success-bg);
 }
 
 .uploadRow[data-status='error'] {
@@ -2387,11 +2616,25 @@
   font: inherit;
 }
 
+.uploadRowIcon {
+  flex: 0 0 auto;
+}
+
+.uploadRowName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
 .uploadRowPreview:disabled {
   cursor: default;
 }
 
-.uploadRow svg {
+.uploadRowAction svg,
+.uploadRowSpinner {
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
@@ -2416,38 +2659,25 @@
   }
 }
 
-.uploadRowName {
+.uploadRowStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
-  flex: 0 1 auto;
+  max-width: 40%;
+  flex: 0 0 auto;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
+  color: var(--chat-editor-text-dimmed);
 }
 
-.uploadRowStatus {
+.uploadRowStatusText {
   min-width: 0;
-  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--chat-editor-text-dimmed);
-  text-align: right;
 }
 
 .uploadRow[data-status='error'] .uploadRowStatus {
-  color: var(--error-color);
-}
-
-.uploadRow[data-status='done'] .uploadRowStatus {
-  color: var(--success-color);
-}
-
-.uploadRow[data-status='done'] .uploadRowPreview > svg {
-  color: var(--success-color);
-}
-
-.uploadRow[data-status='error'] .uploadRowPreview > svg {
   color: var(--error-color);
 }
 
@@ -2489,4 +2719,125 @@
   color: var(--chat-editor-text-primary);
   font-size: 13px;
   pointer-events: none;
+}
+
+.fileTag {
+  background: var(--chat-editor-bg-primary);
+  min-height: 28px;
+  border-radius: 8px;
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.fileTagIcon {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  color: var(--muted-foreground);
+}
+
+.editorShell[data-web-shell-mobile-composer] .container {
+  --chat-editor-max-height: min(480px, 60dvh);
+}
+
+.editorShell[data-web-shell-mobile-composer] .uploadRowAction,
+.editorShell[data-web-shell-mobile-composer] .toolBtn,
+.editorShell[data-web-shell-mobile-composer] .sendBtn,
+.editorShell[data-web-shell-mobile-composer] .toolbarRight button,
+.editorShell[data-web-shell-mobile-composer] .mobileContextRow button,
+.editorShell[data-web-shell-mobile-composer] .dropdownWrapperCompact {
+  min-width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbar,
+.editorShell[data-web-shell-mobile-composer] .toolbarLeft {
+  flex-wrap: wrap;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarLeading {
+  max-width: 100%;
+  margin-left: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarRight {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.mobileEditingActions,
+.mobileContextRow,
+.mobileExpandedHeader {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mobileContextRow {
+  flex-wrap: wrap;
+}
+
+.mobileContextRow > *,
+.mobileContextRow [data-web-shell-git-branch] {
+  max-width: 100%;
+}
+
+.editorShell[data-web-shell-mobile-composer] .mobileContextRow button {
+  max-width: 100%;
+  flex-shrink: 1;
+}
+
+.mobileEditingActions {
+  flex-wrap: wrap;
+  margin-top: -8px;
+}
+
+.mobileEditingActions svg {
+  width: 18px;
+  height: 18px;
+}
+
+.mobileEditingSpacer {
+  flex: 1;
+}
+
+.mobileExpandedEditor {
+  display: flex;
+  width: calc(100% - 16px);
+  max-width: 720px;
+  height: 85dvh;
+  max-height: 100%;
+  flex-direction: column;
+  padding: 12px;
+  gap: 8px;
+}
+
+.mobileExpandedHeader h2 {
+  flex: 1;
+}
+
+.mobileExpandedTextarea {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.editorShell[data-web-shell-mobile-composer] .uploadRowPreview {
+  min-height: 44px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .searchInput {
+  min-height: 44px;
+  font-size: 16px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .searchResult {
+  min-height: 44px;
 }

@@ -13,7 +13,11 @@ import {
   type AgentApprovalRequestEvent,
 } from './runtime/agent-events.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
-import { RESUME_ARGS_TOO_LARGE_NOTE } from './workflow-resume-call.js';
+import { MAX_FAILURE_LINES } from './workflow-failure-lines.js';
+import {
+  NO_JOURNAL_NO_RESUME_NOTE,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from './workflow-resume-call.js';
 import {
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
@@ -1119,6 +1123,44 @@ describe('WorkflowRunRegistry', () => {
     expect(r.register(reg(runId)).status).toBe('running');
   });
 
+  // A second start under a live id would run two copies of its agents against
+  // one journal, so each refusal says what to do about the run that holds it.
+  it('says what to do about a run id that is still live', () => {
+    const r = new WorkflowRunRegistry();
+    const fresh = () => new AbortController();
+
+    const running = r.register(reg('wf_live_running'));
+    expect(() => r.reserveStart(running.runId, fresh)).toThrow(
+      'Workflow run wf_live_running is still running. Starting it again now would run two copies of its agents against the same journal: cancel it from /workflows first, or wait for it to settle.',
+    );
+
+    const pausedRefusal =
+      'Workflow run wf_live_paused is paused, not finished. Starting it again now would run two copies of its agents against the same journal: resume it from /workflows, or cancel it there and wait for it to exit.';
+    const paused = r.register(reg('wf_live_paused'));
+    r.onDispatchStateChange(paused.runId, 'pausing');
+    expect(r.get(paused.runId)?.status).toBe('pausing');
+    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(
+      'Workflow run wf_live_paused is pausing, not finished. Starting it again now would run two copies of its agents against the same journal: wait for it to pause and resume it from /workflows, or cancel it there and wait for it to exit.',
+    );
+    r.onDispatchStateChange(paused.runId, 'paused');
+    expect(r.get(paused.runId)?.status).toBe('paused');
+    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(pausedRefusal);
+
+    const exiting = r.register(reg('wf_live_exiting'));
+    r.attachHandle({
+      runId: exiting.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle);
+    r.fail(exiting.runId, 'boom', 2_000);
+    expect(() => r.reserveStart(exiting.runId, fresh)).toThrow(
+      'Workflow run wf_live_exiting is not running but its run has not exited yet. Starting it again now would run two copies of its agents against the same journal: wait for it to exit.',
+    );
+
+    const settled = r.register(reg('wf_settled'));
+    r.fail(settled.runId, 'boom', 2_000);
+    expect(() => r.reserveStart(settled.runId, fresh)).not.toThrow();
+  });
+
   it('reserves a run id while a workflow is starting', () => {
     const r = new WorkflowRunRegistry();
     const runId = 'wf_starting';
@@ -1130,7 +1172,7 @@ describe('WorkflowRunRegistry', () => {
     expect(r.isStarting(runId)).toBe(true);
     expect(r.hasRunningEntries()).toBe(true);
     expect(() => r.reserveStart(runId, () => competing)).toThrow(
-      /already active/,
+      /already starting/,
     );
     expect(() => r.register(reg(runId))).toThrow(/already active/);
 
@@ -1167,7 +1209,7 @@ describe('WorkflowRunRegistry', () => {
     expect(r.isStarting('wf_starting')).toBe(true);
     expect(() =>
       r.reserveStart('wf_starting', () => new AbortController()),
-    ).toThrow(/already active/);
+    ).toThrow(/already starting/);
     r.releaseStart('wf_starting', controller);
     expect(r.hasRunningEntries()).toBe(false);
   });
@@ -2000,6 +2042,174 @@ describe('WorkflowRunRegistry', () => {
   // The notification is the whole surface a backgrounded run has: it lands in
   // a later turn, when the handle and the tool result are long gone. What the
   // run cost, and how to get back into it, have to be in the message itself.
+  // A count says a fan-out came back thinner than it left; it does not say
+  // which agents are missing or why. That is the difference between the
+  // reader re-running the whole thing and re-running one prompt.
+  it('names the agents that failed, with their errors', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_failures', { isBackgrounded: true }));
+    for (const [id, label] of [
+      ['d1', 'scout'],
+      ['d2', 'audit <core>'],
+    ] as const) {
+      r.onDispatchQueued(entry.runId, {
+        id,
+        label,
+        prompt: 'p',
+        dependsOn: [],
+        queuedAt: 1,
+      });
+    }
+    r.onDispatchSettled(entry.runId, 'd1', 'terminate mode: MAX_TURNS', 2);
+    r.onDispatchSettled(entry.runId, 'd2', 'model <errored> & died', 2);
+    r.complete(entry.runId, [], 3_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('<failures>');
+    expect(modelText).toContain('[scout] terminate mode: MAX_TURNS');
+    // Element text is escaped: a label or error carrying markup must not be
+    // able to close the tag it sits in.
+    expect(modelText).toContain(
+      '[audit &lt;core&gt;] model &lt;errored&gt; &amp; died',
+    );
+    expect(modelText).not.toContain('<core>');
+  });
+
+  it('caps the failures list and names the remainder', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_many', { isBackgrounded: true }));
+    for (let i = 0; i < MAX_FAILURE_LINES + 2; i++) {
+      r.onDispatchQueued(entry.runId, {
+        id: `d${i}`,
+        label: `agent-${i}`,
+        prompt: 'p',
+        dependsOn: [],
+        queuedAt: 1,
+      });
+      r.onDispatchSettled(entry.runId, `d${i}`, `boom ${i}`, 2);
+    }
+    r.complete(entry.runId, [], 3_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const failuresBlock = modelText.slice(
+      modelText.indexOf('<failures>'),
+      modelText.indexOf('</failures>'),
+    );
+    expect(failuresBlock).toContain('[agent-0] boom 0');
+    expect(failuresBlock).not.toContain('[agent-10]');
+    expect(failuresBlock).toContain('… and 2 more failures omitted');
+    expect(modelText).toContain(`agents_failed=${MAX_FAILURE_LINES + 2}`);
+  });
+
+  it('omits the failures block when nothing failed', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_clean', { isBackgrounded: true }));
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'p',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchSettled(entry.runId, 'd1', undefined, 2);
+    r.complete(entry.runId, [], 3_000);
+
+    expect(completion.mock.calls[0][1] as string).not.toContain('<failures>');
+  });
+
+  // "Why is it running that agent again?" is the first question a resume
+  // raises, and the two answers call for different reactions.
+  it.each([
+    [true, '[resume] re-running "scout": it failed in the previous run'],
+    [
+      false,
+      '[resume] respawning "scout": interrupted in a previous run (2 prior attempts)',
+    ],
+  ])('logs a respawn (wasFailed=%s) and counts it', (wasFailed, expected) => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_respawn', { isBackgrounded: true }));
+
+    r.onResumeRespawn(entry.runId, expected);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toContain(expected);
+    expect(
+      r
+        .get(entry.runId)
+        ?.events.filter(
+          (event) => event.type === 'log' && event.message === expected,
+        ),
+    ).toHaveLength(1);
+    // Settlement replaces the live mirror from the sandbox buffer. The
+    // respawn line must therefore be present in that buffer too.
+    r.setRecentLogs(entry.runId, [expected]);
+
+    expect(r.get(entry.runId)?.agentsRespawned).toBe(1);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toContain(expected);
+
+    r.complete(entry.runId, [], 3_000);
+    expect(completion.mock.calls[0][1] as string).toContain(
+      'agents_respawned=1',
+    );
+  });
+
+  it('rejects the respawn counter and log together after terminal settlement', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_terminal_respawn'));
+    r.complete(entry.runId, [], 3_000);
+
+    const line = '[resume] respawning an agent: interrupted in a previous run';
+    r.onResumeRespawn(entry.runId, line);
+
+    expect(r.get(entry.runId)?.agentsRespawned).toBe(0);
+    expect(r.get(entry.runId)?.recentLogs).not.toContain(line);
+  });
+
+  // A backgrounded run has nothing but this notification: the trailer that
+  // carries the hint on a foreground failure never reaches it. The tool decides
+  // whether the script is one the model authored; the registry only relays.
+  it('carries the authoring hint on a failed background run', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const hint =
+      'hint: Load the `workflow-authoring` skill for the script reference if you have not, fix the script, and retry.';
+    r.register(
+      reg('wf_hinted', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_hinted.js',
+        authoringHint: hint,
+      }),
+    );
+    r.fail('wf_hinted', 'boom', 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const recovery = modelText.slice(
+      modelText.indexOf('<recovery>'),
+      modelText.indexOf('</recovery>'),
+    );
+    expect(recovery).toContain(hint);
+  });
+
+  it.each([
+    ['a run registered without a hint', {}, 'fail'],
+    ['a completed run', { authoringHint: 'hint: x' }, 'complete'],
+  ])('adds no authoring hint to %s', (_case, overrides, settle) => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_plain', { isBackgrounded: true, ...overrides }));
+    if (settle === 'fail') r.fail('wf_plain', 'boom', 2_000);
+    else r.complete('wf_plain', [], 2_000);
+
+    expect(completion.mock.calls[0][1] as string).not.toContain('hint:');
+  });
+
   it('reports usage and the recovery route on a background failure', () => {
     const r = new WorkflowRunRegistry();
     const completion = vi.fn();
@@ -2038,7 +2248,8 @@ describe('WorkflowRunRegistry', () => {
     const modelText = completion.mock.calls[0][1] as string;
     expect(modelText).toContain(
       '<usage>agents_dispatched=2 agents_succeeded=1 agents_cached=0 ' +
-        'agents_failed=1 agents_cancelled=0 tokens_spent=4242 duration_ms=2500</usage>',
+        'agents_failed=1 agents_cancelled=0 agents_respawned=0 ' +
+        'tokens_spent=4242 duration_ms=2500</usage>',
     );
     expect(modelText).toContain('<recovery>');
     expect(modelText).toContain(
@@ -2081,6 +2292,124 @@ describe('WorkflowRunRegistry', () => {
     expect(modelText).not.toContain('<recovery>');
   });
 
+  // A qualified run name only comes from the extension tier; the advice must
+  // not call a third-party file the user's saved workflow, and must name a
+  // destination the next extension update will not overwrite.
+  it('names an extension workflow in the recovery and diagnostics advice', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const failed = r.register(
+      reg('wf_ext_fail', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_fail/journal.jsonl',
+      }),
+    );
+    failed.workflowName = 'gcp:audit';
+    r.fail(failed.runId, 'boom', 2_000);
+
+    const recovery = completion.mock.calls[0][1] as string;
+    expect(recovery).toContain(
+      'This reads the /gcp:audit workflow the gcp extension ships; copy it into .qwen/workflows before making a run-specific change.',
+    );
+    expect(recovery).not.toContain('saved /gcp:audit');
+
+    const completed = r.register(
+      reg('wf_ext_done', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_done/journal.jsonl',
+      }),
+    );
+    completed.workflowName = 'gcp:audit';
+    r.complete(completed.runId, [], 3_000);
+
+    const diagnostics = completion.mock.calls[1][1] as string;
+    expect(diagnostics).toContain('Re-run the /gcp:audit extension workflow:');
+    expect(diagnostics).not.toContain('Re-run the saved /gcp:audit');
+  });
+
+  // In a name-only session the model may not pass a script path, so the
+  // notification must not offer one: a run resumes by the name the runner
+  // verified, and any other run is only its starter's to retry.
+  it('resumes by the verified name in a name-only session, and says who can retry the rest', () => {
+    const r = new WorkflowRunRegistry();
+    r.setNameOnly(true);
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const named = r.register(
+      reg('wf_named', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_named/journal.jsonl',
+      }),
+    );
+    r.fail(named.runId, 'boom', 2_000);
+    const namedText = completion.mock.calls[0][1] as string;
+    expect(namedText).toContain(
+      'Resume: Workflow({ name: "audit", resumeFromRunId: "wf_named" })',
+    );
+    expect(namedText).not.toContain('scriptPath:');
+    expect(namedText).not.toContain('only whoever started it');
+
+    // A name without a verified resume name — one recorded from a path that
+    // a lookup would not lead back to — is not offered.
+    const shadowed = r.register(
+      reg('wf_shadowed', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        scriptPath: '/home/u/.qwen/workflows/audit.js',
+        journalPath: '/runs/journal.jsonl',
+      }),
+    );
+    r.fail(shadowed.runId, 'boom', 3_000);
+    const shadowedText = completion.mock.calls[1][1] as string;
+    expect(shadowedText).toContain('<recovery>');
+    expect(shadowedText).toContain(
+      'This session runs named workflows only, and this run cannot be resumed by name, so only whoever started it can retry it.',
+    );
+    expect(shadowedText).not.toContain('Workflow({');
+
+    const completed = r.register(
+      reg('wf_named_done', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runs/journal.jsonl',
+      }),
+    );
+    r.complete(completed.runId, [], 4_000);
+    expect(completion.mock.calls[2][1] as string).toContain(
+      'Re-run the saved /audit workflow: Workflow({ name: "audit", resumeFromRunId: "wf_named_done" })',
+    );
+  });
+
+  // Outside the lock a verified name changes nothing: the call names the path.
+  it('ignores the resume name outside a name-only session', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(
+      reg('wf_unlocked', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runs/wf_unlocked/journal.jsonl',
+      }),
+    );
+    r.fail(entry.runId, 'boom', 2_000);
+    const text = completion.mock.calls[0][1] as string;
+    expect(text).toContain(
+      'Workflow({ scriptPath: "/proj/.qwen/workflows/audit.js", resumeFromRunId: "wf_unlocked" })',
+    );
+    expect(text).not.toContain('only whoever started it');
+  });
+
   // An unpersisted inline script (no storage, symlinked root) leaves nothing
   // to resume from, and a run with no journal has nothing to read: the
   // notification must then say neither rather than name a path that is not
@@ -2100,6 +2429,36 @@ describe('WorkflowRunRegistry', () => {
 
   // Args that cannot be pasted back are NAMED, never truncated: half a JSON
   // literal in a resume call is a call that fails to parse.
+  // A resume replays the run's journal. A run that wrote none is told so, in
+  // place of a call the runner would refuse.
+  it('offers no resume call for a run that wrote no journal', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(
+      reg('wf_nojournal', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_nojournal.js',
+      }),
+    );
+    r.fail('wf_nojournal', 'boom', 2_000);
+    const failedText = completion.mock.calls[0][1] as string;
+    expect(failedText).toContain(NO_JOURNAL_NO_RESUME_NOTE);
+    expect(failedText).not.toContain('resumeFromRunId:');
+    expect(failedText).not.toContain('runs live');
+
+    r.register(
+      reg('wf_nojournal_done', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_nojournal_done.js',
+      }),
+    );
+    r.complete('wf_nojournal_done', [], 3_000);
+    const doneText = completion.mock.calls[1][1] as string;
+    expect(doneText).not.toContain('resumeFromRunId:');
+    expect(doneText).not.toContain('Re-run');
+  });
+
   it('names oversized args instead of truncating the resume call', () => {
     const r = new WorkflowRunRegistry();
     const completion = vi.fn();
@@ -2108,6 +2467,7 @@ describe('WorkflowRunRegistry', () => {
       reg('wf_bigargs', {
         isBackgrounded: true,
         scriptPath: '/runtime/workflows/generated/inline/wf_bigargs.js',
+        journalPath: '/runs/wf_bigargs/journal.jsonl',
         args: { blob: 'x'.repeat(400) },
       }),
     );
@@ -2127,6 +2487,7 @@ describe('WorkflowRunRegistry', () => {
       reg('wf_bigargs_done', {
         isBackgrounded: true,
         scriptPath: '/runtime/workflows/generated/inline/wf_bigargs_done.js',
+        journalPath: '/runs/wf_bigargs_done/journal.jsonl',
         args: { blob: 'x'.repeat(400) },
       }),
     );
@@ -2490,4 +2851,50 @@ describe('workflow status guards', () => {
       expect(isTerminalWorkflowStatus(status)).toBe(false);
     },
   );
+});
+
+// The registry keeps the first large-run warning and nothing after it: the flag
+// tells the user a run grew past what was expected, once, while it can still
+// be stopped.
+describe('WorkflowRunRegistry.onSizeWarning', () => {
+  const warning = {
+    axis: 'agents' as const,
+    scheduledAgents: 16,
+    totalTokens: 0,
+    projectedTokens: 1_120_000,
+    agentCap: 15,
+    tokenCap: 1_500_000,
+    capFromGuideline: true,
+    at: 1_700_000_000_500,
+  };
+
+  it('records the first warning, logs it and notifies, and ignores later ones', () => {
+    const r = new WorkflowRunRegistry();
+    const changes = vi.fn();
+    r.setStatusChangeCallback(changes);
+    const entry = r.register(reg('wf_size'));
+    changes.mockClear();
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(true);
+    expect(r.get(entry.runId)?.sizeWarning).toEqual(warning);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toBe(
+      '[size] Large workflow: 16 agents scheduled (warning threshold 15, from the size guideline) — /workflows to stop.',
+    );
+    expect(changes).toHaveBeenCalled();
+
+    expect(
+      r.onSizeWarning(entry.runId, { ...warning, scheduledAgents: 40 }),
+    ).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning?.scheduledAgents).toBe(16);
+  });
+
+  it('does not flag a run that has already settled, or one it does not know', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_settled'));
+    r.complete(entry.runId, [], 1_700_000_001_000);
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning).toBeUndefined();
+    expect(r.onSizeWarning('wf_unknown', warning)).toBe(false);
+  });
 });
