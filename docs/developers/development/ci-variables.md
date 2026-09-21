@@ -15,19 +15,22 @@ default listed below.
 The workflow files are the source of truth for these levers, and the test
 suites pin the workflow expressions byte-for-byte:
 `scripts/tests/package-scripts.test.js` pins the shared worker-cap
-expression (`QWEN_CI_VITEST_MAX_WORKERS` with the `ecs-qwen-` guard), and
+expression in `release.yml` (`QWEN_CI_VITEST_MAX_WORKERS` with the
+`ecs-qwen-` guard), `scripts/tests/no-ak-integration-ci.test.js` pins the
+worker-cap expression in `ci.yml`, and
 `scripts/tests/release-workflow.test.js` pins the `release.yml` retry and
-timeout expressions. This page mirrors them; if the docs and the workflows
+timeout expressions. `package-scripts.test.js` also checks this table's
+defaults against both workflows. If the docs and the workflows
 ever disagree, trust the workflows and update this page in the same change.
 
 ## Variables
 
-| Variable                                 | Default | Used in                 | Controls                                              |
-| ---------------------------------------- | ------- | ----------------------- | ----------------------------------------------------- |
-| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI Vitest suites             |
-| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards     |
-| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard      |
-| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Vitest worker cap on the reserved self-hosted runners |
+| Variable                                 | Default | Used in                 | Controls                                                                                  |
+| ---------------------------------------- | ------- | ----------------------- | ----------------------------------------------------------------------------------------- |
+| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI Vitest suites                                                 |
+| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                         |
+| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                          |
+| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners |
 
 ### Retry counts
 
@@ -57,7 +60,7 @@ test regression.
 
 ### Vitest worker cap on self-hosted runners
 
-`QWEN_CI_VITEST_MAX_WORKERS` caps each Vitest process
+`QWEN_CI_VITEST_MAX_WORKERS` caps the Vitest processes in the steps listed below
 (`VITEST_MAX_THREADS` / `VITEST_MAX_FORKS`, with the matching minimum forced to
 `1`) on the reserved self-hosted runners whose name starts with `ecs-qwen-`.
 The variable is exported only by the main CI workspace-test step and the

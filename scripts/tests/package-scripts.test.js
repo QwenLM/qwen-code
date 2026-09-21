@@ -47,6 +47,37 @@ function readWorkflow(relativePath) {
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
 
 describe('package scripts', () => {
+  it('keeps documented CI variable defaults in sync with workflows', () => {
+    const guide = readWorkflow('docs/developers/development/ci-variables.md');
+    const defaults = new Map(
+      [...guide.matchAll(/^\|\s*`(QWEN_\w+)`\s*\|\s*`([^`]+)`\s*\|/gm)].map(
+        ([, name, value]) => [name, value],
+      ),
+    );
+    const variables = {
+      'ci.yml': ['QWEN_CI_VITEST_RETRY', 'QWEN_CI_VITEST_MAX_WORKERS'],
+      'release.yml': [
+        'QWEN_RELEASE_VITEST_RETRY',
+        'QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES',
+        'QWEN_CI_VITEST_MAX_WORKERS',
+      ],
+    };
+    for (const [file, names] of Object.entries(variables)) {
+      const workflow = readWorkflow(`.github/workflows/${file}`);
+      for (const name of names) {
+        const fallbacks = [
+          ...workflow.matchAll(
+            new RegExp(`vars\\.${name}\\s*\\|\\|\\s*'([^']+)'`, 'g'),
+          ),
+        ];
+        expect(fallbacks.length, `${file}: ${name}`).toBeGreaterThan(0);
+        for (const [, fallback] of fallbacks) {
+          expect(defaults.get(name), `${file}: ${name}`).toBe(fallback);
+        }
+      }
+    }
+  });
+
   it('accepts only an exact pnpm package-manager version', () => {
     expect(getPinnedPnpmPackage({ packageManager: 'pnpm@11.24.0' })).toBe(
       'pnpm@11.24.0',
