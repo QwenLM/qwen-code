@@ -378,6 +378,9 @@ importers:
       '@qwen-code/channel-base':
         specifier: workspace:*
         version: link:../base
+      markdown-it:
+        specifier: ^15.0.0
+        version: 15.0.0
     devDependencies:
       typescript:
         specifier: 5.8.3
