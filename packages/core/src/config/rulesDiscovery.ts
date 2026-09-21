@@ -35,6 +35,21 @@ export interface RuleFile {
   description?: string;
   paths?: string[];
   content: string;
+  /**
+   * How the rule is labelled in the prompt. Set for rules that live outside
+   * the project, where a path relative to the project root would be a stack of
+   * `../` segments: an extension's rule is shown as `<extension>:rules/<file>`
+   * so the model — and anyone reading a transcript — can tell whose rule it is.
+   */
+  displayPath?: string;
+}
+
+/** An active extension's rules directory, as `loadRules` reads it. */
+export interface ExtensionRuleSource {
+  /** Extension name, used to label the rules it contributes. */
+  name: string;
+  /** Absolute path of the extension's `rules/` directory. */
+  dir: string;
 }
 
 export interface LoadRulesResponse {
@@ -44,6 +59,13 @@ export interface LoadRulesResponse {
   ruleCount: number;
   /** Conditional rules (with `paths:`) for turn-level lazy injection. */
   conditionalRules: RuleFile[];
+  /**
+   * Extension rules that were dropped for having no `paths:`, by display path.
+   * An extension's rule is conditional-only: a baseline one would be resident
+   * on every request, which is the cost this mechanism exists to avoid
+   * (#12030). Surfaced so the author is told rather than left guessing.
+   */
+  ignoredExtensionRules: string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,9 +203,11 @@ async function loadRulesFromDir(
 export function formatRules(rules: RuleFile[], projectRoot: string): string {
   return rules
     .map((rule) => {
-      const rawDisplayPath = path.isAbsolute(rule.filePath)
-        ? path.relative(projectRoot, rule.filePath)
-        : rule.filePath;
+      const rawDisplayPath =
+        rule.displayPath ??
+        (path.isAbsolute(rule.filePath)
+          ? path.relative(projectRoot, rule.filePath)
+          : rule.filePath);
       // Normalize to forward slashes for cross-platform consistency in the
       // system prompt. Glob patterns in `paths:` use forward slashes, so
       // display paths should match — otherwise Windows shows `.qwen\rules\foo.md`
@@ -297,6 +321,7 @@ export async function loadRules(
   projectRoot: string,
   folderTrust: boolean,
   excludes: string[] = [],
+  extensionRuleSources: readonly ExtensionRuleSource[] = [],
 ): Promise<LoadRulesResponse> {
   logger.debug(`Loading rules for project: ${projectRoot}`);
 
@@ -323,6 +348,43 @@ export async function loadRules(
     }
   }
 
+  // 3. Active extensions' rules: <extensionPath>/rules/ — conditional only.
+  //
+  //    An extension's `contextFileName` is concatenated into every request of
+  //    every session it is active in, with no relevance gating: nine of them
+  //    measured 9,989 tokens, 65% of one session's always-on context (#12030).
+  //    Rules are the cheaper path, but only while they stay conditional — a
+  //    baseline extension rule would recreate exactly that residency inside
+  //    the new mechanism, so it is dropped and reported rather than loaded.
+  //
+  //    Not gated on `folderTrust`: an extension is installed by an explicit
+  //    act of the user and already contributes MCP servers, commands, skills
+  //    and an ungated context file, so requiring project trust for the one
+  //    mechanism that is strictly cheaper and narrower than the context file
+  //    would push authors back to the expensive path.
+  const ignoredExtensionRules: string[] = [];
+  for (const source of extensionRuleSources) {
+    const extensionRules = await loadRulesFromDir(source.dir, excludes);
+    for (const rule of extensionRules) {
+      const displayPath = `${source.name}:rules/${path
+        .relative(source.dir, rule.filePath)
+        .replace(/\\/g, '/')}`;
+      if (!rule.paths || rule.paths.length === 0) {
+        ignoredExtensionRules.push(displayPath);
+        continue;
+      }
+      allRules.push({ ...rule, displayPath });
+    }
+    logger.debug(
+      `Loaded ${extensionRules.length} rule(s) from extension ${source.name}`,
+    );
+  }
+  if (ignoredExtensionRules.length > 0) {
+    logger.debug(
+      `Ignored ${ignoredExtensionRules.length} extension rule(s) with no paths:`,
+    );
+  }
+
   // Split into baseline (no paths) and conditional (has paths)
   const baselineRules: RuleFile[] = [];
   const conditionalRules: RuleFile[] = [];
@@ -341,5 +403,10 @@ export async function loadRules(
   const content =
     baselineRules.length > 0 ? formatRules(baselineRules, projectRoot) : '';
 
-  return { content, ruleCount: baselineRules.length, conditionalRules };
+  return {
+    content,
+    ruleCount: baselineRules.length,
+    conditionalRules,
+    ignoredExtensionRules,
+  };
 }

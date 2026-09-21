@@ -606,6 +606,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_resume',
   'unstable_session_resume',
   'session_list',
+  'session_catalog_batch',
   'session_info',
   'session_source_metadata',
   'session_side_task',
@@ -870,6 +871,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_runtime_removal',
   'native_directory_picker',
   'workspace_runtime',
+  'workspace_runtime_stop',
   'workspace_local_open',
   'workspace_local_terminal',
   'workspace_qualified_rest_core',
@@ -3765,6 +3767,27 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_runtime_stop') {
+          expect(predicate({ workspaceRuntimeStopAvailable: true })).toBe(true);
+          expect(predicate({ workspaceRuntimeStopAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeStopAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeStopAvailable: false,
+            }),
+          ).not.toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'native_directory_picker') {
           expect(predicate({ nativeDirectoryPickerAvailable: true })).toBe(
             true,
@@ -4210,7 +4233,7 @@ describe('createServeApp', () => {
         'evil.example',
       );
       expect(bracketed.headers['content-security-policy']).toContain(
-        "connect-src 'self';",
+        "connect-src 'self' https://unpkg.com/@qwen-code/;",
       );
 
       // The mixed shape is the one that broke functionally, not just by
@@ -19965,6 +19988,31 @@ describe('createServeApp', () => {
       expect(res.body).toMatchObject({
         code: 'invalid_archive_state',
       });
+    });
+
+    it('serves the advertised batch catalog through the daemon middleware', async () => {
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: fakeBridge(),
+          boundWorkspace: WS_BOUND,
+          primaryWorkspaceTrusted: true,
+        },
+      );
+      const result = await request(app)
+        .post('/sessions/catalog')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ workspaces: 'all' });
+      expect(result.status).toBe(200);
+      expect(result.body.workspaces).toEqual([
+        expect.objectContaining({
+          workspace: WS_BOUND,
+          cwd: WS_BOUND,
+          sessions: [],
+        }),
+      ]);
+      expect(result.body.workspaces[0].workspaceId).toEqual(expect.any(String));
     });
 
     it('merges live sessions only on first page (no cursor)', async () => {

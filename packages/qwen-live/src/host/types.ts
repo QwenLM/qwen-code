@@ -181,6 +181,12 @@ export interface LiveHostHello {
     audioOutput: boolean;
     globalShortcut: boolean;
     appshot: boolean;
+    /**
+     * A browser Host sets this when it can answer `host.capture_visual` from a
+     * screen the user shares with it. Absent on Hosts that predate the field
+     * and on every native Host, which captures through Appshot instead.
+     */
+    screenShare?: boolean;
   };
 }
 

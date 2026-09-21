@@ -195,7 +195,8 @@ export type WebShellRightPanelItem =
   | 'review'
   | 'sideTask'
   | 'terminal'
-  | 'webPreview';
+  | 'webPreview'
+  | 'trajectory';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -295,6 +296,23 @@ export interface WebShellAssistantMessageInfo {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
+}
+
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Final visible assistant message when retained in the mounted transcript. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
 }
 
 export interface WebShellAssistantTurnFooterRenderInfo {

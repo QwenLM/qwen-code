@@ -3241,6 +3241,38 @@ bad`);
         vi.restoreAllMocks();
       });
 
+      it.each([
+        { executor: executorConfig.executor },
+        { mcpServers: { remote: { command: 'node' } } },
+        { hooks: { Stop: [] } },
+      ])(
+        'rejects sandbox child overrides %j before invoking any executor',
+        async (overrides) => {
+          vi.spyOn(mockConfig, 'getShellExecutionSandbox').mockReturnValue(
+            {} as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>,
+          );
+          const externalCreate = vi.fn();
+          vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+            create: externalCreate,
+          });
+          await expect(
+            manager.createAgentHeadless(
+              {
+                ...executorConfig,
+                executor: undefined,
+                ...overrides,
+              } as SubagentConfig,
+              mockConfig,
+            ),
+          ).rejects.toThrow(
+            'does not support agent executors, MCP servers or hooks',
+          );
+          expect(externalCreate).not.toHaveBeenCalled();
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+          expect(mockToolRegistry.warmAll).not.toHaveBeenCalled();
+        },
+      );
+
       it('refuses to run in-process when no executor is registered', async () => {
         vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue(
           undefined,
