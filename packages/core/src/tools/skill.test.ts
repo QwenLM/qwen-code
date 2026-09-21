@@ -796,6 +796,62 @@ describe('SkillTool', () => {
   });
 
   describe('refreshSkills', () => {
+    it('deduplicates a backslash-path skill after an actual load and refresh', async () => {
+      const skill = {
+        ...mockSkills[0],
+        filePath: 'C:\\skills\\code-review\\SKILL.md',
+      };
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([skill]);
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([skill]);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(skill);
+      await skillTool.refreshSkills();
+      const invoke = async () =>
+        partToString(
+          (
+            await (skillTool as SkillToolWithProtectedMethods)
+              .createInvocation({ skill: skill.name })
+              .execute()
+          ).llmContent,
+        );
+      const first = await invoke();
+      expect(first).toContain(skill.body);
+      await skillTool.refreshSkills();
+      expect(await invoke()).toContain('already loaded');
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set([first]));
+    });
+
+    it('invalidates an explicitly disabled skill even when a failed scan leaves the cache empty', async () => {
+      const skill = mockSkills[0];
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(skill);
+      const invoke = async () =>
+        partToString(
+          (
+            await (skillTool as SkillToolWithProtectedMethods)
+              .createInvocation({ skill: skill.name })
+              .execute()
+          ).llmContent,
+        );
+      const first = await invoke();
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([]);
+      vi.mocked(mockSkillManager.hasDiscoveryErrors).mockReturnValue(true);
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set([skill.name.toLowerCase()]),
+      );
+      await skillTool.refreshSkills();
+      expect(skillTool.getLoadedSkillNames()).toEqual(new Set());
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set([first]));
+      expect(skillTool.validateToolParams({ skill: skill.name })).toContain(
+        'disabled',
+      );
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(new Set());
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([skill]);
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([skill]);
+      vi.mocked(mockSkillManager.hasDiscoveryErrors).mockReturnValue(false);
+      await skillTool.refreshSkills();
+      expect(await invoke()).toBe(first);
+    });
+
     it.each(['user', 'project', 'extension'] as const)(
       'reloads a changed %s skill body while unchanged refreshes remain deduplicated',
       async (level) => {

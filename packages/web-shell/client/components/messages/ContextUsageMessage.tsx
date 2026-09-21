@@ -214,7 +214,6 @@ function SkillsSection({
 }: {
   skills: readonly DaemonContextSkillDetail[];
   labels: {
-    active: string;
     bodyLoaded: string;
     tokens: string;
   };
@@ -234,7 +233,7 @@ function SkillsSection({
             <span className={styles.detailName} title={skill.name}>
               {skill.name}
               {skill.loaded && (
-                <span className={styles.success}> {labels.active}</span>
+                <span className={styles.success}> {labels.bodyLoaded}</span>
               )}
             </span>
             <span className={styles.value}>
@@ -458,7 +457,6 @@ export function ContextUsageMessage({
               <SkillsSection
                 skills={usage.skills}
                 labels={{
-                  active: t('contextUsage.active'),
                   bodyLoaded: t('contextUsage.bodyLoaded'),
                   tokens: t('contextUsage.tokens'),
                 }}

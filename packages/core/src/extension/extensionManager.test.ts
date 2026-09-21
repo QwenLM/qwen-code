@@ -530,6 +530,36 @@ describe('extension tests', () => {
     });
   });
 
+  it('retains extension skill discovery errors until the next successful load', async () => {
+    const extensionDirectory = createExtension({
+      extensionsDir: userExtensionsDir,
+      name: 'broken-skill',
+    });
+    const skillDirectory = path.join(extensionDirectory, 'skills', 'review');
+    fs.mkdirSync(skillDirectory, { recursive: true });
+    const manifestPath = path.join(skillDirectory, 'SKILL.md');
+    fs.writeFileSync(manifestPath, 'invalid frontmatter');
+    const manager = createExtensionManager();
+    await manager.refreshCache();
+    const [broken] = manager.getLoadedExtensions();
+    expect(broken).toBeDefined();
+    expect(broken.skills).toEqual([]);
+    expect(broken.skillsDiscoveryHasErrors).toBe(true);
+    fs.writeFileSync(
+      manifestPath,
+      '---\nname: review\ndescription: Review code\n---\nBody.',
+    );
+    await manager.refreshCache();
+    const [recovered] = manager.getLoadedExtensions();
+    expect(recovered.skills?.map((skill) => skill.name)).toEqual(['review']);
+    expect(recovered.skillsDiscoveryHasErrors).not.toBe(true);
+    fs.rmSync(skillDirectory, { recursive: true });
+    await manager.refreshCache();
+    expect(manager.getLoadedExtensions()[0].skillsDiscoveryHasErrors).not.toBe(
+      true,
+    );
+  });
+
   describe('extension skill states', () => {
     let manager: ExtensionManager;
     let extensionDirectory: string;

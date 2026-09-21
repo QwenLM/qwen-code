@@ -18,6 +18,7 @@ import {
 } from './skill-manager.js';
 import { type SkillConfig, SkillError } from './types.js';
 import type { Config } from '../config/config.js';
+import type { Extension } from '../extension/extensionManager.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 
 // Mock file system operations
@@ -1624,6 +1625,69 @@ Review content`;
   });
 
   describe('discovery completeness', () => {
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'distinguishes a bundled directory %s error even when existsSync returns false',
+      async (code) => {
+        const bundledDir = manager.getSkillsBaseDirs('bundled')[0];
+        vi.mocked(fsSync.existsSync).mockReturnValue(false);
+        vi.mocked(fs.readdir).mockImplementation(async (directory) => {
+          if (String(directory) === bundledDir)
+            throw Object.assign(new Error(code), { code });
+          return [];
+        });
+        await manager.refreshCache();
+        expect(manager.hasDiscoveryErrors()).toBe(code !== 'ENOENT');
+        expect(fs.readdir).toHaveBeenCalledWith(bundledDir, {
+          withFileTypes: true,
+        });
+      },
+    );
+
+    it('propagates an active extension skill scan failure and clears it after recovery', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      const extension: Extension = {
+        id: 'suite-id',
+        name: 'suite',
+        version: '1.0.0',
+        isActive: true,
+        path: '/extensions/suite',
+        config: { name: 'suite', version: '1.0.0' },
+        contextFiles: [],
+        skills: [],
+        skillsDiscoveryHasErrors: true,
+      };
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([extension]);
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      extension.skillsDiscoveryHasErrors = false;
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'distinguishes an unreadable skill symlink from a removed target: %s',
+      async (code) => {
+        const projectDir = manager.getSkillsBaseDirs('project')[0];
+        vi.mocked(fs.readdir).mockImplementation(async (directory) =>
+          String(directory) === projectDir
+            ? ([
+                {
+                  name: 'linked',
+                  isDirectory: () => false,
+                  isSymbolicLink: () => true,
+                },
+              ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+            : [],
+        );
+        vi.mocked(fs.realpath).mockRejectedValue(
+          Object.assign(new Error(code), { code }),
+        );
+        await manager.refreshCache();
+        expect(manager.getCachedSkills()).toEqual([]);
+        expect(manager.hasDiscoveryErrors()).toBe(code !== 'ENOENT');
+      },
+    );
+
     it('does not treat absent optional directories as discovery errors', async () => {
       vi.mocked(fs.readdir).mockRejectedValue(
         Object.assign(new Error('missing'), { code: 'ENOENT' }),

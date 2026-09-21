@@ -1022,6 +1022,7 @@ export class SkillManager {
       const extensions = this.config.getActiveExtensions();
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
+        if (extension.skillsDiscoveryHasErrors) this.discoveryHasErrors = true;
         extension.skills?.forEach((skill) => {
           // Extension skills bypass parseSkillContent / validateConfig, so a
           // non-number `priority` would silently sort at the bottom of the
@@ -1064,12 +1065,6 @@ export class SkillManager {
 
     if (level === 'bundled') {
       const bundledDir = this.bundledSkillsDir;
-      if (!fsSync.existsSync(bundledDir)) {
-        debugLogger.warn(
-          `Bundled skills directory not found: ${bundledDir}. This may indicate an incomplete installation.`,
-        );
-        return [];
-      }
       debugLogger.debug(`Loading bundled skills from: ${bundledDir}`);
       const skills = await this.loadSkillsFromDir(bundledDir, 'bundled');
       debugLogger.debug(`Loaded ${skills.length} bundled skills`);
@@ -1203,6 +1198,10 @@ export class SkillManager {
     } catch (error) {
       if (!(isNodeError(error) && error.code === 'ENOENT')) {
         this.discoveryHasErrors = true;
+      } else if (level === 'bundled') {
+        debugLogger.warn(
+          `Bundled skills directory not found: ${baseDir}. This may indicate an incomplete installation.`,
+        );
       }
       // Directory doesn't exist or can't be read
       const errorMessage =

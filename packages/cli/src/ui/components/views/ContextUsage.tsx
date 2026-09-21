@@ -562,7 +562,10 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
                         {truncateName(skill.name, DETAIL_NAME_MAX_LEN)}
                       </Text>
                       {skill.loaded && (
-                        <Text color={theme.status.success}> {t('active')}</Text>
+                        <Text color={theme.status.success}>
+                          {' '}
+                          {t('body loaded')}
+                        </Text>
                       )}
                     </Box>
                     <Box flexGrow={1} justifyContent="flex-end">
