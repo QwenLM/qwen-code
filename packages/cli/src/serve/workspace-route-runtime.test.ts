@@ -478,6 +478,40 @@ describe('resolveSessionManagedGitCwd', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports an unsearchable client cwd as invalid_cwd, not a daemon error',
+    async () => {
+      // realpath needs +x only on the parents, so the path resolves and the
+      // failure surfaces one step later: git cannot spawn with a mode-000
+      // cwd. That is a property of the client-supplied path, not of the
+      // daemon's git installation, so it must answer 400, never 500.
+      const locked = path.join(repo, 'locked');
+      fs.mkdirSync(locked, { mode: 0o000 });
+      const runtime = { workspaceCwd: repo } as unknown as WorkspaceRuntime;
+      try {
+        expect(
+          await resolveSessionManagedGitCwd(fakeReq(locked), runtime),
+        ).toBeNull();
+
+        const response = makeResponse();
+        const sendBridgeError = vi.fn();
+        expect(
+          await resolveSessionManagedGitCwdForRoute(
+            fakeReq(locked),
+            response,
+            runtime,
+            'GET /workspaces/:workspace/git',
+            sendBridgeError,
+          ),
+        ).toBeUndefined();
+        expect(response.status).toHaveBeenCalledWith(400);
+        expect(sendBridgeError).not.toHaveBeenCalled();
+      } finally {
+        fs.chmodSync(locked, 0o755);
+      }
+    },
+  );
+
   it('rejects a runtime that drains during cwd resolution', async () => {
     const error = new Error('runtime draining');
     const response = makeResponse();
@@ -693,6 +727,14 @@ describe('resolveSessionManagedGitCwd', () => {
     expect(await resolveSessionManagedGitCwd(fakeReq(worktree), runtime)).toBe(
       fs.realpathSync(worktree),
     );
+
+    // A contained subdirectory is the same checkout as the workspace even
+    // though it also reports as a linked worktree.
+    const subdirectory = path.join(worktree, 'src');
+    fs.mkdirSync(subdirectory);
+    expect(
+      await resolveSessionManagedGitCwd(fakeReq(subdirectory), runtime),
+    ).toBe(fs.realpathSync(subdirectory));
   });
 
   it.each(['...', '..cache'])(

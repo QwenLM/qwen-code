@@ -620,6 +620,42 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
+  it('restores a sidecar caught in the link-then-unlink publish window', async () => {
+    // createWorktreeSession publishes by hard-linking the staged inode onto
+    // the sidecar path and only then unlinking the staged name, so a crash
+    // (or a concurrent reader) can observe nlink === 2. That state carries
+    // complete, fsync'd content — it must restore, not be deleted as stale.
+    const liveCwd = path.join(tmpDir, 'repo-inflight');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'inflight');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'inflight',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await createWorktreeSession(filePath, live);
+    await fs.writeFile(
+      path.join(liveWorktree, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const inflight = `${filePath}.inflight`;
+    await fs.link(filePath, inflight);
+    try {
+      const result = await restoreWorktreeContext(
+        filePath,
+        undefined,
+        'session-owner',
+      );
+
+      expect(result.session).toEqual(live);
+      expect(await readWorktreeSession(filePath)).toEqual(live);
+    } finally {
+      await fs.unlink(inflight);
+    }
+  });
+
   it('rejects and preserves a sidecar when the marker has another owner', async () => {
     const liveCwd = path.join(tmpDir, 'repo');
     const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'reowned');

@@ -49,6 +49,7 @@ import {
   SessionService,
   Storage,
   writeRuntimeStatus,
+  writeWorktreeSession,
   writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -538,6 +539,46 @@ describe('persistStartupWorktreeSidecar', () => {
       await expect(readWorktreeSession(result.sidecarPath)).resolves.toBeNull();
     },
   );
+
+  it('clears a stale sidecar naming another worktree when ownership is unverifiable', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('stale-sidecar');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    await writeWorktreeSessionMarker(setup.context.worktreePath, 'old-session');
+
+    const config = makeConfig(setup.context.worktreePath, 'new-session');
+    // The resumed session was previously bound to a DIFFERENT worktree;
+    // that binding is stale the moment the process runs in this one.
+    await writeWorktreeSession(
+      config.getSessionService().getWorktreeSessionPath('new-session'),
+      {
+        slug: 'other-slug',
+        worktreePath: path.join(tempRepo, '.qwen', 'worktrees', 'other-slug'),
+        worktreeBranch: 'worktree-other-slug',
+        originalCwd: tempRepo,
+        originalBranch: 'main',
+        originalHeadCommit: '0'.repeat(40),
+      },
+    );
+
+    const result = await persistStartupWorktreeSidecar(config, {
+      ...setup.context,
+      wasReattached: true,
+    });
+
+    expect(result.overrodeResumedWorktree).toBe(false);
+    // Ownership of the worktree stays with the unverifiable owner...
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'old-session',
+    );
+    // ...but the stale binding to the other worktree must not survive — a
+    // later --resume would otherwise restore a worktree this session is
+    // not running in.
+    await expect(readWorktreeSession(result.sidecarPath)).resolves.toBeNull();
+  });
 
   it('does not write a sidecar when re-attachment marker transfer fails', async () => {
     tempRepo = await makeTempRepo();

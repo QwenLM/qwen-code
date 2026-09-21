@@ -264,6 +264,35 @@ describe('fetchGitHubPullRequestIssues', () => {
       expect.any(Function),
     );
   });
+  it('derives GH_CONFIG_DIR from XDG_CONFIG_HOME without exposing it', async () => {
+    // gh's credentials live at $XDG_CONFIG_HOME/gh; the scrubbed env must
+    // re-derive GH_CONFIG_DIR (as github-prs does) or gh falls back to
+    // ~/.config/gh and silently loses the operator's login.
+    fs.mkdirSync(path.join(dir, '.git'));
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(
+          null,
+          JSON.stringify({ data: { repository: { p42: prNode(42, []) } } }),
+          '',
+        );
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    const result = await fetchGitHubPullRequestIssues(
+      dir,
+      { XDG_CONFIG_HOME: '/tmp/gh-user-config', GIT_DIR: '/tmp/decoy/.git' },
+      [42],
+    );
+
+    expect(result.kind).toBe('ok');
+    expect(seenEnv?.['GH_CONFIG_DIR']).toBe('/tmp/gh-user-config/gh');
+    expect(seenEnv).not.toHaveProperty('XDG_CONFIG_HOME');
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
+  });
 
   it('keeps the resolved aliases when gh exits non-zero over a NOT_FOUND number', async () => {
     // A binding to another repository's same-numbered PR does not resolve

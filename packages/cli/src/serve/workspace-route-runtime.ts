@@ -37,6 +37,29 @@ function isGitProbeInfrastructureError(error: unknown): boolean {
   );
 }
 
+/**
+ * A spawn ENOENT/EACCES can mean "the daemon cannot run git" (missing or
+ * unexecutable binary — an infrastructure fault) or "git cannot start in
+ * this cwd" (an unsearchable client-supplied directory — a validation
+ * failure). Only the former is rethrown; when the probe cwd itself fails an
+ * access check the probe reports its ordinary negative result so the route
+ * answers 400 instead of 500.
+ */
+async function isGitInfrastructureFault(
+  error: unknown,
+  cwd: string,
+): Promise<boolean> {
+  if (!isGitProbeInfrastructureError(error)) return false;
+  const code = (error as { code?: unknown }).code;
+  if (code !== 'ENOENT' && code !== 'EACCES') return true;
+  try {
+    await fsPromises.access(cwd, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface WorkspaceRouteContext {
   readonly runtime: WorkspaceRuntime;
   readonly routePrefix: string;
@@ -436,7 +459,7 @@ async function resolveGitCommonDir(cwd: string): Promise<string | null> {
       },
     ));
   } catch (error) {
-    if (isGitProbeInfrastructureError(error)) throw error;
+    if (await isGitInfrastructureFault(error, cwd)) throw error;
     return null;
   }
   return fsPromises
@@ -458,7 +481,7 @@ async function resolveAbsoluteGitDir(cwd: string): Promise<string | null> {
       },
     ));
   } catch (error) {
-    if (isGitProbeInfrastructureError(error)) throw error;
+    if (await isGitInfrastructureFault(error, cwd)) throw error;
     return null;
   }
   return fsPromises.realpath(stdout.trim()).catch(() => null);
@@ -527,7 +550,7 @@ async function isLinkedWorktreeOrUnknown(cwd: string): Promise<boolean> {
       { cwd, encoding: 'utf8', timeout: 30_000, env: gitEnv() },
     ));
   } catch (error) {
-    if (isGitProbeInfrastructureError(error)) throw error;
+    if (await isGitInfrastructureFault(error, cwd)) throw error;
     const stderr = (error as { stderr?: unknown }).stderr;
     return !(
       typeof stderr === 'string' && /not a git repository/i.test(stderr)
@@ -590,10 +613,22 @@ export async function resolveSessionManagedGitCwd(
   const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
   if (
     isWithinRoot(requested, workspace) &&
-    !isWithinRoot(requested, managedRoot) &&
-    !(await isLinkedWorktreeOrUnknown(requested))
+    !isWithinRoot(requested, managedRoot)
   ) {
-    return requested;
+    if (!(await isLinkedWorktreeOrUnknown(requested))) {
+      return requested;
+    }
+    // A workspace that is itself a linked worktree reports every contained
+    // path as one; a path resolving to the workspace's own git dir is the
+    // same checkout and keeps the plain-subdirectory allowance. A nested
+    // worktree of another repo resolves elsewhere and stays rejected.
+    const [workspaceGitDir, requestedGitDir] = await Promise.all([
+      resolveAbsoluteGitDir(workspace),
+      resolveAbsoluteGitDir(requested),
+    ]);
+    if (workspaceGitDir !== null && requestedGitDir === workspaceGitDir) {
+      return requested;
+    }
   }
   if (!isWithinRoot(requested, managedRoot)) return null;
   const [workspaceCommonDir, requestedCommonDir] = await Promise.all([

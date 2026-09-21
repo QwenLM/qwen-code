@@ -129,7 +129,11 @@ export async function readWorktreeSession(
   try {
     options.signal?.throwIfAborted();
     const pathStat = await fs.lstat(filePath);
-    if (!pathStat.isFile() || pathStat.nlink !== 1) return null;
+    // Deliberately no nlink check (unlike readWorktreeSessionStrict):
+    // createWorktreeSession's link-then-unlink publish leaves a complete,
+    // fsync'd sidecar at nlink === 2 inside its window and after a crash,
+    // and restoreWorktreeContext deletes whatever this read rejects.
+    if (!pathStat.isFile()) return null;
     handle = await fs.open(
       filePath,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
@@ -137,7 +141,6 @@ export async function readWorktreeSession(
     const openedStat = await handle.stat();
     if (
       !openedStat.isFile() ||
-      openedStat.nlink !== 1 ||
       openedStat.dev !== pathStat.dev ||
       openedStat.ino !== pathStat.ino ||
       openedStat.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES
@@ -151,7 +154,6 @@ export async function readWorktreeSession(
     const finalStat = await fs.lstat(filePath);
     if (
       !finalStat.isFile() ||
-      finalStat.nlink !== 1 ||
       finalStat.dev !== openedStat.dev ||
       finalStat.ino !== openedStat.ino
     ) {

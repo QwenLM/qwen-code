@@ -33,6 +33,7 @@ import {
   WorktreeSessionMarkerOwnerChangedError,
 } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import {
+  clearWorktreeSessionDurable,
   getSessionRuntimeLiveness,
   readWorktreeSession,
   writeWorktreeSession,
@@ -462,6 +463,16 @@ export async function persistStartupWorktreeSidecar(
             `persistStartupWorktreeSidecar: cannot verify marker owner ${observedOwner} at ` +
               `${path.join(context.worktreePath, '.qwen-session')}; preserving ownership`,
           );
+          // No new binding is written on this path, so a pre-existing
+          // sidecar naming a DIFFERENT worktree would survive and direct a
+          // later --resume at a worktree this session is not running in.
+          if (previous && previous.slug !== context.slug) {
+            await clearWorktreeSessionDurable(sidecarPath).catch((error) =>
+              debugLogger.warn(
+                `persistStartupWorktreeSidecar: failed to clear the stale sidecar at ${sidecarPath}: ${error}`,
+              ),
+            );
+          }
           return { overrodeResumedWorktree: false, sidecarPath };
         } else {
           await replaceWorktreeSessionMarker(
