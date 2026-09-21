@@ -961,7 +961,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * part for a `fileData` reference — the `fileUtils.ts` precedent: a local
    * resize is a lossy transform reserved for omni policies with disclosure —
    * so clamping here would destroy the fidelity the funnel is contracted to
-   * deliver while buying no inline-size relief. The funnel's own predicate
+   * deliver while buying no inline-size relief. A part the funnel DECLINES
+   * to upload does not escape either: the funnel bounds any image it keeps
+   * inline (`boundDeclinedInlineImage`), so the skip here never strands
+   * source-resolution bytes on the inline path. The funnel's own predicate
    * (`isOmniDeliveryActive`, not `Config.isOmniEnabled`) decides, so a config
    * where omni is enabled but delivery is inactive still gets bounded; a
    * missing Config reads as omni-inactive.

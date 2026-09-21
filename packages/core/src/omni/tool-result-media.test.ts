@@ -16,6 +16,7 @@ import {
 import os from 'node:os';
 import nodePath from 'node:path';
 import nodeFs from 'node:fs/promises';
+import sharp from 'sharp';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 
@@ -706,10 +707,14 @@ describe('processToolResultOmniMedia', () => {
     expect(result).toBe(parts);
   });
 
-  it('enforces the aggregate upload-byte budget (over-budget parts stay inline)', async () => {
+  it('enforces the aggregate upload-byte budget (over-budget parts are bounded, not uploaded)', async () => {
     // Two parts: the first consumes nearly the whole 128 MiB budget, the
-    // second no longer fits and must stay inline even though the upload
-    // COUNT budget still has room.
+    // second no longer fits and must not upload even though the upload
+    // COUNT budget still has room. The declined image no longer sails
+    // through unbounded: the renderer's own source cap refuses 127 MiB and
+    // the trailing inline clamp substitutes the placeholder — the bounded
+    // delivery the producer-side pipeline would have made had the funnel
+    // never run.
     const bigBytes = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       Buffer.alloc(127 * 1024 * 1024),
@@ -725,7 +730,75 @@ describe('processToolResultOmniMedia', () => {
     );
     expect(deliverMock).toHaveBeenCalledTimes(1);
     expect(result[0]!.fileData).toBeDefined();
-    expect(result[1]!.inlineData).toBeDefined();
+    expect(result[1]!.text).toContain('[Media omitted: image/png');
+  });
+
+  it('bounds an over-budget image it keeps inline instead of delivering source-resolution bytes', async () => {
+    // Producer-side bounding is skipped while omni delivery owns the media,
+    // so an image the funnel DECLINES must still be bounded here — else the
+    // original bytes reach the model inline at source resolution on every
+    // turn. Nine images exhaust the eight-upload budget; the ninth must
+    // come back re-encoded, not as the server's original 3840x2160 PNG.
+    // Removing the keep-inline bound turns this test red.
+    const oversized = await sharp({
+      create: {
+        width: 3840,
+        height: 2160,
+        channels: 3,
+        background: '#204080',
+      },
+    })
+      .png()
+      .toBuffer();
+    const parts = Array.from({ length: 9 }, () =>
+      inlinePart('image/png', oversized),
+    );
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(deliverMock).toHaveBeenCalledTimes(8);
+    expect(result.filter((p) => p.fileData)).toHaveLength(8);
+    const keptInline = result.filter((p) => p.inlineData);
+    expect(keptInline).toHaveLength(1);
+    expect(keptInline[0]!.inlineData!.mimeType).toBe('image/jpeg');
+    const metadata = await sharp(
+      Buffer.from(keptInline[0]!.inlineData!.data!, 'base64'),
+    ).metadata();
+    expect(
+      Math.max(metadata.width ?? 0, metadata.height ?? 0),
+    ).toBeLessThanOrEqual(1568);
+  });
+
+  it('bounds an image whose upload fails instead of delivering source-resolution bytes inline', async () => {
+    // Same residue, different decline exit: a staging/upload failure keeps
+    // the part inline, and the kept image must be bounded rather than
+    // forwarded at source resolution.
+    deliverMock.mockRejectedValue(new Error('upload exploded'));
+    const oversized = await sharp({
+      create: {
+        width: 3840,
+        height: 2160,
+        channels: 3,
+        background: '#204080',
+      },
+    })
+      .png()
+      .toBuffer();
+    const result = await processToolResultOmniMedia(
+      [inlinePart('image/png', oversized)],
+      cfg({ image: true }),
+      signal,
+    );
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(result[0]!.inlineData!.mimeType).toBe('image/jpeg');
+    const metadata = await sharp(
+      Buffer.from(result[0]!.inlineData!.data!, 'base64'),
+    ).metadata();
+    expect(
+      Math.max(metadata.width ?? 0, metadata.height ?? 0),
+    ).toBeLessThanOrEqual(1568);
   });
 
   it('propagates an abort instead of degrading the part to inline', async () => {
