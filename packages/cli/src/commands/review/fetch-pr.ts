@@ -949,10 +949,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
-  // The scratch directory, refused outright when the workspace redirected
-  // it — before the lease, the worktree, the diff and the plan land there
-  // (see `ensureReviewTmpDir`).
-  ensureReviewTmpDir('fetch-pr');
 
   // BEFORE the first git command of the run, not at step 4. Every git
   // invocation this command makes without an explicit `-C` — `cleanStale`'s
@@ -993,6 +989,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Run the review from a checkout outside the review temp dir.`,
     );
   }
+
+  // The scratch directory, refused outright when the workspace redirected
+  // it — before the worktree, the diff and the plan land there (see
+  // `ensureReviewTmpDir`). AFTER the launch-directory gate, not ahead of it:
+  // the guard lists the index (`gitRaw`) and creates `.qwen/tmp`, and the gate
+  // above promises that no git call and no state change precedes it. The
+  // wrapper would refuse the listing on its own, but the guard's `catch`
+  // rewords that refusal as a listing failure, and outside a repository it
+  // goes on to create the directory. BEFORE the lease gate: the lease no
+  // longer lives under `.qwen/tmp`, but a round that cannot write its side
+  // files must not take the lock either.
+  ensureReviewTmpDir('fetch-pr');
 
   // The lease is also a lock. The worktree path is fixed per PR number, so
   // the stale-clean below would remove a worktree ANOTHER session is actively

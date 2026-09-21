@@ -1417,6 +1417,13 @@ describe('fetch-pr report assembly', () => {
       );
       expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
       expect(producerMocks.git).not.toHaveBeenCalled();
+      // `gitRaw` is a git call too, and the scratch-directory guard makes one
+      // (`ls-files -s -z`) and then creates `.qwen/tmp`. It answers an empty
+      // listing under this suite's mock, so a guard placed ahead of the gate
+      // runs silently and the refusal below it still fires — the message
+      // assertion alone cannot see the order.
+      expect(producerMocks.gitRaw).not.toHaveBeenCalled();
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
       expect(producerMocks.execFileSync).not.toHaveBeenCalled();
       expect(vi.mocked(readReviewWorktreeLease)).not.toHaveBeenCalled();
       expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
