@@ -129,6 +129,7 @@ import {
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
+  peekSessionCatalogDisplayName,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
 } from './session-catalog/session-catalog-store';
 import {
@@ -247,8 +248,8 @@ import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { McpAppHostContext } from './mcpAppHostContext';
 import {
-  isItemExcluded,
-  isSettingExcluded,
+  isItemVisible,
+  isSettingVisible,
   type WebShellSettingsOptions,
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
@@ -296,7 +297,7 @@ import {
   type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
-import { workspaceLabel } from './utils/workspace';
+import { workspaceLabel, workspaceLabelForCwd } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
   getLocalCommands,
@@ -3876,6 +3877,29 @@ export function App({
     setSessionStatusDisplayName(undefined);
     setCurrentSessionSummary(undefined);
   }, [logicalSessionKey]);
+  // Declared after the reset above so it wins in the same layout pass. A
+  // history session's name exists only in the session catalog — neither the
+  // load response nor the metadata events carry it — so seeding it from the
+  // cache here keeps the header from flashing the "New session" placeholder
+  // while the load round-trip is in flight.
+  useLayoutEffect(() => {
+    // `?? prev` keeps this from ever blanking a title the catalog already
+    // resolved; the reset above runs first in the same layout pass, so a
+    // session switch still starts from an empty title.
+    setSessionStatusDisplayName(
+      (prev) =>
+        peekSessionCatalogDisplayName(
+          workspace.client,
+          connection.sessionId,
+          connection.workspaceCwd,
+        ) ?? prev,
+    );
+  }, [
+    logicalSessionKey,
+    workspace.client,
+    connection.sessionId,
+    connection.workspaceCwd,
+  ]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
   // cleanup: connection.sessionId can cycle through several sessions during
@@ -3915,7 +3939,7 @@ export function App({
           }
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
-          setSessionStatusDisplayName(summary.displayName);
+          setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
           setCurrentSessionSummary(summary);
         })
         .catch(() => {
@@ -3924,7 +3948,8 @@ export function App({
             worktreeSessionKeyRef.current === sessionKey &&
             owner.isCurrent()
           ) {
-            setSessionStatusDisplayName(undefined);
+            // A failed refresh must not blank a title the catalog already
+            // resolved.
             setCurrentSessionSummary(undefined);
           }
         });
@@ -3941,7 +3966,7 @@ export function App({
           ) {
             setSessionWorktree(undefined);
             setSessionBranch(undefined);
-            setSessionStatusDisplayName(summary.displayName);
+            setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
             setCurrentSessionSummary(summary);
           }
           return;
@@ -3953,7 +3978,7 @@ export function App({
         ) {
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
-          setSessionStatusDisplayName(summary.displayName);
+          setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
           setCurrentSessionSummary(summary);
         }
         return loadSessionCatalogOnce(
@@ -3977,7 +4002,8 @@ export function App({
               (session) => session.sessionId === sid,
             );
             setSessionStatusDisplayName(
-              listedSession?.displayName ?? summary.displayName,
+              (prev) =>
+                listedSession?.displayName ?? summary.displayName ?? prev,
             );
             setCurrentSessionSummary(listedSession ?? summary);
           })
@@ -3989,9 +4015,11 @@ export function App({
           worktreeSessionKeyRef.current === sessionKey &&
           owner.isCurrent()
         ) {
+          // The live summary does not carry a history session's name, and a
+          // failed refresh must not blank a title the catalog already
+          // resolved.
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
-          setSessionStatusDisplayName(undefined);
           setCurrentSessionSummary(undefined);
         }
       });
@@ -4028,6 +4056,13 @@ export function App({
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
   ]);
+  // The chat header always answers "which workspace is this session in?": the
+  // workspace's name when there is one, and nothing when the session lives
+  // outside every workspace (standalone, Live), which the header shows as the
+  // no-workspace icon.
+  const headerWorkspaceName = activeWorkspaceCwd
+    ? workspaceLabelForCwd(activeWorkspaceCwd, ordinaryWorkspaces)
+    : undefined;
   const workspaceWorkflowsEnabled =
     workspaces.find(
       (entry) =>
@@ -6669,6 +6704,11 @@ export function App({
       if (request.kind === 'background_task') {
         if (!request.sourceSessionId) return;
         const turn = request.backgroundTurn;
+        // A peer turn handled a message inside this session: what it did is
+        // the transcript already on screen, and no task registry entry can
+        // hydrate a pending tab for it. A rendering of its own is a
+        // follow-up; until then there is nothing to open.
+        if (turn.kind === 'peer') return;
         const tab: ArtifactPanelTab =
           turn.kind === 'workflow'
             ? {
@@ -11800,7 +11840,7 @@ export function App({
         ) &&
         (source === 'settings'
           ? activePanelRef.current === 'settings' &&
-            !isSettingExcluded('voiceModel', settingsPresentationRef.current)
+            isSettingVisible('voiceModel', settingsPresentationRef.current)
           : activePanelRef.current === null) &&
         mainViewRef.current === 'chat' &&
         modelDialogModeRef.current === null &&
@@ -17438,11 +17478,11 @@ export function App({
   useEffect(() => {
     const key = settingsDialogKeyRef.current;
     if (!key) return;
-    const excluded =
+    const visible =
       key === 'builtin:model-management'
-        ? isItemExcluded(key, settingsPresentation)
-        : isSettingExcluded(key, settingsPresentation);
-    if (excluded) {
+        ? isItemVisible(key, settingsPresentation)
+        : isSettingVisible(key, settingsPresentation);
+    if (!visible) {
       if (pendingVoicePickerSourceRef.current === 'settings') {
         voicePickerRequestRef.current++;
         pendingVoicePickerSourceRef.current = undefined;
@@ -18975,6 +19015,8 @@ export function App({
                           ? (sessionDisplayName ?? t('session.new'))
                           : null
                       }
+                      workspaceName={headerWorkspaceName}
+                      workspacePath={activeWorkspaceCwd}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={
                         mainView === 'chat' && environmentHeaderItemVisible
@@ -19268,7 +19310,7 @@ export function App({
                           onDeleteModel: handleDeleteModel,
                           onAddModel: () => {
                             if (
-                              isItemExcluded(
+                              !isItemVisible(
                                 'builtin:model-management',
                                 settingsPresentation,
                               )
@@ -19280,7 +19322,7 @@ export function App({
                           },
                         }}
                         onSubDialog={(key, scope) => {
-                          if (isSettingExcluded(key, settingsPresentation)) return;
+                          if (!isSettingVisible(key, settingsPresentation)) return;
                           settingsDialogKeyRef.current = key;
                           // Record the persist scope only for model settings —
                           // the reset effect is gated on the dialog/fallback/auth
@@ -20605,6 +20647,13 @@ export function App({
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
                           visibleToolbarActions={visibleComposerToolbarActions}
+                          // Before the session exists the workspace and git
+                          // chips sit under the composer, next to the prompt
+                          // they describe; once it does, the header owns the
+                          // workspace and the composer keeps only git.
+                          contextChipPlacement={
+                            isChatEmptyState ? 'below' : 'header'
+                          }
                           tokenCount={
                             contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
                           }

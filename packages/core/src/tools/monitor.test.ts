@@ -27,6 +27,10 @@ vi.mock('node:os', async (importOriginal) => {
 
 // Mock child_process.spawn
 const mockSpawn = vi.hoisted(() => vi.fn());
+const mockRuntimeShell = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: mockRuntimeShell,
+}));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
 
@@ -140,6 +144,10 @@ vi.mock('../utils/shellAstParser.js', () => ({
 
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
+import type {
+  ShellExecutionResult,
+  ShellOutputEvent,
+} from '../services/shellExecutionService.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import type { ToolCallConfirmationDetails } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
@@ -201,6 +209,7 @@ describe('MonitorTool', () => {
     delete process.env['GIT_PAGER'];
 
     vi.clearAllMocks();
+    mockRuntimeShell.mockReset();
     mockOsPlatform.mockReturnValue('linux');
 
     monitorRegistry = new MonitorRegistry();
@@ -213,6 +222,7 @@ describe('MonitorTool', () => {
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getShellExecutionSandbox: vi.fn().mockReturnValue(undefined),
       getMonitorRegistry: vi.fn().mockReturnValue(monitorRegistry),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({
@@ -274,6 +284,127 @@ describe('MonitorTool', () => {
         };
       }
     ).createInvocation(params);
+
+  describe('tool execution sandbox', () => {
+    beforeEach(() => {
+      vi.mocked(mockConfig.getShellExecutionSandbox).mockReturnValue(
+        {} as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>,
+      );
+    });
+
+    it('streams stdout and stderr independently and settles the existing registry', async () => {
+      let output!: (event: ShellOutputEvent) => void;
+      let signal!: AbortSignal;
+      let finish!: (result: ShellExecutionResult) => void;
+      const result = new Promise<ShellExecutionResult>((resolve) => {
+        finish = resolve;
+      });
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, onOutput, abortSignal) => {
+          output = onOutput;
+          signal = abortSignal;
+          return { pid: 9876, result };
+        },
+      );
+      const emit = vi.spyOn(monitorRegistry, 'emitEvent');
+      const turn = new AbortController();
+      await createInvocation({ command: 'watch command' }).execute(turn.signal);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockRuntimeShell).toHaveBeenCalledWith(
+        mockConfig,
+        'watch command',
+        '/test/dir',
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        { maxBufferedOutputBytes: 4096 },
+        { streamStdout: true },
+      );
+      const entry = monitorRegistry.getRunning()[0]!;
+      expect(entry.pid).toBe(9876);
+      turn.abort();
+      expect(signal.aborted).toBe(false);
+      output({ type: 'data', chunk: 'out', stream: 'stdout' });
+      output({ type: 'data', chunk: 'err\n', stream: 'stderr' });
+      output({ type: 'data', chunk: 'put\nlast', stream: 'stdout' });
+      finish({ exitCode: 0, signal: null } as ShellExecutionResult);
+      await result;
+      await Promise.resolve();
+      expect(emit.mock.calls.map((call) => call[1])).toEqual([
+        'err',
+        'output',
+        'last',
+      ]);
+      expect(entry.status).toBe('completed');
+    });
+
+    it('fails and stops a sandboxed monitor after binary output', async () => {
+      let output!: (event: ShellOutputEvent) => void;
+      let signal!: AbortSignal;
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, onOutput, abortSignal) => {
+          output = onOutput;
+          signal = abortSignal;
+          return { result: new Promise(() => {}) };
+        },
+      );
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      const entry = monitorRegistry.getRunning()[0]!;
+      output({ type: 'binary_detected' });
+      expect(entry.status).toBe('failed');
+      expect(signal.aborted).toBe(true);
+    });
+
+    it('fails an unconfirmed sandbox completion', async () => {
+      mockRuntimeShell.mockResolvedValue({
+        result: Promise.resolve({
+          error: new Error('Sandbox termination is unconfirmed'),
+          exitCode: 0,
+          signal: null,
+        }),
+      });
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      await Promise.resolve();
+      expect(monitorRegistry.getAll()[0]?.status).toBe('failed');
+    });
+
+    it('stops through the monitor abort controller without replaying on the host', async () => {
+      let signal!: AbortSignal;
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, _output, abortSignal) => {
+          signal = abortSignal;
+          return { result: new Promise(() => {}) };
+        },
+      );
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      monitorRegistry.cancel(monitorRegistry.getRunning()[0]!.monitorId);
+      expect(signal.aborted).toBe(true);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('fails setup without falling back to a host process', async () => {
+      mockRuntimeShell.mockRejectedValue(new Error('sandbox unavailable'));
+      const result = await createInvocation({
+        command: 'watch command',
+      }).execute(new AbortController().signal);
+      expect(result.llmContent).toContain('sandbox unavailable');
+      expect(monitorRegistry.getRunning()).toEqual([]);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('does not run host AST permission probes', async () => {
+      const invocation = createInvocation({ command: 'git status' });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      await invocation.getConfirmationDetails(new AbortController().signal);
+      expect(mockIsShellCommandReadOnlyAST).not.toHaveBeenCalled();
+    });
+  });
 
   describe('schema', () => {
     it('declares monitor limits as integers', () => {

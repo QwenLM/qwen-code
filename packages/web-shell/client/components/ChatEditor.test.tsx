@@ -403,7 +403,14 @@ afterEach(() => {
 interface ChatEditorRenderProps
   extends Pick<
     ComponentProps<typeof ChatEditor>,
-    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+    | 'contextChipPlacement'
+    | 'standaloneTargetSupported'
+    | 'onSelectStandaloneTarget'
+    | 'workspaceSelectionDisabled'
+    | 'selectedWorkspaceCwd'
+    | 'contextUsageAlwaysVisible'
+    | 'contextUsageControls'
+    | 'onOpenContextUsage'
   > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
@@ -1731,6 +1738,181 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       ws!.compareDocumentPosition(git!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+describe('ChatEditor context chip placement', () => {
+  const workspaceProps = {
+    workspaces: [
+      {
+        id: 'primary',
+        cwd: '/work/main',
+        label: 'main',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'api',
+        cwd: '/work/api',
+        label: 'api',
+        primary: false,
+        trusted: true,
+      },
+    ],
+    onSelectWorkspace: vi.fn(),
+  };
+  const bothChips = {
+    ...workspaceProps,
+    gitBranch: 'main',
+    visibleToolbarActions: ['workspace', 'gitBranch'] as const,
+  };
+
+  it('keeps both chips in the toolbar by default', () => {
+    const container = renderChatEditor(bothChips);
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+  });
+
+  it('moves both chips into the row under the composer', () => {
+    const container = renderChatEditor({
+      ...bothChips,
+      contextChipPlacement: 'below',
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    );
+
+    expect(row).not.toBeNull();
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    expect(surface.contains(row)).toBe(false);
+    expect(row!.querySelector('button[aria-label="Workspace"]')).not.toBeNull();
+    expect(
+      row!.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+    // Neither chip stays behind in the toolbar.
+    const toolbar = container.querySelector('[data-web-shell-toolbar-leading]');
+    expect(toolbar!.querySelector('button[aria-label="Workspace"]')).toBeNull();
+    expect(
+      toolbar!.querySelector('[aria-label^="Current Git branch:"]'),
+    ).toBeNull();
+  });
+
+  it('leaves the workspace to the header and keeps git in the toolbar', () => {
+    const container = renderChatEditor({
+      ...bothChips,
+      contextChipPlacement: 'header',
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders the row for git alone when only the git action is visible', () => {
+    const container = renderChatEditor({
+      gitBranch: 'main',
+      visibleToolbarActions: ['gitBranch'],
+      contextChipPlacement: 'below',
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    );
+
+    expect(
+      row?.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+    expect(row?.querySelector('button[aria-label="Workspace"]')).toBeNull();
+  });
+
+  it('does not keep an empty row for standalone support without a callback', () => {
+    const props = {
+      ...workspaceProps,
+      workspaces: workspaceProps.workspaces.slice(0, 1),
+      standaloneTargetSupported: true,
+      visibleToolbarActions: ['workspace', 'gitBranch'] as const,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(props);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+
+    rerenderChatEditor(container, {
+      ...props,
+      onSelectStandaloneTarget: vi.fn(),
+    });
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+
+    rerenderChatEditor(container, props);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+  });
+
+  it('follows controlled visibility without changing the workspace selection', () => {
+    const onSelectWorkspace = vi.fn();
+    const props = {
+      ...bothChips,
+      onSelectWorkspace,
+      selectedWorkspaceCwd: '/work/api',
+      workspaceSelectionDisabled: true,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(props);
+    const workspace = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Workspace"]',
+    );
+    expect(workspace?.textContent).toContain('api');
+    expect(workspace?.disabled).toBe(true);
+
+    for (const visibleToolbarActions of [
+      ['workspace'],
+      ['gitBranch'],
+      [],
+    ] as const) {
+      rerenderChatEditor(container, { ...props, visibleToolbarActions });
+      const row = container.querySelector(
+        '[data-web-shell-composer-context-row]',
+      );
+      expect(Boolean(row)).toBe(visibleToolbarActions.length > 0);
+      expect(
+        Boolean(row?.querySelector('button[aria-label="Workspace"]')),
+      ).toBe(visibleToolbarActions.some((action) => action === 'workspace'));
+      expect(Boolean(row?.querySelector('[data-web-shell-git-branch]'))).toBe(
+        visibleToolbarActions.some((action) => action === 'gitBranch'),
+      );
+    }
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('omits the row when neither chip is available', () => {
+    const container = renderChatEditor({
+      ...workspaceProps,
+      visibleToolbarActions: [],
+      contextChipPlacement: 'below',
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
   });
 });
 
@@ -3311,7 +3493,13 @@ describe('ChatEditor mobile composer actions', () => {
       cancelable: true,
     });
     previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(true);
+    expect(pointerDown.defaultPrevented).toBe(false);
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    previous.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
     composerCoreState.focus.mockClear();
     await clickButton('Previous input');
     await clickButton('Next input');
@@ -3320,6 +3508,46 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.focus).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(backend.textareaRef.current);
+  });
+
+  it('prevents mousedown default on the remaining migrated buttons', async () => {
+    mobileComposer('draft');
+    renderChatEditor({ visibleToolbarActions: [] });
+
+    const actions = document.querySelector(
+      '[data-web-shell-mobile-editing-actions]',
+    )!;
+    const historyButton = actions.querySelector<HTMLButtonElement>(
+      '[aria-label="Input history"]',
+    )!;
+    const shellButton = Array.from(actions.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Shell mode',
+    )!;
+
+    const expectMousedownPrevented = (button: HTMLButtonElement) => {
+      const pointerDown = new Event('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(pointerDown);
+      expect(pointerDown.defaultPrevented).toBe(false);
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(mouseDown);
+      expect(mouseDown.defaultPrevented).toBe(true);
+    };
+
+    expectMousedownPrevented(historyButton);
+    expectMousedownPrevented(shellButton);
+
+    await clickButton('Expand editor');
+    expectMousedownPrevented(
+      document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] [aria-label="Hide keyboard"]',
+      )!,
+    );
   });
 
   it('disables both history buttons when the composer is disabled', () => {
