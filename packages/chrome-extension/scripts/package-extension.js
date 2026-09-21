@@ -25,11 +25,9 @@ const packageRoot = path.resolve(
  */
 async function stageStoreBuild(source, staged) {
   // Checked before the staging directory is removed, because everything below
-  // is destructive: this script is the only one here that does not follow
-  // EXTENSION_OUT_DIR, so a caller that redirects the build leaves `source`
-  // unbuilt. The manifest is what makes a directory a build, so a missing,
-  // empty or non-directory source all fail the same named way rather than
-  // deleting the staged copy on the way to an ENOENT.
+  // is destructive. The manifest is what makes a directory a build, so a
+  // missing, empty or non-directory source all fail the same named way rather
+  // than deleting the staged copy on the way to an ENOENT.
   if (!existsSync(path.join(source, 'manifest.json'))) {
     throw new Error('Nothing to package: ' + source + ' has no manifest.json');
   }
@@ -45,11 +43,19 @@ async function stageStoreBuild(source, staged) {
   return staged;
 }
 
+// Every other script here reads EXTENSION_OUT_DIR — sync-extension, the
+// esbuild config, dev-watch and artifact-scan — so packaging followed it too
+// late, and a redirected build packaged whatever the default path still held.
+const defaultSource = path.resolve(
+  packageRoot,
+  process.env.EXTENSION_OUT_DIR || 'dist/extension',
+);
+
 export async function packageExtension({
-  source = path.join(packageRoot, 'dist/extension'),
+  source = defaultSource,
   archive = path.join(packageRoot, 'chrome-extension.zip'),
   store = false,
-  staged = path.join(packageRoot, 'dist/store-extension'),
+  staged = path.join(path.dirname(defaultSource), 'store-extension'),
 } = {}) {
   if (store) source = await stageStoreBuild(source, staged);
   await rm(archive, { force: true });

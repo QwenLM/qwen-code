@@ -197,6 +197,10 @@ jobs:
           call() {
             local what=$1 body=$2 status
             shift 2
+            # curl leaves --output untouched when a transfer dies before the
+            # first byte, so without this a failing call would print whatever
+            # the previous one left behind — including the token response.
+            rm -f response.json
             status=$(curl --silent --show-error --output response.json \
               --retry 5 --retry-delay 10 --retry-all-errors --retry-max-time 300 \
               --max-time 120 --write-out '%{http_code}' "$@") || {
@@ -215,7 +219,10 @@ jobs:
               else
                 # A refusal here is an OAuth error object, but a 2xx body on
                 # this endpoint carries the token, so never print it verbatim.
-                node -p 'const v=JSON.parse(require("fs").readFileSync("response.json","utf8"));JSON.stringify({error:v.error,error_description:v.error_description})' 2>/dev/null
+                # Anything that is not that object is withheld rather than
+                # leaving the message above ending at its colon.
+                node -p 'const v=JSON.parse(require("fs").readFileSync("response.json","utf8"));if(!v.error)throw 0;JSON.stringify({error:v.error,error_description:v.error_description})' 2>/dev/null ||
+                  echo '(body withheld: this endpoint returns the access token)'
               fi
               return 1
             fi
@@ -262,18 +269,22 @@ jobs:
           ITEM_ID: '${{ secrets.CHROME_WEBSTORE_ITEM_ID }}'
           RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
         run: |-
-          # Without --retry-all-errors, unlike the calls above: this is the one
-          # request that is not safe to repeat blindly. A connection reset can
-          # arrive after the store accepted the submission, and asking it to
-          # publish an item already in review would fail a release that worked.
+          # Not retried at all, unlike the calls above. Every status plain
+          # --retry treats as transient (408, 429, 5xx) is one where the store
+          # may already have taken the submission, so a repeat could fail a
+          # release that worked. A transient failure here leaves the package
+          # uploaded: dispatch again to submit it.
+          rm -f response.json
           status_code=$(curl --silent --show-error --output response.json \
-            --retry 5 --retry-delay 10 --retry-max-time 300 \
             --max-time 120 --write-out '%{http_code}' \
             --request POST \
             --header "Authorization: Bearer ${QWEN_CHROME_TOKEN}" \
             --header 'x-goog-api-version: 2' \
             --header 'Content-Length: 0' \
-            "https://www.googleapis.com/chromewebstore/v1.1/items/${ITEM_ID}/publish")
+            "https://www.googleapis.com/chromewebstore/v1.1/items/${ITEM_ID}/publish") || {
+            echo "::error::Could not reach the Chrome Web Store publish API. The package is uploaded; dispatch again to submit it."
+            exit 1
+          }
           cat response.json
           if [[ "${status_code}" != 2?? ]]; then
             echo "::error::HTTP ${status_code} while publishing ${RELEASE_VERSION}."
