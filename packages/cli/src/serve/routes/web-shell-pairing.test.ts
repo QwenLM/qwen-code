@@ -334,6 +334,58 @@ describe('Web Shell pairing', () => {
     },
   );
 
+  it('auto-selects the only LAN candidate on a wildcard bind', async () => {
+    vi.mocked(listLanCandidates).mockReturnValue([
+      { interfaceName: 'en0', address: '192.168.1.2' },
+    ]);
+    const { app } = setup();
+    const response = await request(app)
+      .post('/web-shell/pairing')
+      .set('Host', '127.0.0.1:4170')
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(response.status).toBe(200);
+    expect(response.body.interfaces).toBeUndefined();
+    expect(new URL(response.body.url).origin).toBe('http://192.168.1.2:4170');
+  });
+
+  it.each(['0', '0.0', '[::0]', '::ffff:0.0.0.0'])(
+    'offers the LAN choice on a wildcard bind spelled %s',
+    async (hostname) => {
+      const interfaces = [
+        { interfaceName: 'en0', address: '192.168.1.2' },
+        { interfaceName: 'en1', address: '10.0.0.2' },
+      ];
+      vi.mocked(listLanCandidates).mockReturnValue(interfaces);
+      const { app } = setup(hostname);
+      const response = await request(app)
+        .post('/web-shell/pairing')
+        .set('Host', '127.0.0.1:4170')
+        .set('Authorization', 'Bearer runtime-secret');
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ active: true, interfaces });
+    },
+  );
+
+  it('substitutes the bound address when a specific bind is reached over loopback', async () => {
+    const { app } = setup('192.168.1.5');
+    const response = await request(app)
+      .post('/web-shell/pairing')
+      .set('Host', '127.0.0.1:4170')
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(response.status).toBe(200);
+    expect(new URL(response.body.url).origin).toBe('http://192.168.1.5:4170');
+  });
+
+  it('evicts only the oldest live invitation at the cap', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const { issue, exchange } = setup();
+    const oldest = await issue();
+    const second = await issue();
+    for (let index = 0; index < 63; index++) await issue();
+    expect((await exchange(codeOf(oldest))).status).toBe(401);
+    expect((await exchange(codeOf(second))).status).toBe(200);
+  });
+
   it('bounds invitations and refuses excess devices without revoking existing credentials', async () => {
     const { credentials, issue, exchange } = setup();
     const first = await issue();

@@ -44,6 +44,9 @@ socket 的 Host 白名单，与 REST 现有的非 loopback 策略一致，仍要
 这适用于主监听上的全部 WebSocket 功能，包括 ACP、终端和语音，runtime 凭证与
 设备凭证均可使用。loopback 与 Local Control 监听保留原有校验。
 终止 TLS 或改写 Host 的代理仍需为浏览器的 origin 配置 `--allow-origin`。
+daemon 从不信任转发头，因此在 TLS 终结代理之后，配对二维码仍保留 socket
+自身的 `http` 协议，且兑换的 origin 绑定会拒绝来自代理的 `https` 页面 ——
+此时请通过 daemon 的直连地址扫码配对，或改用 token 登录。
 
 同源兑换请求仅获得针对 runtime bearer Origin 检查的窄例外，仍由兑换处理器
 验证自身凭证；即使其它 API 请求显式允许某个外部 origin，兑换处理器也会拒绝它。

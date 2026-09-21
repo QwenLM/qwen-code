@@ -4267,6 +4267,31 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
     });
 
+    it('mounts pairing exchange pre-auth and issuance behind the bearer', async () => {
+      const app = createServeApp(
+        { ...nonTrustedEmbedOpts, token: 'runtime-secret' },
+        undefined,
+        { webShellDir },
+      );
+      // The exchange route is registered before `app.use(authenticate)`: an
+      // invalid code gets the pairing-specific 401, not the bearer gate's.
+      const exchange = await request(app)
+        .post('/web-shell/pairing/exchange')
+        .set('Authorization', 'Bearer not-a-real-code');
+      expect(exchange.status).toBe(401);
+      expect(exchange.body.error).toContain('Pairing code expired');
+
+      const denied = await request(app).post('/web-shell/pairing');
+      expect(denied.status).toBe(401);
+      expect(denied.body).toEqual({ error: 'Unauthorized' });
+
+      const issued = await request(app)
+        .post('/web-shell/pairing')
+        .set('Authorization', 'Bearer runtime-secret');
+      expect(issued.status).toBe(200);
+      expect(issued.body.active).toBe(true);
+    });
+
     it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
       // Express non-strict routing matches a raw `//` against `app.get('/')`
       // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.

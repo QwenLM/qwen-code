@@ -36,7 +36,7 @@ export function LocalControlQrButton({
   const { baseUrl, token } = useWorkspace();
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<
-    LocalControlStatus & { expiresAt?: number }
+    LocalControlStatus & { expiresAt?: number; dynamic?: boolean }
   >();
   const [error, setError] = useState('');
   const [address, setAddress] = useState<string>();
@@ -52,6 +52,7 @@ export function LocalControlQrButton({
     const refresh = async () => {
       try {
         let next: LocalControlStatus;
+        let dynamic = false;
         try {
           next = await requestLocalControl(
             baseUrl,
@@ -60,6 +61,7 @@ export function LocalControlQrButton({
             '/web-shell/pairing',
             address ? { address } : undefined,
           );
+          dynamic = next.active;
         } catch (failure) {
           if (
             !(failure instanceof LocalControlRequestError) ||
@@ -69,6 +71,7 @@ export function LocalControlQrButton({
           next = { active: false };
         }
         if (!next.active) {
+          dynamic = false;
           next = await requestLocalControl(
             baseUrl,
             token,
@@ -81,7 +84,7 @@ export function LocalControlQrButton({
           next.expiresInMs === undefined
             ? undefined
             : Date.now() + next.expiresInMs;
-        setStatus({ ...next, expiresAt });
+        setStatus({ ...next, expiresAt, dynamic });
         setNow(Date.now());
         setError('');
         if (expiresAt) {
@@ -89,6 +92,11 @@ export function LocalControlQrButton({
             () => void refresh(),
             Math.max(1000, expiresAt - Date.now() - 15_000),
           );
+        } else if (next.active && !next.url && !next.urlRedacted) {
+          // A wildcard bind can find no LAN candidate for a while (an
+          // interface flapping down/up); poll again rather than sticking on
+          // the empty choice until the popover is reopened.
+          refreshTimer = setTimeout(() => void refresh(), 5000);
         }
       } catch (failure) {
         if (ignore) return;
@@ -171,9 +179,13 @@ export function LocalControlQrButton({
             {status.encrypted !== undefined && (
               <p className="text-xs text-muted-foreground">
                 {t(
-                  status.encrypted
-                    ? 'localControl.securePairing'
-                    : 'localControl.insecurePairing',
+                  status.dynamic
+                    ? status.encrypted
+                      ? 'localControl.securePairingDynamic'
+                      : 'localControl.insecurePairingDynamic'
+                    : status.encrypted
+                      ? 'localControl.securePairing'
+                      : 'localControl.insecurePairing',
                 )}
               </p>
             )}

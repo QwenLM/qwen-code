@@ -55,7 +55,11 @@ case, matching REST's existing non-loopback policy, and still require a valid
 bearer. This applies to all primary WebSocket features, including ACP,
 terminal, and voice, for runtime and device credentials alike. Loopback and
 Local Control listeners keep their existing gates. Proxies that terminate TLS
-or rewrite Host still need `--allow-origin` for the browser's origin.
+or rewrite Host still need `--allow-origin` for the browser's origin. The
+daemon never trusts forwarded headers, so behind a TLS-terminating proxy the
+pairing QR keeps the socket's `http` scheme and the exchange's origin binding
+rejects the proxied `https` page — pair from the daemon's direct address or
+with the token there.
 
 Same-origin exchange requests receive only a narrow exception from the
 runtime-bearer Origin check; the exchange handler verifies its own credential

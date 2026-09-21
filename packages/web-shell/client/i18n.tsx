@@ -3820,9 +3820,13 @@ const EN: Messages = {
   'localControl.noNetwork':
     'No local network address is available. Open the Web Shell through an address your phone can reach.',
   'localControl.securePairing':
-    'Scan to grant access to this daemon. This browser tab stays signed in until the daemon restarts or the tab is closed.',
+    'Scan to grant access until this daemon restarts.',
   'localControl.insecurePairing':
     'Scan to grant access until this daemon restarts. Traffic is unencrypted; use a trusted network.',
+  'localControl.securePairingDynamic':
+    'Scan to grant access to this daemon. This browser tab stays signed in until the daemon restarts or the tab is closed.',
+  'localControl.insecurePairingDynamic':
+    'Scan to grant access to this daemon. This browser tab stays signed in until the daemon restarts or the tab is closed. Traffic is unencrypted; use a trusted network.',
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
@@ -7501,10 +7505,13 @@ const ZH: Messages = {
   'localControl.retry': '重试',
   'localControl.noNetwork':
     '没有可用的局域网地址。请通过手机可访问的地址打开 Web Shell。',
-  'localControl.securePairing':
-    '扫码将授予此 daemon 的访问权限。当前标签页保持登录，直到 daemon 重启或标签页关闭。',
+  'localControl.securePairing': '扫码将授予访问权限，直到 daemon 重启。',
   'localControl.insecurePairing':
     '扫码将授予访问权限，直到 daemon 重启。流量未加密，请使用受信任网络。',
+  'localControl.securePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。当前标签页保持登录，直到 daemon 重启或标签页关闭。',
+  'localControl.insecurePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。当前标签页保持登录，直到 daemon 重启或标签页关闭。流量未加密，请使用受信任网络。',
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',

@@ -10,12 +10,11 @@ import { bearerAuth } from '../auth.js';
 import type { CredentialStore } from '../local-control/credentials.js';
 import { listLanCandidates } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
-import { isLoopbackBind } from '../loopback-binds.js';
+import { isLoopbackBind, isWildcardBind } from '../loopback-binds.js';
 import { ACCESS_LOG_REJECT_LOCAL } from '../server/access-log.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 
 const PAIRING_TTL_MS = 60_000;
-const WILDCARD_HOSTS = ['0.0.0.0', '::', '[::]'];
 
 function digest(secret: string): string {
   return createHash('sha256').update(secret).digest('hex');
@@ -102,11 +101,8 @@ export function registerWebShellPairingRoutes(
       }
       try {
         const url = requestUrl(req);
-        if (
-          isLoopbackBind(url.hostname) ||
-          WILDCARD_HOSTS.includes(url.hostname)
-        ) {
-          if (WILDCARD_HOSTS.includes(hostname)) {
+        if (isLoopbackBind(url.hostname) || isWildcardBind(url.hostname)) {
+          if (isWildcardBind(hostname)) {
             const interfaces = listLanCandidates();
             const address: unknown = req.body?.address;
             const selected =

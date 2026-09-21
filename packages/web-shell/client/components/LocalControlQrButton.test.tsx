@@ -287,6 +287,93 @@ describe('LocalControlQrButton', () => {
     expect(container.textContent).not.toContain('Traffic is unencrypted');
   });
 
+  it('states the per-tab lifetime for an unencrypted dynamic pairing QR', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=one-time',
+        qrText: 'QR-TEXT',
+        expiresInMs: 60_000,
+        encrypted: false,
+      }),
+    );
+    mount();
+    await openPopover();
+
+    expect(container.textContent).toContain(
+      'This browser tab stays signed in until the daemon restarts or the tab is closed.',
+    );
+    expect(container.textContent).toContain('Traffic is unencrypted');
+    expect(container.textContent).not.toContain(
+      'Scan to grant access until this daemon restarts.',
+    );
+  });
+
+  it('keeps the daemon-lifetime wording on an encrypted legacy Local Control QR', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(localControlResponse({ active: false }))
+      .mockResolvedValueOnce(
+        localControlResponse({
+          active: true,
+          url: 'https://192.168.1.2:8080/ws#token=abc',
+          qrText: 'QR-TEXT',
+          encrypted: true,
+        }),
+      );
+    mount();
+    await openPopover();
+
+    expect(container.textContent).toContain(
+      'Scan to grant access until this daemon restarts.',
+    );
+    expect(container.textContent).not.toContain(
+      'This browser tab stays signed in',
+    );
+  });
+
+  it('re-polls while a wildcard bind offers no network address', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({ active: true, interfaces: [] }),
+    );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain('No local network address');
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('No local network address');
+  });
+
+  it('recovers from a failed refresh without a manual retry', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('offline'));
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=recovered',
+        qrText: 'RECOVERED-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain('offline');
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(container.textContent).toContain('RECOVERED-QR');
+    expect(container.textContent).not.toContain('offline');
+  });
+
   it('clears the QR material when the popover closes', async () => {
     vi.mocked(fetch).mockResolvedValue(
       localControlResponse({

@@ -11826,6 +11826,30 @@ describe('ACP WebSocket transport security', () => {
     },
   );
 
+  it.each([
+    ['[fd00::1]:4170', 'http://[fd00::1]:4170', 101],
+    ['[fd00::1]:4170', 'http://fd00::1:4170', 403],
+    ['[fd00::1]:4170', 'http://[fd00::2]:4170', 403],
+    // RFC 7230 §5.4: a browser omits the scheme-default port from Origin;
+    // only the URL-parse normalization matches `Host: qwen.test:80` to it.
+    ['qwen.test:80', 'http://qwen.test', 101],
+    ['qwen.test:4170', 'http://qwen.test', 403],
+  ])(
+    'checks non-loopback primary device access with Host %s and origin %s',
+    async (host, origin, code) => {
+      await startServer({
+        hostname: '0.0.0.0',
+        token: 'runtime-token',
+        webShellToken: 'device-token',
+      });
+      const result = await wsConnectRaw('127.0.0.1', origin, {
+        Host: host,
+        Authorization: 'Bearer device-token',
+      });
+      expect(result.code).toBe(code);
+    },
+  );
+
   it('rejects WS upgrade with cross-origin Origin header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
