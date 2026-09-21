@@ -1491,6 +1491,47 @@ export interface ComposeReviewInput {
   modelId: string;
 }
 
+/**
+ * How much of the diff this run read — a separate question from `event`,
+ * which answers what should happen to the PR.
+ *
+ * - `complete` — every planned chunk was read by an agent that could and did.
+ * - `partial`  — some were, and some were not.
+ * - `failed`   — none were, or coverage could not be computed at all.
+ * - `skipped`  — coverage was never attempted: no plan was given, or the round
+ *   re-ruled standing findings without launching anything.
+ */
+export type TerminalState = 'complete' | 'partial' | 'failed' | 'skipped';
+
+/**
+ * The run's coverage state, from the chunk counts and the run-level failure.
+ *
+ * Reads nothing else — not the finding count, not `cappedBy`, not a
+ * disclosure list. A `REQUEST_CHANGES` run that read every chunk is
+ * `complete`, and an `APPROVE`-shaped run that read half of them is `partial`
+ * whatever else capped it: today a reader who sees `Approve → Comment` cannot
+ * tell whether the diff went unread or an unrelated posture withheld the
+ * approval, and those have different repairs.
+ *
+ * A chunk an agent declared unreachable is not `covered`, so it keeps a run
+ * from `complete`. That is this pipeline's standing position — "a disclosed
+ * gap, not coverage", enforced in the coverage report's own `ok` — and a
+ * state that called such a run `complete` would contradict the report it
+ * ships beside.
+ */
+export function deriveTerminalState(coverage: {
+  /** `coverageFromTranscripts` was called for this run. */
+  attempted: boolean;
+  /** …and threw: an unusable plan, unreadable transcripts. */
+  failed: boolean;
+  planned: number;
+  covered: number;
+}): TerminalState {
+  if (!coverage.attempted) return 'skipped';
+  if (coverage.failed || coverage.covered === 0) return 'failed';
+  return coverage.covered >= coverage.planned ? 'complete' : 'partial';
+}
+
 export interface ComposeReviewResult {
   event: ReviewEvent;
   body: string;
@@ -1498,6 +1539,8 @@ export interface ComposeReviewResult {
   baseEvent: ReviewEvent;
   /** Which cap states applied (empty when none). */
   cappedBy: string[];
+  /** How much of the diff the run read — see `TerminalState`. Never moves `event`. */
+  terminalState: TerminalState;
   /** True when a presubmit flag actually changed the event. */
   downgraded: boolean;
   /**
@@ -5148,6 +5191,10 @@ function composeReviewBody(
   // zero-certified test falls to the `coverage` disclosure instead.
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
+  // Whether coverage was computed at all, for `terminalState`: a run with no
+  // plan never attempted it, which is not the same as attempting and failing.
+  let coverageAttempted = false;
+  let coverageFailed = false;
 
   // The deterministic script-lint gate. `compose-review` is the authority here:
   // it reads the report the orchestrator's `qwen review script-lint` step wrote
@@ -5640,6 +5687,7 @@ function composeReviewBody(
     });
     criticalsUnverified = criticalsNeedingVerify >= 1;
   } else {
+    coverageAttempted = true;
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
@@ -5766,6 +5814,7 @@ function composeReviewBody(
         );
       }
     } catch (err) {
+      coverageFailed = true;
       // Two different failures, and they must not wear each other's message. A
       // malformed plan is the caller's mistake and says so; missing transcripts
       // are an environment fault (a read-only HOME, a sandbox) and say *that*.
@@ -5852,6 +5901,15 @@ function composeReviewBody(
       criticalsUnverified = criticalsNeedingVerify >= 1;
     }
   }
+
+  // Derived here, from the coverage block above and nothing after it: no
+  // finding, cap or disclosure below can move it.
+  const terminalState = deriveTerminalState({
+    attempted: coverageAttempted,
+    failed: coverageFailed,
+    planned: plannedChunks.length,
+    covered: coveredChunks.length,
+  });
 
   // The pipelined loop's invariant, machine-checked. "The last round's
   // verification completes before Step 6" used to be STRUCTURAL — the serial
@@ -7842,6 +7900,7 @@ function composeReviewBody(
       body,
       baseEvent,
       cappedBy,
+      terminalState,
       downgraded,
       downgradedFrom,
       remediation,
@@ -7939,6 +7998,7 @@ function composeReviewBody(
       body,
       baseEvent,
       cappedBy,
+      terminalState,
       downgraded,
       downgradedFrom,
       remediation,
@@ -8282,6 +8342,7 @@ function composeReviewBody(
     body: visibleBody,
     baseEvent,
     cappedBy,
+    terminalState,
     downgraded,
     downgradedFrom,
     remediation,

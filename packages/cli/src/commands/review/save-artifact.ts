@@ -58,6 +58,11 @@ interface PersistedVerdict
     // artifact contains (the `prevPostedInline` precedent).
     | 'draftedIds'
     | 'mintedIds'
+    // Live-only as well: `terminalState` describes the run that composed it,
+    // and nothing reads it back from an artifact. Persisting it would mean
+    // validating it here, and an artifact written before the field existed
+    // must not come back reading as a `complete` run.
+    | 'terminalState'
     // Submit-time gate input, live-only for the same reason: the
     // contradiction gate consumes the reroute entries in the same pass
     // that composed them, and the indices already persist.
