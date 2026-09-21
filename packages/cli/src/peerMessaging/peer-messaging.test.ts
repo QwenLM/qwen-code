@@ -714,22 +714,63 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     });
   });
 
-  it('settles what never reached a session at close, and nothing else', async () => {
-    // The tail of what was handed over is not the tail of what is
-    // unread when several sessions read at their own pace, so a host of
-    // several settles its own; what is still buffered here reached no
-    // session at all and is this transport's to settle.
+  it('settles a message that never reached a session at close', async () => {
+    // It was receipted `delivered` when the gate accepted it, and it got
+    // no further than this buffer: no session ever saw it, so no host can
+    // say it went unread. That correction is this transport's.
     const sender = await startSenderInbox();
-    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
       resolveSessionId: (id) => id,
     });
-    const read = peerFrame({
-      content: 'this one was read',
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    // No submit function ever registered, so it waits here.
+    const stranded = peerFrame({
+      content: 'never handed over',
       from: sender.socketPath,
       fromMode: 'prompting',
       toSessionId: 'session-a',
     });
-    await send(m.socketPath!, read);
+    await send(started.socketPath!, stranded);
+    await settle();
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'delivered',
+      origMsgId: stranded.msgId,
+    });
+
+    await started.close();
+    messaging = null;
+    await settle();
+
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'expired',
+      origMsgId: stranded.msgId,
+    });
+  });
+
+  it('leaves a message a session took for its host to settle', async () => {
+    // The sessions of a host read at their own pace, so the order
+    // messages were handed over in says nothing about which are still
+    // waiting. Guessing here would expire messages that were read.
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: (id) => id,
+    });
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'handed to a session',
+        from: sender.socketPath,
+        fromMode: 'prompting',
+        toSessionId: 'session-a',
+      }),
+    );
     await settle();
     expect(submitted).toHaveLength(1);
 
