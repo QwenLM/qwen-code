@@ -584,6 +584,26 @@ describe('cleanupOldDebugLogs', () => {
     expect(fs.existsSync(other)).toBe(false);
   });
 
+  // 25 > SWEEP_CONCURRENCY (20): a batch-loop stride regression that only
+  // visits the first batch would silently under-delete and still pass every
+  // smaller fixture.
+  it('sweeps stale logs spanning multiple concurrency batches', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const ids = new Set<string>();
+    for (let i = 0; i < 25; i++) {
+      const id = `${i.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+      ids.add(id);
+      mkDebugLog(`${id}.txt`, old);
+    }
+
+    const r = await cleanupOldDebugLogs({
+      cutoffDate: cutoff,
+      isValidSessionId: (sessionId) => ids.has(sessionId),
+    });
+    expect(r).toEqual({ removed: 25, errors: 0 });
+    expect(fs.readdirSync(debugRoot)).toEqual([]);
+  });
+
   it('leaves the latest symlink and the daemon subdir untouched', async () => {
     const old = mkDebugLog(
       `${UUID_A}.txt`,
