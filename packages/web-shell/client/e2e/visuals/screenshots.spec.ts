@@ -38,6 +38,9 @@ const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
+/** Fixed so the subagent prompt ids below can name it before it is built. */
+const TRAJECTORY_SESSION_ID = 'web-shell-trajectory-session';
+
 function trajectoryUpdate(update: Record<string, unknown>): DaemonEvent {
   return {
     v: 1,
@@ -477,10 +480,12 @@ for (const theme of THEMES) {
     });
 
     test('trajectory', async ({ page }, testInfo) => {
-      const scenario = createWebShellDaemonScenario({});
-      scenario.transcriptPage = {
-        events: trajectoryTranscriptEvents(scenario.sessionId),
-      };
+      const scenario = createWebShellDaemonScenario({
+        transcriptPage: {
+          events: trajectoryTranscriptEvents(TRAJECTORY_SESSION_ID),
+        },
+        sessionId: TRAJECTORY_SESSION_ID,
+      });
       const daemon = await installScenario(
         page,
         scenario,

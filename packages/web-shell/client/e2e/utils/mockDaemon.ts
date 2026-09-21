@@ -456,6 +456,7 @@ export function createWebShellDaemonScenario(
     savedWorkflowDetails: overrides.savedWorkflowDetails,
     providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
+    transcriptPage: overrides.transcriptPage,
     workspaceFiles: overrides.workspaceFiles ?? {},
     pathSuggestions: overrides.pathSuggestions,
     gitStatus: overrides.gitStatus,
