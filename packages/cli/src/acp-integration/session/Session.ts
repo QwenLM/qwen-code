@@ -5917,6 +5917,12 @@ export class Session implements SessionContext {
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
+            const inputAnnotationsValue = promptMetadata?.['inputAnnotations'];
+            const inputAnnotations =
+              Array.isArray(inputAnnotationsValue) &&
+              inputAnnotationsValue.length > 0
+                ? structuredClone(inputAnnotationsValue)
+                : undefined;
             const declaredSubmission =
               promptMetadata?.[DAEMON_SUBMITTED_PROMPT_META_KEY];
             const submittedPrompt =
@@ -6076,11 +6082,13 @@ export class Session implements SessionContext {
                 promptText,
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
+                  inputAnnotations ||
                   attachmentReferences ||
                   resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
+                      ...(inputAnnotations ? { inputAnnotations } : {}),
                       ...(attachmentReferences ? { attachmentReferences } : {}),
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
@@ -6169,8 +6177,12 @@ export class Session implements SessionContext {
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined
-                    ? { displayText: promptDisplayText, hookContext: '' }
+                  promptDisplayText !== undefined || inputAnnotations
+                    ? {
+                        displayText: promptDisplayText ?? promptText,
+                        hookContext: '',
+                        ...(inputAnnotations ? { inputAnnotations } : {}),
+                      }
                     : undefined,
                   daemonPromptId,
                 );

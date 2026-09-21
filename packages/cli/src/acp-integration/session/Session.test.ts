@@ -10911,6 +10911,70 @@ describe('Session', () => {
       ]);
     });
 
+    it.each([
+      ['file', '@README.md'],
+      ['mcp', '@mcp:o2'],
+      ['extension', '@ext:browser'],
+    ])('records %s input annotations for replay', async (kind, text) => {
+      const inputAnnotations = [
+        {
+          type: 'reference',
+          start: 0,
+          end: text.length,
+          text,
+          reference: { id: text, kind, value: text.slice(1), serialized: text },
+        },
+      ];
+      const expectedAnnotations = structuredClone(inputAnnotations);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text }],
+          _meta: { inputAnnotations, privateRequestId: 'not-for-history' },
+        },
+        { version: 1, sessionId: 'test-session-id', promptId: 'tag-prompt' },
+        undefined,
+        'model-only prompt',
+      );
+      inputAnnotations[0].reference.value = 'changed after submission';
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        text,
+        undefined,
+        {
+          displayText: text,
+          hookContext: '',
+          inputAnnotations: expectedAnnotations,
+        },
+        'tag-prompt',
+      );
+      expect(textParts(firstSentMessage())).toEqual(['model-only prompt']);
+    });
+
+    it.each([null, 'invalid', {}, []])(
+      'ignores invalid or empty input annotations (%j)',
+      async (inputAnnotations) => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: { inputAnnotations },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'hello',
+          undefined,
+          undefined,
+          undefined,
+        );
+      },
+    );
+
     it.each(['read both', ''])(
       'records original resource links independently of model expansion (%j)',
       async (text) => {
@@ -27307,6 +27371,17 @@ describe('Session', () => {
           {
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: '/advisor check my work' }],
+            _meta: {
+              inputAnnotations: [
+                {
+                  type: 'reference',
+                  start: 15,
+                  end: 22,
+                  text: 'my work',
+                  reference: { id: 'work', kind: 'file', value: 'work' },
+                },
+              ],
+            },
           },
           {
             version: 1,
@@ -27318,7 +27393,19 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/advisor check my work',
           undefined,
-          undefined,
+          {
+            displayText: '/advisor check my work',
+            hookContext: '',
+            inputAnnotations: [
+              {
+                type: 'reference',
+                start: 15,
+                end: 22,
+                text: 'my work',
+                reference: { id: 'work', kind: 'file', value: 'work' },
+              },
+            ],
+          },
           'daemon-advisor',
         );
       });

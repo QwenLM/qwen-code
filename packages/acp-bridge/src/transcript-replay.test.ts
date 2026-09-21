@@ -973,6 +973,66 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it.each([
+    ['file', '@README.md'],
+    ['mcp', '@mcp:o2'],
+    ['extension', '@ext:browser'],
+  ])('restores %s input annotations from saved user records', (kind, text) => {
+    const inputAnnotations = [
+      {
+        type: 'reference',
+        start: 0,
+        end: text.length,
+        text,
+        reference: { id: text, kind, value: text.slice(1), serialized: text },
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-tag', 'user', {
+        daemonPromptId: 'tag-prompt',
+        message: { role: 'user', parts: [{ text: 'expanded model input' }] },
+        systemPayload: { displayText: text, hookContext: '', inputAnnotations },
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text },
+        _meta: expect.objectContaining({
+          inputAnnotations,
+          promptId: 'tag-prompt',
+          qwenTranscript: {
+            sourceRecordIds: ['user-tag'],
+            segmentId: 'user-tag:0',
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it.each([undefined, null, 'invalid', {}])(
+    'ignores missing or non-array saved input annotations (%j)',
+    (inputAnnotations) => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-plain', 'user', {
+          message: { role: 'user', parts: [{ text: '@README.md' }] },
+          systemPayload: {
+            displayText: '@README.md',
+            hookContext: '',
+            inputAnnotations,
+          },
+        }),
+      );
+      expect(projected[0]._meta).not.toHaveProperty('inputAnnotations');
+      expect(projected[0]).toMatchObject({
+        content: { type: 'text', text: '@README.md' },
+      });
+    },
+  );
+
   it('strips only a complete final tag-only context part', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
