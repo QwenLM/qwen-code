@@ -3204,6 +3204,8 @@ const EN: Messages = {
   'workflow.action.retry': 'Retry failed path',
   'workflow.action.rerun': 'Rerun all',
   'workflow.action.unavailable': 'Workflow state changed before the action.',
+  'workflow.action.argsUnavailable':
+    'No restart: its history does not have the args it was launched with.',
   'workflow.action.failed': 'Could not update the workflow.',
   'workflow.history.retry': (v) => `Retried from ${v?.runId ?? ''}`,
   'workflow.history.rerun': (v) => `Rerun from ${v?.runId ?? ''}`,
@@ -6909,6 +6911,7 @@ const ZH: Messages = {
   'workflow.action.retry': '重试失败路径',
   'workflow.action.rerun': '全部重跑',
   'workflow.action.unavailable': '操作前工作流状态已发生变化。',
+  'workflow.action.argsUnavailable': '无法重启：历史里没有它启动时用的参数。',
   'workflow.action.failed': '无法更新工作流状态。',
   'workflow.history.retry': (v) => `从 ${v?.runId ?? ''} 续跑`,
   'workflow.history.rerun': (v) => `从 ${v?.runId ?? ''} 全部重跑`,
