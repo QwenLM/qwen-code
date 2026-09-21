@@ -129,6 +129,20 @@ export function AddWorkspaceDialog({
     setHighlight(-1);
   }, []);
 
+  // Reset the path when the location changes, since each daemon has its own
+  // filesystem. The effect below re-fetches suggestions for the new root.
+  const prevLocationRef = useRef(selectedLocation);
+  useEffect(() => {
+    if (prevLocationRef.current === selectedLocation) return;
+    prevLocationRef.current = selectedLocation;
+    setPath(initialPath || '/');
+    setError(null);
+    setSuggestions([]);
+    setSuggestionsLoaded(false);
+    setSuggestionsError(false);
+    closeList();
+  }, [selectedLocation, initialPath, closeList]);
+
   // Debounced suggestion fetch, keyed off the current path value. A stale
   // response (older sequence number) never overwrites a newer one.
   useEffect(() => {

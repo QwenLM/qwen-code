@@ -1,11 +1,82 @@
 import {
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
+  getDaemonToken,
   navigateToDaemon,
 } from './daemon';
 
 const FLOW_PARAM = 'addRemoteWorkspace';
 const RETURN_URL_KEY = 'qwen-remote-workspace-return';
+
+export interface RemotePathSuggestions {
+  dir: string;
+  sep: string;
+  suggestions: { name: string; path: string }[];
+  truncated: boolean;
+}
+
+/**
+ * Fetches directory suggestions from an arbitrary daemon origin without
+ * navigating the page. Used by the Add-workspace dialog's location switcher
+ * so the user can browse a remote daemon's folders in place.
+ *
+ * Goes through the current daemon's proxy route to avoid CSP issues.
+ */
+export async function fetchRemotePathSuggestions(
+  daemonOrigin: string,
+  prefix: string,
+): Promise<RemotePathSuggestions> {
+  const token = getDaemonToken(daemonOrigin);
+  const query = new URLSearchParams({ daemon: daemonOrigin, prefix });
+  const headers: Record<string, string> = {};
+  if (token) headers['X-Daemon-Token'] = token;
+  const res = await fetch(
+    `/remote-workspace-path-suggestions?${query.toString()}`,
+    { headers },
+  );
+  if (!res.ok) {
+    throw new Error(
+      `Failed to fetch directory suggestions from ${daemonOrigin}: ${res.status}`,
+    );
+  }
+  return (await res.json()) as RemotePathSuggestions;
+}
+
+/**
+ * Registers a workspace on an arbitrary daemon origin without navigating the
+ * page. Used by the Add-workspace dialog when the user browsed a remote
+ * daemon's folders in place and then confirms the add.
+ *
+ * Goes through the current daemon's proxy route to avoid CSP issues.
+ */
+export async function addWorkspaceToDaemon(
+  daemonOrigin: string,
+  cwd: string,
+  persist: boolean,
+  displayName?: string,
+): Promise<void> {
+  const token = getDaemonToken(daemonOrigin);
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token) headers['X-Daemon-Token'] = token;
+  const res = await fetch('/remote-workspaces', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      daemon: daemonOrigin,
+      cwd,
+      ...(persist ? { persist: true } : {}),
+      ...(displayName !== undefined ? { displayName } : {}),
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(
+      `Failed to add workspace on ${daemonOrigin}: ${res.status} ${body}`,
+    );
+  }
+}
 
 export function isRemoteWorkspaceAddActive(): boolean {
   if (typeof window === 'undefined') return false;

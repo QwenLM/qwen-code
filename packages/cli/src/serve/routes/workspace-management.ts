@@ -711,6 +711,138 @@ export function registerWorkspaceManagementRoutes(
     },
   );
 
+  // Proxies directory suggestions from a remote daemon, so the Web Shell can
+  // browse a remote daemon's folders without navigating the page. The target
+  // daemon must be reachable from this daemon's host.
+  app.get(
+    '/remote-workspace-path-suggestions',
+    async (req: Request, res: Response) => {
+      const daemonRaw = req.query['daemon'];
+      const prefixRaw = req.query['prefix'];
+      if (typeof daemonRaw !== 'string' || daemonRaw.trim().length === 0) {
+        res.status(400).json({
+          error: '`daemon` must be a non-empty string',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      if (typeof prefixRaw !== 'string' || prefixRaw.trim().length === 0) {
+        res.status(400).json({
+          error: '`prefix` must be a non-empty string',
+          code: 'invalid_prefix',
+        });
+        return;
+      }
+      let daemonOrigin: string;
+      try {
+        const parsed = new URL(daemonRaw);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('unsupported protocol');
+        }
+        daemonOrigin = parsed.origin;
+      } catch {
+        res.status(400).json({
+          error: '`daemon` must be a valid HTTP(S) origin',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      const token = req.headers['x-daemon-token'];
+      const headers: Record<string, string> = {};
+      if (typeof token === 'string' && token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      try {
+        const query = new URLSearchParams({ prefix: prefixRaw });
+        const upstream = await fetch(
+          `${daemonOrigin}/workspace-path-suggestions?${query.toString()}`,
+          { headers },
+        );
+        if (!upstream.ok) {
+          res.status(upstream.status).json({
+            error: `Remote daemon returned ${upstream.status}`,
+            code: 'remote_error',
+          });
+          return;
+        }
+        const data = await upstream.json();
+        res.status(200).json(data);
+      } catch (error) {
+        res.status(502).json({
+          error: `Failed to reach remote daemon: ${error instanceof Error ? error.message : String(error)}`,
+          code: 'remote_unreachable',
+        });
+      }
+    },
+  );
+
+  // Proxies workspace registration to a remote daemon, so the Web Shell can
+  // register a workspace on a remote daemon without navigating the page first.
+  app.post(
+    '/remote-workspaces',
+    mutate(),
+    async (req: Request, res: Response) => {
+      const body = safeBody(req);
+      const daemonRaw = body['daemon'];
+      const cwd = body['cwd'];
+      if (typeof daemonRaw !== 'string' || daemonRaw.trim().length === 0) {
+        res.status(400).json({
+          error: '`daemon` must be a non-empty string',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+        res.status(400).json({
+          error: '`cwd` must be a non-empty string',
+          code: 'invalid_cwd',
+        });
+        return;
+      }
+      let daemonOrigin: string;
+      try {
+        const parsed = new URL(daemonRaw);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('unsupported protocol');
+        }
+        daemonOrigin = parsed.origin;
+      } catch {
+        res.status(400).json({
+          error: '`daemon` must be a valid HTTP(S) origin',
+          code: 'invalid_daemon',
+        });
+        return;
+      }
+      const token = req.headers['x-daemon-token'];
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (typeof token === 'string' && token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      try {
+        const upstream = await fetch(`${daemonOrigin}/workspaces`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            cwd,
+            ...(body['persist'] === true ? { persist: true } : {}),
+            ...(typeof body['displayName'] === 'string'
+              ? { displayName: body['displayName'] }
+              : {}),
+          }),
+        });
+        const data = await upstream.json();
+        res.status(upstream.status).json(data);
+      } catch (error) {
+        res.status(502).json({
+          error: `Failed to reach remote daemon: ${error instanceof Error ? error.message : String(error)}`,
+          code: 'remote_unreachable',
+        });
+      }
+    },
+  );
+
   app.post(
     '/workspace-directory-picker',
     mutate(),

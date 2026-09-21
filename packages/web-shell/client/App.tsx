@@ -264,9 +264,11 @@ import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
+  addWorkspaceToDaemon,
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
   discardAbandonedRemoteWorkspaceAdd,
+  fetchRemotePathSuggestions,
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
   selectRemoteWorkspaceLocation,
@@ -13248,24 +13250,11 @@ export function App({
       workspaceActions,
     ],
   );
-  const handleAddRemoteWorkspace = useCallback(
-    async (cwd: string, persist: boolean, displayName?: string) => {
-      await handleAddWorkspace(cwd, persist, displayName);
-      workspaceBrowseActiveRef.current = false;
-      completeRemoteWorkspaceAdd();
-    },
-    [handleAddWorkspace],
-  );
-
-  const closeAddWorkspaceDialog = useCallback(() => {
-    setShowAddWorkspaceDialog(false);
-    if (!workspaceBrowseActiveRef.current) return;
-    workspaceBrowseActiveRef.current = false;
-    leaveRemoteWorkspaceAdd();
-  }, []);
-
+  const [workspaceAddLocation, setWorkspaceAddLocation] = useState<
+    string | undefined
+  >(undefined);
   const workspaceAddSelectedLocation =
-    workspace.baseUrl || window.location.origin;
+    workspaceAddLocation || workspace.baseUrl || window.location.origin;
   const workspaceAddLocations = standalone
     ? [
         {
@@ -13282,13 +13271,71 @@ export function App({
     : undefined;
   const hasRemoteWorkspaceLocation = (workspaceAddLocations?.length ?? 0) > 1;
   const changeWorkspaceAddLocation = useCallback((origin: string) => {
-    return selectRemoteWorkspaceLocation(origin, getDaemonToken(origin));
+    setWorkspaceAddLocation(origin);
+    return true;
+  }, []);
+
+  // Suggest paths from the selected location's daemon, not necessarily the
+  // currently connected one. This lets the user browse a remote daemon's
+  // folders without navigating the page.
+  const suggestWorkspacePathsForLocation = useCallback(
+    async (prefix: string) => {
+      const location = workspaceAddSelectedLocation;
+      const currentOrigin = workspace.baseUrl || window.location.origin;
+      if (location === currentOrigin) {
+        return workspaceActions.suggestWorkspacePaths(prefix);
+      }
+      return fetchRemotePathSuggestions(location, prefix);
+    },
+    [workspaceAddSelectedLocation, workspace.baseUrl, workspaceActions],
+  );
+
+  const handleAddRemoteWorkspace = useCallback(
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      const currentOrigin = workspace.baseUrl || window.location.origin;
+      if (
+        workspaceAddSelectedLocation &&
+        workspaceAddSelectedLocation !== currentOrigin
+      ) {
+        // The user browsed a different daemon's folders in place. Register
+        // the workspace there via REST, then navigate to that daemon.
+        await addWorkspaceToDaemon(
+          workspaceAddSelectedLocation,
+          cwd,
+          persist,
+          displayName,
+        );
+        workspaceBrowseActiveRef.current = false;
+        completeRemoteWorkspaceAdd();
+        // Navigate to the target daemon so the user lands on the new
+        // workspace.
+        selectRemoteWorkspaceLocation(
+          workspaceAddSelectedLocation,
+          getDaemonToken(workspaceAddSelectedLocation),
+        );
+        return;
+      }
+      await handleAddWorkspace(cwd, persist, displayName);
+      workspaceBrowseActiveRef.current = false;
+      completeRemoteWorkspaceAdd();
+    },
+    [handleAddWorkspace, workspace.baseUrl, workspaceAddSelectedLocation],
+  );
+
+  const closeAddWorkspaceDialog = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    setWorkspaceAddLocation(undefined);
+    if (!workspaceBrowseActiveRef.current) return;
+    workspaceBrowseActiveRef.current = false;
+    leaveRemoteWorkspaceAdd();
   }, []);
 
   // Which computer the folder step is reading, for loading and error states.
-  const workspaceAddRemoteHost = isPageOriginDaemon(workspace.baseUrl)
+  const workspaceAddRemoteHost = isPageOriginDaemon(
+    workspaceAddSelectedLocation,
+  )
     ? undefined
-    : formatOriginHost(workspace.baseUrl);
+    : formatOriginHost(workspaceAddSelectedLocation);
   const workspaceAddLocationSubtitle = workspaceAddRemoteHost
     ? t('workspaceHost.folderOn', { address: workspaceAddRemoteHost })
     : t('workspaceHost.folderOnThisComputer');
@@ -18614,7 +18661,7 @@ export function App({
                     ? handleAddRemoteWorkspace
                     : handleAddWorkspace
                 }
-                onSuggest={workspaceActions.suggestWorkspacePaths}
+                onSuggest={suggestWorkspacePathsForLocation}
                 onPick={
                   nativeDirectoryPickerSupported &&
                   (!workspace.baseUrl ||
