@@ -232,6 +232,17 @@
   min-width: 0;
 }
 
+.workflowLineDetail {
+  padding: 8px 0 2px;
+}
+
+.workflowFallback {
+  padding: 10px 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .chatSummary {
   width: 100%;
   margin: 0;
@@ -248,14 +259,26 @@
   font: inherit;
 }
 
-.chatSummary:hover,
+.chatSummary[aria-disabled='true'],
+.lineExpandable[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.chatSummary[aria-disabled='true']:focus-visible,
+.lineExpandable[aria-disabled='true']:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.chatSummary:not([aria-disabled='true']):hover,
 .chatSummary:focus-visible,
 .chatSummary[aria-expanded='true'] {
   color: var(--primary);
   outline: none;
 }
 
-.chatSummary:hover .chatSummaryTextActive,
+.chatSummary:not([aria-disabled='true']):hover .chatSummaryTextActive,
 .chatSummary:focus-visible .chatSummaryTextActive,
 .chatSummary[aria-expanded='true'] .chatSummaryTextActive {
   background-image: none;
@@ -275,6 +298,29 @@
 
 .chatSummaryIcon svg {
   display: block;
+}
+
+/* Marks the row's only active work as a detached agent. The tint is not
+   motion, so it stays on under reduced motion — otherwise such a card would
+   remain indistinguishable from a finished one. */
+.chatSummaryIconDetached {
+  color: var(--agent-blue-500);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chatSummaryIconDetached {
+    animation: chat-summary-agent-pulse 2.4s ease-in-out infinite;
+  }
+
+  @keyframes chat-summary-agent-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
 }
 
 .chatSummaryToolIcon {
@@ -353,8 +399,8 @@
   border-radius: 1px;
 }
 
-.chatSummary:hover .chatChevronRight,
-.chatSummary:hover .chatChevronDown,
+.chatSummary:not([aria-disabled='true']):hover .chatChevronRight,
+.chatSummary:not([aria-disabled='true']):hover .chatChevronDown,
 .chatSummary:focus-visible .chatChevronRight,
 .chatSummary:focus-visible .chatChevronDown {
   opacity: 1;
@@ -398,6 +444,12 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Collapsed groups that stay mounted (workflow details keep their live state)
+   collapse the grid row instead of unmounting via `display: none`. */
+.chatSummaryContentCollapsed {
+  grid-template-rows: 0fr;
 }
 
 .chatSummaryContentInner {
@@ -461,14 +513,14 @@
 }
 
 .lineExpandable * {
-  cursor: pointer;
+  cursor: inherit;
 }
 
 .lineExpandable .lineArg {
   flex: 0 1 auto;
 }
 
-.lineExpandable:hover,
+.lineExpandable:not([aria-disabled='true']):hover,
 .lineExpandable:focus-visible {
   color: var(--foreground);
 }
@@ -504,8 +556,8 @@
   transform: rotate(45deg);
 }
 
-.lineExpandable:hover .lineChevronRight,
-.lineExpandable:hover .lineChevronDown,
+.lineExpandable:not([aria-disabled='true']):hover .lineChevronRight,
+.lineExpandable:not([aria-disabled='true']):hover .lineChevronDown,
 .lineExpandable:focus-visible .lineChevronRight,
 .lineExpandable:focus-visible .lineChevronDown {
   opacity: 1;
@@ -599,7 +651,6 @@
   overflow: visible;
 }
 
-.expandedBash,
 .expandedRead {
   overflow: hidden;
 }
@@ -616,6 +667,11 @@
   overflow-x: auto;
   max-height: 400px;
   overflow-y: auto;
+}
+
+:global([data-transcript-render-mode='document']) .expandedOutput {
+  max-height: none;
+  overflow-y: visible;
 }
 
 .expandedEdit {
@@ -645,4 +701,99 @@
 
 .expandedCardBody .todoBody {
   padding: 0;
+}
+
+.shellHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shellStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.shellBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.shellOutput {
+  color: var(--foreground);
+  max-height: 200px;
+}
+
+.shellOutput,
+.shellDetails dl {
+  background: color-mix(in srgb, var(--background) 70%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.shellFailure {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.shellSection {
+  position: relative;
+}
+
+.shellSection > button {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.shellSection summary {
+  min-height: 24px;
+  padding-right: 32px;
+}
+
+.shellSection summary,
+.shellDetails summary {
+  color: color-mix(in srgb, var(--foreground) 75%, var(--muted-foreground));
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.shellSection pre,
+.shellDetails pre,
+.shellDetails dl {
+  margin-top: 8px;
+}
+
+.shellDetails dl {
+  max-height: 200px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin-bottom: 0;
+  font-size: 12px;
+}
+
+.shellDetails dt {
+  color: var(--muted-foreground);
+}
+
+.shellDetails dd {
+  margin: 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+:global([data-transcript-render-mode='document']) .shellDetails dl {
+  max-height: none;
+  overflow: visible;
 }

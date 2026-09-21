@@ -7,6 +7,7 @@
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   recordDaemonBridgeError,
   recordDaemonError,
   SessionIdCaseConflictError,
@@ -14,12 +15,14 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionWriterError,
+  SessionSourceError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
@@ -30,6 +33,7 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
@@ -45,6 +49,7 @@ import {
   SessionLimitExceededError,
   SessionNotArchivedError,
   SessionNotFoundError,
+  SessionResetPendingError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceInitConflictError,
@@ -56,6 +61,7 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { workflowRequestErrorStatus } from '../workflow-errors.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import {
@@ -65,6 +71,14 @@ import {
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
+import {
+  WorktreeMarkerMissingError,
+  WorktreeResetActiveError,
+  WorktreeResetInterruptedError,
+  WorktreeResetInvalidStateError,
+  WorktreeResetUnsupportedError,
+  WorktreeSessionSupersededError,
+} from './worktree-reset-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -259,6 +273,34 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  const sourceErrorKind =
+    err instanceof SessionSourceError
+      ? err.code
+      : (err as { data?: { errorKind?: unknown } } | null)?.data?.errorKind;
+  const sourceErrorStatus =
+    sourceErrorKind === 'invalid_source'
+      ? 400
+      : sourceErrorKind === 'source_limit_reached'
+        ? 409
+        : sourceErrorKind === 'source_persistence_unavailable'
+          ? 503
+          : sourceErrorKind === 'source_attachment_not_found'
+            ? 404
+            : undefined;
+  if (sourceErrorStatus !== undefined) {
+    const sourceError =
+      err instanceof Error ? err : new Error('Source operation failed');
+    if (sourceErrorStatus >= 500) {
+      reportBridgeError(sourceError, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(sourceError, ctx, daemonLog);
+    }
+    res.status(sourceErrorStatus).json({
+      error: err instanceof Error ? err.message : 'Source operation failed',
+      code: sourceErrorKind,
+    });
+    return;
+  }
   if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
     recordExpectedBridgeError(err, ctx, daemonLog);
     if (ctx?.initPrecedesMutations === true) {
@@ -356,8 +398,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof StandaloneSessionServiceError) {
-    const status =
-      err.code === 'invalid_request'
+    const status = err.capacity
+      ? 503
+      : err.code === 'invalid_request'
         ? 400
         : err.code === 'standalone_session_not_found'
           ? 404
@@ -370,12 +413,13 @@ export function sendBridgeError(
             ? 500
             : 409;
     if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
-    if (err.retryable) res.set('Retry-After', '5');
+    if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,
       code: err.code,
       errorKind: err.code,
       retryable: err.retryable,
+      ...(err.capacity ? { capacity: err.capacity } : {}),
       ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
     });
     return;
@@ -387,6 +431,19 @@ export function sendBridgeError(
     res.status(503).json({
       error: err.message,
       code: 'runtime_still_starting',
+    });
+    return;
+  }
+  const capacityError =
+    err instanceof WorkspaceRuntimeInitializationError ? err.cause : err;
+  if (capacityError instanceof AcpChildCapacityExceededError) {
+    recordExpectedBridgeError(capacityError, ctx, daemonLog);
+    res.status(503).json({
+      error: capacityError.message,
+      code: capacityError.code,
+      errorKind: capacityError.code,
+      maxConcurrentChildren: capacityError.maxConcurrentChildren,
+      committedAcpChildren: capacityError.committedAcpChildren,
     });
     return;
   }
@@ -427,6 +484,14 @@ export function sendBridgeError(
     res.status(400).json({
       error: err.message,
       code: 'invalid_transcript_cursor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionTranscriptTurnAnchorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_turn_anchor',
       ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
     });
     return;
@@ -517,6 +582,13 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof McpAuthenticationInProgressError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'mcp_authentication_in_progress',
+    });
+    return;
+  }
   if (err instanceof McpServerNotFoundError) {
     // Stable 404 for "MCP server name not in config".
     res.status(404).json({
@@ -549,6 +621,67 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'cd_while_prompt_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionResetPendingError) {
+    // The prompt barrier the worktree-reset route arms for the superseded
+    // session. 409 + the shared reset code: callers that know the reset flow
+    // (Channel worker) retry the task; non-Channel callers get a bounded
+    // message with no path or transfer internals.
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeSessionSupersededError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_session_superseded',
+      sessionId: err.sessionId,
+      replacementSessionId: err.replacementSessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeMarkerMissingError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_marker_missing',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInterruptedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_interrupted',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInvalidStateError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_invalid_state',
       sessionId: err.sessionId,
     });
     return;
@@ -806,6 +939,14 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      const workflowStatus = workflowRequestErrorStatus(kind);
+      if (workflowStatus !== undefined) {
+        res.status(workflowStatus).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
       if (kind === 'session_busy') {
         res.set('Retry-After', '5');
         res.status(409).json({
@@ -963,6 +1104,13 @@ export function sendBridgeError(
         res.status(400).json({
           error: errorMessage(err),
           code: 'invalid_transcript_limit',
+        });
+        return;
+      }
+      if (kind === 'invalid_turn_anchor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_turn_anchor',
         });
         return;
       }

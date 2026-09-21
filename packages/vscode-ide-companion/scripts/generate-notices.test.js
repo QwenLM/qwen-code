@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,7 +15,61 @@ import {
   findSupplementaryLicenseFiles,
   getFallbackLicenseText,
   normalizeRepositoryUrl,
+  runNoticeGeneration,
 } from './generate-notices.js';
+
+describe('runNoticeGeneration', () => {
+  it('skips generation during dependency-only worktree setup', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Stubbed no-op so a regression that drops the early return rewrites the
+    // tracked NOTICES.txt instead of merely failing this assertion.
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+
+    try {
+      await runNoticeGeneration({
+        npm_lifecycle_event: 'generate:notices',
+        QWEN_SKIP_NOTICE_GENERATION: '1',
+      });
+
+      expect(log).toHaveBeenCalledWith(
+        'Skipping VS Code notice generation during worktree bootstrap.',
+      );
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      write.mockRestore();
+    }
+  });
+
+  it('still generates notices when the skip flag is absent', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Empty dependency graph: main() reaches the write without touching the
+    // real node_modules, and a failing main() cannot process.exit the worker.
+    const read = vi.spyOn(fs, 'readFile').mockImplementation(async (file) => {
+      const name = String(file);
+      if (name.endsWith('package.json')) {
+        return JSON.stringify({ dependencies: {} });
+      }
+      throw Object.assign(new Error(`ENOENT: ${name}`), { code: 'ENOENT' });
+    });
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+
+    try {
+      await runNoticeGeneration({ npm_lifecycle_event: 'generate:notices' });
+
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(String(write.mock.calls[0]?.[1])).toContain(
+        'third-party software notices and license terms',
+      );
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+      read.mockRestore();
+      write.mockRestore();
+    }
+  });
+});
 
 describe('findLicenseFile', () => {
   let packageDir;
@@ -65,24 +119,55 @@ describe('findLicenseFile', () => {
 });
 
 describe('collectDependencies', () => {
-  it('resolves workspace dependencies from the linked package location', () => {
-    const packageLock = {
-      packages: {
-        'packages/companion/node_modules/@qwen-code/core': {
-          link: true,
-          resolved: 'packages/core',
-        },
-        'packages/core': { dependencies: { nested: '1.0.0' } },
-        'packages/core/node_modules/nested': { version: '1.0.0' },
-      },
-    };
+  let root;
+
+  beforeEach(async () => {
+    // realpath: on macOS the temp dir sits behind /var -> /private/var, and
+    // the traversal reports real directories.
+    root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'notices-tree-')),
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function writePackage(dir, manifest) {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'package.json'),
+      JSON.stringify(manifest),
+    );
+  }
+
+  it('follows a workspace link to its dependencies without listing it', async () => {
+    const companion = path.join(root, 'packages', 'companion');
+    const core = path.join(root, 'packages', 'core');
+    await writePackage(companion, { name: 'companion' });
+    await writePackage(core, {
+      name: '@qwen-code/core',
+      version: '0.1.0',
+      dependencies: { nested: '^1.0.0' },
+    });
+    await writePackage(path.join(core, 'node_modules', 'nested'), {
+      name: 'nested',
+      version: '1.0.0',
+    });
+    await fs.mkdir(path.join(root, 'node_modules', '@qwen-code'), {
+      recursive: true,
+    });
+    await fs.symlink(
+      core,
+      path.join(root, 'node_modules', '@qwen-code', 'core'),
+      'junction',
+    );
     const dependencies = new Map();
 
-    collectDependencies(
+    await collectDependencies(
       '@qwen-code/core',
-      packageLock,
+      companion,
       dependencies,
-      'packages/companion',
       new Set(),
     );
 
@@ -90,9 +175,33 @@ describe('collectDependencies', () => {
       {
         name: 'nested',
         version: '1.0.0',
-        resolvedKey: 'packages/core/node_modules/nested',
+        dir: path.join(core, 'node_modules', 'nested'),
       },
     ]);
+  });
+
+  it('resolves each dependency from the nearest node_modules above it', async () => {
+    const companion = path.join(root, 'packages', 'companion');
+    await writePackage(companion, { name: 'companion' });
+    await writePackage(path.join(root, 'node_modules', 'hoisted'), {
+      name: 'hoisted',
+      version: '2.0.0',
+      dependencies: { leaf: '^3.0.0' },
+    });
+    // The nested copy wins over the hoisted one for the package that nests it.
+    await writePackage(
+      path.join(root, 'node_modules', 'hoisted', 'node_modules', 'leaf'),
+      { name: 'leaf', version: '3.1.0' },
+    );
+    await writePackage(path.join(root, 'node_modules', 'leaf'), {
+      name: 'leaf',
+      version: '4.0.0',
+    });
+    const dependencies = new Map();
+
+    await collectDependencies('hoisted', companion, dependencies, new Set());
+
+    expect([...dependencies.keys()]).toEqual(['hoisted@2.0.0', 'leaf@3.1.0']);
   });
 });
 

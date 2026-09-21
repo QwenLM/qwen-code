@@ -13,6 +13,7 @@
 // genuinely UNCHANGED and resumable, never whether a field was forged.
 
 import { describe, it, expect } from 'vitest';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import { assessResume, type ResumeProbes } from './resume.js';
 import { RESUME_MAX } from './run-ledger.js';
 
@@ -69,6 +70,26 @@ describe('assessResume — the empty-string shapes, named by the FIRST break', (
 });
 
 describe('assessResume', () => {
+  it('starts fresh rather than resuming a focused automatic review as high', () => {
+    expect(
+      assessResume({ ...prev(), reviewProfile: DOCS_NAV_PROFILE }, probes()),
+    ).toEqual({
+      ok: false,
+      reason: 'profile-not-resumable',
+    });
+  });
+
+  it('reports a moved head as head-moved even on a focused-profile report', () => {
+    // A focused run starts fresh by design, but a head that MOVED is the
+    // restart case the run-ledger charges — masking it as
+    // profile-not-resumable would bypass the restart accounting.
+    expect(
+      assessResume(
+        { ...prev(), reviewProfile: DOCS_NAV_PROFILE },
+        probes({ liveHeadSha: 'e'.repeat(64) }),
+      ),
+    ).toEqual({ ok: false, reason: 'head-moved' });
+  });
   it('resumes when every probe matches the previous report', () => {
     expect(assessResume(prev(), probes())).toEqual({ ok: true });
   });

@@ -21,10 +21,6 @@ import {
   GoalInvalidTransitionError,
 } from './goal-reducer.js';
 import {
-  capPreviewBytes,
-  GOAL_EVIDENCE_REFERENCE_LIMIT,
-} from './goal-evidence.js';
-import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
@@ -54,31 +50,43 @@ export interface GoalToolConfig {
 
 export interface GetGoalToolParams {
   /**
-   * `summary` (default) keeps the payload small on every read: checkpoint
-   * claims collapse to a count (their previews are already catalog entries),
-   * and entries from earlier turns carry previews capped at
-   * SUMMARY_PREVIEW_BYTE_LIMIT. `full` returns the whole catalog and the
-   * checkpoint verbatim. Entry uuids are identical in both views.
+   * @deprecated `get_goal` no longer returns an evidence catalog, so there is
+   * nothing for a view to select. Accepted and ignored so a model still
+   * following the older contract is not refused.
    */
   view?: 'summary' | 'full';
 }
 
-/**
- * Preview bytes an earlier-turn entry keeps in the summary view. Enough to
- * recognise what a record is ("12 tests passed", "wrote src/x.ts") without
- * re-sending the 240-byte preview on every read of a Goal that has been
- * running for a while -- one call used to cost the whole bounded catalog.
- */
-const SUMMARY_PREVIEW_BYTE_LIMIT = 80;
-
 export interface UpdateGoalToolParams {
   status: 'complete' | 'blocked';
   reason: string;
-  evidenceRefs: string[];
+  /**
+   * @deprecated The verifier judges a proposal from the tail of the Goal's
+   * transcript, not from references the model cites. Accepted and ignored.
+   */
+  evidenceRefs?: string[];
   blockerKind?: GoalBlockerKind;
 }
 
 export type GoalToolResult = ToolResult;
+
+/**
+ * Parameters the Goal tools used to take and no longer advertise. A model
+ * that learnt the older contract, or that sees its own earlier calls in the
+ * conversation, may still send them; they are dropped before the schema is
+ * checked, so the call is served rather than refused for an unknown key.
+ */
+function withoutDeprecatedParams<T extends object>(
+  params: T,
+  names: readonly string[],
+): T {
+  // Anything that is not an object is left for the schema check to describe.
+  if (typeof params !== 'object' || params === null) return params;
+  if (!names.some((name) => name in params)) return params;
+  return Object.fromEntries(
+    Object.entries(params).filter(([key]) => !names.includes(key)),
+  ) as T;
+}
 
 type LastGoalSummary = Pick<
   GoalRecord,
@@ -89,6 +97,8 @@ type LastGoalSummary = Pick<
   | 'activeTimeMs'
   | 'tokensUsed'
   | 'tokenBudget'
+  | 'turnBudget'
+  | 'activeTimeBudgetMs'
   | 'lastReason'
 >;
 
@@ -134,12 +144,7 @@ class GetGoalInvocation extends BaseToolInvocation<
     ) {
       throw staleGoalTurnError();
     }
-    const payload = projectWorkerView(
-      view,
-      snapshot,
-      this.permit,
-      this.params.view ?? 'summary',
-    );
+    const payload = projectWorkerView(view, snapshot);
     return {
       llmContent: JSON.stringify(payload),
       returnDisplay: `Active goal · revision ${view.revision}`,
@@ -157,20 +162,27 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget and lastReason when recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
+      'Read the current Goal during a permitted Goal turn: its objective, status, budget figures, and the verifier\'s feedback on the previous proposal when there is any. Outside a Goal turn it returns "active": false with "lastGoal", a summary of the session\'s most recent Goal. It never changes Goal state. Use the result silently; do not mention the retrieval to the user.',
       Kind.Read,
       {
         type: 'object',
-        properties: {
-          view: {
-            type: 'string',
-            enum: ['summary', 'full'],
-            description: `summary (default): checkpoint claims as a count, full previews only for this turn and checkpoint entries, ${SUMMARY_PREVIEW_BYTE_LIMIT}-byte previews for earlier turns. full: the whole catalog and checkpoint verbatim. Uuids are identical in both.`,
-          },
-        },
+        properties: {},
         additionalProperties: false,
       },
     );
+  }
+
+  // The strip happens in `build`, on the object that then flows through the
+  // schema check and into the invocation: the validator repairs values in
+  // place (a number where a string is expected, say), and a repair made on
+  // a copy would be thrown away. `validateToolParams` strips too, for a
+  // caller that only validates; on a stripped object it is a no-op.
+  override build(params: GetGoalToolParams) {
+    return super.build(withoutDeprecatedParams(params, ['view']));
+  }
+
+  override validateToolParams(params: GetGoalToolParams): string | null {
+    return super.validateToolParams(withoutDeprecatedParams(params, ['view']));
   }
 
   protected createInvocation(
@@ -218,6 +230,10 @@ export class GetGoalTool extends BaseDeclarativeTool<
       ...(goal.tokenBudget === undefined
         ? {}
         : { tokenBudget: goal.tokenBudget }),
+      ...(goal.turnBudget === undefined ? {} : { turnBudget: goal.turnBudget }),
+      ...(goal.activeTimeBudgetMs === undefined
+        ? {}
+        : { activeTimeBudgetMs: goal.activeTimeBudgetMs }),
       ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
     };
   }
@@ -267,66 +283,9 @@ class UpdateGoalInvocation extends BaseToolInvocation<
     ) {
       throw staleGoalTurnError();
     }
-    let autoCitedCurrentDeliveredOutput: string[] = [];
-    const evidenceEntries = view.evidenceCatalog?.entries;
-    if (evidenceEntries) {
-      const normalizedEvidenceRefs = this.params.evidenceRefs.map((reference) =>
-        reference.trim(),
-      );
-      const validEvidenceRefs = new Set(
-        evidenceEntries.map((entry) => entry.uuid),
-      );
-      const invalidEvidenceRefs = normalizedEvidenceRefs.filter(
-        (reference) => !validEvidenceRefs.has(reference),
-      );
-      if (invalidEvidenceRefs.length > 0) {
-        const error =
-          'evidenceRefs must use values from the latest get_goal evidenceCatalog.entries[].uuid; call get_goal and retry. Do not use goalId, turnId, or lineageTurnIds.';
-        return {
-          llmContent: JSON.stringify({
-            proposalRecorded: false,
-            readyForVerification: false,
-            goalLifecycleChanged: false,
-            invalidEvidenceRefs,
-            error,
-          }),
-          returnDisplay:
-            'Goal proposal was not recorded because its evidence is not current. Read the current Goal and retry.',
-        };
-      }
-      const citedEvidenceRefs = new Set(normalizedEvidenceRefs);
-      // The verifier judges a completion against this turn's delivered output,
-      // so it has to be cited. Asking the model to cite it cannot converge:
-      // assistant output is `delivered_output` stamped with this same turn, so
-      // every attempt to comply — reading the catalog, then calling back —
-      // emits text that becomes another uncited entry, and the required set
-      // grows by one per retry. Refusing produced runs that proposed
-      // completion until a human paused them.
-      //
-      // Nothing about the list needs the model's judgment: it is exactly the
-      // entries computed here. Fold them in instead of demanding they be
-      // repeated back. Both sets are drawn from the same catalog and are
-      // disjoint by construction, so the union cannot exceed
-      // GOAL_EVIDENCE_REFERENCE_LIMIT, which is that catalog's own entry cap.
-      autoCitedCurrentDeliveredOutput =
-        this.params.status === 'complete'
-          ? evidenceEntries
-              .filter(
-                (entry) =>
-                  entry.proofKind === 'delivered_output' &&
-                  entry.turnId === permit.turnId &&
-                  !citedEvidenceRefs.has(entry.uuid),
-              )
-              .map((entry) => entry.uuid)
-          : [];
-    }
     const proposal: GoalTerminalProposal = {
       status: this.params.status,
       reason: this.params.reason.trim(),
-      evidenceRefs: [
-        ...this.params.evidenceRefs.map((reference) => reference.trim()),
-        ...autoCitedCurrentDeliveredOutput,
-      ],
       ...(this.params.blockerKind
         ? { blockerKind: this.params.blockerKind }
         : {}),
@@ -342,15 +301,9 @@ class UpdateGoalInvocation extends BaseToolInvocation<
       proposalRecorded: receipt.recorded,
       readyForVerification: receipt.readyForVerification,
       goalLifecycleChanged: false,
-      // Reported so the proposal the verifier sees is not a surprise, and so a
-      // model that wants to cite this turn's output explicitly can see it was
-      // already covered rather than calling back to add it.
-      ...(autoCitedCurrentDeliveredOutput.length > 0
-        ? { autoCitedCurrentDeliveredOutput }
-        : {}),
       nextAction: receipt.readyForVerification
         ? 'End this turn without user-facing text. Do not claim the Goal is complete or blocked. The Goal status card will report the independent verification result.'
-        : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, with current evidence cited on each turn.',
+        : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, each of which must show the blocker in its own tool results.',
     };
     let returnDisplay: string;
     if (!receipt.recorded) {
@@ -387,7 +340,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a cited external_fact (a tool result, not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
+      "Propose that the current Goal is complete or blocked. An independent verifier decides; this tool never changes the Goal's status. The verifier reads only the most recent records of this Goal's transcript (your visible output, tool results, the user's messages), so run the checks that prove every objective condition immediately before calling. If completion depends on content delivered in this turn, emit only what the objective requires first, with no progress or completion commentary. For blocked, set blockerKind: authority (a user or maintainer decision or permission is required), external (an evidenced external resource or capability is unavailable), or infeasible (a tool result, not your own text, shows the objective cannot be satisfied as written: it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; never for difficulty, uncertainty, information you could still obtain, or wanting to ask; the reason must state what was checked and why no in-scope work could satisfy the objective). The verifier may accept those three on the first turn they are proposed; a rejected proposal leaves the Goal running. Omit blockerKind, or set repeated, for the same blocker with the exact same reason text across three consecutive Goal turns, which is only sent to the verifier on the third. Never tell the user the Goal is complete or blocked: when the result reports readyForVerification, end the turn with no further text; otherwise keep working. The Goal status card reports the verdict.",
       Kind.Think,
       {
         type: 'object',
@@ -398,51 +351,34 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             minLength: 1,
             maxLength: GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
           },
-          evidenceRefs: {
-            type: 'array',
-            minItems: 1,
-            uniqueItems: true,
-            maxItems: GOAL_EVIDENCE_REFERENCE_LIMIT,
-            description:
-              'Exact values from the latest get_goal evidenceCatalog.entries[].uuid.',
-            items: {
-              type: 'string',
-              minLength: 1,
-              description:
-                'A transcript record uuid from evidenceCatalog.entries, not a turnId or lineageTurnId.',
-            },
-          },
           blockerKind: {
             type: 'string',
             enum: ['authority', 'external', 'repeated', 'infeasible'],
             description:
-              'authority: a user or maintainer decision or permission is required; external: an evidenced external resource or capability is unavailable; repeated: the same evidenced blocker with the exact same reason text across three consecutive Goal turns; infeasible: a cited external_fact shows the objective cannot be satisfied as written (self-contradictory, names a target that verifiably does not exist, or needs an action no tool can perform) -- not difficulty, uncertainty, or obtainable information. Omission uses the repeated-blocker audit.',
+              'Which blocker a blocked proposal reports; the tool description says when each applies.',
           },
         },
-        required: ['status', 'reason', 'evidenceRefs'],
+        required: ['status', 'reason'],
         additionalProperties: false,
       },
+    );
+  }
+
+  // See GetGoalTool.build for why the strip happens here as well.
+  override build(params: UpdateGoalToolParams) {
+    return super.build(withoutDeprecatedParams(params, ['evidenceRefs']));
+  }
+
+  override validateToolParams(params: UpdateGoalToolParams): string | null {
+    return super.validateToolParams(
+      withoutDeprecatedParams(params, ['evidenceRefs']),
     );
   }
 
   protected override validateToolParamValues(
     params: UpdateGoalToolParams,
   ): string | null {
-    const reasonError = validateGoalProposalReason(params.reason);
-    if (reasonError) return reasonError;
-    if (
-      params.evidenceRefs.length === 0 ||
-      params.evidenceRefs.some((reference) => !reference.trim())
-    ) {
-      return 'evidenceRefs must contain non-empty stable evidence references';
-    }
-    const normalizedReferences = params.evidenceRefs.map((reference) =>
-      reference.trim(),
-    );
-    if (new Set(normalizedReferences).size !== normalizedReferences.length) {
-      return 'evidenceRefs must contain unique stable evidence references';
-    }
-    return null;
+    return validateGoalProposalReason(params.reason);
   }
 
   protected createInvocation(
@@ -520,78 +456,13 @@ function staleGoalTurnError(): Error {
   return new Error(STALE_GOAL_TURN_MESSAGE);
 }
 
-function projectWorkerView(
-  view: GoalWorkerView,
-  snapshot: GoalSnapshotV2,
-  permit: GoalTurnPermit,
-  detail: NonNullable<GetGoalToolParams['view']>,
-) {
-  const full = detail === 'full';
+function projectWorkerView(view: GoalWorkerView, snapshot: GoalSnapshotV2) {
   return {
     active: true,
-    view: detail,
-    snapshot: full ? structuredClone(snapshot) : summarizeSnapshot(snapshot),
-    ...(view.evidenceCatalog
-      ? {
-          evidenceCatalog: full
-            ? structuredClone(view.evidenceCatalog)
-            : summarizeCatalog(view.evidenceCatalog, permit),
-        }
-      : {}),
+    snapshot: structuredClone(snapshot),
     ...(view.verifierFeedback
       ? { verifierFeedback: view.verifierFeedback }
       : {}),
-  };
-}
-
-/**
- * The checkpoint's claims are the largest thing a Goal record carries -- up to
- * 32 claims of up to 2,000 characters -- and every one of them is already in
- * the catalog as a `goal_checkpoint` entry with a preview and the same uuid.
- * The summary keeps the checkpoint's identity and drops the duplicate text.
- */
-function summarizeSnapshot(snapshot: GoalSnapshotV2) {
-  const goal = snapshot.goal;
-  const checkpoint = goal?.evidenceCheckpoint;
-  if (!goal || !checkpoint) return structuredClone(snapshot);
-  // Collapse the claims to their count before cloning, not after: the claims
-  // are the bulk of a checkpoint and none of them survives the summary.
-  const { claims, ...checkpointRest } = checkpoint;
-  return structuredClone({
-    ...snapshot,
-    goal: {
-      ...goal,
-      evidenceCheckpoint: { ...checkpointRest, claimCount: claims.length },
-    },
-  });
-}
-
-function summarizeCatalog(
-  catalog: NonNullable<GoalWorkerView['evidenceCatalog']>,
-  permit: GoalTurnPermit,
-) {
-  let shortenedPreviews = 0;
-  const entries = catalog.entries.map((entry) => {
-    // Checkpoint claims are the compacted proof of everything before the
-    // window, and this turn's entries are the ones a proposal cites next; both
-    // keep their full preview. Earlier turns only need to be recognisable.
-    if (
-      entry.provenance === 'goal_checkpoint' ||
-      entry.turnId === permit.turnId
-    ) {
-      return { ...entry };
-    }
-    const preview = capPreviewBytes(entry.preview, SUMMARY_PREVIEW_BYTE_LIMIT);
-    if (preview !== entry.preview) shortenedPreviews += 1;
-    return { ...entry, preview };
-  });
-  // Clone only what survives the summary; the entries above are rebuilt from
-  // the originals, so cloning them first would allocate and drop the copy.
-  const { entries: _entries, ...catalogRest } = catalog;
-  return {
-    ...structuredClone(catalogRest),
-    entries,
-    ...(shortenedPreviews > 0 ? { shortenedPreviews } : {}),
   };
 }
 
@@ -604,6 +475,12 @@ function summarizeCatalog(
  * well under this.
  */
 export const PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS = 1500;
+
+export const formatProposeGoalRecoveryNotStarted = (objective: string) =>
+  `The approved Goal was not started because the turn did not finish normally. To start it, run:\n/goal set ${objective}`;
+
+export const formatProposeGoalRecoveryFailed = (objective: string) =>
+  `The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ${objective}`;
 
 export interface ProposeGoalToolParams {
   objective: string;
@@ -618,6 +495,9 @@ export interface ProposeGoalToolParams {
  */
 export interface PendingGoalProposal {
   objective: string;
+  reviewedGoal: Pick<GoalRecord, 'goalId' | 'revision'> | null;
+  /** Plan mode revokes approval even after the host takes the proposal. */
+  approvalSignal?: AbortSignal;
   /**
    * The `prompt_id` of the turn whose dialog approved it. Only that turn's
    * terminal boundary may set or discard the Goal; unrelated frames leave it
@@ -638,27 +518,42 @@ type ProposeGoalRuntime = Pick<GoalRuntime, 'getSnapshot' | 'dispatch'>;
 
 export type ApplyPendingGoalProposalResult =
   | { applied: true; goal: GoalRecord }
-  | { applied: false; reason: string };
+  | { applied: false; reason: string; kind: 'changed' | 'unavailable' };
 
 /**
  * Sets an approved proposal as the session Goal. Called by the client once
  * the proposing turn has ended; never from inside a turn.
  *
  * Re-reads the snapshot because `/goal` may have changed the session since
- * the dialog: an active Goal is never replaced (someone is already running
- * it), a stopped one is replaced through its expected version, and no Goal
- * creates.
+ * the dialog: only the reviewed Goal can be replaced, through its expected
+ * version, and a reviewed empty session can only create a new Goal.
  */
 export async function applyPendingGoalProposal(
   runtime: ProposeGoalRuntime,
   proposal: PendingGoalProposal,
 ): Promise<ApplyPendingGoalProposalResult> {
+  if (proposal.approvalSignal?.aborted) {
+    return {
+      applied: false,
+      kind: 'changed',
+      reason:
+        'The approved Goal was not started because its approval was revoked. Ask for a new draft when you are ready to start.',
+    };
+  }
   const objective = proposal.objective.trim();
   const current = runtime.getSnapshot().goal;
   if (current?.status === 'active') {
     return {
       applied: false,
+      kind: 'changed',
       reason: `A Goal became active (revision ${current.revision}) before the approved proposal could be set.`,
+    };
+  }
+  if (!matchesReviewedGoal(current, proposal.reviewedGoal)) {
+    return {
+      applied: false,
+      kind: 'changed',
+      reason: PROPOSE_GOAL_CHANGED_MESSAGE,
     };
   }
   const request: GoalControlRequest = current
@@ -678,6 +573,7 @@ export async function applyPendingGoalProposal(
     if (!goal) {
       return {
         applied: false,
+        kind: 'unavailable',
         reason: 'The Goal runtime accepted the request but reported no Goal.',
       };
     }
@@ -688,10 +584,12 @@ export async function applyPendingGoalProposal(
   } catch (error) {
     if (
       error instanceof GoalConflictError ||
-      error instanceof GoalInvalidTransitionError ||
-      error instanceof GoalPersistenceUnavailableError
+      error instanceof GoalInvalidTransitionError
     ) {
-      return { applied: false, reason: error.message };
+      return { applied: false, kind: 'changed', reason: error.message };
+    }
+    if (error instanceof GoalPersistenceUnavailableError) {
+      return { applied: false, kind: 'unavailable', reason: error.message };
     }
     throw error;
   }
@@ -703,12 +601,37 @@ export const PROPOSE_GOAL_UNTRUSTED_MESSAGE =
   'Goals can only be set in trusted workspaces. Tell the user to trust the folder with /trust and then run /goal set themselves.';
 export const PROPOSE_GOAL_UNAVAILABLE_MESSAGE =
   'This session cannot persist Goals, so no Goal can be set.';
-export const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
+/**
+ * Defensive only: the model never reads this.
+ *
+ * A declined dialog resolves as `ToolConfirmationOutcome.Cancel`, and the
+ * scheduler settles the call as `cancelled` without ever entering
+ * `execute()` -- the model is handed the scheduler's own cancellation
+ * notice instead. The guard below stays for a host that one day runs
+ * `execute()` after a cancelled confirmation, so a decline can never fall
+ * through to parking an approval. It is deliberately not exported: nothing
+ * outside this module should assert on a string the model cannot receive.
+ * What actually keeps the model from re-proposing is the tool description.
+ */
+const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
   'The Goal was not set: the user did not approve it. Do not ask why and do not propose the same or a reworded objective again.';
 export const PROPOSE_GOAL_NO_TURN_MESSAGE =
   'The Goal was not set: this call is not attributable to a turn, so its approval could not be bound to one. Hand the user a `/goal set <objective>` line instead.';
 export const PROPOSE_GOAL_PENDING_MESSAGE =
   'Another approved Goal proposal is already waiting for this turn to end. Do not propose another one.';
+const PROPOSE_GOAL_CHANGED_MESSAGE =
+  'The Goal changed after the proposal was shown. The approved proposal was not applied; review the current Goal before proposing again.';
+
+function matchesReviewedGoal(
+  current: GoalRecord | null,
+  reviewed: PendingGoalProposal['reviewedGoal'] | undefined,
+): boolean {
+  if (reviewed === undefined) return false;
+  return reviewed === null
+    ? current === null
+    : current?.goalId === reviewed.goalId &&
+        current.revision === reviewed.revision;
+}
 
 function activeGoalMessage(revision: number): string {
   return `A Goal is already active (revision ${revision}); this tool does not replace a running Goal. Hand the user a \`/goal edit <objective>\` line to tighten it or a \`/goal set <objective>\` line to replace it, and stop.`;
@@ -726,6 +649,7 @@ class ProposeGoalInvocation extends BaseToolInvocation<
   GoalToolResult
 > {
   private approved = false;
+  private reviewedGoal: PendingGoalProposal['reviewedGoal'] | undefined;
 
   constructor(
     params: ProposeGoalToolParams,
@@ -735,9 +659,7 @@ class ProposeGoalInvocation extends BaseToolInvocation<
   }
 
   /**
-   * The description is the one piece of the confirmation every host shows
-   * (the Web Shell does not forward an `info` prompt), so the objective has
-   * to be in it.
+   * Include the objective for hosts that show only the tool description.
    */
   getDescription(): string {
     return `Propose Goal: ${this.params.objective.trim()}`;
@@ -811,11 +733,15 @@ class ProposeGoalInvocation extends BaseToolInvocation<
       throw new StructuredToolError(blocker.message, blocker.type);
     }
     const current = this.config.getGoalRuntime().getSnapshot().goal;
+    this.reviewedGoal = current
+      ? { goalId: current.goalId, revision: current.revision }
+      : null;
     return {
       type: 'info',
       title: 'Set this as the session Goal?',
       prompt: `${proposalPromptHeadline(current)}\n\n${this.params.objective.trim()}`,
       renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         this.approved = outcome !== ToolConfirmationOutcome.Cancel;
       },
@@ -834,6 +760,15 @@ class ProposeGoalInvocation extends BaseToolInvocation<
 
     const objective = this.params.objective.trim();
     const current = this.config.getGoalRuntime().getSnapshot().goal;
+    if (
+      this.reviewedGoal === undefined ||
+      !matchesReviewedGoal(current, this.reviewedGoal)
+    ) {
+      return this.errorResult(
+        PROPOSE_GOAL_CHANGED_MESSAGE,
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
     // Parked, not dispatched: the client sets it when this turn ends. Doing
     // it here would strip the rest of the turn of its Goal permit. The
     // approval is bound to this turn's prompt id so no other frame can
@@ -845,7 +780,13 @@ class ProposeGoalInvocation extends BaseToolInvocation<
         ToolErrorType.EXECUTION_DENIED,
       );
     }
-    if (!this.config.setPendingGoalProposal({ objective, turnKey })) {
+    if (
+      !this.config.setPendingGoalProposal({
+        objective,
+        turnKey,
+        reviewedGoal: this.reviewedGoal,
+      })
+    ) {
       return this.errorResult(
         PROPOSE_GOAL_PENDING_MESSAGE,
         ToolErrorType.EXECUTION_DENIED,
@@ -887,7 +828,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     super(
       ProposeGoalTool.Name,
       ToolDisplayNames.PROPOSE_GOAL,
-      `Propose a session Goal for the user to approve. The user sees the objective in an approval dialog and decides; only their approval sets the Goal. This tool never sets one on its own, and no permission rule or approval mode skips the dialog. Propose only when the user asked for an outcome with a verifiable end state that spans multiple turns ("make the tests pass", "migrate every call site", or after /goal-draft produced an objective), and never to widen scope: the objective must follow from their request. Write the objective so an independent verifier can judge it from transcript evidence alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked. At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters, on one line. One Goal is active at a time: if a Goal is active this tool refuses and you must hand the user a \`/goal edit …\` or \`/goal set …\` line instead; a stopped Goal (paused, blocked, complete, usage-limited) is replaced on approval. If the user declines you will not be told why: do not ask about it and do not propose the same or a reworded objective again. After approval the Goal is set the moment the current turn ends: acknowledge it in one sentence and stop, without further tool calls; the Goal runtime starts the first Goal turn on its own. Unavailable in plan mode, in subagents, and in headless runs.`,
+      `Propose a session Goal. The user approves or declines it in a dialog that no permission rule or approval mode skips, and only approval sets it. Propose only when the user asked for an outcome with a verifiable end state that spans several turns, or /goal-draft produced an objective; never to widen their request. If a Goal is active this tool refuses: give the user a \`/goal edit …\` or \`/goal set …\` line instead. A stopped Goal is replaced on approval. If the user declines you are not told why: do not ask, and do not propose the same or a reworded objective again. Write the objective on one line, at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters, so the verifier can judge it from the transcript alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked. After approval, acknowledge in one sentence and stop with no further tool calls; the Goal starts on its own when the turn ends. Not available in plan mode.`,
       Kind.Other,
       {
         type: 'object',
@@ -896,7 +837,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
             type: 'string',
             minLength: 1,
             maxLength: PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
-            description: `The objective to propose, written so the Goal verifier can judge it from the transcript (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: stop as blocked after 20 turns. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
+            description: `The objective, on one line, at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
           },
         },
         required: ['objective'],
@@ -913,6 +854,9 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     }
     if (params.objective.length > PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS) {
       return `objective must be at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters.`;
+    }
+    if (/[\r\n]/.test(params.objective)) {
+      return 'objective must be written on one line.';
     }
     return null;
   }

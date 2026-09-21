@@ -99,6 +99,11 @@ export interface BridgeRuntimeEpochSource {
   allocate(): number;
 }
 
+export type BridgeMcpAuthenticationAdmission = (
+  workspaceCwd: string,
+  serverName: string,
+) => (() => void) | undefined;
+
 /**
  * Trusted child-to-daemon request made immediately before a tool executor.
  * `sessionId` and `promptId` are revalidated by BridgeClient against its
@@ -224,6 +229,8 @@ export interface BridgeTelemetry {
  * strictly-required field. See per-field JSDoc for caller contract.
  */
 export interface BridgeOptions {
+  /** Captured owner runtime for saved webpage bytes and references. */
+  artifactSnapshotRuntimeBaseDir?: string;
   /**
    * Runtime-owned directory for persistent session attachment bytes. Daemon
    * callers provide a workspace-scoped directory under the Qwen runtime temp
@@ -256,6 +263,8 @@ export interface BridgeOptions {
   channelFactory?: ChannelFactory;
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
+  /** Daemon-global admission for the process-wide MCP OAuth callback port. */
+  acquireMcpAuthentication?: BridgeMcpAuthenticationAdmission;
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
@@ -698,6 +707,8 @@ export interface CreateSubSessionInfo {
   completion: 'sent' | 'first-turn';
   /** Optional model service id for the sub-session (falls back to default). */
   model?: string;
+  /** Optional named group for a scheduled-task run session. */
+  groupId?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
   /** Optional immutable creator attribution for the fresh session. */

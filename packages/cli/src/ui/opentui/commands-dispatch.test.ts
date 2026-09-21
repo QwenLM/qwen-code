@@ -22,6 +22,7 @@ import {
   type SlashCommand,
   type SlashCommandActionReturn,
 } from '../commands/types.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import type { HistoryItem } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -297,6 +298,31 @@ describe('guards (ink handleSlashCommand parity)', () => {
       sentToModel: false,
     });
   });
+
+  it('hides only the bare /output-style invocation', async () => {
+    const commands = [
+      stub({
+        name: 'output-style',
+        action: (_context, args) =>
+          args
+            ? { type: 'message', messageType: 'info', content: args }
+            : { type: 'dialog', dialog: 'output-style' },
+      }),
+    ];
+
+    const { host: bareHost } = await dispatch('/output-style', commands);
+    expect(bareHost.items.some((item) => item.type === 'user')).toBe(false);
+
+    const { host: namedHost } = await dispatch(
+      '/output-style Concise',
+      commands,
+    );
+    expect(namedHost.items[0]).toMatchObject({
+      type: 'user',
+      text: '/output-style Concise',
+      sentToModel: false,
+    });
+  });
 });
 
 describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () => {
@@ -331,6 +357,7 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
 
   it.each([
     ['effort', ''],
+    ['output-style', ''],
     ['statusline', ''],
     ['model', ''],
     ['model', '--fast'],
@@ -345,6 +372,7 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
     ['model', 'qwen-max'],
     ['model', '--fast qwen3-coder-flash'],
     ['effort', 'high'],
+    ['output-style', 'Concise'],
     ['statusline', 'show'],
   ])('keeps /%s %j (work-performing)', (root, args) => {
     expect(shouldHideSlashCommandInvocation(cmd(root), [root], args)).toBe(
@@ -366,16 +394,38 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
   });
 });
 
-describe('canRunDuringStreaming (ink AppContainer fast path)', () => {
-  it('reports the command opt-in flag', () => {
+describe('mustDeferDuringStreaming (ink AppContainer mid-turn gate)', () => {
+  it('defers the slash submissions a running turn must not race', () => {
     const host = createFakeHost();
     const dispatcher = new OpenTuiSlashDispatcher(host, services, [
       stub({ name: 'help', canRunDuringStreaming: true }),
       stub({ name: 'clear' }),
     ]);
-    expect(dispatcher.canRunDuringStreaming('/help')).toBe(true);
-    expect(dispatcher.canRunDuringStreaming('/clear')).toBe(false);
-    expect(dispatcher.canRunDuringStreaming('not a command')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/help')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/clear')).toBe(true);
+    expect(dispatcher.mustDeferDuringStreaming('/nope')).toBe(true);
+    expect(dispatcher.mustDeferDuringStreaming('not a command')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/some/path/to/file')).toBe(
+      false,
+    );
+    expect(dispatcher.mustDeferDuringStreaming('?btw side question')).toBe(
+      false,
+    );
+  });
+
+  it('never defers quit, so a mid-turn exit stops the responding stream', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      quitCommand,
+      stub({ name: 'clear' }),
+    ]);
+    // The real built-in, reached through its altName as well: the exemption has
+    // to come from the command the parser resolved, not the typed token.
+    expect(dispatcher.mustDeferDuringStreaming('/quit')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('  /exit  ')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/clear')).toBe(true);
+    // What the gate lets through is an exit, not a prompt handed to the model.
+    expect(await dispatcher.handle('/exit')).toMatchObject({ kind: 'quit' });
   });
 });
 
@@ -1299,5 +1349,34 @@ describe('extension refresh subscription (ink processor parity)', () => {
     const itemsAfterDispose = host.items.length;
     extensionRefreshState.markExtensionsChanged();
     expect(host.items.length).toBe(itemsAfterDispose);
+  });
+
+  it('replays a latch set before mount once, not once per dispatcher', () => {
+    const extensionRefreshState = new ExtensionRefreshState();
+    // The watcher latches during startup, before any dispatcher exists.
+    extensionRefreshState.markExtensionsChanged();
+
+    const notice =
+      'Extensions changed on disk. Run /reload-plugins to apply updates.';
+    const count = (host: ReturnType<typeof createFakeHost>) =>
+      host.items.filter((item) => item.text === notice).length;
+
+    // The shell rebuilds the dispatcher whenever its host identity changes,
+    // and the latch survives that rebuild — both must not re-announce it.
+    const first = createFakeHost();
+    new OpenTuiSlashDispatcher(
+      first,
+      { ...services, extensionRefreshState },
+      [],
+    ).dispose();
+    expect(count(first)).toBe(1);
+
+    const second = createFakeHost();
+    new OpenTuiSlashDispatcher(
+      second,
+      { ...services, extensionRefreshState },
+      [],
+    ).dispose();
+    expect(count(second)).toBe(0);
   });
 });

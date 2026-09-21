@@ -8,6 +8,7 @@ import express, { type RequestHandler } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import { registerA2uiActionRoutes } from '../routes/a2ui-action.js';
 import { registerPermissionRoutes } from '../routes/permission.js';
+import { registerSessionCatalogRoutes } from '../routes/session-catalog.js';
 import { registerSessionRoutes } from '../routes/session.js';
 import { registerSseEventsRoutes } from '../routes/sse-events.js';
 import { legacySessionTelemetryRoutes } from './telemetry.js';
@@ -55,6 +56,10 @@ describe('legacy session telemetry route drift guard', () => {
     const pass: RequestHandler = (_req, _res, next) => next();
     const mutate = () => pass;
 
+    registerSessionCatalogRoutes(
+      app,
+      {} as Parameters<typeof registerSessionCatalogRoutes>[1],
+    );
     registerSessionRoutes(app, {
       boundWorkspace: '/workspace/primary',
       bridge: {} as Parameters<typeof registerSessionRoutes>[1]['bridge'],
@@ -98,7 +103,7 @@ describe('legacy session telemetry route drift guard', () => {
       .map(({ method, path }) => `${method} ${path}`)
       .sort();
 
-    expect(registered).toHaveLength(62);
+    expect(registered).toHaveLength(74);
     expect(registered).toEqual(catalog);
   });
 });

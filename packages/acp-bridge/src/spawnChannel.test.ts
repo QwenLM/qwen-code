@@ -32,6 +32,9 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
+import { makeBridge } from './internal/testUtils.js';
+import type { ChannelFactoryStartupContext } from './channel.js';
+import { AcpChildCapacityExceededError } from './bridgeErrors.js';
 import { EventEmitter, getEventListeners } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
@@ -201,6 +204,27 @@ describe('createSpawnChannelFactory env policy', () => {
       'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
     );
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+  });
+
+  it('merges non-scrubbed overrides into the spawned child env', async () => {
+    // Pins the behavior the forwarding attestation claims: the factory's
+    // second argument actually reaches the child. Dropping the overrides
+    // argument from the `scrubChildEnv` call must turn this red. The key must
+    // sit outside SCRUBBED_CHILD_ENV_KEYS — a scrubbed key would assert
+    // absence rather than forwarding.
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+
+    const factory = createSpawnChannelFactory();
+    await factory('/tmp/project', {
+      QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+    });
+
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env?.['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME']).toBe(
+      '1',
+    );
   });
 
   it('marks the spawned ACP child as daemon-spawned for telemetry', async () => {
@@ -463,15 +487,42 @@ describe('createSpawnChannelFactory env policy', () => {
     ).not.toThrow();
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(third),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
 
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
+      budget: 'prepared_response',
     });
     await vi.waitFor(() =>
       expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
     );
     writer.releaseLock();
+  });
+
+  it('attributes outbound operation budget failures', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 1,
+        maxQueuedBytes: 4096,
+      },
+    })('/tmp/project');
+
+    const release = channel.transportGuard?.reserveOutboundOperation([
+      'first',
+      {},
+    ]);
+    expect(() =>
+      channel.transportGuard?.reserveOutboundOperation(['second', {}]),
+    ).toThrow('NDJSON outbound_operation queue limit exceeded');
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+      budget: 'outbound_operation',
+      maxQueuedMessages: 1,
+    });
+    release?.();
   });
 
   it('stops estimating a large response once its byte budget is exceeded', async () => {
@@ -505,7 +556,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     expect(elementReads).toBeLessThan(1_000);
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
@@ -528,7 +579,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });
@@ -631,6 +682,243 @@ describe('createSpawnChannelFactory child-heap observation', () => {
   afterEach(() => {
     process.argv[1] = originalArgv1;
     delete process.env['QWEN_CLI_ENTRY'];
+  });
+
+  it('shares the final slot across factories and releases rejected reservations', async () => {
+    const registry = new ProcessRegistry();
+    const policy = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+      mode: 'admit',
+    });
+    const first = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: policy,
+    });
+    const second = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: policy,
+    });
+    const results = await Promise.allSettled([
+      first('/tmp/a'),
+      second('/tmp/b'),
+    ]);
+    expect(results[0].status).toBe('fulfilled');
+    expect(results[1]).toMatchObject({
+      status: 'rejected',
+      reason: {
+        code: 'acp_child_capacity_exhausted',
+        maxConcurrentChildren: 1,
+        committedAcpChildren: 1,
+      },
+    });
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(registry.committedProcessCount).toBe(1);
+    expect(policy.snapshot().refusals).toBe(1);
+    await expect(second('/tmp/b')).rejects.toBeInstanceOf(
+      AcpChildCapacityExceededError,
+    );
+    expect(registry.committedProcessCount).toBe(1);
+    const child = mockSpawn.mock.results[0].value as ChildProcess;
+    child.emit('exit', 0, null);
+    expect(registry.committedProcessCount).toBe(0);
+    await expect(second('/tmp/b')).resolves.toBeDefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the admitted child arguments identical to legacy spawning', async () => {
+    const policy = createChildHeapPolicy({ budget, mode: 'admit' });
+    await createSpawnChannelFactory({
+      processRegistry: new ProcessRegistry(),
+      childHeapPolicy: policy,
+    })('/tmp/a');
+    const admittedArgs = mockSpawn.mock.calls[0][1];
+    await createSpawnChannelFactory()('/tmp/a');
+    expect(mockSpawn.mock.calls[1][1]).toEqual(admittedArgs);
+  });
+
+  it('cancels the rejected reservation before reclamation and retries only after release', async () => {
+    const registry = new ProcessRegistry();
+    const policy = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+      mode: 'admit',
+    });
+    const occupied = registry.reserve();
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reclaim = vi.fn(async () => {
+      expect(registry.committedProcessCount).toBe(1);
+      await waiting;
+      occupied.cancel();
+    });
+    const factory = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: policy,
+      reclaimIdleChild: reclaim,
+    });
+    const controller = new AbortController();
+    const startup: ChannelFactoryStartupContext = {};
+    const pending = factory('/tmp/new', undefined, controller.signal, startup);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(registry.committedProcessCount).toBe(1);
+    release();
+    await pending;
+    expect(reclaim).toHaveBeenCalledTimes(1);
+    expect(reclaim).toHaveBeenCalledWith(controller.signal);
+    expect(startup.getTimeoutError).toBeUndefined();
+    expect(policy.snapshot().refusals).toBe(1);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(registry.committedProcessCount).toBe(1);
+  });
+
+  it.each(['occupied', 'failed', 'competing', 'aborted'] as const)(
+    'does not cascade reclamation or spawn after %s reclamation',
+    async (outcome) => {
+      const registry = new ProcessRegistry();
+      const policy = createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'admit',
+      });
+      const occupied = registry.reserve();
+      const controller = new AbortController();
+      const reclaim = vi.fn(async () => {
+        expect(registry.committedProcessCount).toBe(1);
+        if (outcome === 'failed') throw new Error('teardown failed');
+        if (outcome === 'competing') {
+          occupied.cancel();
+          registry.reserve();
+        }
+        if (outcome === 'aborted') {
+          occupied.cancel();
+          controller.abort(new Error('cancelled during reclaim'));
+        }
+      });
+      const factory = createSpawnChannelFactory({
+        processRegistry: registry,
+        childHeapPolicy: policy,
+        reclaimIdleChild: reclaim,
+      });
+      const pending = factory('/tmp/new', undefined, controller.signal);
+      if (outcome === 'aborted') {
+        await expect(pending).rejects.toThrow('cancelled during reclaim');
+      } else {
+        await expect(pending).rejects.toBeInstanceOf(
+          AcpChildCapacityExceededError,
+        );
+        await expect(pending).rejects.toMatchObject({
+          code: 'acp_child_capacity_exhausted',
+          maxConcurrentChildren: 1,
+          committedAcpChildren: 1,
+        });
+      }
+      expect(reclaim).toHaveBeenCalledTimes(1);
+      expect(reclaim).toHaveBeenCalledWith(controller.signal);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(registry.committedProcessCount).toBe(
+        outcome === 'aborted' ? 0 : 1,
+      );
+    },
+  );
+
+  it('admits after the registry releases even if teardown reports an unclean exit', async () => {
+    const registry = new ProcessRegistry();
+    const occupied = registry.reserve();
+    const diagnostic = vi.fn();
+    const factory = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'admit',
+      }),
+      reclaimIdleChild: async () => {
+        occupied.cancel();
+        throw new Error('unclean exit after release');
+      },
+      onDiagnosticLine: diagnostic,
+    });
+    await expect(factory('/tmp/new')).resolves.toBeDefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(registry.committedProcessCount).toBe(1);
+    expect(diagnostic).toHaveBeenCalledWith(
+      expect.stringContaining('unclean exit after release'),
+      'warn',
+    );
+  });
+
+  it.each([20, 80])(
+    'preserves capacity errors at the bridge startup deadline (%s ms)',
+    async (initializeTimeoutMs) => {
+      const registry = new ProcessRegistry();
+      const occupied = registry.reserve();
+      let finish!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const factory = createSpawnChannelFactory({
+        processRegistry: registry,
+        childHeapPolicy: createChildHeapPolicy({
+          budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+          mode: 'admit',
+        }),
+        reclaimIdleChild: async () => {
+          await waiting;
+          occupied.cancel();
+        },
+      });
+      let startupSignal: AbortSignal | undefined;
+      let pendingFactory: ReturnType<typeof factory> | undefined;
+      const bridge = makeBridge({
+        initializeTimeoutMs,
+        channelFactory: (...args) => {
+          startupSignal = args[2];
+          pendingFactory = factory(...args);
+          return pendingFactory;
+        },
+      });
+      try {
+        await expect(bridge.preheat()).rejects.toMatchObject({
+          code: 'acp_child_capacity_exhausted',
+          maxConcurrentChildren: 1,
+          committedAcpChildren: 1,
+        });
+        expect(startupSignal?.aborted).toBe(true);
+        expect(startupSignal?.reason).toBeInstanceOf(
+          AcpChildCapacityExceededError,
+        );
+        finish();
+        await expect(pendingFactory).rejects.toBe(startupSignal?.reason);
+        expect(mockSpawn).not.toHaveBeenCalled();
+        expect(registry.committedProcessCount).toBe(0);
+      } finally {
+        finish();
+        await bridge.shutdown();
+      }
+    },
+  );
+
+  it('never reclaims in observe mode', async () => {
+    const registry = new ProcessRegistry();
+    registry.reserve();
+    const reclaim = vi.fn();
+    await createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'observe',
+      }),
+      reclaimIdleChild: reclaim,
+    })('/tmp/new');
+    expect(reclaim).not.toHaveBeenCalled();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires explicit shared registry wiring for admission', () => {
+    const policy = createChildHeapPolicy({ budget, mode: 'admit' });
+    expect(() =>
+      createSpawnChannelFactory({ childHeapPolicy: policy }),
+    ).toThrow('shared process registry');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('leaves argv byte-identical while counting what it would have refused', async () => {

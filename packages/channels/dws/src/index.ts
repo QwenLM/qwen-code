@@ -14,7 +14,9 @@ export type {
   DwsClientLike,
   DwsClientOptions,
   DwsIdentity,
+  DwsImDispatch,
   DwsImMessage,
+  DwsImMessageResult,
   DwsImSource,
   DwsImTarget,
   DwsMessageHistoryPage,
@@ -55,6 +57,19 @@ export const plugin: ChannelPlugin = {
         options: [
           { value: 'pairing', label: 'Pairing' },
           { value: 'allowlist', label: 'Allowlist' },
+          { value: 'open', label: 'Open' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+      {
+        key: 'dmPolicy',
+        label: 'Direct Message Access',
+        kind: 'enum',
+        required: true,
+        default: 'open',
+        description:
+          'Controls whether direct messages and document notifications can start tasks',
+        options: [
           { value: 'open', label: 'Open' },
           { value: 'disabled', label: 'Disabled' },
         ],

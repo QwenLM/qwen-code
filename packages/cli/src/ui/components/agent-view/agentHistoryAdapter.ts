@@ -86,6 +86,7 @@ export function agentMessagesToHistoryItems(
           callId: string;
           name: string;
           description: string;
+          args: Record<string, unknown> | undefined;
           resultDisplay: ToolResultDisplay | string | undefined;
           outputFile: string | undefined;
           renderOutputAsMarkdown: boolean | undefined;
@@ -108,6 +109,10 @@ export function agentMessagesToHistoryItems(
             callId,
             name: (m.metadata?.['toolName'] as string) ?? 'unknown',
             description: (m.metadata?.['description'] as string) ?? '',
+            // Contractually present for role='tool_call' (agent-types.ts).
+            // Carried like the live and resume builders so `ui.showToolCallArgs`
+            // renders the args row in the agent view too.
+            args: m.metadata?.['args'] as Record<string, unknown> | undefined,
             resultDisplay: undefined,
             outputFile: undefined,
             renderOutputAsMarkdown: m.metadata?.['renderOutputAsMarkdown'] as
@@ -137,6 +142,7 @@ export function agentMessagesToHistoryItems(
               callId,
               name: (m.metadata?.['toolName'] as string) ?? 'unknown',
               description: '',
+              args: undefined,
               resultDisplay,
               outputFile,
               renderOutputAsMarkdown: undefined,
@@ -172,6 +178,7 @@ export function agentMessagesToHistoryItems(
           callId: entry.callId,
           name: entry.name,
           description: entry.description,
+          args: entry.args,
           resultDisplay,
           outputFile: entry.outputFile,
           renderOutputAsMarkdown: entry.renderOutputAsMarkdown,

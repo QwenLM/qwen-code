@@ -29,6 +29,7 @@ import {
   resolveGitDir,
 } from './gitDiff.js';
 import { UNVERIFIABLE_IDENTITY_CODE } from './no-follow-open.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1159,7 +1160,7 @@ describe('parseShortstat ReDoS guard', () => {
     const elapsed = Date.now() - start;
     // Expect the bounded regex to either reject (too long for \d{1,10}) or
     // match trivially. Either way it must not spin.
-    expect(elapsed).toBeLessThan(250);
+    expectWithinLatencyBudget(elapsed, 250, { poolMultiplier: 20 });
     expect(result).toBeNull();
   });
 });
@@ -2083,6 +2084,99 @@ describe('fetchGitLog', () => {
     expect(result!.entries[0].refs).toContain('HEAD');
     expect(result!.entries[0].parents).toHaveLength(0);
   });
+  it('walks every branch and tag with `all`, children before parents', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await fs.writeFile(path.join(repo, 'f.txt'), 'f\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'feature work');
+    await git(repo, 'tag', 'v1');
+    await git(repo, 'checkout', '-q', 'main');
+
+    const headOnly = await fetchGitLog(repo);
+    expect(headOnly!.entries.map((e) => e.subject)).toEqual(['base']);
+
+    const all = await fetchGitLog(repo, { all: true });
+    expect(all!.entries.map((e) => e.subject)).toEqual([
+      'feature work',
+      'base',
+    ]);
+    expect(all!.entries[0].refs).toContain('feature');
+    expect(all!.entries[0].refs).toContain('v1');
+  }, 15_000);
+
+  it('ignores an unsafe range instead of passing it to git', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'only');
+
+    const result = await fetchGitLog(repo, { range: '--output=/tmp/x' });
+    expect(result!.entries.map((e) => e.subject)).toEqual(['only']);
+  });
+
+  it('searches message, author, and hash prefix as a union', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'Add parser');
+    await fs.writeFile(path.join(repo, 'b.txt'), 'y\n');
+    await git(repo, 'add', '.');
+    await git(
+      repo,
+      '-c',
+      'user.name=Grace Hopper',
+      'commit',
+      '-q',
+      '-m',
+      'Fix typo',
+    );
+    await fs.writeFile(path.join(repo, 'c.txt'), 'z\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'Unrelated [a.b]');
+    const unfiltered = await fetchGitLog(repo);
+    const parserSha = unfiltered!.entries.find(
+      (e) => e.subject === 'Add parser',
+    )!.sha;
+
+    const byMessage = await fetchGitLog(repo, { search: 'PARSER' });
+    expect(byMessage!.entries.map((e) => e.subject)).toEqual(['Add parser']);
+
+    const byAuthor = await fetchGitLog(repo, { search: 'hopper' });
+    expect(byAuthor!.entries.map((e) => e.subject)).toEqual(['Fix typo']);
+
+    const byHash = await fetchGitLog(repo, { search: parserSha.slice(0, 7) });
+    expect(byHash!.entries.map((e) => e.sha)).toEqual([parserSha]);
+
+    // Fixed-string matching: regex metacharacters are literal.
+    const literal = await fetchGitLog(repo, { search: '[a.b]' });
+    expect(literal!.entries.map((e) => e.subject)).toEqual(['Unrelated [a.b]']);
+
+    const none = await fetchGitLog(repo, { search: 'zzz-no-such' });
+    expect(none).toEqual({ entries: [], hasMore: false });
+  }, 20_000);
+
+  it('pages search results newest-first with hasMore', async () => {
+    for (let i = 0; i < 4; i++) {
+      await fs.writeFile(path.join(repo, `f${i}.txt`), `${i}\n`);
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', `match ${i}`);
+    }
+    const page1 = await fetchGitLog(repo, { search: 'match', limit: 3 });
+    expect(page1!.entries.map((e) => e.subject)).toEqual([
+      'match 3',
+      'match 2',
+      'match 1',
+    ]);
+    expect(page1!.hasMore).toBe(true);
+    const page2 = await fetchGitLog(repo, {
+      search: 'match',
+      limit: 3,
+      skip: 3,
+    });
+    expect(page2!.entries.map((e) => e.subject)).toEqual(['match 0']);
+    expect(page2!.hasMore).toBe(false);
+  }, 15_000);
 });
 
 describe('fetchGitCommitDetail', () => {

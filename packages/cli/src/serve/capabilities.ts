@@ -42,6 +42,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  session_catalog_batch: { since: 'v1' },
   // Aggregate persisted session counts via
   // `GET /workspace/:id/session-info` (and the plural
   // `/workspaces/:workspace/session-info` twin). Performs a disk scan of
@@ -56,6 +57,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
   // `GET /session/:id/mid-turn-messages` returns the messages still waiting
@@ -68,6 +70,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -85,6 +88,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   permission_vote: { since: 'v1' },
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
+  workspace_skills_config_runtime: { since: 'v1' },
   workspace_providers: { since: 'v1' },
   workspace_acp_preheat: { since: 'v1' },
   workspace_acp_status: { since: 'v1' },
@@ -122,10 +126,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  session_agents: { since: 'v1' },
+  session_agent_trace: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
+  session_resources: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
@@ -134,8 +141,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
   standalone_sessions_v1: { since: 'v1' },
+  standalone_session_options_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
+  session_turn_navigation: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -203,7 +212,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_skill_settings_toggle: { since: 'v1' },
   workspace_skill_settings_batch_toggle: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
+  // Extension activation commits do not refresh active sessions. Clients that
+  // need immediate runtime application must submit the independent refresh
+  // operation after the activation operation commits.
+  extension_activation_explicit_refresh: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // `GET /brand` — the Web Shell's product name and logo, resolved from the
+  // operator settings scopes. Unconditional because the route is registered
+  // unconditionally. Advertised so a host can preflight rather than issue the
+  // request and swallow a 404 from a daemon too old to have it.
+  web_shell_brand: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -306,7 +324,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // can pre-flight whether the daemon will honor their cross-origin
   // request before issuing it (and parsing a 403). The configured
   // pattern list is intentionally NOT echoed in the capabilities
-  // envelope — browser webui knows its own origin, and surfacing the
+  // envelope — a browser client knows its own origin, and surfacing the
   // list would let an unauthenticated `/capabilities` reader
   // enumerate every trusted origin, which is useful recon for a
   // misconfigured deployment.
@@ -380,6 +398,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   native_directory_picker: { since: 'v1' },
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
+  workspace_runtime_stop: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -441,6 +460,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace-qualified metadata updates for active, inactive, and archived
   // persisted sessions.
   workspace_session_metadata: { since: 'v1' },
+  // Worktree-backed session create/load responses are durably persisted and
+  // carry per-response `persisted-v1` attestation.
+  session_worktree_persistence_v1: { since: 'v1' },
+  // Worktree ownership transfer: `POST /session/:id/worktree-reset` moves a
+  // session's checkout ownership to a fresh replacement session, and the
+  // restore surface reports the superseded / interrupted / missing-marker
+  // classifications as typed 409s.
+  session_worktree_reset_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -484,6 +511,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  // The Web Shell page may itself be the Live Voice audio endpoint over WS
+  // `/live/web`, on any platform. Separate from `realtime_voice` so clients
+  // that only know the native Host never offer its macOS install flow here.
+  realtime_voice_web: { since: 'v1' },
   web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
@@ -540,6 +571,7 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  workspaceRuntimeStopAvailable?: boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   /**
@@ -548,6 +580,7 @@ export interface AdvertiseFeatureToggles {
    */
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
+  realtimeVoiceWebEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   standaloneSessionsAvailable?: boolean;
 }
@@ -593,6 +626,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
   ],
+  [
+    'standalone_session_options_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
   [
@@ -625,6 +662,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'session_artifacts_persistence',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'session_sources',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
@@ -686,7 +727,15 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
   ],
   [
+    'workspace_runtime_stop',
+    (toggles) => toggles.workspaceRuntimeStopAvailable === true,
+  ],
+  [
     'workspace_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'workspace_skills_config_runtime',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [
@@ -740,6 +789,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'realtime_voice',
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
+  ],
+  [
+    'realtime_voice_web',
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.realtimeVoiceWebEnabled === true,
   ],
   ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);

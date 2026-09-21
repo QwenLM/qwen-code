@@ -18,6 +18,13 @@ import {
   worktreeBranchForSlug,
   writeWorktreeSessionMarker,
 } from '../services/gitWorktreeService.js';
+import {
+  readWorktreeSession,
+  writeWorktreeSession,
+} from '../services/worktreeSessionService.js';
+import { SessionService } from '../services/sessionService.js';
+import { Storage } from '../config/storage.js';
+import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 
 function makeMockConfig(targetDir = process.cwd()): Config {
   // Default to cwd because `GitWorktreeService` constructs `simpleGit`
@@ -320,6 +327,141 @@ describe('ExitWorktreeTool', () => {
         'utf8',
       );
       expect(re.trim()).toBe('rewritten-id');
+    });
+  });
+
+  // ── execute() integration: superseded sidecar after a worktree reset ──
+  // The reset transfer retains the superseded session's sidecar (same
+  // slug, same worktreePath) and only adds `supersededBy`, so the
+  // stale-marker hatch must not read that sidecar as proof the current
+  // session owns the checkout.
+  describe('execute() — superseded sidecar', () => {
+    let repoRoot: string;
+
+    beforeEach(async () => {
+      const raw = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-exit-sup-'));
+      repoRoot = await fs.realpath(raw);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+      execFileSync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repoRoot,
+      });
+      execFileSync('git', ['config', 'user.name', 't'], { cwd: repoRoot });
+      execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repoRoot,
+      });
+      await fs.writeFile(path.join(repoRoot, 'README.md'), 'hi\n');
+      execFileSync('git', ['add', '.'], { cwd: repoRoot });
+      execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+        cwd: repoRoot,
+      });
+      Storage.setRuntimeBaseDir(path.join(repoRoot, '.runtime'));
+    });
+
+    afterEach(async () => {
+      Storage.setRuntimeBaseDir(null);
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    });
+
+    /**
+     * A committed transfer: the marker names the replacement, the
+     * replacement's runtime is dead (so `ownerActive` is false and the
+     * stale-marker hatch is reachable), and the superseded session's
+     * sidecar still names the slug and path.
+     */
+    async function provisionTransferredWorktree(
+      slug: string,
+      supersededBy?: string,
+    ): Promise<{ worktreePath: string; sidecarPath: string }> {
+      const service = new GitWorktreeService(repoRoot);
+      expect((await service.createUserWorktree(slug)).success).toBe(true);
+      const worktreePath = service.getUserWorktreePath(slug);
+      await writeWorktreeSessionMarker(worktreePath, 'session-new');
+      await writeRuntimeStatus(
+        new Storage(worktreePath).getRuntimeStatusPath('session-new'),
+        {
+          sessionId: 'session-new',
+          workDir: worktreePath,
+          pid: 2147483647,
+        },
+      );
+      const sessionService = new SessionService(worktreePath);
+      const sidecarPath = sessionService.getWorktreeSessionPath('session-old');
+      const originalHeadCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim();
+      await writeWorktreeSession(sidecarPath, {
+        slug,
+        worktreePath,
+        worktreeBranch: worktreeBranchForSlug(slug),
+        originalCwd: repoRoot,
+        originalBranch: 'main',
+        originalHeadCommit,
+        ...(supersededBy === undefined ? {} : { supersededBy }),
+      });
+      return { worktreePath, sidecarPath };
+    }
+
+    function supersededConfig(worktreePath: string): Config {
+      return {
+        getTargetDir: () => worktreePath,
+        getSessionId: () => 'session-old',
+        getSessionService: () => new SessionService(worktreePath),
+      } as unknown as Config;
+    }
+
+    it('refuses remove when the current sidecar is superseded by the marker owner', async () => {
+      const { worktreePath, sidecarPath } = await provisionTransferredWorktree(
+        'transferred',
+        'session-new',
+      );
+
+      const result = await new ExitWorktreeTool(supersededConfig(worktreePath))
+        .build({
+          name: 'transferred',
+          action: 'remove',
+          discard_changes: true,
+        })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.message ?? 'removal was allowed to proceed').toMatch(
+        /different session.*owner=session-new/i,
+      );
+      // The replacement's checkout, branch, marker and the redirect link the
+      // restore route depends on must all survive.
+      await expect(fs.access(worktreePath)).resolves.toBeUndefined();
+      expect(
+        execFileSync('git', ['branch', '--list'], {
+          cwd: repoRoot,
+          encoding: 'utf8',
+        }),
+      ).toContain(worktreeBranchForSlug('transferred'));
+      await expect(
+        fs.readFile(path.join(worktreePath, WORKTREE_SESSION_FILE), 'utf8'),
+      ).resolves.toBe('session-new');
+      expect(await readWorktreeSession(sidecarPath)).toMatchObject({
+        supersededBy: 'session-new',
+      });
+    });
+
+    it('still recovers a stale marker when the sidecar carries no supersede link', async () => {
+      // Fix constraint: the new term is a conjunction on
+      // `currentSessionOwnsPath`, not a replacement of the `ownerActive`
+      // check — legitimate stale-marker recovery must keep firing.
+      const { worktreePath, sidecarPath } =
+        await provisionTransferredWorktree('stale-owned');
+
+      const result = await new ExitWorktreeTool(supersededConfig(worktreePath))
+        .build({
+          name: 'stale-owned',
+          action: 'remove',
+          discard_changes: true,
+        })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      await expect(fs.access(worktreePath)).rejects.toBeDefined();
+      expect(await readWorktreeSession(sidecarPath)).toBeNull();
     });
   });
 });

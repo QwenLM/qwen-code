@@ -312,12 +312,9 @@ Guidelines:
       // Deliberately absent, each a real narrowing rather than a free saving —
       // `getFunctionDeclarationsFiltered` drops unknown names silently, and
       // naming a deferred tool here would declare it, so nothing is zero-cost:
-      //   TOOL_SEARCH (357 tokens/turn) — would let an agent widen the list
-      //     at runtime, which is the opposite of what a closed list is for,
-      //     and it costs more than two of the tools actually kept. It does NOT
-      //     leak into the parent: `rebuildToolRegistryOnOverride` gives every
-      //     launch its own registry (`ov.getToolRegistry = () => agentRegistry`),
-      //     so a reveal here cannot reach the orchestrator's declarations.
+      //   TOOL_SEARCH + TOOL_CALL — together they would let an agent inspect
+      //     hidden deferred-tool schemas, but invocation still honors this
+      //     allowlist. Neither bridge is needed by review parts.
       //   AGENT — `prepareTools` special-cases it and would have granted it
       //     (nesting is allowed to depth 5), so this DOES remove a capability
       //     the inherited surface had. Review parts are leaf workers: the
@@ -382,6 +379,24 @@ Notes:
 - Your working directory is set for you and is reset between shell calls. Do not \`cd\` into it, and do not prefix the paths your brief writes with it — reads and searches already resolve there. If your brief sends you to a tree of your own, that is where \`cd\` belongs.
 - You run non-interactively: never ask a question, and never wait for input.
 - Report in the format your assignment specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
+    },
+    {
+      name: 'claude-code',
+      description:
+        'Delegate to Claude Code through the installed claude-agent-acp adapter, using its own authentication and model settings. Foreground by default.',
+      systemPrompt:
+        'Complete the delegated task and report the verified result.',
+      background: false,
+      executor: { kind: 'acp', command: 'claude-agent-acp' },
+    },
+    {
+      name: 'codex',
+      description:
+        'Delegate one self-contained task to the installed Codex CLI using its own authentication and model settings. Foreground by default; optional background execution, no messages or resume.',
+      systemPrompt:
+        'Complete the delegated task and report the verified result.',
+      background: false,
+      executor: { kind: 'codex', command: 'codex' },
     },
   ];
 

@@ -123,6 +123,71 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('reduceDaemonEventToTuiUpdates', () => {
+  it('renders structured shell results as sanitized display text', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'shell-1',
+          status: 'completed',
+          rawOutput: {
+            type: 'shell_result',
+            version: 1,
+            text: '\x1b[32mHealth check complete\x1b[0m',
+            output: 'raw stdout must not replace display text',
+            directory: '/workspace',
+            exitCode: 0,
+            signal: null,
+            pid: 42,
+            error: null,
+            outcome: 'completed',
+            notices: [],
+            truncated: false,
+            outputFiles: [],
+          },
+        },
+      },
+    });
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: { tools: [{ resultDisplay: 'Health check complete' }] },
+      },
+    ]);
+  });
+
+  it('renders structured question answers as sanitized display text', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'ask-1',
+          status: 'completed',
+          rawOutput: {
+            type: 'ask_user_question_answers',
+            text: '\x1b[31mSelected Staging\x1b[0m',
+            answers: [{ question: 'Deploy where?', answer: 'Staging' }],
+          },
+        },
+      },
+    });
+
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: { tools: [{ resultDisplay: 'Selected Staging' }] },
+      },
+    ]);
+  });
+
   it('preserves a sanitized vision bridge notice as structured output', () => {
     const updates = reduceDaemonEventToTuiUpdates({
       id: 1,
@@ -1255,4 +1320,57 @@ describe('DaemonTuiAdapter', () => {
     modelEvents.close();
     voteEvents.close();
   });
+});
+
+it('stopped session disconnects TUI with persistence warning', () => {
+  const updates = reduceDaemonEventToTuiUpdates({
+    id: 1,
+    v: 1,
+    type: 'session_closed',
+    data: {
+      sessionId: 'session',
+      reason: 'client_close',
+      cause: 'workspace_runtime_stop',
+      persistenceUnconfirmed: true,
+      exitCode: null,
+      signalCode: 'SIGKILL',
+    },
+  });
+  expect(updates.some((update) => update.type === 'disconnected')).toBe(true);
+  expect(JSON.stringify(updates)).toMatch(/persist|sav|record/i);
+});
+
+it('graceful stop disconnects TUI with friendly copy, not the wire cause token', () => {
+  const updates = reduceDaemonEventToTuiUpdates({
+    id: 1,
+    v: 1,
+    type: 'session_closed',
+    data: {
+      sessionId: 'session',
+      reason: 'client_close',
+      cause: 'workspace_runtime_stop',
+      exitCode: null,
+      signalCode: null,
+    },
+  });
+  expect(updates.some((update) => update.type === 'disconnected')).toBe(true);
+  expect(JSON.stringify(updates)).toContain('Workspace runtime stopped.');
+  expect(JSON.stringify(updates)).not.toContain('workspace_runtime_stop');
+});
+
+it('ordinary close renders generic copy, not the wire reason token', () => {
+  const updates = reduceDaemonEventToTuiUpdates({
+    id: 1,
+    v: 1,
+    type: 'session_closed',
+    data: {
+      sessionId: 'session',
+      reason: 'client_close',
+      exitCode: null,
+      signalCode: null,
+    },
+  });
+  expect(updates.some((update) => update.type === 'disconnected')).toBe(true);
+  expect(JSON.stringify(updates)).toContain('Session closed');
+  expect(JSON.stringify(updates)).not.toContain('client_close');
 });

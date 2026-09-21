@@ -10,6 +10,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './cleanup';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('cleanup', () => {
   beforeEach(() => {
@@ -49,6 +50,41 @@ describe('cleanup', () => {
 
     expect(syncFn).toHaveBeenCalledTimes(1);
     expect(asyncFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs priority resource cleanup before earlier ordinary registrations', async () => {
+    const order: string[] = [];
+    registerCleanup(() => {
+      order.push('ordinary');
+    });
+    registerCleanup(
+      () => {
+        order.push('container');
+      },
+      { first: true },
+    );
+    await runExitCleanup();
+    expect(order).toEqual(['container', 'ordinary']);
+  });
+
+  it('shares an in-flight cleanup pass between concurrent callers', async () => {
+    let finishCleanup: (() => void) | undefined;
+    const cleanupFn = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        }),
+    );
+    registerCleanup(cleanupFn);
+
+    const first = runExitCleanup();
+    await vi.waitFor(() => expect(cleanupFn).toHaveBeenCalledOnce());
+    const second = runExitCleanup();
+
+    expect(second).toBe(first);
+    finishCleanup?.();
+    await Promise.all([first, second]);
+    expect(cleanupFn).toHaveBeenCalledOnce();
   });
 
   it('should let a caller unregister a cleanup', async () => {
@@ -97,14 +133,17 @@ describe('cleanup', () => {
 
       expect(hangFn).toHaveBeenCalledTimes(1);
       expect(nextFn).toHaveBeenCalledTimes(1);
-      expect(elapsed).toBeLessThan(500);
+      expectWithinLatencyBudget(elapsed, 500);
     });
 
     it('caps overall wall-clock time when many cleanups all hang', async () => {
       // 100 × 50ms perFn ≈ 5000ms drain — structurally impossible for "drain
       // finished naturally" to satisfy < 800ms, so the upper bound proves
       // wallClock actually fired. Lower bound proves we waited for it and
-      // didn't short-circuit. 800ms slack absorbs CI scheduler jitter.
+      // didn't short-circuit. 800ms slack absorbs CI scheduler jitter. On
+      // the pool the bound keeps asserting with x5 slack: 4000ms still sits
+      // under the ~5000ms no-cap drain but above a ~100ms firing under the
+      // fleet's ~5x contention (a larger multiple would clear the drain).
       for (let i = 0; i < 100; i++) {
         registerCleanup(() => new Promise<void>(() => {}));
       }
@@ -116,7 +155,7 @@ describe('cleanup', () => {
       });
       const elapsed = Date.now() - start;
 
-      expect(elapsed).toBeLessThan(800);
+      expectWithinLatencyBudget(elapsed, 800, { poolMultiplier: 5 });
       expect(elapsed).toBeGreaterThanOrEqual(80);
     });
 

@@ -10,14 +10,25 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  getLastPeerInboxFailure,
   type InboundPolicy,
+  parseHeldExpiry,
+  type PeerInboxStartFailure,
   isDebugLogFileEnabled,
   registerSession,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
-import { PeerMessagingContext } from '../peerMessaging/PeerMessagingContext.js';
+import {
+  PeerInboxFailureContext,
+  PeerMessagingContext,
+} from '../peerMessaging/PeerMessagingContext.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
+import {
+  isCrossSessionMessagingEnabled,
+  isCrossSessionMessagingOptedIn,
+} from '../peerMessaging/enabled.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -175,7 +186,7 @@ export async function startInteractiveUI(
       ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
       : { restore: () => {}, repaint: () => {} };
 
-  // Cross-session messaging (experimental, off by default). The inbox is
+  // Cross-session messaging (on by default; see peerMessaging/enabled.ts). The inbox is
   // owned outside React — bound once per process by the block at the end of
   // this function — and this promise is how the bound instance (or null,
   // when the feature is off or the socket could not be bound) reaches the
@@ -199,10 +210,38 @@ export async function startInteractiveUI(
     // listening where no peer can reach it.
     const [peerMessaging, setPeerMessaging] =
       React.useState<PeerMessaging | null>(null);
+    const [peerInboxFailure, setPeerInboxFailure] =
+      React.useState<PeerInboxStartFailure | null>(null);
     React.useEffect(() => {
       let alive = true;
       void peerMessagingReady.then((messaging) => {
-        if (alive) setPeerMessaging(messaging);
+        if (!alive) return;
+        setPeerMessaging(messaging);
+        // A null inbox with the feature on is a bind that failed; the
+        // cause is what the user needs, not the null.
+        if (
+          messaging === null &&
+          isCrossSessionMessagingEnabled(settings.merged)
+        ) {
+          const failure = getLastPeerInboxFailure();
+          // A different question from the helper above: not "is messaging
+          // on", which an unset key also answers yes, but "did a person
+          // write `true`" — in their user settings or this workspace's, not
+          // in an operator's defaults, which merged settings cannot tell
+          // apart. The switch is on by default, so a platform with no inbox
+          // transport would otherwise greet every one of its users with a
+          // failure about a feature they never asked for; that one is said
+          // only to someone who opted in by hand. A bind that failed where
+          // it should have worked is said to everyone: they are
+          // unreachable, and this line is the only place they learn it.
+          const optedInByHand = isCrossSessionMessagingOptedIn(settings);
+          if (
+            failure !== null &&
+            (failure.cause !== 'unsupported_platform' || optedInByHand)
+          ) {
+            setPeerInboxFailure(failure);
+          }
+        }
       });
       return () => {
         alive = false;
@@ -210,44 +249,48 @@ export async function startInteractiveUI(
     }, []);
 
     return (
-      <PeerMessagingContext.Provider value={peerMessaging}>
-        <RemoteInputContext.Provider value={remoteInputWatcher}>
-          <DualOutputContext.Provider value={dualOutputBridge}>
-            <SettingsContext.Provider value={settings}>
-              <KeypressProvider
-                kittyProtocolEnabled={kittyProtocolStatus.enabled}
-                config={config}
-                debugKeystrokeLogging={
-                  settings.merged.general?.debugKeystrokeLogging
-                }
-                pasteWorkaround={
-                  process.platform === 'win32' || nodeMajorVersion < 20
-                }
-                initialCapturedInput={initialCapturedInput}
-              >
-                <SessionStatsProvider sessionId={config.getSessionId()}>
-                  <VimModeProvider settings={settings}>
-                    <AgentViewProvider config={config}>
-                      <BackgroundTaskViewProvider config={config}>
-                        <AppContainer
-                          config={config}
-                          settings={settings}
-                          startupWarnings={startupWarnings}
-                          version={version}
-                          initializationResult={initializationResult}
-                          initialUseVirtualViewport={useVP}
-                          extensionRefreshState={options.extensionRefreshState}
-                          repaintViewport={resizeReflow.repaint}
-                        />
-                      </BackgroundTaskViewProvider>
-                    </AgentViewProvider>
-                  </VimModeProvider>
-                </SessionStatsProvider>
-              </KeypressProvider>
-            </SettingsContext.Provider>
-          </DualOutputContext.Provider>
-        </RemoteInputContext.Provider>
-      </PeerMessagingContext.Provider>
+      <PeerInboxFailureContext.Provider value={peerInboxFailure}>
+        <PeerMessagingContext.Provider value={peerMessaging}>
+          <RemoteInputContext.Provider value={remoteInputWatcher}>
+            <DualOutputContext.Provider value={dualOutputBridge}>
+              <SettingsContext.Provider value={settings}>
+                <KeypressProvider
+                  kittyProtocolEnabled={kittyProtocolStatus.enabled}
+                  config={config}
+                  debugKeystrokeLogging={
+                    settings.merged.general?.debugKeystrokeLogging
+                  }
+                  pasteWorkaround={
+                    process.platform === 'win32' || nodeMajorVersion < 20
+                  }
+                  initialCapturedInput={initialCapturedInput}
+                >
+                  <SessionStatsProvider sessionId={config.getSessionId()}>
+                    <VimModeProvider settings={settings}>
+                      <AgentViewProvider config={config}>
+                        <BackgroundTaskViewProvider config={config}>
+                          <AppContainer
+                            config={config}
+                            settings={settings}
+                            startupWarnings={startupWarnings}
+                            version={version}
+                            initializationResult={initializationResult}
+                            initialUseVirtualViewport={useVP}
+                            extensionRefreshState={
+                              options.extensionRefreshState
+                            }
+                            repaintViewport={resizeReflow.repaint}
+                          />
+                        </BackgroundTaskViewProvider>
+                      </AgentViewProvider>
+                    </VimModeProvider>
+                  </SessionStatsProvider>
+                </KeypressProvider>
+              </SettingsContext.Provider>
+            </DualOutputContext.Provider>
+          </RemoteInputContext.Provider>
+        </PeerMessagingContext.Provider>
+      </PeerInboxFailureContext.Provider>
     );
   };
 
@@ -421,6 +464,7 @@ export async function startInteractiveUI(
       sessionId: config.getSessionId(),
       cwd: config.getTargetDir(),
       qwenVersion: version,
+      kind: 'tui',
     }),
   );
 
@@ -429,7 +473,7 @@ export async function startInteractiveUI(
   // registry record, and `patchSessionRecord` no-ops when there is no record
   // yet, so binding any earlier would publish the socket path into nothing.
   // Not awaited — startup must never block on binding a socket.
-  if (settings.merged.agents?.crossSessionMessaging !== true) {
+  if (!isCrossSessionMessagingEnabled(settings.merged)) {
     publishPeerMessaging(null);
   } else {
     let exiting = false;
@@ -451,6 +495,9 @@ export async function startInteractiveUI(
             settings.merged.agents?.crossSessionInbound as
               | InboundPolicy
               | undefined,
+          getHeldExpiryMs: () =>
+            parseHeldExpiry(settings.merged.agents?.crossSessionHeldExpiry),
+          getPolicyScope: () => inboundPolicyScope(settings),
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
           getSessionId: () => config.getSessionId(),

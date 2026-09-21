@@ -97,11 +97,20 @@ export const compressCommand: SlashCommand = {
             yield {
               messageType: 'info' as const,
               content: truncationNotice,
+              // The daemon locale files have no translation for this sentence,
+              // so hosts that render their own language take it from here. Its
+              // own key, not `contextCompression`: the result frame that follows
+              // merges into the same block and would overwrite a shared key.
+              contextCompressionNotice: {
+                phase: 'notice' as const,
+                instructionsLimit: MAX_COMPRESS_INSTRUCTIONS_CHARS,
+              },
             };
           }
           yield {
             messageType: 'info' as const,
             content: 'Compressing context...',
+            contextCompression: { phase: 'progress' as const },
           };
           const compressed = await doCompress();
           if (
@@ -124,6 +133,19 @@ export const compressCommand: SlashCommand = {
             content:
               `Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
               (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
+            contextCompression: {
+              phase: 'done' as const,
+              originalTokenCount: compressed.originalTokenCount,
+              newTokenCount: compressed.newTokenCount,
+              // An omitted flag travels as `false`, which is how the daemon's
+              // own banner reads it (`isEstimated ? '~' : ''`). Core is more
+              // conservative about an omitted flag (`?? true`, #9309).
+              originalTokenCountIsEstimated:
+                compressed.originalTokenCountIsEstimated ?? false,
+              newTokenCountIsEstimated:
+                compressed.newTokenCountIsEstimated ?? false,
+              ...(compressed.warning ? { warning: compressed.warning } : {}),
+            },
           };
         } catch (e) {
           yield {

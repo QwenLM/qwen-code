@@ -1,11 +1,15 @@
 # Daemon Channel Runtime Control
 
+[English](daemon-channel-runtime-control.md) | [简体中文](daemon-channel-runtime-control.zh-CN.md)
+
 ## Summary
 
 Add runtime desired-state control for daemon-managed channel workers. A daemon
 may start without `--channel`, then enable, replace, inspect, reload, and stop
 its channel selection without restarting the daemon. Runtime changes are not
-persisted; the next daemon boot still follows `--channel`.
+persisted. The next daemon boot follows an explicit `--channel`, otherwise it
+restores each trusted registered workspace's own `serve.channels`; without
+either it remains disabled.
 
 The control layer sits above the workspace-grouped worker implementation. It
 owns the committed selection, serializes lifecycle mutations, preserves the
@@ -62,9 +66,37 @@ daemon status continues to emit `channel_worker_partial_connect`.
 ## Compatibility
 
 Boot-time `--channel` uses the same manager while retaining pre-listen lease
-reservation and ready-before-success behavior. Without `--channel`, the daemon
-does not reserve the channel service or load the heavy channel runtime until
-the first runtime mutation.
+reservation and ready-before-success behavior. On a flagless boot, the daemon
+restores `serve.channels` from every trusted registered workspace, each
+contributing the list in its own workspace-scope settings. The startup
+selection uses persisted folder-trust settings; workspace ownership and trust
+are checked again before workers start. The workspace that listed a name breaks
+an otherwise ambiguous ownership tie, and keeps breaking it for as long as the
+daemon runs, so re-enabling a name the daemon stopped resolves as boot did. A
+name contributed only by non-primary workspaces is dropped with a log rather
+than failing the whole restore; a name the primary workspace listed keeps
+failing it. `all` stays primary-only and is reported when configured elsewhere.
+Without an explicit or persisted
+selection, the daemon does not reserve the channel service or load the heavy
+channel runtime until the first runtime mutation.
+
+Stored startup names must be non-empty, have no leading or trailing whitespace,
+and contain no unsafe control or invisible characters. Invalid entries are
+skipped individually and logged by array index. Startup does not trim them into
+other instance names or rewrite the stored configuration. Workers receive each
+name as `--channel=<value>`, so a leading dash remains part of the value.
+
+An invalid startup field or a validation or lease error before workers start
+skips the automatic restore with a log identifying `serve.channels`; unrelated
+settings remain in effect. A failed worker startup allows the daemon to
+continue only after cleanup succeeds. Global runtime startup timeouts and
+unconfirmed worker stops retain the existing startup-failure behavior. The
+service lease remains held while worker termination is unconfirmed.
+
+Channel management reports persisted startup settings and actual runtime state.
+Skipped or failed automatic restores are diagnosed through the daemon log;
+they do not replace the configured instances or startup toggles with a retained
+boot-failure snapshot.
 
 Legacy `runtime.channelWorker`, grouped `runtime.channelWorkers`, pidfile
 fields, standalone `qwen channel start`, and `qwen channel reload` remain

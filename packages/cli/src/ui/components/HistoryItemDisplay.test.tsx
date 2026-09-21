@@ -46,6 +46,11 @@ vi.mock('../utils/measure-element-position.js', () => ({
   measureElementPosition: vi.fn(),
 }));
 
+vi.mock('../utils/hyperlink-at.js', () => ({
+  hyperlinkAtCell: vi.fn(),
+}));
+
+import { hyperlinkAtCell } from '../utils/hyperlink-at.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 
 import { toggleKeyHint } from './messages/ConversationMessages.js';
@@ -779,6 +784,17 @@ describe('<HistoryItemDisplay />', () => {
       handler?.(mouseEvent('left-press', 5));
       handler?.(mouseEvent('move', 20));
       handler?.(mouseEvent('left-release', 20));
+
+      expect(toggle).not.toHaveBeenCalled();
+    });
+
+    it('does not toggle on a plain click over an OSC 8 hyperlink (reserved for the link gesture)', () => {
+      vi.mocked(hyperlinkAtCell).mockReturnValue('https://example.com');
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle);
+
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
 
       expect(toggle).not.toHaveBeenCalled();
     });

@@ -421,6 +421,94 @@ describe('group sender-name sanitization', () => {
     expect(env.alreadyPrefixed).toBeUndefined();
   });
 
+  it('keeps another member mention display-only for an unprefixed group slash command', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-slash-other-mention',
+      group_openid: 'grp-1',
+      content: '<@OPENID_OTHER> /clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toBe('/clear');
+  });
+
+  it('keeps a sanitizer-shaped group command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-sanitized-command-group',
+      group_openid: 'grp-1',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
+  it('keeps a sanitizer-shaped C2C command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+
+    (ch as unknown as { handleC2C: (event: unknown) => void }).handleC2C({
+      id: 'evt-sanitized-command-c2c',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'user-openid' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
+  it('audits the command that ran', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
+      () => Promise.resolve();
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-command-audit',
+      group_openid: 'grp-1',
+      content: '/clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      mentions: [{ is_you: true, member_openid: 'bot-openid' }],
+    });
+
+    spy.mockRestore();
+
+    const audit = writes.find((w) => w.includes('Slash cmd from'));
+    expect(audit).toBeDefined();
+    expect(audit).toContain('/clear');
+    expect(audit!.split('\n')).toHaveLength(2);
+  });
+
   it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {
     vi.useFakeTimers();
     const ch = makeChannel();

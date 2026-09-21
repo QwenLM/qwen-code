@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SendMessageTool } from './send-message.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { SHARED_RECORD_SLOT } from '../services/session-registry.js';
 import { ToolErrorType } from './tool-error.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
@@ -47,6 +48,7 @@ function makeTeamConfig(opts?: {
     getBackgroundTaskRegistry: () =>
       opts?.registry ?? new BackgroundTaskRegistry(),
     getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
+    getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
   } as unknown as Config;
 }
 
@@ -290,6 +292,12 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Message queued');
+    // The caller must not sit waiting for an inline answer, nor start a
+    // replacement task while the original is still holding the message.
+    expect(result.llmContent).toContain('There is no inline reply');
+    expect(result.llmContent).toContain(
+      'Do not relaunch the task while waiting',
+    );
     expect(registry.get('agent-1')!.pendingMessages).toEqual(['do more work']);
   });
 
@@ -596,6 +604,128 @@ describe('SendMessageTool — background-task mode', () => {
   });
 });
 
+describe('SendMessageTool — destination validation (#10073)', () => {
+  it('rejects calls that specify both "to" and "task_id" at build time', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+
+    expect(() =>
+      tool.build({ to: 'alice', task_id: 'agent-1', message: 'hello' }),
+    ).toThrow('Only one of "to" or "task_id" may be provided.');
+  });
+
+  it('declares the two destination fields mutually exclusive', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    expect(tool.description).toContain('Specify exactly one of the two fields');
+  });
+
+  it('suggests "to" when a failed task_id matches a teammate name', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({
+          members: [{ agentId: 'qa-reviewer@team', name: 'qa-reviewer' }],
+        }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'QA Reviewer', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    // The scheduler builds the model-facing error response from
+    // error.message, so assert there — not on llmContent, which an
+    // errored ToolResult never forwards to the model.
+    expect(result.error?.message).toContain('Task not found');
+    expect(result.error?.message).toContain('use `to: "qa-reviewer"`');
+    expect(result.error?.message).toContain('instead of `task_id`');
+  });
+
+  it('adds no teammate hint when the task_id matches no teammate', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({
+          members: [{ agentId: 'alice@team', name: 'alice' }],
+        }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'definitely-not-a-teammate', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).not.toContain('use `to:');
+  });
+
+  it('suggests "to" when the task_id is the reserved leader name', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({ members: [] }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'Leader', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).toContain('instead of `task_id`');
+  });
+
+  it('adds no hint for leader spellings the "to" route would reject', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({ members: [] }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'Leader!', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).not.toContain('use `to:');
+  });
+
+  it('suggests "to" when the task_id is the leader agent ID', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({
+          members: [],
+          leadAgentId: 'leader@test-team',
+        }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'leader@test-team', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).toContain('instead of `task_id`');
+  });
+});
+
 describe('SendMessageTool — peer mode', () => {
   function toolWithoutTeam() {
     return new SendMessageTool(makeTeamConfig());
@@ -624,7 +754,34 @@ describe('SendMessageTool — peer mode', () => {
         target: 'docs-cd',
         message: 'check the tests',
         approvalMode: DEFAULT_MODE,
+        slot: SHARED_RECORD_SLOT,
       }),
+    );
+  });
+
+  it('sends from the record this session registered under, not the default', async () => {
+    // A session hosted by a daemon owns a minted record; the send path
+    // reads its own identity from that record. Passing the default here
+    // would make it advertise a `<pid>.json` reply address the host
+    // never wrote — and exclude the wrong session from the directory.
+    sendToPeer.mockResolvedValue({
+      kind: 'sent',
+      address: 'docs-cd',
+      peer: { cwd: '/w/docs' },
+    });
+    const tool = new SendMessageTool({
+      getTeamManager: () => null,
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getSessionRegistrySlot: () => 'a1b2c3d4',
+    } as unknown as Config);
+
+    await tool
+      .build({ to: 'docs-cd', message: 'hi' })
+      .execute(new AbortController().signal);
+
+    expect(sendToPeer).toHaveBeenCalledWith(
+      expect.objectContaining({ slot: 'a1b2c3d4' }),
     );
   });
 
@@ -640,6 +797,7 @@ describe('SendMessageTool — peer mode', () => {
       getApprovalMode: () => {
         throw new Error('not yet');
       },
+      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
     } as unknown as Config);
 
     await tool

@@ -70,6 +70,70 @@ afterEach(() => {
 });
 
 describe('Injector window conditions', () => {
+  it('drains thousands of independent control receipts without recursive stack growth', () => {
+    injector.noteSpeechStarted();
+    for (let index = 0; index < 10_000; index += 1) {
+      injector.enqueue({
+        kind: 'control',
+        controlId: String(index),
+        context: `receipt ${index}`,
+      });
+      if (index % 100 === 0) injector.enqueue(complete(`ordinary ${index}`));
+    }
+    expect(() => injector.noteInputCommitted()).not.toThrow();
+    expect(injector.pendingCount).toBe(0);
+    const receipts = sink.contextCalls.filter((text) =>
+      text.startsWith('receipt'),
+    );
+    expect(receipts).toHaveLength(10_000);
+    expect(receipts[0]).toBe('receipt 0');
+    expect(receipts.at(-1)).toBe('receipt 9999');
+    expect(
+      sink.injected.filter(({ item }) => item.kind === 'control'),
+    ).toHaveLength(10_000);
+  });
+
+  it('delivers control receipts separately and completely beyond the ordinary batch cap', () => {
+    injector.noteSpeechStarted();
+    const first = 'A'.repeat(7_000);
+    const second = 'B'.repeat(7_000);
+    injector.enqueue({
+      kind: 'control',
+      controlId: 'one',
+      context: first,
+      spoken: 'must not speak',
+    });
+    injector.enqueue({ kind: 'control', controlId: 'one', context: first });
+    injector.enqueue({ kind: 'control', controlId: 'two', context: second });
+    expect(injector.pendingCount).toBe(2);
+    injector.noteInputCommitted(true);
+    expect(sink.contextCalls).toEqual([]);
+    injector.noteResponseCreated('direct');
+    injector.noteResponseDone('direct');
+    expect(sink.contextCalls).toEqual([first, second]);
+    expect(sink.speechCalls).toEqual([]);
+    expect(sink.injected.map((entry) => entry.spoken)).toEqual([false, false]);
+  });
+
+  it('does not acknowledge a control receipt through speech-only acceptance', () => {
+    sink.contextResult = false;
+    sink.speechResult = true;
+    injector.enqueue({
+      kind: 'control',
+      controlId: 'one',
+      context: 'Complete owned text',
+      spoken: 'speech',
+    });
+    expect(sink.injected).toEqual([]);
+    expect(sink.speechCalls).toEqual([]);
+    expect(injector.pendingCount).toBe(1);
+    sink.contextResult = true;
+    vi.advanceTimersByTime(QUIET_GAP_MS);
+    expect(sink.injected).toHaveLength(1);
+    expect(sink.injected[0]?.item.context).toBe('Complete owned text');
+    expect(injector.pendingCount).toBe(0);
+  });
+
   it('deduplicates a replayed permission while its ask is queued', () => {
     injector.noteSpeechStarted();
     const permission: InjectorItem = {
@@ -101,17 +165,18 @@ describe('Injector window conditions', () => {
     expect(injector.pendingCount).toBe(0);
   });
 
-  it('reports estimated playback pending when user speech starts', () => {
-    injector.noteOutputAudio(48_000);
+  it('reports playback in progress when user speech starts', () => {
+    injector.notePlaybackStarted();
 
     expect(injector.noteSpeechStarted()).toBe(true);
     injector.noteOutputCleared();
     expect(injector.noteSpeechStarted()).toBe(false);
   });
 
-  it('drops the old quiet gap when speech starts after playback ends', () => {
-    injector.noteOutputAudio(48_000);
-    vi.advanceTimersByTime(1_100);
+  it('drops the quiet gap when speech starts after playback completes', () => {
+    injector.notePlaybackStarted();
+    injector.notePlaybackCompleted();
+    vi.advanceTimersByTime(100);
 
     expect(injector.noteSpeechStarted()).toBe(false);
     injector.enqueue(complete('arrived while speaking', 'Result ready.'));
@@ -134,35 +199,41 @@ describe('Injector window conditions', () => {
     expect(sink.contextCalls).toEqual(['build finished']);
   });
 
-  it('waits out the estimated playback plus the quiet gap', () => {
-    // 48,000 bytes of 24 kHz mono PCM16 ≈ 1,000 ms of audio.
-    injector.noteOutputAudio(48_000);
+  it('holds items while playback is in progress and delivers after completion + quiet gap', () => {
+    injector.notePlaybackStarted();
     injector.enqueue(complete('done'));
 
     expect(sink.contextCalls).toEqual([]);
 
-    // One tick before playback end + quiet gap: still closed.
-    vi.advanceTimersByTime(1_000 + QUIET_GAP_MS - 1);
+    injector.notePlaybackCompleted();
+    // Quiet gap still applies after completion.
+    vi.advanceTimersByTime(QUIET_GAP_MS - 1);
     expect(sink.contextCalls).toEqual([]);
 
     vi.advanceTimersByTime(1);
     expect(sink.contextCalls).toEqual(['done']);
   });
 
-  it('stacks playback estimates for consecutive audio chunks', () => {
-    injector.noteOutputAudio(48_000);
-    injector.noteOutputAudio(48_000);
+  it('holds items through multiple playback chunks until completion', () => {
+    injector.notePlaybackStarted();
+    // Additional chunks arrive while playback is in progress — the
+    // window stays closed until the Host reports completion.
+    injector.notePlaybackStarted();
     injector.enqueue(complete('done'));
 
-    vi.advanceTimersByTime(2_000 + QUIET_GAP_MS - 1);
+    vi.advanceTimersByTime(QUIET_GAP_MS + 5_000);
+    expect(sink.contextCalls).toEqual([]);
+
+    injector.notePlaybackCompleted();
+    vi.advanceTimersByTime(QUIET_GAP_MS - 1);
     expect(sink.contextCalls).toEqual([]);
 
     vi.advanceTimersByTime(1);
     expect(sink.contextCalls).toEqual(['done']);
   });
 
-  it('reopens the window immediately when output audio is cleared', () => {
-    injector.noteOutputAudio(48_000 * 60);
+  it('reopens the window immediately when output is cleared during playback', () => {
+    injector.notePlaybackStarted();
     injector.enqueue(complete('interrupted'));
     vi.advanceTimersByTime(500);
     expect(sink.contextCalls).toEqual([]);

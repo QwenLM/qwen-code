@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
+  getPlanExecutionMode,
   getReplayTokenCount,
   getReplayTokenUsage,
   mapProviderStatus,
@@ -77,7 +78,143 @@ const turnComplete: DaemonEvent = {
   data: { stopReason: 'end_turn' },
 };
 
+describe('session title metadata', () => {
+  it('keeps manual provenance with a renamed session', () => {
+    expect(
+      applyEvent(
+        { status: 'connected' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_metadata_updated',
+          data: {
+            sessionId: 'session-1',
+            displayName: 'Bug hunt',
+            titleSource: 'manual',
+          },
+        },
+      ),
+    ).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+  });
+
+  it('keeps manual provenance when a pr-only event echoes the same name', () => {
+    const renamed = applyEvent(
+      { status: 'connected' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          titleSource: 'manual',
+        },
+      },
+    );
+    expect(renamed).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+    expect(
+      applyEvent(renamed, {
+        id: 2,
+        v: 1,
+        type: 'session_metadata_updated',
+        // The bridge's pr-binding publish echoes the name without a
+        // provenance: binding a PR must not wipe the manual title.
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          prs: [
+            {
+              number: 9260,
+              url: 'https://github.com/QwenLM/qwen-code/pull/9260',
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+  });
+
+  it('drops provenance when an unstamped event changes the name', () => {
+    const renamed = applyEvent(
+      { status: 'connected' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          titleSource: 'manual',
+        },
+      },
+    );
+    const next = applyEvent(renamed, {
+      id: 2,
+      v: 1,
+      type: 'session_metadata_updated',
+      data: { sessionId: 'session-1', displayName: 'New name' },
+    });
+    expect(next.displayName).toBe('New name');
+    expect(next.titleSource).toBeUndefined();
+  });
+});
+
 describe('mapReasoningControls', () => {
+  it.each(['default', 'max', null, false, undefined])(
+    'accepts only the explicit reset enable value %j',
+    (enableValue) => {
+      const result = mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'none',
+          options: [{ value: 'none' }, { value: 'medium' }],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'medium', enableValue },
+          },
+        },
+      ]);
+      expect(result).toEqual({
+        enabled: false,
+        effort: 'medium',
+        efforts: ['medium'],
+        defaultEffort: 'medium',
+        ...(enableValue === 'default' ? { enableValue: 'default' } : {}),
+      });
+    },
+  );
+
+  it.each([false, true, 'false', null, undefined])(
+    'preserves only an explicit cannot-enable capability %j for tiered and toggle-only controls',
+    (canEnable) => {
+      for (const toggleOnly of [false, true]) {
+        const result = mapReasoningControls([
+          {
+            id: 'reasoning_effort',
+            currentValue: 'none',
+            options: [
+              { value: 'none' },
+              { value: 'default' },
+              ...(toggleOnly ? [] : [{ value: 'low' }, { value: 'high' }]),
+            ],
+            _meta: { 'qwenCode/reasoning': { canEnable, toggleOnly } },
+          },
+        ]);
+        expect(result?.enabled).toBe(false);
+        if (canEnable === false)
+          expect(result).toHaveProperty('canEnable', false);
+        else expect(result).not.toHaveProperty('canEnable');
+      }
+    },
+  );
+
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
       mapReasoningControls([
@@ -262,6 +399,39 @@ describe('getReplayTokenCount', () => {
     ).toBe(23_000);
   });
 
+  it('restores flat persisted usage and ignores newer subagent usage', () => {
+    const usage = { inputTokens: 23_000, totalTokens: 25_000 };
+    const events: DaemonEvent[] = [
+      usageEvent(1, { inputTokens: 11_000 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage },
+        },
+      },
+      {
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            parentToolCallId: 'agent-1',
+            usage: { inputTokens: 1_000 },
+          },
+        },
+      },
+    ];
+
+    expect(getReplayTokenUsage(events)).toEqual(usage);
+    expect(getReplayTokenCount(events)).toBe(23_000);
+  });
+
   it('returns the latest structured usage fields', () => {
     expect(
       getReplayTokenUsage([
@@ -418,6 +588,8 @@ describe('updateConnectionFromDaemonEvent', () => {
       evidenceCursor: { recordId: 'record-1' },
       turnCount: 3,
       activeTimeMs: 4_000,
+      tokensUsed: 1_234,
+      tokenBudget: 30_000_000,
       createdAt: 10,
       updatedAt: 20,
     };
@@ -876,6 +1048,134 @@ describe('updateConnectionFromDaemonEvent', () => {
     });
   });
 
+  it.each(['turn_budget', 'time_budget'])(
+    'carries a %s limitKind through from the wire',
+    (limitKind) => {
+      // The mapper enumerates the kinds by value, so a kind it does not name
+      // is dropped on the live path even though the daemon sent it.
+      const next = applyEvent(
+        { status: 'connected', workspaceCwd: '/workspace' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-1',
+                    revision: 3,
+                    objective: 'ship it',
+                    status: 'usage_limited',
+                    evidenceCursor: { recordId: 'record-1' },
+                    turnCount: 20,
+                    activeTimeMs: 1_800_000,
+                    turnBudget: 20,
+                    activeTimeBudgetMs: 1_800_000,
+                    createdAt: 1,
+                    updatedAt: 2,
+                    limitKind,
+                  },
+                },
+              },
+            },
+          },
+        } as DaemonEvent,
+      );
+
+      expect(next.goalState?.goal).toMatchObject({
+        limitKind,
+        turnBudget: 20,
+        activeTimeBudgetMs: 1_800_000,
+      });
+    },
+  );
+
+  it('leaves out the cadence ceilings when the daemon omits them', () => {
+    // Spreading them in unconditionally would leave `turnBudget: undefined` on
+    // the record, which renders the same but does not compare the same.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'running',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    const goal = next.goalState?.goal;
+    expect(goal).toBeDefined();
+    expect(Object.keys(goal!)).not.toContain('turnBudget');
+    expect(Object.keys(goal!)).not.toContain('activeTimeBudgetMs');
+  });
+
+  it('drops the checkpoint health an older daemon still sends', () => {
+    // Goals no longer run evidence checkpoints and no surface draws these
+    // two fields, so the field-by-field rebuild leaves them behind.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  checkpointStalls: 2,
+                  lastCheckpointFailure: 'Error: provider failed',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({ status: 'active' });
+    expect(next.goalState?.goal).not.toHaveProperty('checkpointStalls');
+    expect(next.goalState?.goal).not.toHaveProperty('lastCheckpointFailure');
+  });
+
   it('drops an unknown limitKind rather than passing it through', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
@@ -910,6 +1210,48 @@ describe('updateConnectionFromDaemonEvent', () => {
     );
 
     expect(next.goalState?.goal?.limitKind).toBeUndefined();
+  });
+
+  it('leaves out the spend keys when the daemon omits them', () => {
+    // Older daemons send neither field. Spreading them in unconditionally
+    // would leave `tokensUsed: undefined` on the record, which reads the same
+    // to the renderer but not to the structural comparisons this state goes
+    // through.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'running',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    const goal = next.goalState?.goal;
+    expect(goal).toBeDefined();
+    expect(Object.keys(goal!)).not.toContain('tokensUsed');
+    expect(Object.keys(goal!)).not.toContain('tokenBudget');
   });
 
   it('ignores malformed Goal snapshots', () => {
@@ -1087,6 +1429,31 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.skills).toEqual(['review']);
   });
 
+  it('maps command aliases from available_commands_update metadata', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      availableCommandsEvent(
+        [
+          {
+            name: 'compress',
+            description: 'Compress context',
+            input: null,
+            _meta: { source: 'builtin-command', altNames: ['summarize'] },
+          },
+        ],
+        [],
+      ),
+    );
+
+    expect(next.commands).toEqual([
+      expect.objectContaining({
+        name: 'compress',
+        source: 'builtin-command',
+        altNames: ['summarize'],
+      }),
+    ]);
+  });
+
   it('reads nested availableSkills from the daemon wire shape', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
@@ -1153,4 +1520,142 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.commands).toEqual([]);
     expect(next.skills).toEqual([]);
   });
+});
+
+describe('Plan connection state', () => {
+  it.each(['approval_mode_changed', 'session_snapshot'])(
+    'maps workflow and execution permission together from %s',
+    (type) => {
+      const planning = applyEvent(
+        { status: 'connected' },
+        {
+          id: 1,
+          v: 1,
+          type,
+          data: {
+            next: 'plan',
+            currentApprovalMode: 'plan',
+            planExecutionMode: 'yolo',
+          },
+        },
+      );
+      expect(planning).toMatchObject({
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      const done = applyEvent(planning, {
+        id: 2,
+        v: 1,
+        type,
+        data: { next: 'yolo', currentApprovalMode: 'yolo' },
+      });
+      expect(done.currentMode).toBe('yolo');
+      expect(done.planExecutionMode).toBeUndefined();
+    },
+  );
+
+  it('reads execution permission only while the context is in Plan', () => {
+    const context = {
+      v: 1 as const,
+      sessionId: 's',
+      workspaceCwd: '/workspace',
+      state: {
+        modes: {
+          currentModeId: 'plan',
+          _meta: { planExecutionMode: 'auto-edit' },
+        },
+      },
+    };
+    expect(getPlanExecutionMode(context)).toBe('auto-edit');
+    context.state.modes.currentModeId = 'default';
+    expect(getPlanExecutionMode(context)).toBeUndefined();
+  });
+});
+
+describe('background execution state', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 10,
+  };
+  it('starts explicitly and ignores another execution terminal', () => {
+    const started = applyEvent(
+      { status: 'connected' },
+      {
+        v: 1,
+        id: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Continue' },
+            _meta: {
+              source: 'background_notification_turn_started',
+              backgroundTurn,
+            },
+          },
+        },
+      },
+    );
+    expect(started.backgroundTurn).toEqual(backgroundTurn);
+    const stale = applyEvent(started, {
+      ...turnComplete,
+      data: { promptId: 'older-turn' },
+    });
+    expect(stale).toBe(started);
+    expect(
+      applyEvent(stale, { ...turnComplete, data: { promptId: 'auto-1' } })
+        .backgroundTurn,
+    ).toBeUndefined();
+  });
+  it('does not infer running state from arbitrary persisted reply metadata', () => {
+    expect(
+      applyEvent(
+        { status: 'connected' },
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'background_notification_response',
+                backgroundTurn,
+              },
+            },
+          },
+        },
+      ).backgroundTurn,
+    ).toBeUndefined();
+  });
+});
+
+it('does not revive a completed background turn from its repeated start', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const finished = applyEvent(
+    { status: 'connected', backgroundTurn },
+    { ...turnComplete, data: { promptId: 'auto-1' } },
+  );
+  const replayed = applyEvent(finished, {
+    v: 1,
+    id: 100,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn,
+        },
+      },
+    },
+  });
+  expect(replayed.backgroundTurn).toBeUndefined();
 });

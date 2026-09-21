@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
@@ -19,6 +20,8 @@ import {
   computeModelListVersion,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
+import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 import { useProviderUpdates } from './useProviderUpdates.js';
 
 vi.mock('../../config/settingsUtils.js', async (importOriginal) => {
@@ -48,6 +51,13 @@ const METADATA_KEY = 'coding-plan';
 const TOKEN_METADATA_KEY = 'token-plan';
 
 describe('useProviderUpdates', () => {
+  let userSettingsFile:
+    | {
+        settings: Record<string, unknown>;
+        originalSettings: Record<string, unknown>;
+        path: string;
+      }
+    | undefined;
   const mockSettings = {
     merged: {
       modelProviders: {} as Record<string, unknown>,
@@ -55,10 +65,39 @@ describe('useProviderUpdates', () => {
     } as Record<string, unknown>,
     setValue: vi.fn(),
     setValues: vi.fn(),
-    forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
+    forScope: vi.fn((scope: SettingScope) =>
+      scope === SettingScope.User
+        ? mockSettings.user
+        : scope === SettingScope.Workspace
+          ? mockSettings.workspace
+          : scope === SettingScope.System
+            ? mockSettings.system
+            : mockSettings.systemDefaults,
+    ),
+    recomputeMerged: vi.fn(),
     isTrusted: true,
-    workspace: { settings: {} },
-    user: { settings: {} },
+    workspace: {
+      settings: {},
+      originalSettings: {},
+      path: '/tmp/workspace-settings.json',
+    },
+    system: {
+      settings: {},
+      originalSettings: {},
+      path: '/tmp/system-settings.json',
+    },
+    systemDefaults: {
+      settings: {},
+      originalSettings: {},
+      path: '/tmp/default-settings.json',
+    },
+    get user() {
+      return (userSettingsFile ??= {
+        settings: mockSettings.merged,
+        originalSettings: structuredClone(mockSettings.merged),
+        path: '/tmp/settings.json',
+      });
+    },
   };
 
   const mockModelsConfig = {
@@ -81,6 +120,14 @@ describe('useProviderUpdates', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    userSettingsFile = undefined;
+    mockSettings.setValue.mockImplementation(
+      (scope: SettingScope, key: string, value: unknown) => {
+        const settingsFile = mockSettings.forScope(scope);
+        setNestedPropertySafe(settingsFile.settings, key, value);
+        setNestedPropertySafe(settingsFile.originalSettings, key, value);
+      },
+    );
     mockSettings.merged['modelProviders'] = {};
     mockSettings.merged[PROVIDER_METADATA_NS] = {};
     mockConfig.getContentGeneratorConfig.mockReturnValue({
@@ -249,12 +296,21 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.added).toContain(addedModelId);
   });
 
-  it('persists the template version and preserves custom models', async () => {
+  it('refreshes template fields and version while preserving custom model settings', async () => {
     const customModel = {
       id: 'my-custom-model',
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       envKey: CODING_PLAN_ENV_KEY,
       name: '[Coding Plan] my-custom-model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        samplingParams: { temperature: 0.2 },
+      },
+    };
+    const responsesModel = {
+      ...customModel,
+      id: 'responses-only',
+      wireApi: 'responses' as const,
     };
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
@@ -263,7 +319,15 @@ describe('useProviderUpdates', () => {
       version: 'old-version-hash',
     };
     mockSettings.merged['modelProviders'] = {
-      [AuthType.USE_OPENAI]: [...chinaTemplate, customModel],
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate.map((model) => ({
+          ...model,
+          name: '[OLD LABEL] ' + model.id,
+          generationConfig: { contextWindowSize: 262144 },
+        })),
+        customModel,
+        responsesModel,
+      ],
     };
     mockConfig.refreshAuth.mockResolvedValue(undefined);
 
@@ -290,16 +354,25 @@ describe('useProviderUpdates', () => {
     });
 
     const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    expect(
+      reloaded[AuthType.USE_OPENAI].filter(
+        (model: { id: string }) => model.id === 'responses-only',
+      ),
+    ).toEqual([responsesModel]);
     expect(reloaded[AuthType.USE_OPENAI]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: 'my-custom-model' }),
-      ]),
+      expect.arrayContaining([customModel, ...chinaTemplate]),
+    );
+    expect(mockSettings.user.originalSettings['modelProviders']).toEqual(
+      reloaded,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
       `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
       chinaVersion,
     );
+    expect(
+      mockSettings.user.originalSettings[PROVIDER_METADATA_NS],
+    ).toMatchObject({ [METADATA_KEY]: { version: chinaVersion } });
   });
 
   it('executes update when user confirms with "update"', async () => {
@@ -821,6 +894,42 @@ describe('useProviderUpdates', () => {
       expect.anything(),
     );
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('refreshes a built-in Responses override without adding a Chat route', async () => {
+    const first = chinaTemplate[0]!;
+    const responseModel = { ...first, wireApi: 'responses' as const };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      openai: [responseModel, ...chinaTemplate.slice(1)],
+    };
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+    await waitFor(() =>
+      expect(result.current.providerUpdateRequest).toBeDefined(),
+    );
+    await result.current.providerUpdateRequest!.onConfirm('update');
+    await waitFor(() =>
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled(),
+    );
+    const updated =
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0]['openai'];
+    expect(
+      updated.filter((model: { id: string }) => model.id === first.id),
+    ).toEqual([
+      expect.objectContaining({ id: first.id, wireApi: 'responses' }),
+    ]);
+    expect(updated).toHaveLength(chinaTemplate.length);
   });
 
   it('persists a cooldown (not a full update) when user chooses "later"', async () => {

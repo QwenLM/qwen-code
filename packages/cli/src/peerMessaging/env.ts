@@ -16,6 +16,12 @@
  * Where child processes of this session find its inbox, so a script or
  * hook it runs can inject a message back into it (through the same
  * inbound gate as any peer). Cleared when the inbox closes.
+ *
+ * The token is the session's *child* token, not the one it publishes for
+ * peers: it goes nowhere but this environment, so a connection presenting
+ * it is known to come from a process the session started, and the gate
+ * treats such a message as the session's own rather than as another
+ * session's.
  */
 export const MESSAGING_SOCKET_ENV = 'QWEN_CODE_MESSAGING_SOCKET';
 export const MESSAGING_TOKEN_ENV = 'QWEN_CODE_MESSAGING_TOKEN';

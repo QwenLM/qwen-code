@@ -313,6 +313,64 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  it('renders blocked retry guidance without offering a mode switch', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_blocked_retry',
+        message: 'This exact action was previously blocked.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('This exact action was previously blocked.');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).not.toContain('Switch to Default Mode');
+    expect(frame).not.toContain('Always allow');
+  });
+
+  it('offers a mode switch after consecutive classifier failures', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'consecutive_unavailable',
+        message: 'Auto Mode could not classify consecutive actions.',
+      },
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame() ?? '').toContain(
+      'Switch to Default Mode and allow once (recommended)',
+    );
+  });
+
   // Regression coverage for the round-1 review on PR #4386 (PR #4386 round-2
   // self-review SR-1): the warnings block sits outside the MaxSizedBox
   // cap, so its footprint has to be reserved from `bodyContentHeight`
@@ -576,6 +634,84 @@ describe('ToolConfirmationMessage', () => {
         );
 
         expect(lastFrame()).not.toContain(alwaysAllowText);
+      });
+    });
+
+    describe('unguarded entrances', () => {
+      const infoDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'info',
+        title: 'Confirm Web Fetch',
+        prompt: 'https://example.com',
+        urls: ['https://example.com'],
+        onConfirm,
+      });
+
+      const planDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Plan\n- Step 1',
+        onConfirm,
+      });
+
+      const renderWith = (
+        trusted: boolean,
+        details: ToolCallConfirmationDetails,
+        compactMode = false,
+      ) => {
+        const config = {
+          isTrustedFolder: () => trusted,
+          getIdeMode: () => false,
+        } as unknown as Config;
+        return renderWithProviders(
+          <ToolConfirmationMessage
+            confirmationDetails={details}
+            config={config}
+            availableTerminalHeight={30}
+            contentWidth={80}
+            compactMode={compactMode}
+          />,
+        );
+      };
+
+      it('compactMode offers "Allow always" only in a trusted folder', () => {
+        expect(renderWith(true, infoDetails(), true).lastFrame()).toContain(
+          'Allow always',
+        );
+        const untrusted = renderWith(false, infoDetails(), true).lastFrame();
+        expect(untrusted).toContain('Yes, allow once');
+        expect(untrusted).not.toContain('Allow always');
+      });
+
+      it('plan exit offers auto-accept only in a trusted folder', () => {
+        expect(renderWith(true, planDetails()).lastFrame()).toContain(
+          'Yes, and auto-accept edits',
+        );
+        const untrusted = renderWith(false, planDetails()).lastFrame();
+        // Both remaining exits must survive: the gate admits DEFAULT and PLAN.
+        expect(untrusted).toContain('Yes, and manually approve edits');
+        expect(untrusted).toContain('restore previous mode');
+        expect(untrusted).not.toContain('Yes, and auto-accept edits');
+      });
+
+      it('subscribes to the promise onConfirm returns instead of letting it float', async () => {
+        // A floating rejection reaches the process-level handler (llm.tsx) and
+        // shows a "file a bug report" banner over a correctly-refused action,
+        // so the call site must consume what onConfirm returns. Asserted via a
+        // thenable: `Promise.resolve(x).catch(...)` subscribes through `then`,
+        // a bare `onConfirm(outcome)` statement never does.
+        const then = vi.fn();
+        const thenable = { then } as unknown as Promise<void>;
+        const onConfirm = vi.fn(() => thenable);
+        const { stdin } = renderWith(true, infoDetails(onConfirm));
+
+        stdin.write('\r');
+
+        await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+        expect(then).toHaveBeenCalled();
       });
     });
   });
@@ -966,6 +1102,40 @@ describe('ToolConfirmationMessage', () => {
         'Switch to Default Mode and allow once (recommended)',
       );
       expect(frame).toContain('No');
+      expect(frame).not.toContain('Allow always');
+    });
+
+    it('budgets the two-option blocked retry layout on a tight terminal', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: ['line-1', 'line-2', 'line-3', 'line-4'].join('\n'),
+        rootCommand: 'line-1',
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'classifier_blocked_retry',
+          message: 'This exact action was previously blocked.',
+        },
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('previously blocked');
+      expect(frame).toContain('line-1');
+      expect(frame).toContain('last 2 lines hidden');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+      expect(frame).not.toContain('Switch to Default Mode');
       expect(frame).not.toContain('Allow always');
     });
 
