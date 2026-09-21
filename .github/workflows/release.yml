@@ -168,6 +168,12 @@ jobs:
           sparse-checkout: |-
             /.github/scripts
             /scripts/assert-release-version.mjs
+            /scripts/release-packages.mjs
+            /scripts/workspaces.js
+            /package.json
+            /packages/*/package.json
+            /packages/channels/*/package.json
+            /integrations/*/package.json
           sparse-checkout-cone-mode: false
           path: '.release-workflow'
 
@@ -650,7 +656,6 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
           npm run postinstall
-          npm run generate
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts

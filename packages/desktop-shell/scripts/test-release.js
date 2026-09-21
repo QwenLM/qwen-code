@@ -853,6 +853,7 @@ function testBootstrapBridgeConfiguration() {
   assert.deepEqual(capability.permissions, [
     'core:event:allow-listen',
     'core:event:allow-unlisten',
+    'core:window:allow-start-dragging',
   ]);
 
   const webShellCapability = JSON.parse(
@@ -872,11 +873,20 @@ function testBootstrapBridgeConfiguration() {
   });
   assert.deepEqual(webShellCapability.windows, ['main']);
   assert.deepEqual(webShellCapability.permissions, [
+    'core:window:allow-start-dragging',
     {
       identifier: 'opener:allow-open-url',
       allow: [{ url: 'http://*' }, { url: 'https://*' }, { url: 'mailto:*' }],
     },
   ]);
+
+  const main = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
+    'utf8',
+  );
+  assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
+  assert.match(main, /hidden_title\(true\)/);
+  assert.match(main, /initialization_script\(MACOS_TITLEBAR_INIT_SCRIPT\)/);
 }
 
 function testResolveLogRoot() {
