@@ -9,34 +9,41 @@ benchmark sessions the model repeatedly changed the values instead of omitting
 these fields. Setting `limit` to zero replaced the notebook error with a generic
 positive-integer error, suggesting another change of value.
 
-The Responses adapter also left `strict` unspecified. [OpenAI documents](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)
-that Responses may normalize such schemas into strict mode, where all properties
-are required. The original upstream schema was not captured, so normalization is
-a compatibility risk, not a confirmed explanation of those sessions.
+[OpenAI documents](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)
+that Responses may normalize tool schemas into strict mode, where every property
+is required and optional values use `null`. The original upstream schema was not
+captured, so normalization is a compatibility risk, not a confirmed explanation
+of those sessions. The tool must accept nullable optional values without
+requiring strict mode to be disabled.
 
 ## Change
 
-- Send `strict: false` for converted Responses function tools to preserve the
-  declared optional fields. Retain existing schema normalization and local
-  validation; do not introduce nullable parameters or silently discard inputs.
-- Describe notebook reads as structured cells with outputs and explicitly tell
-  the model to omit pagination. Restrict line-pagination guidance to text files.
-- After path validation and empty-`pages` normalization, check notebook pagination
-  before numeric range validation. All schema-valid pagination values, including
-  zero or negative integers and invalid PDF page strings, return the same
-  instruction to omit the fields and a JSON-escaped, path-only retry example.
-- Keep schema type validation first. Wrong types, including `null`, still fail
-  schema validation. Empty or whitespace-only `pages` retains its existing
-  omission behavior. Text ranges and PDF page validation retain their semantics.
+- Preserve the existing Responses strict defaults. Do not globally disable or
+  force strict mode, or introduce a generic coercion of arbitrary tool inputs.
+- Declare `read_file`'s `offset`, `limit`, and `pages` as nullable. Keep only
+  `file_path` required locally so both omitted and explicit-null arguments work.
+  If the provider makes every property required, the nullable types already
+  provide a valid representation for unused fields.
+- Normalize these three fields from `null` to `undefined` before notebook,
+  numeric, or page validation and before creating the invocation. This preserves
+  descriptions, locations, full-read caching, and text/PDF read defaults.
+- Describe notebook reads as structured cells with outputs. Restrict line
+  pagination guidance to text files. Check notebook pagination before numeric
+  ranges and give one error directing the model to omit fields or use `null`,
+  with a JSON-escaped retry example containing all three null fields.
+- Keep `file_path` non-nullable and validate other types normally. Reject actual
+  notebook pagination, including zero and negative integers. Empty or whitespace
+  `pages` keeps its existing omission behavior. Non-null text/PDF values retain
+  their existing meaning.
 
 ## Validation and limits
 
-Unit tests cover consistent notebook errors, a usable retry example, preserved
-text/PDF validation, and outgoing optional parameters with `strict: false`.
-Headless CLI tests use a local deterministic Responses endpoint to capture the
-wire schema and verify failed calls followed by a successful path-only read.
-Build, typecheck, focused tests, and independent review complete verification.
+Unit tests cover null normalization, strict-compatible nullable calls, usable
+retry examples, full-read caching, and text/PDF behavior. Headless CLI tests use
+local deterministic Chat Completions and Responses endpoints to capture schemas
+and exercise omitted, nullable, and invalid arguments. Complete the build,
+typecheck, focused tests, and independent review.
 
-This does not add notebook pagination, relax loop protection, change compression,
-or guarantee that every model follows a valid recovery instruction. The local
-endpoint verifies client behavior, not the historical upstream transformation.
+This does not add notebook pagination, relax loop protection, or change
+compression. Local endpoints verify client behavior, not historical upstream
+normalization or the probability that a real model follows recovery guidance.
