@@ -1848,14 +1848,14 @@ describe('cleanOrphanedFunctionCalls', () => {
 });
 
 describe('convertGeminiToolsToResponsesTools', () => {
-  it('keeps optional tool parameters optional on the Responses wire', () => {
+  it('preserves nullable optional parameters without disabling strict mode', () => {
     const parameters = {
       type: 'object',
       properties: {
         file_path: { type: 'string' },
-        offset: { type: 'integer' },
-        limit: { type: 'integer' },
-        pages: { type: 'string' },
+        offset: { type: ['integer', 'null'] },
+        limit: { type: ['integer', 'null'] },
+        pages: { type: ['string', 'null'] },
       },
       required: ['file_path'],
     };
@@ -1881,7 +1881,6 @@ describe('convertGeminiToolsToResponsesTools', () => {
         type: 'function',
         name: 'read_file',
         description: 'reads a file',
-        strict: false,
         parameters,
       },
     ]);
@@ -1958,7 +1957,6 @@ describe('convertGeminiToolsToResponsesTools', () => {
       {
         type: 'function',
         name: 'read_file',
-        strict: false,
         parameters: {
           type: 'object',
           properties: { path: { type: 'string' } },
@@ -2007,7 +2005,6 @@ describe('convertGeminiToolsToResponsesTools', () => {
         type: 'function',
         name: 'list_files',
         description: 'lists files with no arguments',
-        strict: false,
         parameters: { type: 'object', properties: {} },
       },
     ]);
