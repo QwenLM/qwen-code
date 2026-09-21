@@ -34,22 +34,38 @@ function skillProse(): string {
 }
 
 /**
+ * The frontmatter `description` is a per-request surface as well, and a
+ * separate one from the body: the session-start prelude renders bundled
+ * entries verbatim into the `<available_skills>` block (`environmentContext.ts`
+ * keeps them whole while trimming towards `MAX_SKILL_LISTING_CHARS`). So a kept
+ * rule widened into `description:` — the natural lever, since it is what lets
+ * the model recall the skill — would be charged on every request, and the
+ * body-only negative half below would never see it.
+ */
+function skillFrontmatter(): string {
+  return collapse(loadSkill().description);
+}
+
+/**
  * The Agent tool's description in a session that can load skills — the shape
  * almost every session sends, and the one the moved guidance must be gone
  * from. `skills: false` models a session with no route to any skill, where the
  * reference travels inside the description instead. `skillDeferred: true`
  * models a `tools.eager` allowlist withholding the Skill tool, reachable only
  * through the tool_search + tool_call bridge. `bundledDisabled: true`
- * models a user who turned the reference off, where the description carries
- * neither.
+ * models a user who turned off the whole bundled level, and
+ * `skillDisabledByName: true` one who named this reference in
+ * `skills.disabled`; in either the description carries neither.
  */
 async function agentDescription({
   skills = true,
   bundledDisabled = false,
+  skillDisabledByName = false,
   skillDeferred = false,
 }: {
   skills?: boolean;
   bundledDisabled?: boolean;
+  skillDisabledByName?: boolean;
   skillDeferred?: boolean;
 } = {}): Promise<string> {
   const subagentManager = {
@@ -66,6 +82,18 @@ async function agentDescription({
     // lack of a route, which is the ordering the withheld test below pins.
     ...(bundledDisabled
       ? { getDisabledSkillLevels: () => new Set(['bundled']) }
+      : {}),
+    // The other opt-out lever, `skills.disabled` naming this reference. It
+    // decides on the name it is handed, as the real `Config.isSkillEnabled`
+    // does, and the disabled name is spelled out as the literal a user writes
+    // in `settings.json` rather than read from the exported constant — so a
+    // drift in the name the production code probes turns the by-name case red
+    // instead of quietly leaving the reference in every request.
+    ...(skillDisabledByName
+      ? {
+          isSkillEnabled: (skill: { name: string; level?: string }) =>
+            skill.level === 'bundled' && skill.name !== 'agent-delegation',
+        }
       : {}),
     ...(skills
       ? {
@@ -115,6 +143,9 @@ describe('bundled agent-delegation skill', () => {
     ['Brief the agent like a smart colleague'],
     ["Explain what you're trying to accomplish and why"],
     ["Describe what you've already learned or ruled out"],
+    // The bullet that left the description as a rewrite rather than a copy, so
+    // it is the one a later pass can drop from the skill with nothing noticing.
+    ['Give enough context about the surrounding problem'],
     ['If you need a short response, say so explicitly'],
     ['For lookups, provide the exact target'],
     ['Provide clear, detailed prompts so the agent can work autonomously'],
@@ -142,9 +173,15 @@ describe('bundled agent-delegation skill', () => {
    * must have without loading anything. These decide whether to delegate at
    * all, shape the call itself, or keep a background agent safe — a session
    * that never loads the skill still has to get them right, so they stay in
-   * the description and stay out of the reference.
+   * the description and stay out of the reference, in its body and in the
+   * frontmatter that the session-start listing charges for on every request.
    */
   describe.each([
+    // The block that decides against delegating, and the first item §2 of the
+    // design doc lists as deliberately kept. A general compression pass is the
+    // live pressure — one was reverted under review in #12142 — and nothing
+    // else in the repo asserts this text.
+    ['When NOT to use the Agent tool'],
     ["Don't peek"],
     ["Don't race"],
     ["Don't relaunch"],
@@ -160,6 +197,13 @@ describe('bundled agent-delegation skill', () => {
     });
     it('is not in the skill', () => {
       expect(skillProse()).not.toContain(anchor);
+    });
+    // Not folded into `skillProse()` above: widening that helper would let the
+    // moved-out table's positive half match frontmatter text too, and a rule
+    // duplicated into the listing is charged every turn whether or not the
+    // skill is ever loaded.
+    it('is not in the skill frontmatter either', () => {
+      expect(skillFrontmatter()).not.toContain(anchor);
     });
   });
 
@@ -262,6 +306,35 @@ describe('bundled agent-delegation skill', () => {
       expect(description).not.toContain('## Writing the prompt');
     },
   );
+
+  /**
+   * The other opt-out lever. Turning off the whole `bundled` level reaches
+   * `getDisabledSkillLevels`; naming this reference in `skills.disabled`
+   * reaches `isSkillEnabled`, which is a separate branch of
+   * `resolveBundledReferenceRoute` and the one a user is far likelier to set.
+   * Without this row the by-name branch had no coverage here at all, and a
+   * drift in the name the production code probes would leave the reference in
+   * every request while the user's opt-out silently stopped working. Mirrors
+   * the by-name rows in `workflow-authoring-skill.test.ts`.
+   */
+  it.each([
+    ['a Skill tool is registered', true],
+    ['no route to any skill exists', false],
+  ])('carries nothing when disabled by name and %s', async (_, skills) => {
+    const description = await agentDescription({
+      skills,
+      skillDisabledByName: true,
+    });
+
+    expect(description).not.toContain(
+      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
+    );
+    expect(description).not.toContain(
+      'Skills cannot be loaded in this session',
+    );
+    expect(description).not.toContain('Never delegate understanding');
+    expect(description).not.toContain('## Writing the prompt');
+  });
 
   /**
    * One sentence left the description without arriving here, and this pins it
