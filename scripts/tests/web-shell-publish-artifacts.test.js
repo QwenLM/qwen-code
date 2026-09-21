@@ -59,12 +59,12 @@ function write(fixture, name, contents) {
 // the build emits below `dist/` is on disk yet absent from the tarball.
 const files = ['dist/*.js', 'dist/types'];
 
-function declarePackage(fixture, exports) {
+function declarePackage(fixture, exports, packageFiles = files) {
   write(fixture, 'package.json', {
     name: 'fixture-web-shell',
     version: '0.0.0',
     type: 'module',
-    files,
+    files: packageFiles,
     exports,
   });
 }
@@ -156,6 +156,73 @@ describe('web-shell publish artifact verifier', () => {
     // it against whatever the package happens to contain.
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('missing ./dist/*.js');
+  });
+
+  it('refuses an exports key that carries more than one star', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, {
+        '.': { import: './dist/index.js' },
+        './*/*': './dist/*',
+      });
+      write(fixture, 'dist/index.js', 'export default 1;\n');
+    });
+
+    // Node honours a pattern key only when it carries exactly one `*`; a
+    // two-star key matches nothing at all, so the pair must fall through to
+    // the literal checks and be refused like the base verifier refused it.
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing ./dist/*');
+  });
+
+  it('refuses a multi-star target whose capture cannot match every star', () => {
+    const result = runVerifier((fixture) => {
+      // `files: ['dist']` packs dist/a/b.js, so the refusal cannot be
+      // explained by an unpacked file: Node substitutes the one captured
+      // substring into BOTH stars (`./a` -> `dist/a/a.js`), and only a
+      // back-referencing regex rejects the packed `dist/a/b.js` here.
+      declarePackage(fixture, { './*': './dist/*/*.js' }, ['dist']);
+      write(fixture, 'dist/a/b.js', 'export default 1;\n');
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('matches no file in the npm package');
+  });
+
+  it('accepts a multi-star target when one capture satisfies every star', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, { './*': './dist/*/*.js' }, ['dist']);
+      write(fixture, 'dist/a/a.js', 'export default 1;\n');
+    });
+
+    // Positive control: the same-capture shape Node actually resolves, so the
+    // gate must not be a blanket refusal of multi-star targets.
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('checks a target advertised by both a pattern key and a literal key', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, { './*': './dist/*', './foo': './dist/*' });
+      write(fixture, 'dist/index.js', 'export default 1;\n');
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing ./dist/*');
+  });
+
+  it('keeps the literal checks for a pattern key with a literal target', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, { './*': './dist/entry.js' });
+      write(
+        fixture,
+        'dist/entry.js',
+        'import { chunk } from "./nested/chunk.js";\nexport default chunk;\n',
+      );
+      write(fixture, 'dist/nested/chunk.js', 'export const chunk = 1;\n');
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('not included in the npm package');
   });
 
   it('still fails closed on a wildcard pattern that matches nothing packed', () => {

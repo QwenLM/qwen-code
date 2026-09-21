@@ -42,7 +42,9 @@ const entryPoints = Object.entries(pkg.exports).flatMap(([key, entry]) =>
 const seen = new Set();
 for (const [key, entry] of entryPoints) {
   // `[key, entry]` pairs are fresh arrays, so identity dedup (`new Set` over
-  // the pairs) would never fire; dedupe on the key/target text instead.
+  // the pairs) would never fire. The key is part of the dedup text on
+  // purpose: which branch a pair takes depends on the key, so two keys
+  // sharing one target must both be checked.
   if (seen.has(key + '\0' + entry)) continue;
   seen.add(key + '\0' + entry);
   // A subpath pattern (`"./*": "./dist/*"`) names a family of files, not a
@@ -52,12 +54,22 @@ for (const [key, entry] of entryPoints) {
   // Node gives `*` pattern meaning only when the KEY carries it, so gate on
   // both sides: a `*` target under a literal key is a literal path and keeps
   // the checks below, and a pattern key with a literal target still needs the
-  // relative-import chunk scan the `continue` would skip.
-  if (key.includes('*') && entry.includes('*')) {
+  // relative-import chunk scan the `continue` would skip. Node honours a
+  // pattern key only when it carries exactly one `*`, and substitutes that
+  // one capture into every `*` in the target — so the gate counts stars on
+  // the key, and the regex captures on the first `*` and back-references
+  // that capture for every later `*` instead of matching each star
+  // independently.
+  if (key.split('*').length === 2 && entry.includes('*')) {
     if (packed) {
-      const pattern = packPath(join(root, entry))
-        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-        .replaceAll('*', '.*');
+      const escaped = packPath(join(root, entry)).replace(
+        /[.+?^${}()|[\]\\]/g,
+        '\\$&',
+      );
+      const [first, ...rest] = escaped.split('*');
+      const pattern =
+        first +
+        rest.map((part, i) => (i === 0 ? '(.*)' : '\\1') + part).join('');
       if (![...packed].some((file) => new RegExp(`^${pattern}$`).test(file))) {
         problems.push(`${entry} matches no file in the npm package`);
       }
