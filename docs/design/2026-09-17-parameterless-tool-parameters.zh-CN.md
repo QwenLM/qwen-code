@@ -61,22 +61,32 @@ DashScope 自行组装请求，从其合并步骤调用同一份修复。映射�
 而 `provider/minimax.ts` 明确记录了这一约束。
 
 在请求层而非工具列表层处理，也同时覆盖了工具完全没有 `parameters` 的两种成因：
-声明了空参数列表的工具（被 converter 归约为 `undefined`），
+以 converter 会归约的形式声明空参数列表的工具（被归约为 `undefined`），
 以及完全没有声明 schema 的工具（从未获得 schema）。
 在 converter 侧的修复只能覆盖前者。
 
 第三种形状被原样保留，因为它本就带有该字段：声明为 `{ "type": "object" }`
-且没有 `properties` 键的 schema。converter 只归约两种情形——声明了空
-`properties` 对象的 schema，或 `properties` 缺失且
-`additionalProperties: false` 的 schema——裸对象两者都不满足，因此
-`relaxSchemaForFunctionCalling` 保留它，以 `parameters === undefined`
-为条件的修复也不改动它。开启开关的请求于是对上面那些工具发出空对象 schema，
-对以这一形状上线的工具则发出其自身声明的形状。两种情况字段都在，
-下面的 TabbyAPI 实测记录裸形状为 HTTP 200，所以这是形状不一致，而非请求被拒。
-以空参数列表注册的 MCP 工具并不属于这一豁免：SDK 会把它发布为
-`{ "type": "object", "properties": {} }`，而这一形状会被 converter 归约，
-因此开启开关后它同样被改写。给这些被保留的工具补上 `properties`
-以使所有无参数工具发出同一形状，已记入下方的不在范围内，
+且没有 `properties` 键的 schema。归约的条件比"声明了空参数列表"更窄，
+必须同时满足三项：schema 经 `parametersJsonSchema` 声明而非 Gemini 的
+`parameters`；它声明了空的 `properties` 对象，或 `properties` 缺失且
+`additionalProperties: false`；并且源 schema 的每一个键都在
+`PARAMETERLESS_SCHEMA_KEYS` 白名单所列的关键字之中。裸对象不满足第二项，
+因此 `relaxSchemaForFunctionCalling` 保留它，以 `parameters === undefined`
+为条件的修复也不改动它。携带白名单之外某个键的零参数 schema 不满足第三项：
+`required` 与 `minProperties` 都不在白名单内，因此
+`{ "type": "object", "properties": {}, "required": [] }` 既未被归约也未被修复，
+而放宽步骤在出网前删去了它的空 `properties`，最终上线为
+`{ "type": "object", "required": [] }`。针对 converter 的实测结果为：
+`{ "type": "object", "properties": {} }` 先被归约、随后被修复为空对象 schema；
+`{ "type": "object" }` 原样上线；带 `required: []` 的 schema 上线为
+`{ "type": "object", "required": [] }`。经 Gemini `parameters` 声明的工具
+不满足第一项，因此其 schema 到达修复时本就带有该字段。开启开关的请求于是
+对被归约的工具发出空对象 schema，对每一个被修复步骤原样保留的工具发出其
+自身声明的形状。两种情况字段都在，下面的 TabbyAPI 实测记录裸形状为 HTTP 200，
+所以这是形状不一致，而非请求被拒。以空参数列表注册的 MCP 工具并不属于这一豁免：
+SDK 会把它发布为 `{ "type": "object", "properties": {} }`，
+该形状同时满足三项条件，因此开启开关后它同样被改写。给这些被保留的工具补上
+`properties` 以使所有无参数工具发出同一形状，已记入下方的不在范围内，
 面向用户的文档也以同样方式限定这一承诺。
 
 ### 形状
@@ -112,7 +122,12 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   watcher 按最长前缀把该变更归类到 `modelProviders` 叶节点（它不要求重启），
   监听器随后重载模型注册表并刷新鉴权，从而重建 provider，
   因此该取值作用于下一个请求。`model.generationConfig` 下的修改没有这样的
-  消费者，因此在下一次模型切换或重启后生效。两者都不作用于正在进行的请求，
+  消费者：该块只在 CLI 于启动时通过 `resolveCliGenerationConfig` 构建
+  generation config 时被读取一次，因此该取值在重启后生效。模型切换同样不会
+  重新读取它 —— `syncAfterAuthRefresh` → `applyResolvedModelDefaults` 会用所选
+  provider 条目的 generation config 覆盖每一个 `MODEL_GENERATION_CONFIG_FIELDS`
+  条目 —— 这正是该开关在 provider 托管的路由上应当写在 `modelProviders`
+  下的原因。两者都不作用于正在进行的请求，
   且在 bare 模式（不监听设置文件）下都不会热重载。`qwen-oauth`
   的热更新路径只复制固定的字段集合且不重建 provider，也不是该开关能服务的路由。
 - 该开关按路由生效，不会被其它路由继承。子 agent、fork 或 `baseLlmClient` 目标
@@ -150,6 +165,13 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   因此测试套件区分的是开关，而不是 provider 类。
 - 既有 converter 测试仍然固定默认省略行为，包括
   `expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters')`。
+- 本豁免所推理的三种形状无需实时服务器即可在 converter 处确定：
+  `{ "type": "object", "properties": {} }` 先被归约、随后被修复为空对象 schema；
+  `{ "type": "object" }` 原样上线；
+  `{ "type": "object", "properties": {}, "required": [] }` 上线为
+  `{ "type": "object", "required": [] }`。`converter.test.ts` 中的 `constrained`
+  用例已经固定了带 `minProperties` 的 schema 的白名单条件，
+  因此只有"严格端点是否接受每一种形状"需要下面的实时运行。
 - #11956 已确认的抓包正是一条模型名路由 —— 经网关的 `deepseek-v4.1-flash`，
   `400 litellm.BadRequestError: ... tools[5].function: missing field parameters` ——
   正是过去被遮蔽的那一支。回环 baseUrl 上使用 `deepseek` 模型 id 的单元测试用例
@@ -160,9 +182,10 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   `{ "type": "object" }` → HTTP 200；线上采用的
   `{ "type": "object", "properties": {} }` → HTTP 200。CLI 在该路由上默认失败为
   `422 status code (no body)`，在对应的 `modelProviders` 条目上设置该键后可正常完成。
-  运行记录：`.qwen/e2e-tests/2026-09-19-tool-parameters-shape-ab.md`。
-  2026-09-17 在同一路由上的较早运行以裸形状记录到 HTTP 200，见
-  `.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`。
+  2026-09-17 在同一路由上的较早运行记录了省略该字段时的 HTTP 422 与裸形状的
+  HTTP 200，并额外记录：在存在匹配 provider 条目的路由上，写在
+  `model.generationConfig` 下的键会被报告为忽略，请求仍为 422 ——
+  与本文在"限制与风险"下记录的同一分支。
 - 属于他人报告、并非本机实测：另有两个严格 Rust/serde 网关
   （`api-inference.modelscope.cn`、`apihub.agnes-ai.com`）的评论称带 `properties`
   的形状作为本地补丁被接受。这些报告都早于本次形状改动，

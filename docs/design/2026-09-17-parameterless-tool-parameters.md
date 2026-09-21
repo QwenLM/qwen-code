@@ -69,26 +69,39 @@ explicitly.
 
 Acting on the request rather than the tool list also covers the two ways a tool
 can end up with no `parameters` at all: one that declares an empty argument
-list, which the converter reduces to `undefined`, and one that declares no
+list in a form the converter reduces to `undefined`, and one that declares no
 schema at all, which never receives a schema. A converter-side fix only reaches
 the first.
 
 A third shape is left alone because it already carries the field: a schema
-declared as `{ "type": "object" }` with no `properties` key. The converter
-reduces only a schema that declares an empty `properties` object, or one whose
-`properties` is absent together with `additionalProperties: false`, so a bare
-object meets neither condition, `relaxSchemaForFunctionCalling` leaves it
-intact, and the repair — which keys on `parameters === undefined` — leaves it
-untouched. An opted-in request therefore carries the empty-object schema for the
-tools above and the declared shape for a tool that publishes this one. The field
-is present either way, and the TabbyAPI run below records HTTP 200 for the bare
-shape, so this is a shape split rather than a rejected request. An MCP tool
-registered with an empty argument list is not an instance of this carve-out: the
-SDK publishes it as `{ "type": "object", "properties": {} }`, which the converter
-does reduce, so the opt-in rewrites it. Filling `properties` on the tools the
-repair leaves alone, so that every parameterless tool ships one shape, is
-recorded under Not in scope; the user-facing documents qualify the promise the
-same way.
+declared as `{ "type": "object" }` with no `properties` key. The reduction is
+narrower than "declares an empty argument list". It fires only when all three
+conditions hold: the schema is declared through `parametersJsonSchema` rather
+than Gemini `parameters`; it declares an empty `properties` object, or
+`properties` is absent together with `additionalProperties: false`; and every key
+of the source schema is one of the keywords whitelisted by
+`PARAMETERLESS_SCHEMA_KEYS`. A bare object fails the second condition, so
+`relaxSchemaForFunctionCalling` leaves it intact and the repair — which keys on
+`parameters === undefined` — leaves it untouched. A zero-argument schema that
+carries a key outside that whitelist fails the third: `required` and
+`minProperties` are not whitelisted, so
+`{ "type": "object", "properties": {}, "required": [] }` is neither reduced nor
+repaired, and the relax step strips its empty `properties` on the way out,
+shipping `{ "type": "object", "required": [] }`. Measured against the converter:
+`{ "type": "object", "properties": {} }` reduces and is then repaired to the
+empty-object schema, `{ "type": "object" }` ships unchanged, and the
+`required: []` schema ships `{ "type": "object", "required": [] }`. A tool
+declared through Gemini `parameters` fails the first condition, so its schema
+always reaches the repair already carrying the field. An opted-in request
+therefore carries the empty-object schema for a reduced tool and the declared
+shape for every tool the repair leaves alone. The field is present either way,
+and the TabbyAPI run below records HTTP 200 for the bare shape, so this is a
+shape split rather than a rejected request. An MCP tool registered with an empty
+argument list is not an instance of this carve-out: the SDK publishes it as
+`{ "type": "object", "properties": {} }`, which meets all three conditions, so
+the opt-in rewrites it. Filling `properties` on the tools the repair leaves
+alone, so that every parameterless tool ships one shape, is recorded under Not in
+scope; the user-facing documents qualify the promise the same way.
 
 ### Shape
 
@@ -127,7 +140,13 @@ hostname-gated, so it applies wherever the user opted in.
   prefix of the changed path, which does not require a restart — and the listener
   reloads the model registry and refreshes the auth, which rebuilds the provider,
   so the value applies to the next request. An edit under `model.generationConfig`
-  has no such consumer, so it applies on the next model switch or restart.
+  has no such consumer: that block is read into the generation config once, when
+  the CLI builds it at startup through `resolveCliGenerationConfig`, so the value
+  applies on restart. A model switch does not re-read it either —
+  `syncAfterAuthRefresh` → `applyResolvedModelDefaults` overwrites every
+  `MODEL_GENERATION_CONFIG_FIELDS` entry with the generation config of the
+  selected provider entry — which is why the setting belongs under
+  `modelProviders` for a provider-backed route.
   Neither reaches a request already in flight, and neither is hot-reloaded in
   bare mode, where settings are not watched. The `qwen-oauth` hot-update path
   copies a fixed field set without rebuilding the provider, and is not a route
@@ -140,9 +159,9 @@ hostname-gated, so it applies wherever the user opted in.
 - The field is added, never removed. A route whose server rejects a present
   `parameters` object stays out of the opt-in and is unaffected.
 - The injected `properties` object is added after conversion, so it survives the
-  step where `relaxSchemaForFunctionCalling` strips an empty `properties` from
-  every converted schema. A server that rejects an empty `properties` object
-  must not opt in.
+  step where `relaxSchemaForFunctionCalling` strips an empty `properties` from a
+  schema whose source validated locally. A server that rejects an empty
+  `properties` object must not opt in.
 - Reading `parameters === undefined` tests the value, not key presence: the
   converter emits the key with an `undefined` value, and a key-presence test
   would skip every tool that needs the repair.
@@ -174,6 +193,14 @@ hostname-gated, so it applies wherever the user opted in.
   rather than on the provider class.
 - Existing converter tests still pin the default omission, including
   `expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters')`.
+- The three shapes this carve-out reasons about are settled at the converter
+  without a live server: `{ "type": "object", "properties": {} }` is reduced and
+  then repaired to the empty-object schema, `{ "type": "object" }` ships
+  unchanged, and `{ "type": "object", "properties": {}, "required": [] }` ships
+  `{ "type": "object", "required": [] }`. The `constrained` case in
+  `converter.test.ts` already pins the whitelist conjunct for a
+  `minProperties`-bearing schema, so only whether a strict endpoint accepts each
+  shape needs the live run below.
 - #11956's confirmed capture is a model-name route — `deepseek-v4.1-flash`
   through a gateway, `400 litellm.BadRequestError: ... tools[5].function:
 missing field parameters` — which is the arm that used to be shadowed. The unit
@@ -185,10 +212,11 @@ missing field parameters` — which is the arm that used to be shadowed. The uni
 "msg":"Field required"}`, `{ "type": "object" }` → HTTP 200, and the shipped
   `{ "type": "object", "properties": {} }` → HTTP 200. The CLI on that route
   fails with `422 status code (no body)` by default and completes normally once
-  the key is set on the matching `modelProviders` entry. Run record:
-  `.qwen/e2e-tests/2026-09-19-tool-parameters-shape-ab.md`. The earlier 2026-09-17
-  run on the same route recorded HTTP 200 with the bare shape and is
-  `.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`.
+  the key is set on the matching `modelProviders` entry. An earlier run on the
+  same route, 2026-09-17, recorded HTTP 422 with the field omitted and HTTP 200
+  with the bare shape, and added that a key set under `model.generationConfig` is
+  reported as ignored for a route that has a matching provider entry, leaving the
+  request at 422 — the same split this document records under Limits and risks.
 - Reported, not measured here: comments on two other strict Rust/serde gateways
   (`api-inference.modelscope.cn`, `apihub.agnes-ai.com`) say the
   properties-bearing shape was accepted there as a local patch. Every one of
