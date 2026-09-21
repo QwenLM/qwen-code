@@ -73,7 +73,10 @@ selection uses persisted folder-trust settings; workspace ownership and trust
 are checked again before workers start. The workspace that listed a name breaks
 an otherwise ambiguous ownership tie, and a name contributed by a non-primary
 workspace is dropped with a log rather than failing the whole restore. `all`
-stays primary-only and is reported when configured elsewhere. Without an explicit or persisted
+stays primary-only and is reported when configured elsewhere. A workspace
+registered after boot restores its own names through the same path; a channel
+this daemon stopped on purpose, and every channel after a daemon-wide stop, is
+excluded until the next boot reads the settings again. Without an explicit or persisted
 selection, the daemon does not reserve the channel service or load the heavy
 channel runtime until the first runtime mutation.
 

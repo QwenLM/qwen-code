@@ -14962,6 +14962,161 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  function makeLateRegistrationDaemon() {
+    const primary = path.join(tmpDir!, 'primary');
+    const secondary = path.join(tmpDir!, 'secondary');
+    fs.mkdirSync(primary, { recursive: true });
+    writeWorkspaceSettings(secondary, {
+      channels: { feishu: { type: 'feishu' } },
+      serve: { channels: ['feishu'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeById: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const { factory } = makePerWorkspaceWorkerFactory();
+    return {
+      primary,
+      secondary,
+      factory,
+      headers: {
+        Authorization: 'Bearer secret',
+        'Content-Type': 'application/json',
+      },
+      start: () =>
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: primary,
+            token: 'secret',
+            serveWebShell: false,
+          },
+          {
+            preheatBridge: false,
+            daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+            channelWorkerSupervisorFactory: factory,
+            channelServicePidfile: makePidfileDeps(),
+            workspaceRegistrationStore: store,
+          },
+        ),
+    };
+  }
+
+  it("restores a workspace's own serve.channels when it registers after boot", async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-register-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      expect(daemon.factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: canonicalizeWorkspace(daemon.secondary),
+          selection: { mode: 'names', names: ['feishu'] },
+        }),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves a late workspace alone after channel hosting was stopped', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-stopped-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const stopped = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(stopped.status).toBe(200);
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      expect(daemon.factory).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not revive a channel the operator stopped when its workspace returns', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-revive-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      const workspaceId = ((await added.json()) as { id: string }).id;
+      expect(daemon.factory).toHaveBeenCalledTimes(1);
+
+      const stopped = await fetch(
+        `${handle.url}/workspaces/${workspaceId}/channels/feishu/stop`,
+        { method: 'POST', headers: daemon.headers },
+      );
+      expect(stopped.status).toBe(200);
+
+      const removed = await fetch(`${handle.url}/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(removed.status).toBe(200);
+
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(readded.status).toBe(201);
+      expect(daemon.factory).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('keeps explicit channel selection ahead of workspace startup channels', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-explicit-')),

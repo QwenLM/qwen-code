@@ -828,8 +828,13 @@ workspace that listed a name breaking an otherwise ambiguous ownership tie. A
 name a non-primary workspace contributed is dropped, with a log identifying it,
 when it cannot be resolved, so one workspace's stale entry does not strand the
 others; the primary workspace's own names still fail the restore as a whole.
-`all` remains primary-only: it is ignored, and reported, anywhere else. With no
-explicit or configured selection, channel runtime loading stays lazy.
+`all` remains primary-only: it is ignored, and reported, anywhere else. A
+workspace registered after boot restores its own `serve.channels` through the
+same path, loading the channel runtime if nothing else has; a channel stopped
+through `POST /workspaces/:workspace/channels/:name/stop`, and every channel
+once `DELETE /workspace/channel` has stopped hosting, is left alone until the
+daemon restarts. With no explicit or configured selection, channel runtime
+loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are

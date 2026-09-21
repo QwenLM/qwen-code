@@ -4068,6 +4068,15 @@ async function runQwenServeImpl(
   // stranding the other workspaces. Empty for an explicit `--channel`
   // selection and for every runtime change, both of which stay fail-fast.
   let channelStartupTolerantNames: ReadonlySet<string> = new Set();
+  // Channels an operator explicitly stopped in this process, and whether they
+  // stopped channel hosting outright. A workspace registered after boot
+  // restores its own `serve.channels`, and neither decision may be undone by
+  // that restore. Both are per-process: the next boot reads the settings
+  // again, which is exactly what the setting means.
+  const channelsStoppedByOperator = new Set<string>();
+  let channelHostingStoppedByOperator = false;
+  const operatorStopKey = (workspaceCwd: string, name: string) =>
+    `${workspaceCwd}\u0000${name}`;
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       redactLogCredentials(
@@ -4112,6 +4121,32 @@ async function runQwenServeImpl(
     workspaceCwd: workspace.cwd,
     primary: index === 0,
   }));
+  const loadStartupChannelsFor = (workspaceCwd: string): unknown =>
+    (workspaceCwd === boundWorkspace
+      ? bootSettings
+      : (deps.loadWorkspaceBootSettings ?? loadServeFastPathSettings)(
+          workspaceCwd,
+        )
+    )?.serve?.channels;
+  /**
+   * One workspace's own startup channels, for a workspace that registered
+   * after boot. It is never the primary workspace, so its names carry the
+   * same attribution a secondary workspace's names carry at boot.
+   */
+  const startupChannelsForWorkspace = (workspaceCwd: string) => {
+    const restored = resolveStartupChannelSelection({
+      workspaces: [{ workspaceCwd, primary: false }],
+      loadStartupChannels: loadStartupChannelsFor,
+    });
+    for (const diagnostic of restored.diagnostics) {
+      reportStartupChannelDiagnostic(diagnostic);
+    }
+    return {
+      names:
+        restored.selection?.mode === 'names' ? restored.selection.names : [],
+      ownerHints: restored.ownerHints,
+    };
+  };
   if (
     !opts.channelSelection &&
     (bootSettings?.serve?.channels !== undefined ||
@@ -4124,13 +4159,7 @@ async function runQwenServeImpl(
         // registered workspace is read here, through the same loader, so a
         // secondary workspace contributes exactly what it would contribute if
         // it were the one the daemon bound to.
-        loadStartupChannels: (workspaceCwd) =>
-          (workspaceCwd === boundWorkspace
-            ? bootSettings
-            : (deps.loadWorkspaceBootSettings ?? loadServeFastPathSettings)(
-                workspaceCwd,
-              )
-          )?.serve?.channels,
+        loadStartupChannels: loadStartupChannelsFor,
       });
       for (const diagnostic of restored.diagnostics) {
         reportStartupChannelDiagnostic(diagnostic);
@@ -4654,6 +4683,7 @@ async function runQwenServeImpl(
       await manager.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
+    channelHostingStoppedByOperator = false;
     return manager.setSelection(selection);
   };
   const stopChannelWorker = async (): Promise<ChannelWorkerStopResult> => {
@@ -4664,6 +4694,7 @@ async function runQwenServeImpl(
       await manager?.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
+    channelHostingStoppedByOperator = true;
     if (!manager) {
       return { changed: false, state: getChannelWorkerControl() };
     }
@@ -7465,14 +7496,57 @@ async function runQwenServeImpl(
         );
         channelWebhookConfigVersion += 1;
         refreshChannelWebhookConfigs?.();
-        if (!channelWorkerManager) return;
+        // A workspace that registers after boot restores its own
+        // `serve.channels` the way a workspace present at boot does, minus
+        // anything the operator has since stopped on purpose.
+        const startup =
+          runtimeAdded.trusted && !channelHostingStoppedByOperator
+            ? startupChannelsForWorkspace(runtimeAdded.workspaceCwd)
+            : undefined;
+        const committed = channelWorkerManager?.committedChannelNames() ?? [];
+        const pending = (startup?.names ?? []).filter(
+          (name) =>
+            !committed.includes(name) &&
+            !channelsStoppedByOperator.has(
+              operatorStopKey(runtimeAdded.workspaceCwd, name),
+            ),
+        );
+        if (!channelWorkerManager && pending.length === 0) return;
         try {
-          if (runtimeAdded.trusted) {
-            await channelWorkerManager.restoreWorkspace(
-              runtimeAdded.workspaceCwd,
-            );
+          if (channelWorkerManager) {
+            if (runtimeAdded.trusted) {
+              await channelWorkerManager.restoreWorkspace(
+                runtimeAdded.workspaceCwd,
+              );
+            }
+            await channelWorkerManager.refreshWorkspaces();
           }
-          await channelWorkerManager.refreshWorkspaces();
+          if (pending.length > 0 && startup) {
+            // Seed ownership before asking for the channel: a definition this
+            // workspace shares with another one is otherwise ambiguous, and
+            // only the workspace that listed it can settle that.
+            channelOwnerHints = new Map([
+              ...channelOwnerHints,
+              ...startup.ownerHints,
+            ]);
+            const manager =
+              channelWorkerManager ?? (await ensureChannelWorkerManager?.());
+            if (manager) {
+              daemonLog.info(
+                'restoring serve.channels for a workspace registered after boot',
+                {
+                  workspaceCwd: runtimeAdded.workspaceCwd,
+                  channels: pending,
+                },
+              );
+              for (const name of pending) {
+                await manager.setChannelEnabled(
+                  { name, workspaceCwd: runtimeAdded.workspaceCwd },
+                  true,
+                );
+              }
+            }
+          }
         } catch (err) {
           daemonLog.error(
             'workspace channel worker startup error',
@@ -7777,6 +7851,15 @@ async function runQwenServeImpl(
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
           manager: await ensureChannelWorkerManager(),
+          onRuntimeIntent: (name, enabled) => {
+            const key = operatorStopKey(targetRuntime.workspaceCwd, name);
+            if (!enabled) {
+              channelsStoppedByOperator.add(key);
+              return;
+            }
+            channelsStoppedByOperator.delete(key);
+            channelHostingStoppedByOperator = false;
+          },
         });
       })();
       channelManagementServices.set(targetRuntime, pending);
