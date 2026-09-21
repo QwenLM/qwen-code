@@ -137,7 +137,7 @@ export function AddWorkspaceDialog({
   // response (older sequence number) never overwrites a newer one.
   useEffect(() => {
     if (!onSuggest) return undefined;
-    if (!isAbsoluteLike(path) || path.startsWith('ssh://')) {
+    if (!isAbsoluteLike(path) || path.trim().startsWith('ssh://')) {
       ++suggestSeqRef.current;
       setSuggestions([]);
       setSuggestionsLoaded(false);
@@ -570,11 +570,9 @@ export function AddWorkspaceDialog({
                 </div>
               )}
             </div>
-            {!browseDirectories && (
-              <FieldDescription id={HINT_ID}>
-                {t('sidebar.addWorkspaceHint')}
-              </FieldDescription>
-            )}
+            <FieldDescription id={browseDirectories ? undefined : HINT_ID}>
+              {t('sidebar.addWorkspaceHint')}
+            </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
           {displayNameEnabled && (

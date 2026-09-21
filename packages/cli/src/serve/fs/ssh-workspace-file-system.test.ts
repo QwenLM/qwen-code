@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { request, dispose } = vi.hoisted(() => ({
   request: vi.fn(),
@@ -55,7 +56,7 @@ describe('SSH workspace filesystem boundary', () => {
       '/local/anchor/src/a.ts',
     ]) {
       const p = await fs.resolve(input, 'read');
-      expect(p).toBe('/local/anchor/src/a.ts');
+      expect(p).toBe(path.join('/local/anchor', 'src', 'a.ts'));
       expect((await fs.readText(p)).content).toBe('remote\n');
       expect(request).toHaveBeenLastCalledWith(
         'read',
@@ -79,7 +80,7 @@ describe('SSH workspace filesystem boundary', () => {
     await expect(setup().resolve('/etc/passwd', 'read')).rejects.toMatchObject({
       kind: 'path_outside_workspace',
     });
-    await expect(setup(false).resolve('a', 'read')).rejects.toMatchObject({
+    await expect(setup(false).resolve('a', 'write')).rejects.toMatchObject({
       kind: 'untrusted_workspace',
     });
     await expect(
@@ -108,7 +109,7 @@ describe('SSH workspace filesystem boundary', () => {
         hash: 'sha256:whole',
         truncated: true,
         hasMore: true,
-        originalLineCount: 3,
+        originalLineCount: 2,
       },
     });
     request.mockResolvedValue({
@@ -279,5 +280,134 @@ describe('SSH workspace filesystem boundary', () => {
       kind: 'io_error',
     });
     expect(request).toHaveBeenCalledTimes(3);
+  });
+  it('permits all read intents while preserving the write trust gate', async () => {
+    const fs = setup(false);
+    for (const intent of ['read', 'list', 'glob', 'stat'] as const) {
+      expect(await fs.resolve('a', intent)).toBe(
+        path.join('/local/anchor', 'a'),
+      );
+    }
+    const p = await fs.resolve('a', 'read');
+    request.mockResolvedValueOnce({
+      content: 'text',
+      sizeBytes: 4,
+      hash: 'sha256:read',
+    });
+    expect((await fs.readText(p)).content).toBe('text');
+    request.mockResolvedValueOnce({ kind: 'file', sizeBytes: 4 });
+    expect(await fs.stat(p)).toMatchObject({ kind: 'file' });
+    request.mockResolvedValueOnce([]);
+    expect(await fs.list(p)).toEqual([]);
+    request.mockResolvedValueOnce({ paths: [] });
+    expect(await fs.glob('*')).toEqual([]);
+    await expect(
+      fs.writeTextAtomic(p, 'bad', { mode: 'create' }),
+    ).rejects.toMatchObject({ kind: 'untrusted_workspace' });
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'fs.denied',
+        data: expect.objectContaining({ errorKind: 'untrusted_workspace' }),
+      }),
+    );
+  });
+
+  it.each([
+    ['unsupported_encoding', 422],
+    ['not_file', 422],
+    ['not_directory', 422],
+    ['unsupported_pattern', 400],
+    ['invalid_argument', 400],
+    ['too_large', 413],
+  ] as const)(
+    'maps deterministic remote failure %s to %s',
+    async (code, status) => {
+      const fs = setup();
+      const p = await fs.resolve('a', 'read');
+      request.mockRejectedValueOnce(new SshWorkspaceError(code, code));
+      await expect(fs.stat(p)).rejects.toMatchObject({ status });
+    },
+  );
+
+  it('does not count a trailing newline as another readable line', async () => {
+    const fs = setup();
+    const p = await fs.resolve('a', 'read');
+    request.mockResolvedValue({
+      content: 'one\n',
+      sizeBytes: 4,
+      hash: 'sha256:read',
+    });
+    expect(await fs.readText(p, { limit: 1 })).toMatchObject({
+      meta: { originalLineCount: 1, hasMore: false },
+    });
+    expect((await fs.readText(p)).content).toBe('one\n');
+  });
+
+  it('uses first-match semantics for a hashless edit while atomic edits require uniqueness', async () => {
+    const fs = setup();
+    const p = await fs.resolve('a', 'edit');
+    request
+      .mockResolvedValueOnce({
+        content: 'one one',
+        sizeBytes: 7,
+        hash: 'sha256:read',
+      })
+      .mockResolvedValueOnce({
+        created: false,
+        sizeBytes: 7,
+        hash: 'sha256:write',
+      });
+    await fs.edit(p, 'one', 'two');
+    expect(request).toHaveBeenLastCalledWith(
+      'write',
+      expect.objectContaining({
+        content: 'two one',
+        expectedHash: 'sha256:read',
+      }),
+      expect.any(AbortSignal),
+    );
+    request.mockResolvedValueOnce({
+      content: 'one one',
+      sizeBytes: 7,
+      hash: 'sha256:read',
+    });
+    await expect(
+      fs.editAtomic(p, 'one', 'two', { expectedHash: 'sha256:read' }),
+    ).rejects.toMatchObject({ kind: 'ambiguous_text_match' });
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects oversized uploads before encoding or contacting SSH', async () => {
+    const fs = setup();
+    const p = await fs.resolve('a', 'write');
+    await expect(
+      fs.writeBytesAtomic(p, Buffer.alloc(16 * 1024 * 1024 + 1)),
+    ).rejects.toMatchObject({ status: 413, kind: 'file_too_large' });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('preserves remote glob incompleteness below the requested result cap', async () => {
+    request.mockResolvedValueOnce({
+      paths: ['/srv/project/visible.txt'],
+      truncated: true,
+    });
+    const matches = await setup().glob('*.txt', { maxResults: 10 });
+    expect([...matches]).toEqual([path.join('/local/anchor', 'visible.txt')]);
+    expect(matches).toHaveProperty('truncated', true);
+  });
+
+  it('rejects a result if its runtime generation closes while SSH is active', async () => {
+    let open = true;
+    const fs = setup(true, () => {
+      if (!open) throw new Error('closed');
+    });
+    const p = await fs.resolve('a', 'read');
+    request.mockImplementationOnce(async () => {
+      open = false;
+      return { content: 'stale', sizeBytes: 5, hash: 'sha256:stale' };
+    });
+    await expect(fs.readText(p)).rejects.toThrow('closed');
+    expect(dispose).toHaveBeenCalledOnce();
   });
 });

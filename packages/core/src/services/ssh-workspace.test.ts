@@ -82,7 +82,15 @@ describe('SSH workspace addresses and command construction', () => {
     expect(command.args).toContain('-tt');
     expect(command.args).toContain('BatchMode=yes');
     expect(command.args).toContain('StrictHostKeyChecking=yes');
-    expect(command.args).toContain('ConnectionAttempts=1');
+    for (const option of [
+      'ConnectionAttempts=1',
+      'ConnectTimeout=10',
+      'ServerAliveInterval=15',
+      'ServerAliveCountMax=3',
+      'ForwardAgent=no',
+      'ClearAllForwardings=yes',
+    ])
+      expect(command.args).toContain(option);
     expect(command.args.slice(-5)).toEqual([
       '-p',
       '2222',
@@ -153,7 +161,15 @@ describe('SSH workspace transport', () => {
       directory: '/work/sub',
       onOutput,
     });
-    finish('output', 7, 'error');
+    finish(
+      [
+        { stream: 'stdout', data: Buffer.from('output').toString('base64') },
+        { stream: 'stderr', data: Buffer.from('error').toString('base64') },
+        { ok: true, result: { exitCode: 7 } },
+      ]
+        .map((frame) => JSON.stringify(frame) + '\n')
+        .join(''),
+    );
     await expect(shell).resolves.toEqual({
       stdout: 'output',
       stderr: 'error',
@@ -211,5 +227,109 @@ describe('SSH workspace transport', () => {
       code: 'cancelled',
     });
     expect(mocks.spawn).toHaveBeenCalledTimes(2);
+  });
+  it('distinguishes a completed exit 255 from a disconnected SSH transport', async () => {
+    const pending = client.execute('exit 255');
+    finish(JSON.stringify({ ok: true, result: { exitCode: 255 } }) + '\n');
+    await expect(pending).resolves.toEqual({
+      stdout: '',
+      stderr: '',
+      exitCode: 255,
+    });
+  });
+
+  it('reports a remote pre-execution error without presenting it as command output', async () => {
+    const pending = client.execute('pwd', { directory: '/work/missing' });
+    expect(JSON.parse(child.stdin.read().toString()).params.path).toBe(
+      '/work/missing',
+    );
+    finish(
+      JSON.stringify({
+        ok: false,
+        error: { code: 'path_not_found', message: 'Missing directory' },
+      }) + '\n',
+    );
+    await expect(pending).rejects.toMatchObject({ code: 'path_not_found' });
+  });
+
+  it('preserves UTF-8 split between framed output records and transport chunks', async () => {
+    const pending = client.execute('printf 你好');
+    const bytes = Buffer.from('你好');
+    const wire = [
+      { stream: 'stdout', data: bytes.subarray(0, 1).toString('base64') },
+      { stream: 'stdout', data: bytes.subarray(1).toString('base64') },
+      { ok: true, result: { exitCode: 0 } },
+    ]
+      .map((frame) => JSON.stringify(frame) + '\n')
+      .join('');
+    child.stdout.write(wire.slice(0, 11));
+    finish(wire.slice(11));
+    await expect(pending).resolves.toMatchObject({
+      stdout: '你好',
+      exitCode: 0,
+    });
+  });
+
+  it('retains the SSH diagnostic after an early stdin EPIPE', async () => {
+    const pending = client.execute('pwd');
+    child.stdin.emit(
+      'error',
+      Object.assign(new Error('EPIPE'), { code: 'EPIPE' }),
+    );
+    finish('', 255, 'Host key verification failed.');
+    await expect(pending).rejects.toMatchObject({
+      message: expect.stringContaining('Host key verification failed'),
+    });
+  });
+
+  it('allows a disabled command deadline while retaining cancellation', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const pending = client
+      .execute('sleep 100', { timeoutMs: 0, signal: controller.signal })
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(child.kill).not.toHaveBeenCalled();
+    controller.abort();
+    expect(await pending).toMatchObject({ code: 'cancelled' });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'kills the detached SSH process group on cancellation',
+    async () => {
+      Object.assign(child, { pid: 12345 });
+      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+      try {
+        const controller = new AbortController();
+        const pending = client
+          .execute('sleep 100', { signal: controller.signal })
+          .catch((error: unknown) => error);
+        expect(mocks.spawn).toHaveBeenLastCalledWith(
+          'ssh',
+          expect.any(Array),
+          expect.objectContaining({ detached: true }),
+        );
+        controller.abort();
+        expect(await pending).toMatchObject({ code: 'cancelled' });
+        expect(kill).toHaveBeenCalledWith(-12345, 'SIGKILL');
+        expect(child.kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+      }
+    },
+  );
+
+  it('rejects oversized requests before spawning SSH', async () => {
+    await expect(
+      client.request('write', { content: 'x'.repeat(32 * 1024 * 1024) }),
+    ).rejects.toMatchObject({ code: 'too_large' });
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it('rejects timeouts that would overflow the Node timer before starting SSH', async () => {
+    await expect(
+      client.execute('pwd', { timeoutMs: 2_147_483_648 }),
+    ).rejects.toMatchObject({ code: 'invalid_argument' });
+    expect(mocks.spawn).not.toHaveBeenCalled();
   });
 });

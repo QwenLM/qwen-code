@@ -2724,7 +2724,12 @@ export async function loadCliConfig(
     configParams.executionEnvironment = new SshExecutionEnvironment(
       sshWorkspace,
       cwd,
+      {
+        outputThreshold: configParams.truncateToolOutputThreshold,
+        shellDefaultTimeoutMs: configParams.shellDefaultTimeoutMs,
+      },
     );
+    configParams.codeModeOnly = false;
     configParams.disableAllHooks = true;
     configParams.mcpServers = {};
     configParams.overrideExtensions = [];
@@ -2738,7 +2743,7 @@ export async function loadCliConfig(
     configParams.artifactEnabled = false;
     configParams.appendSystemPrompt = [
       argv.appendSystemPrompt,
-      `This is an SSH workspace on ${sshWorkspace.host}. The project directory is ${sshWorkspace.directory}. All file, search and shell tools operate on that remote project. The local directory ${cwd} is only for session storage; it is not the project. Use remote absolute paths or paths relative to the remote project. Read QWEN.md and AGENTS.md at the remote project root before working if they exist. Remote hooks, MCP, LSP, subagents, workflows and worktree management are unavailable in this session.`,
+      `This is an SSH workspace on ${sshWorkspace.host}. The project directory is ${sshWorkspace.directory}. All file, search and shell tools operate on that remote project. The local directory ${cwd} is only for session storage; it is not the project. Use remote absolute paths or paths relative to the remote project. Read QWEN.md and AGENTS.md at the remote project root before working if they exist. Remote hooks, skills, MCP, LSP, subagents, workflows and worktree management are unavailable in this session.`,
     ]
       .filter(Boolean)
       .join('\n\n');

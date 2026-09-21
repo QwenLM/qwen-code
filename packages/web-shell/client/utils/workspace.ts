@@ -20,13 +20,19 @@ export function workspaceBasename(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
+export function sshWorkspaceLabel(
+  ssh: NonNullable<DaemonWorkspaceCapability['ssh']>,
+): string {
+  return `${ssh.host}${ssh.port === undefined ? '' : `:${ssh.port}`}:${ssh.directory}`;
+}
+
 export function workspaceLabel(
   workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>,
 ): string {
   return (
     workspace.displayName?.trim() ||
     (workspace.ssh
-      ? `${workspace.ssh.host}:${workspace.ssh.directory}`
+      ? sshWorkspaceLabel(workspace.ssh)
       : workspaceBasename(workspace.cwd))
   );
 }

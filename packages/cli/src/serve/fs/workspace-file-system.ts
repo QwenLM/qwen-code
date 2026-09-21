@@ -294,7 +294,10 @@ export interface WorkspaceFileSystem {
     opts?: ReadBytesOptions,
   ): Promise<ReadBytesOutcome>;
   list(p: ResolvedPath, opts?: ListOptions): Promise<FsEntry[]>;
-  glob(pattern: string, opts?: GlobOptions): Promise<ResolvedPath[]>;
+  glob(
+    pattern: string,
+    opts?: GlobOptions,
+  ): Promise<ResolvedPath[] & { truncated?: boolean }>;
   writeTextAtomic(
     p: ResolvedPath,
     content: string,

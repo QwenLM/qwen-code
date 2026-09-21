@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { isIP } from 'node:net';
 import { posix } from 'node:path';
 import { SSH_WORKSPACE_SCRIPT } from './ssh-workspace-script.js';
@@ -277,11 +278,15 @@ export class SshWorkspaceClient {
       );
     }
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    if (
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 0 ||
+      timeoutMs > 2_147_483_647
+    ) {
       return Promise.reject(
         new SshWorkspaceError(
           'invalid_argument',
-          'SSH timeout must be a positive integer.',
+          'SSH timeout must be an integer between 0 and 2147483647 milliseconds.',
         ),
       );
     }
@@ -312,6 +317,14 @@ export class SshWorkspaceClient {
       let size = 0;
       let stdout = '';
       let stderr = '';
+      let frames = '';
+      let remoteExitCode: number | undefined;
+      let remoteError: { code: string; message: string } | undefined;
+      let sendError: Error | undefined;
+      const decoders = {
+        stdout: new StringDecoder('utf8'),
+        stderr: new StringDecoder('utf8'),
+      };
       const cleanup = () => {
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', cancel);
@@ -335,12 +348,20 @@ export class SshWorkspaceClient {
         reject(new SshWorkspaceError(code, `${message} ${UNCERTAIN_STATUS}`));
       };
       const cancel = () => fail('cancelled', 'SSH request was cancelled.');
-      const timer = setTimeout(
-        () => fail('timeout', 'SSH request timed out.'),
-        timeoutMs,
-      );
+      const timer =
+        timeoutMs === 0
+          ? undefined
+          : setTimeout(
+              () => fail('timeout', 'SSH request timed out.'),
+              timeoutMs,
+            );
       this.pending.add(cancel);
       options.signal?.addEventListener('abort', cancel, { once: true });
+      const append = (chunk: string, stream: 'stdout' | 'stderr') => {
+        if (stream === 'stdout') stdout += chunk;
+        else stderr += chunk;
+        options.onOutput?.(chunk);
+      };
       const receive = (chunk: string, stream: 'stdout' | 'stderr') => {
         if (settled) return;
         size += Buffer.byteLength(chunk);
@@ -348,12 +369,52 @@ export class SshWorkspaceClient {
           fail('output_limit', 'SSH output exceeded the 32 MiB limit.');
           return;
         }
-        if (stream === 'stdout') stdout += chunk;
-        else stderr += chunk;
         try {
-          options.onOutput?.(chunk);
+          if (operation !== 'execute' || stream === 'stderr') {
+            append(chunk, stream);
+            return;
+          }
+          frames += chunk;
+          let end: number;
+          while ((end = frames.indexOf('\n')) !== -1) {
+            const frame = JSON.parse(frames.slice(0, end)) as {
+              stream?: 'stdout' | 'stderr';
+              data?: string;
+              ok?: boolean;
+              result?: { exitCode?: number };
+              error?: { code: string; message: string };
+            };
+            frames = frames.slice(end + 1);
+            if (remoteExitCode !== undefined || remoteError)
+              throw new Error('Unexpected trailing frame.');
+            if (
+              (frame.stream === 'stdout' || frame.stream === 'stderr') &&
+              typeof frame.data === 'string'
+            ) {
+              append(
+                decoders[frame.stream].write(Buffer.from(frame.data, 'base64')),
+                frame.stream,
+              );
+            } else if (
+              frame.ok === true &&
+              Number.isInteger(frame.result?.exitCode) &&
+              frame.result!.exitCode! >= 0 &&
+              frame.result!.exitCode! <= 255
+            ) {
+              remoteExitCode = frame.result!.exitCode!;
+            } else if (
+              frame.ok === false &&
+              typeof frame.error?.code === 'string' &&
+              typeof frame.error.message === 'string'
+            ) {
+              remoteError = frame.error;
+            } else throw new Error('Invalid execution frame.');
+          }
         } catch {
-          fail('output_failed', 'SSH output handling failed.');
+          fail(
+            'invalid_response',
+            'The SSH host returned an invalid execution response or output handling failed.',
+          );
         }
       };
       child.stdout.setEncoding('utf8');
@@ -363,21 +424,36 @@ export class SshWorkspaceClient {
       child.on('error', (error) =>
         fail('ssh_failed', `Could not start SSH: ${error.message}`),
       );
-      child.stdin.on('error', (error) =>
-        fail('ssh_failed', `Could not send SSH request: ${error.message}`),
-      );
+      child.stdin.on('error', (error: Error) => {
+        sendError = error;
+      });
       child.on('close', (code, signal) => {
         if (settled) return;
-        if (code === null || code === 255 || signal) {
+        if (code === null || code === 255 || signal || sendError) {
           fail(
             'ssh_failed',
-            `SSH connection failed${stderr ? `: ${stderr.slice(0, 2048)}` : '.'}`,
+            `SSH connection failed${stderr ? `: ${stderr.slice(0, 2048)}` : sendError ? `: ${sendError.message}` : '.'}`,
           );
           return;
         }
+        if (operation === 'execute') {
+          if (remoteError) {
+            fail(remoteError.code, remoteError.message);
+            return;
+          }
+          if (code !== 0 || frames || remoteExitCode === undefined) {
+            fail(
+              'invalid_response',
+              'The SSH host did not confirm command completion.',
+            );
+            return;
+          }
+          stdout += decoders.stdout.end();
+          stderr += decoders.stderr.end();
+        }
         settled = true;
         cleanup();
-        resolve({ stdout, stderr, exitCode: code });
+        resolve({ stdout, stderr, exitCode: remoteExitCode ?? code });
       });
       if (options.signal?.aborted || this.disposed) cancel();
       else child.stdin.end(input);

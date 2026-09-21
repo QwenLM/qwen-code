@@ -3,7 +3,7 @@
 [English](ssh-workspaces.md) | [简体中文](ssh-workspaces.zh-CN.md)
 
 Status: implemented. Real SSH end-to-end tests passed against an isolated macOS
-sshd with Python 3.9.6. A Linux target has not yet been exercised.
+sshd with Python 3.9.6. The PR also contains a [Linux verification report](https://github.com/QwenLM/qwen-code/pull/12255#issuecomment-5755063787) for commit `a75c998`, reporting 121 passing checks on Debian 13 with Python 3.13.5.
 
 ## Problem and current state
 
@@ -25,7 +25,7 @@ The first version includes registration, local session persistence, agent file
 reading/writing/editing/search, remote shell commands, Web Shell file operations,
 an interactive SSH terminal and Git inspection. Unsupported workspace operations
 must fail explicitly; they must never operate on the local anchor directory.
-Remote hooks, MCP/LSP, subagents, workflows, worktree creation and automatic
+Remote hooks, skills, MCP/LSP, subagents, workflows, worktree creation and automatic
 artifact discovery are outside this version.
 
 ## Design
@@ -36,7 +36,7 @@ Accept `ssh://user@host:port/absolute/project` alongside local workspace paths.
 Use a connection descriptor and a deterministic, private local anchor directory
 for each connection and remote directory. Existing local runtime and session
 ownership remain keyed by this anchor; user-visible metadata identifies the SSH
-host and remote path. Persisted registration restores the same descriptor.
+host, explicit port and remote path. Resolve a selected root symlink once during registration and persist its canonical target; subsequent operations reject symlink traversal. Persisted registration restores the same descriptor.
 An absent or malformed descriptor under the SSH anchor root is an error, never
 an ordinary local workspace.
 
@@ -45,7 +45,7 @@ an ordinary local workspace.
 Use system OpenSSH with batch authentication, strict host-key checks, bounded
 connection time and output, and cancellation. Pass target and remote command as
 separate arguments; quote all remote shell arguments. Filesystem requests invoke
-a Python script over SSH and exchange JSON; no remote helper file or listener is
+a Python script over SSH and exchange JSON. Shell output uses framed stdout/stderr records followed by an explicit exit status, distinguishing a completed command exit 255 from a failed SSH connection; no remote helper file or listener is
 installed. Validate paths on the remote host, prevent symlink escapes, preserve
 file modes, and use temporary files plus rename for writes. Conditional edits
 detect stale content. Connection failures are returned without replaying writes
@@ -59,7 +59,7 @@ local. Load the descriptor for the exact anchor when constructing the ACP
 session Config. Install an SSH execution environment for the main session and
 reuse the existing tool schemas and confirmation wrapper. Implement tool actions
 through SSH rather than invoking local tool implementations. Direct the agent to read remote QWEN.md and AGENTS.md through the file
-tools; do not import remote executable configuration into the local runtime. Disable local hooks and services that cannot honor remote paths.
+tools; do not import remote executable configuration into the local runtime. Disable local hooks and services that cannot honor remote paths. Main-session structured output, Goal tools, web fetch/search and the opt-in todo tool retain their ordinary configuration gates and local ownership. Override code-mode-only for SSH sessions so the tools execute through SSH. Shell deadlines and output thresholds honor the local settings; truncated shell output preserves both its beginning and its end.
 
 ### Daemon and Web Shell
 
@@ -68,7 +68,7 @@ Classify registration as process-global, descriptor persistence as
 persisted-workspace scoped, file/Git operations as selected-runtime scoped and
 session operations as live-session-owner scoped. Resolve the selected runtime
 before choosing SSH, enforce its trust and generation guards, and explicitly
-reject unsupported routes. No unknown, removed, blocked or disconnected target
+reject unsupported routes. Read intents remain available before trust; writes, commands and Git inspection require trust. Voice status, settings and transcription use the selected runtime and local model service. A workflow setting can be persisted but never activates workflow execution in an SSH session. No unknown, removed, blocked or disconnected target
 may fall back to the primary runtime or local filesystem.
 
 The add-workspace form accepts an SSH address and explains its prerequisites.
@@ -110,18 +110,15 @@ must remain local.
 
 The remote host needs Python 3, a POSIX shell and the tools required by the
 project. File tools accept UTF-8 text; binary previews/uploads use the byte API.
-Individual remote files are limited to 16 MiB, with the existing smaller Web
-Shell read/write limits retained. Large text reads use line/limit windows; byte
-cursors are not implemented. Search respects `.gitignore` and `.qwenignore` in
+Whole text reads and remote writes are limited to 16 MiB, with the existing smaller Web Shell text read/write limits retained. SSH binary uploads also have a 16 MiB limit; larger uploads fail with HTTP 413. Large text reads use line/limit windows. Byte reads seek directly to the requested offset, including in files larger than 16 MiB, and omit a full-file hash for partial windows. Search respects `.gitignore` and `.qwenignore` in
 Git repositories; non-Git projects containing ignore files fail explicitly.
-Git inspection includes status and working-tree diffs, with at most 500
-untracked files counted per request. Large untracked previews retain the
+Search reports incomplete results when entries are unreadable, a file exceeds the text scan cap, Git warns of skipped entries or a checked-out submodule is omitted. Submodule content can be inspected through the SSH shell. Dubious Git ownership is an explicit error and never changes Git trust configuration. Git inspection includes status and working-tree diffs. Above 500 changed files, the overview returns counts without file details, matching the local fast path. Large untracked previews retain the
 1,000,000-byte/400-line limits and report truncation; their line counts cover the bounded
 preview. Run other Git commands in the SSH terminal
 or through the agent shell tool.
 
 Background shell jobs, local shortcut commands that operate on the project,
-worktrees, hooks, MCP/LSP, subagents, workflows, automatic memory and artifact
+worktrees, hooks, skills, MCP/LSP, subagents, workflows, automatic memory and artifact
 discovery are unavailable for SSH sessions. Session history, model selection
 and approvals remain local. This version uses one SSH process per operation;
-it does not install a remote agent or synchronize a local project copy.
+it does not install a remote agent or synchronize a local project copy. Writes clean up temporary files after ordinary failures; abrupt remote process termination can leave a temporary file and cannot promise cleanup.

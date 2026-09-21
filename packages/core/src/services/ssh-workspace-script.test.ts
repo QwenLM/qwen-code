@@ -16,6 +16,8 @@ import {
   readFileSync,
   utimesSync,
   existsSync,
+  readdirSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,8 +41,9 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     operation: string,
     params: Record<string, unknown> = {},
     env?: NodeJS.ProcessEnv,
+    script = SSH_WORKSPACE_SCRIPT,
   ): Reply {
-    const child = spawnSync('python3', ['-c', SSH_WORKSPACE_SCRIPT], {
+    const child = spawnSync('python3', ['-c', script], {
       input: JSON.stringify({ root, operation, params }),
       encoding: 'utf8',
       timeout: 10_000,
@@ -138,9 +141,10 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
         mode: 'create',
       }).ok,
     ).toBe(true);
-    const full = request('readBytes', { path: 'bytes' }).result as {
-      hash: string;
-    };
+    expect(request('readBytes', { path: 'bytes' })).toMatchObject({
+      ok: true,
+      result: { hash: expect.stringMatching(/^sha256:/) },
+    });
     expect(
       request('readBytes', { path: 'bytes', offset: 1, maxBytes: 2 }),
     ).toEqual({
@@ -148,7 +152,6 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       result: {
         data: bytes.subarray(1, 3).toString('base64'),
         sizeBytes: 5,
-        hash: full.hash,
       },
     });
     expect(request('readBytes', { path: 'bytes', offset: -1 })).toMatchObject({
@@ -348,8 +351,342 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
       }),
       encoding: 'utf8',
     });
-    expect(child.status).toBe(7);
-    expect(child.stdout).toBe(`${join(root, "quoted ' directory")}\nvalue\n`);
+    expect(child.status).toBe(0);
+    const frames = child.stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(frames.at(-1)).toEqual({ ok: true, result: { exitCode: 7 } });
+    expect(
+      frames
+        .slice(0, -1)
+        .map((frame) => Buffer.from(frame.data, 'base64').toString())
+        .join(''),
+    ).toBe(`${join(root, "quoted ' directory")}\nvalue\n`);
     expect(child.stderr).toBe('');
+  });
+  it('lists FIFOs without opening them and rejects reading one', () => {
+    execFileSync('mkfifo', [join(root, 'pipe')]);
+    expect(request('list')).toMatchObject({
+      ok: true,
+      result: [{ name: 'pipe', kind: 'other' }],
+    });
+    expect(request('stat', { path: 'pipe' })).toMatchObject({
+      ok: true,
+      result: { kind: 'other' },
+    });
+    expect(request('read', { path: 'pipe' })).toMatchObject({
+      ok: false,
+      error: { code: 'not_file' },
+    });
+  });
+
+  it('creates missing parents only for an approved create and refuses symlink parents', () => {
+    expect(
+      request('write', {
+        path: 'new/sub/file',
+        content: 'new',
+        mode: 'create',
+        createParents: true,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(readFileSync(join(root, 'new/sub/file'), 'utf8')).toBe('new');
+    expect(statSync(join(root, 'new/sub')).mode & 0o777).toBe(
+      0o755 & ~process.umask(),
+    );
+    symlinkSync(join(root, 'new'), join(root, 'link'));
+    expect(
+      request('write', {
+        path: 'link/escape/file',
+        content: 'bad',
+        mode: 'create',
+        createParents: true,
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'symlink_escape' } });
+    expect(existsSync(join(root, 'new/escape'))).toBe(false);
+  });
+
+  it('seeks directly to byte windows beyond the text limit without a partial-file hash', () => {
+    const offset = 17 * 1024 * 1024;
+    writeFileSync(
+      join(root, 'large'),
+      Buffer.concat([Buffer.alloc(offset), Buffer.from('tail')]),
+    );
+    expect(
+      request('readBytes', { path: 'large', offset, maxBytes: 4 }),
+    ).toEqual({
+      ok: true,
+      result: {
+        sizeBytes: offset + 4,
+        data: Buffer.from('tail').toString('base64'),
+      },
+    });
+  });
+
+  it('keeps Git warnings separate from paths and never expands ignored untracked trees', () => {
+    execFileSync('git', ['init', '-q', root]);
+    writeFileSync(join(root, '.gitignore'), 'node_modules/\n');
+    mkdirSync(join(root, 'node_modules'));
+    writeFileSync(join(root, 'node_modules/hidden.txt'), 'needle');
+    writeFileSync(join(root, 'visible.txt'), 'needle');
+    const bin = join(root, '.git', 'bin');
+    mkdirSync(bin);
+    const git = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(bin, 'git'),
+      `#!/bin/sh\nprintf 'warning: skipped unreadable entry\n' >&2\ncase " $* " in *" --others "*" --ignored "*) exit 99;; esac\nexec '${git.replaceAll("'", "'\"'\"'")}' "$@"\n`,
+      { mode: 0o700 },
+    );
+    const env = { ...process.env, PATH: bin + ':' + process.env['PATH'] };
+    expect(request('glob', { pattern: '*.txt' }, env)).toMatchObject({
+      ok: true,
+      result: { paths: [join(root, 'visible.txt')], truncated: true },
+    });
+    expect(
+      request('grep', { pattern: 'needle', glob: '*.txt' }, env),
+    ).toMatchObject({
+      ok: true,
+      result: { text: 'visible.txt:1:needle', truncated: true },
+    });
+  });
+
+  it('matches glob case when requested and preserves the default exact-case API', () => {
+    writeFileSync(join(root, 'README.MD'), 'text');
+    expect(request('glob', { pattern: '*.md' })).toMatchObject({
+      result: { paths: [] },
+    });
+    expect(
+      request('glob', { pattern: '*.md', caseSensitive: false }),
+    ).toMatchObject({ result: { paths: [join(root, 'README.MD')] } });
+  });
+  it('honors a nested Qwen ignore file even when Git ignores that rule file', () => {
+    execFileSync('git', ['init', '-q', root]);
+    mkdirSync(join(root, 'nested'));
+    writeFileSync(join(root, '.gitignore'), '.qwenignore\n');
+    writeFileSync(join(root, 'nested/.qwenignore'), 'secret.txt\n');
+    writeFileSync(join(root, 'nested/secret.txt'), 'needle');
+    writeFileSync(join(root, 'nested/visible.txt'), 'needle');
+    expect(request('glob', { pattern: '**/*.txt' })).toMatchObject({
+      ok: true,
+      result: { paths: [join(root, 'nested/visible.txt')], truncated: false },
+    });
+  });
+  it('filters and marks ignored directory entries without descending ignored trees', () => {
+    execFileSync('git', ['init', '-q', root]);
+    writeFileSync(join(root, '.gitignore'), 'node_modules/\n');
+    writeFileSync(join(root, '.qwenignore'), 'secret.txt\n');
+    mkdirSync(join(root, 'node_modules'));
+    writeFileSync(join(root, 'node_modules/ignored'), 'ignored');
+    writeFileSync(join(root, 'secret.txt'), 'secret');
+    writeFileSync(join(root, 'visible.txt'), 'visible');
+    const filtered = request('list').result as Array<{ name: string }>;
+    expect(filtered.map((entry) => entry.name)).toEqual([
+      '.gitignore',
+      '.qwenignore',
+      'visible.txt',
+    ]);
+    const all = request('list', { includeIgnored: true }).result as Array<{
+      name: string;
+      ignored: boolean;
+    }>;
+    expect(
+      all.filter((entry) => entry.ignored).map((entry) => entry.name),
+    ).toEqual(['.git', 'node_modules', 'secret.txt']);
+  });
+
+  it.each(['plain', ':(literal)plain'])(
+    'treats directory names literally when listing ignored entries: %s',
+    (directory) => {
+      execFileSync('git', ['init', '-q', root]);
+      writeFileSync(join(root, '.gitignore'), 'secret.txt\n');
+      mkdirSync(join(root, directory));
+      writeFileSync(join(root, directory, 'secret.txt'), 'secret');
+      writeFileSync(join(root, directory, 'visible.txt'), 'visible');
+      expect(request('list', { path: directory })).toMatchObject({
+        ok: true,
+        result: [{ name: 'visible.txt', ignored: false }],
+      });
+      expect(
+        request('list', { path: directory, includeIgnored: true }),
+      ).toMatchObject({
+        ok: true,
+        result: [
+          { name: 'secret.txt', ignored: true },
+          { name: 'visible.txt', ignored: false },
+        ],
+      });
+    },
+  );
+
+  it('returns readable grep hits and marks a skipped tail as incomplete', () => {
+    writeFileSync(
+      join(root, 'a-large.txt'),
+      'needle\n' + 'x'.repeat(16 * 1024 * 1024),
+    );
+    writeFileSync(join(root, 'z-small.txt'), 'needle');
+    expect(request('grep', { pattern: 'needle' })).toMatchObject({
+      ok: true,
+      result: {
+        text: 'a-large.txt:1:needle\nz-small.txt:1:needle',
+        truncated: true,
+      },
+    });
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'keeps readable results when files and directories deny access',
+    () => {
+      writeFileSync(join(root, 'visible.txt'), 'needle');
+      writeFileSync(join(root, 'locked.txt'), 'needle', { mode: 0o000 });
+      mkdirSync(join(root, 'locked-dir'), { mode: 0o000 });
+      try {
+        expect(request('grep', { pattern: 'needle' })).toMatchObject({
+          ok: true,
+          result: { text: 'visible.txt:1:needle', truncated: true },
+        });
+        expect(request('glob', { pattern: '**/*.txt' })).toMatchObject({
+          ok: true,
+          result: {
+            paths: expect.arrayContaining([join(root, 'visible.txt')]),
+            truncated: true,
+          },
+        });
+        expect(
+          request('gitUntrackedStats', {
+            paths: ['visible.txt', 'locked.txt'],
+          }),
+        ).toMatchObject({
+          ok: true,
+          result: [
+            { path: 'visible.txt', added: 1 },
+            { path: 'locked.txt', added: 0, isBinary: true },
+          ],
+        });
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o600);
+        chmodSync(join(root, 'locked-dir'), 0o700);
+      }
+    },
+  );
+  it('removes temporary writes after publication fails and tolerates unsupported directory fsync', () => {
+    const failedPublish = SSH_WORKSPACE_SCRIPT.replace(
+      'os.link(temporary, name,',
+      "fail('io_error', 'injected publish failure')\n                    os.link(temporary, name,",
+    );
+    expect(
+      request(
+        'write',
+        { path: 'file', content: 'value', mode: 'create' },
+        undefined,
+        failedPublish,
+      ),
+    ).toMatchObject({ ok: false, error: { code: 'io_error' } });
+    expect(readdirSync(root)).toEqual([]);
+    const unsupportedSync = SSH_WORKSPACE_SCRIPT.replace(
+      'os.fsync(fd)',
+      "raise OSError(errno.EINVAL, 'directory sync unavailable')",
+    );
+    expect(
+      request(
+        'write',
+        { path: 'file', content: 'value', mode: 'create' },
+        undefined,
+        unsupportedSync,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(readdirSync(root)).toEqual(['file']);
+    expect(readFileSync(join(root, 'file'), 'utf8')).toBe('value');
+  });
+
+  it.each([
+    'stat',
+    'list',
+    'glob',
+    'grep',
+    'readBytes',
+    'mkdir',
+    'gitUntrackedStats',
+  ])(
+    'rejects parent traversal and intermediate symlinks for %s',
+    (operation) => {
+      symlinkSync(root, join(root, 'link'));
+      for (const target of ['../outside', 'link/nested']) {
+        expect(
+          request(operation, {
+            path: target,
+            paths: [target],
+            pattern: '*',
+            recursive: true,
+          }),
+        ).toMatchObject(
+          operation === 'gitUntrackedStats' && target.startsWith('link/')
+            ? { ok: true, result: [{ path: target, added: 0, isBinary: true }] }
+            : {
+                ok: false,
+                error: {
+                  code: target.startsWith('..')
+                    ? 'path_outside_workspace'
+                    : 'symlink_escape',
+                },
+              },
+        );
+      }
+    },
+  );
+
+  it('canonicalizes a selected root symlink at registration but rejects later symlink traversal', () => {
+    const alias = root + '-alias';
+    symlinkSync(root, alias);
+    try {
+      const script = SSH_WORKSPACE_SCRIPT;
+      const probe = spawnSync('python3', ['-c', script], {
+        input: JSON.stringify({ root: alias, operation: 'probe', params: {} }),
+        encoding: 'utf8',
+      });
+      expect(JSON.parse(probe.stdout)).toEqual({
+        ok: true,
+        result: { directory: root },
+      });
+      const read = spawnSync('python3', ['-c', script], {
+        input: JSON.stringify({ root: alias, operation: 'stat', params: {} }),
+        encoding: 'utf8',
+      });
+      expect(JSON.parse(read.stdout)).toMatchObject({
+        ok: false,
+        error: { code: 'symlink_escape' },
+      });
+    } finally {
+      rmSync(alias);
+    }
+  });
+  it('marks an omitted checked-out submodule as incomplete', () => {
+    execFileSync('git', ['init', '-q', root]);
+    mkdirSync(join(root, 'submodule'));
+    writeFileSync(join(root, 'submodule/inside.txt'), 'needle');
+    execFileSync('git', [
+      '-C',
+      root,
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      '160000,' + '1'.repeat(40) + ',submodule',
+    ]);
+    expect(request('glob', { pattern: '**/*.txt' })).toMatchObject({
+      ok: true,
+      result: { paths: [], truncated: true },
+    });
+    expect(request('grep', { pattern: 'needle' })).toMatchObject({
+      ok: true,
+      result: { text: '', truncated: true },
+    });
+  });
+
+  it('searches a bare repository as a filesystem instead of misclassifying it as a Git failure', () => {
+    execFileSync('git', ['init', '--bare', '-q', root]);
+    writeFileSync(join(root, 'visible.txt'), 'needle');
+    expect(request('glob', { pattern: '*.txt' })).toMatchObject({
+      ok: true,
+      result: { paths: [join(root, 'visible.txt')], truncated: false },
+    });
   });
 });

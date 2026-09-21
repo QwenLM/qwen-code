@@ -634,13 +634,7 @@ export const handleSlashCommand = async (
       };
     }
 
-    return sshWorkspace
-      ? {
-          type: 'unsupported',
-          reason: 'This command is unavailable for SSH workspaces.',
-          originalType: 'unsupported_action',
-        }
-      : { type: 'no_command' };
+    return { type: 'no_command' };
   }
 
   if (!commandToExecute.action) {

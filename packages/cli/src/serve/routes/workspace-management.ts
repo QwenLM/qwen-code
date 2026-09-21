@@ -852,7 +852,6 @@ export function registerWorkspaceManagementRoutes(
             AbortSignal.timeout(30_000),
           );
           cwd = prepared.cwd;
-          displayName ??= prepared.displayName;
         } catch (error) {
           res.status(400).json({
             error: error instanceof Error ? error.message : String(error),

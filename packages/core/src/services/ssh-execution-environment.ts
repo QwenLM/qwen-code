@@ -5,10 +5,10 @@
  */
 
 import path from 'node:path';
+import { getCommandRoots } from '../utils/shell-utils.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { createPatchSmart } from '../tools/diffOptions.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { ToolErrorType } from '../tools/tool-error.js';
 import {
   ToolConfirmationOutcome,
   type ToolConfirmationPayload,
@@ -68,26 +68,10 @@ function isWrite(toolName: string): boolean {
   return toolName === ToolNames.WRITE_FILE || toolName === ToolNames.EDIT;
 }
 
-function bounded(text: string): string {
-  return text.length <= MAX_OUTPUT_CHARS
-    ? text
-    : `${text.slice(0, MAX_OUTPUT_CHARS)}\n[SSH output truncated; narrow the request to see the remaining content.]`;
-}
-
-function result(text: string): ToolResult {
-  const output = bounded(text);
-  return {
-    llmContent: output,
-    returnDisplay: output,
-    outputBudgetApplied: true,
-    persistedOutputFiles: [],
-    resultFilePaths: [],
-  };
-}
-
 export class SshExecutionEnvironment implements ExecutionEnvironment {
   readonly toolNames = SSH_EXECUTION_TOOL_NAMES;
   private readonly client: SshWorkspaceClient;
+  private readonly shellDefaultTimeoutMs: number;
   private readonly invocations = new Map<string, PendingExecution>();
   private readonly readHashes = new Map<string, string>();
   private readonly shutdown = new AbortController();
@@ -95,8 +79,39 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
   constructor(
     private readonly workspace: SshWorkspace,
     private readonly localWorkspace: string,
+    private readonly settings: {
+      outputThreshold?: number;
+      shellDefaultTimeoutMs?: number;
+    } = {},
   ) {
     this.client = new SshWorkspaceClient(workspace);
+    const timeout = settings.shellDefaultTimeoutMs;
+    this.shellDefaultTimeoutMs =
+      timeout !== undefined &&
+      Number.isInteger(timeout) &&
+      timeout >= 0 &&
+      timeout <= 2_147_483_647
+        ? timeout
+        : 120_000;
+  }
+
+  private bounded(text: string): string {
+    const limit = this.settings.outputThreshold ?? MAX_OUTPUT_CHARS;
+    if (limit <= 0 || text.length <= limit) return text;
+    const head = Math.ceil(limit / 2);
+    const tail = Math.floor(limit / 2);
+    return `${text.slice(0, head)}\n[SSH output truncated; use offset/limit for reads or narrow the request.]\n${tail ? text.slice(-tail) : ''}`;
+  }
+
+  private result(text: string): ToolResult {
+    const output = this.bounded(text);
+    return {
+      llmContent: output,
+      returnDisplay: output,
+      outputBudgetApplied: true,
+      persistedOutputFiles: [],
+      resultFilePaths: [],
+    };
   }
 
   private signal(signal: AbortSignal): AbortSignal {
@@ -347,7 +362,7 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
         type: 'exec',
         title: `Run on ${this.workspace.host}: ${String(params['directory'])}`,
         command,
-        rootCommand: command.trim().split(/\s+/)[0] ?? '',
+        rootCommand: getCommandRoots(command).join(', '),
         warnings: [
           'This command runs on the SSH host. If the connection is interrupted, the remote command may continue running.',
         ],
@@ -396,11 +411,12 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
             content: change.proposed,
             mode: change.current === null ? 'create' : 'replace',
             ...(change.hash ? { expectedHash: change.hash } : {}),
+            createParents: change.current === null,
           },
           signal,
         );
         this.readHashes.set(filePath, written.hash);
-        return result(`Wrote ${filePath} on ${this.workspace.host}.`);
+        return this.result(`Wrote ${filePath} on ${this.workspace.host}.`);
       }
       if (toolName === ToolNames.READ_FILE) {
         const filePath = stringParam(params, 'file_path');
@@ -416,30 +432,31 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
           .slice(offset, limit === undefined ? undefined : offset + limit)
           .join('\n');
         this.readHashes.set(filePath, read.hash);
-        return result(content);
+        return this.result(content);
       }
       if (toolName === ToolNames.SHELL) {
         this.readHashes.clear();
         try {
+          let liveOutput = '';
           const shell = await this.client.execute(
             stringParam(params, 'command'),
             {
               directory: stringParam(params, 'directory'),
               signal,
-              timeoutMs: (params['timeout'] as number | undefined) ?? 120_000,
+              timeoutMs:
+                (params['timeout'] as number | undefined) ??
+                this.shellDefaultTimeoutMs,
               onOutput: updateOutput
-                ? (chunk) => updateOutput(bounded(chunk))
+                ? (chunk) => {
+                    liveOutput = this.bounded(liveOutput + chunk);
+                    updateOutput(liveOutput);
+                  }
                 : undefined,
             },
           );
-          const output = result(
+          const output = this.result(
             `Exit code: ${shell.exitCode}\n${shell.stdout}${shell.stderr ? `\n${shell.stderr}` : ''}`,
           );
-          if (shell.exitCode !== 0)
-            output.error = {
-              message: `SSH command exited with code ${shell.exitCode}.`,
-              type: ToolErrorType.EXECUTION_FAILED,
-            };
           return output;
         } finally {
           this.readHashes.clear();
@@ -450,7 +467,7 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
         const entries = await this.client.request<
           Array<{ name: string; kind: string; ignored: boolean }>
         >('list', { path: searchPath }, signal);
-        return result(
+        return this.result(
           entries
             .filter((entry) => !entry.ignored)
             .map(
@@ -469,7 +486,7 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
         {
           path: searchPath,
           pattern: stringParam(params, 'pattern'),
-          ...(toolName === ToolNames.GREP ? { caseSensitive: false } : {}),
+          caseSensitive: false,
           ...(params['glob'] === undefined
             ? {}
             : { glob: stringParam(params, 'glob') }),
@@ -477,7 +494,7 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
         },
         signal,
       );
-      return result(
+      return this.result(
         `${search.paths?.join('\n') ?? search.text ?? ''}${search.truncated ? '\n[Search truncated; narrow the query.]' : ''}`,
       );
     } finally {

@@ -102,18 +102,22 @@ export function readSshWorkspace(cwd: string): SshWorkspace | undefined {
 export async function prepareSshWorkspace(
   url: string,
   signal?: AbortSignal,
-): Promise<{ cwd: string; connection: SshWorkspace; displayName: string }> {
+): Promise<{ cwd: string; connection: SshWorkspace }> {
   const requested = parseSshWorkspaceUrl(url);
   const client = new SshWorkspaceClient(requested);
-  let directory: string;
+  let directory: unknown;
   try {
-    ({ directory } = await client.request<{ directory: string }>(
+    const probe = await client.request<{ directory?: unknown } | null>(
       'probe',
       {},
       signal,
-    ));
+    );
+    directory = probe?.directory;
   } finally {
     client.dispose();
+  }
+  if (typeof directory !== 'string') {
+    throw new Error('The SSH host returned an invalid workspace directory.');
   }
   const connection = parseSshWorkspaceUrl(
     formatSshWorkspaceUrl({ ...requested, directory }),
@@ -136,12 +140,13 @@ export async function prepareSshWorkspace(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   } finally {
-    await unlink(temporary);
+    await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
   }
   readSshWorkspace(cwd);
   return {
     cwd,
     connection,
-    displayName: `${connection.host}:${connection.directory}`,
   };
 }

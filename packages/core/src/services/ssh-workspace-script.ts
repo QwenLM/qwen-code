@@ -77,7 +77,7 @@ def kind(info):
         return 'directory'
     if stat.S_ISREG(info.st_mode):
         return 'file'
-    fail('unsupported_file', 'Only regular files and directories are supported.')
+    return 'other'
 
 def inspect(value):
     fd, name, target = parent(value)
@@ -86,7 +86,7 @@ def inspect(value):
     finally:
         os.close(fd)
 
-def read_data(value, maximum=MAX_BYTES, truncate=False):
+def read_data(value, maximum=MAX_BYTES, truncate=False, offset=None):
     directory, name, target = parent(value)
     fd = None
     try:
@@ -94,11 +94,13 @@ def read_data(value, maximum=MAX_BYTES, truncate=False):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             fail('not_file', 'The remote path is not a regular file.')
-        if info.st_size > maximum and not truncate:
+        if offset is not None:
+            os.lseek(fd, offset, os.SEEK_SET)
+        if info.st_size > maximum and not truncate and offset is None:
             fail('file_too_large', 'Remote file exceeds the 16 MiB limit.')
         chunks, size = [], 0
         while True:
-            chunk = os.read(fd, min(65536, maximum + 1 - size))
+            chunk = os.read(fd, min(65536, maximum + (1 if offset is None else 0) - size))
             if not chunk:
                 break
             chunks.append(chunk)
@@ -128,10 +130,11 @@ def list_names(fd):
 def git_output(args):
     environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
     environment.update({'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0', 'LC_ALL': 'C'})
-    process = subprocess.Popen(['git', '--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-C', root] + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment)
+    process = subprocess.Popen(['git', '--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-C', root] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
     selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    chunks, size, deadline = [], 0, time.monotonic() + 10
+    selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+    selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+    chunks, size, deadline = {'stdout': [], 'stderr': []}, 0, time.monotonic() + 10
     try:
         while selector.get_map():
             if time.monotonic() > deadline:
@@ -144,39 +147,58 @@ def git_output(args):
                 size += len(chunk)
                 if size > MAX_SEARCH_BYTES:
                     fail('too_large', 'Remote Git file listing exceeds the search limit.')
-                chunks.append(chunk)
-        return process.wait(timeout=1), b''.join(chunks)
+                chunks[key.data].append(chunk)
+        return process.wait(timeout=1), b''.join(chunks['stdout']), b''.join(chunks['stderr'])
     finally:
         selector.close()
         if process.poll() is None:
             process.kill()
         process.wait()
         process.stdout.close()
+        process.stderr.close()
 
 def search_files(include_ignored):
     if not include_ignored:
         try:
-            code, output = git_output(['rev-parse', '--is-inside-work-tree'])
+            code, output, diagnostic = git_output(['rev-parse', '--is-inside-work-tree'])
         except FileNotFoundError:
-            code, output = 128, b'not a git repository'
+            code, output, diagnostic = 128, b'', b'not a git repository'
         if code == 0 and output.strip() == b'true':
-            code, output = git_output(['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
+            code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
             if code:
                 fail('search_failed', 'Cannot enumerate remote Git files.')
             paths = list(dict.fromkeys(part.decode('utf-8') for part in output.split(b'\0') if part))
-            ignored = set()
+            ignored, incomplete = set(), bool(diagnostic)
             for exclude in ['--exclude-standard', '--exclude-per-directory=.qwenignore']:
-                code, output = git_output(['ls-files', '-z', '--cached', '--others', '--ignored', exclude])
+                code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--ignored', exclude])
                 if code:
                     fail('search_failed', 'Cannot enumerate remote ignored files.')
+                incomplete = incomplete or bool(diagnostic)
                 ignored.update(part.decode('utf-8') for part in output.split(b'\0') if part)
             if len(paths) > MAX_ENTRIES:
                 fail('too_large', 'Remote workspace exceeds the search file limit.')
-            return [normalized(path) for path in paths if path not in ignored and '.git' not in path.split('/')]
-        if b'not a git repository' not in output:
+            included = set()
+            batch, batch_bytes = [], 0
+            for candidate in paths + [None]:
+                spec = None if candidate is None else ':(literal)' + candidate
+                size = 0 if spec is None else len(spec.encode('utf-8')) + 1
+                if batch and (spec is None or batch_bytes + size > 65536):
+                    code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--others', '--exclude-per-directory=.qwenignore', '--'] + batch)
+                    if code:
+                        fail('search_failed', 'Cannot apply remote Qwen ignore rules.')
+                    included.update(part.decode('utf-8') for part in output.split(b'\0') if part)
+                    incomplete = incomplete or bool(diagnostic)
+                    batch, batch_bytes = [], 0
+                if spec is not None:
+                    batch.append(spec)
+                    batch_bytes += size
+            paths = [path for path in paths if path in included]
+            return [normalized(path) for path in paths if path not in ignored and '.git' not in path.split('/')], incomplete
+        if not (code == 0 and output.strip() == b'false') and b'not a git repository' not in diagnostic:
             fail('search_failed', 'Cannot determine remote Git ignore rules.')
-    result = []
+    result, incomplete = [], False
     def walk(fd, directory, depth):
+        nonlocal incomplete
         if depth > 64:
             fail('too_large', 'Remote directory nesting exceeds the search limit.')
         names = list_names(fd)
@@ -187,26 +209,35 @@ def search_files(include_ignored):
         for name in sorted(names):
             if name == '.git':
                 continue
-            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except (FileNotFoundError, PermissionError):
+                incomplete = True
+                continue
             if stat.S_ISLNK(info.st_mode):
                 continue
             target = os.path.join(directory, name)
             if stat.S_ISREG(info.st_mode):
                 result.append(target)
             elif stat.S_ISDIR(info.st_mode):
-                child = child_directory(fd, name)
                 try:
-                    walk(child, target, depth + 1)
-                finally:
-                    os.close(child)
+                    child = child_directory(fd, name)
+                    try:
+                        walk(child, target, depth + 1)
+                    finally:
+                        os.close(child)
+                except (FileNotFoundError, PermissionError):
+                    incomplete = True
     walk(root_fd, root, 0)
-    return result
+    return result, incomplete
 
-def matches(path, pattern, basename=False):
+def matches(path, pattern, basename=False, case_sensitive=True):
     if not isinstance(pattern, str) or len(pattern) > 4096 or pattern.startswith('/') or '..' in pattern.split('/'):
         fail('invalid_argument', 'Use a relative glob pattern without parent traversal.')
     if any(token in pattern for token in ['{', '}', '@(', '!(', '+(', '?(', '*(']):
         fail('unsupported_pattern', 'Brace expansion and extended glob patterns are not supported for SSH search.')
+    if not case_sensitive:
+        path, pattern = path.casefold(), pattern.casefold()
     if basename and '/' not in pattern:
         return fnmatch.fnmatchcase(os.path.basename(path), pattern)
     parts, patterns = path.split('/'), (pattern[2:] if pattern.startswith('./') else pattern).split('/')
@@ -239,7 +270,24 @@ def dispatch(operation, params):
         command = params.get('command')
         if not isinstance(command, str) or '\0' in command:
             fail('invalid_argument', 'Invalid remote shell command.')
-        os.execv('/bin/sh', ['sh', '-c', command])
+        process = subprocess.Popen(['/bin/sh', '-c', command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+        try:
+            while selector.get_map():
+                for key, event in selector.select():
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    print(json.dumps({'stream': key.data, 'data': base64.b64encode(chunk).decode('ascii')}), flush=True)
+            code = process.wait()
+            return {'exitCode': code if code >= 0 else 128 - code}
+        finally:
+            selector.close()
+            process.stdout.close()
+            process.stderr.close()
     if operation == 'stat':
         info = inspect(path)
         return {'kind': kind(info), 'sizeBytes': info.st_size, 'modifiedMs': info.st_mtime * 1000}
@@ -267,21 +315,22 @@ def dispatch(operation, params):
                     raise
                 result.append({'path': path, 'added': 0, 'isBinary': True, 'truncated': False})
             except OSError as error:
-                if error.errno not in [errno.ENOENT, errno.ENOTDIR, errno.ELOOP]:
+                if error.errno not in [errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EACCES, errno.EPERM]:
                     raise
                 result.append({'path': path, 'added': 0, 'isBinary': True, 'truncated': False})
         return result
-    if operation in ['read', 'readBytes']:
+    if operation == 'read':
         data, info = read_data(path)
-        result = {'hash': digest(data), 'sizeBytes': len(data)}
-        if operation == 'read':
-            if b'\0' in data:
-                fail('binary_file', 'Remote file contains binary data; use a byte read.')
-            result['content'] = data.decode('utf-8')
-        else:
-            offset = integer(params.get('offset'), 0, MAX_BYTES)
-            maximum = integer(params.get('maxBytes'), MAX_BYTES, MAX_BYTES)
-            result['data'] = base64.b64encode(data[offset:offset + maximum]).decode('ascii')
+        if b'\0' in data:
+            fail('binary_file', 'Remote file contains binary data; use a byte read.')
+        return {'content': data.decode('utf-8'), 'hash': digest(data), 'sizeBytes': len(data)}
+    if operation == 'readBytes':
+        offset = integer(params.get('offset'), 0, 9007199254740991)
+        maximum = integer(params.get('maxBytes'), MAX_BYTES, MAX_BYTES)
+        data, info = read_data(path, maximum, offset=offset)
+        result = {'sizeBytes': info.st_size, 'data': base64.b64encode(data).decode('ascii')}
+        if offset == 0 and len(data) == info.st_size:
+            result['hash'] = digest(data)
         return result
     if operation == 'list':
         target = normalized(path)
@@ -289,7 +338,26 @@ def dispatch(operation, params):
         try:
             names = list_names(fd)
             maximum = integer(params.get('maxEntries'), MAX_ENTRIES, MAX_ENTRIES)
-            return [{'name': name, 'kind': kind(os.stat(name, dir_fd=fd, follow_symlinks=False)), 'ignored': False} for name in names[:maximum]]
+            ignored = {'.git'}
+            try:
+                code, output, diagnostic = git_output(['rev-parse', '--is-inside-work-tree'])
+                if code == 0 and output.strip() == b'true':
+                    for exclude in ['--exclude-standard', '--exclude-per-directory=.qwenignore']:
+                        code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--others', '--ignored', '--directory', exclude, '--', ':(literal)' + os.path.relpath(target, root)])
+                        if code:
+                            fail('search_failed', 'Cannot determine remote directory ignore rules.')
+                        ignored.update(part.decode('utf-8').rstrip('/') for part in output.split(b'\0') if part)
+            except FileNotFoundError:
+                pass
+            entries = []
+            for name in names:
+                relative = os.path.relpath(os.path.join(target, name), root)
+                parts = relative.split('/')
+                is_ignored = any('/'.join(parts[:index + 1]) in ignored for index in range(len(parts)))
+                if is_ignored and params.get('includeIgnored') is not True:
+                    continue
+                entries.append({'name': name, 'kind': kind(os.stat(name, dir_fd=fd, follow_symlinks=False)), 'ignored': is_ignored})
+            return entries[:maximum]
         finally:
             os.close(fd)
     if operation == 'mkdir':
@@ -299,7 +367,7 @@ def dispatch(operation, params):
             try:
                 for part in os.path.relpath(target, root).split('/'):
                     try:
-                        os.mkdir(part, 0o700, dir_fd=fd)
+                        os.mkdir(part, 0o755, dir_fd=fd)
                     except FileExistsError:
                         pass
                     child = child_directory(fd, part)
@@ -310,7 +378,7 @@ def dispatch(operation, params):
         else:
             fd, name, target = parent(path)
             try:
-                os.mkdir(name, 0o700, dir_fd=fd)
+                os.mkdir(name, 0o755, dir_fd=fd)
             finally:
                 os.close(fd)
         return {'directory': target}
@@ -326,6 +394,8 @@ def dispatch(operation, params):
         expected = params.get('expectedHash')
         if mode not in ['create', 'overwrite', 'replace'] or (mode == 'replace' and not expected):
             fail('invalid_argument', 'Replace writes require an expected content hash.')
+        if mode == 'create' and params.get('createParents') is True:
+            dispatch('mkdir', {'path': os.path.dirname(normalized(path)), 'recursive': True})
         fd, name, target = parent(path)
         temporary = '.qwen-write-' + uuid.uuid4().hex
         temporary_exists = False
@@ -360,7 +430,11 @@ def dispatch(operation, params):
                 else:
                     os.rename(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
                 temporary_exists = False
-                os.fsync(fd)
+                try:
+                    os.fsync(fd)
+                except OSError as error:
+                    if error.errno not in [errno.EINVAL, errno.ENOSYS, errno.ENOTSUP]:
+                        raise
             finally:
                 if temporary_exists:
                     os.unlink(temporary, dir_fd=fd)
@@ -384,7 +458,7 @@ def dispatch(operation, params):
         if operation == 'grep' and include is not None:
             matches('', include, True)
         maximum = integer(params.get('limit', params.get('maxResults')), 1000, MAX_ENTRIES + 1)
-        files = [base] if stat.S_ISREG(base_info.st_mode) else search_files(params.get('includeIgnored') is True)
+        files, incomplete = ([base], False) if stat.S_ISREG(base_info.st_mode) else search_files(params.get('includeIgnored') is True)
         files = [file for file in files if os.path.commonpath([base, file]) == base]
         result, result_bytes, truncated = [], 0, False
         if operation == 'grep':
@@ -395,25 +469,26 @@ def dispatch(operation, params):
             except re.error:
                 fail('invalid_argument', 'Invalid search regular expression.')
         for file in sorted(files):
+            try:
+                info = inspect(file)
+            except (FileNotFoundError, PermissionError):
+                incomplete = True
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                incomplete = incomplete or stat.S_ISDIR(info.st_mode)
+                continue
             relative = os.path.relpath(file, base if stat.S_ISDIR(base_info.st_mode) else os.path.dirname(base))
             if operation == 'glob':
-                if not matches(relative, pattern):
-                    continue
-                try:
-                    info = inspect(file)
-                    if not stat.S_ISREG(info.st_mode):
-                        continue
-                except FileNotFoundError:
-                    continue
-                result.append((info.st_mtime, file))
+                if matches(relative, pattern, case_sensitive=params.get('caseSensitive', True)):
+                    result.append((info.st_mtime, file))
             else:
                 if include and not matches(relative, include, True):
                     continue
                 try:
-                    if not stat.S_ISREG(inspect(file).st_mode):
-                        continue
-                    data, info = read_data(file)
-                except FileNotFoundError:
+                    data, info = read_data(file, truncate=True)
+                    incomplete = incomplete or info.st_size > len(data)
+                except (FileNotFoundError, PermissionError):
+                    incomplete = True
                     continue
                 if b'\0' in data:
                     continue
@@ -429,8 +504,8 @@ def dispatch(operation, params):
                     break
         if operation == 'glob':
             result.sort(key=lambda item: (-item[0], item[1]))
-            return {'paths': [item[1] for item in result[:maximum]], 'truncated': len(result) > maximum}
-        return {'text': '\n'.join(result), 'truncated': truncated}
+            return {'paths': [item[1] for item in result[:maximum]], 'truncated': incomplete or len(result) > maximum}
+        return {'text': '\n'.join(result), 'truncated': incomplete or truncated}
     fail('unsupported_operation', 'Unsupported SSH filesystem operation: ' + str(operation))
 
 root_fd, request = None, {}
@@ -439,7 +514,7 @@ try:
     root = request['root']
     if not isinstance(root, str) or not root.startswith('/') or '\0' in root or '..' in root.split('/'):
         fail('invalid_argument', 'Invalid SSH workspace root.')
-    root = os.path.normpath(root)
+    root = os.path.realpath(root) if request['operation'] == 'probe' else os.path.normpath(root)
     root_fd = open_directory(root)
     result = dispatch(request['operation'], request['params'])
     print(json.dumps({'ok': True, 'result': result}, ensure_ascii=False))
@@ -456,8 +531,6 @@ except Exception as error:
     else:
         code, message = 'io_error', str(error)
     print(json.dumps({'ok': False, 'error': {'code': code, 'message': message}}, ensure_ascii=False))
-    if request.get('operation') == 'execute':
-        sys.exit(1)
 finally:
     if root_fd is not None:
         os.close(root_fd)

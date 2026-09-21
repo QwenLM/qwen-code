@@ -57,11 +57,11 @@ function relativeGitPath(value: unknown): string | undefined {
 function isSshPassthroughRoute(req: Request): boolean {
   switch (req.method) {
     case 'GET':
-      return /^\/(?:file(?:\/bytes)?|stat|list|glob|trust|runtime\/status|permissions|settings|providers|tools|sessions(?:\/(?:search|live-state))?|session-info|session-groups|session\/[^/]+\/(?:export|archive\/export|transcript|turn-index))$/.test(
+      return /^\/(?:file(?:\/bytes)?|stat|list|glob|trust|voice|runtime\/status|permissions|settings|providers|tools|sessions(?:\/(?:search|live-state))?|session-info|session-groups|session\/[^/]+\/(?:export|archive\/export|transcript|turn-index))$/.test(
         req.path,
       );
     case 'POST':
-      return /^\/(?:file\/(?:write|edit|upload)|trust\/request|runtime\/(?:ensure|stop)|permissions|settings|sessions\/(?:delete|archive|unarchive)|session-groups)$/.test(
+      return /^\/(?:acp|voice(?:\/transcribe)?|file\/(?:write|edit|upload)|trust\/request|runtime\/(?:ensure|stop)|permissions|settings|sessions\/(?:delete|archive|unarchive)|session-groups)$/.test(
         req.path,
       );
     case 'PATCH':
@@ -248,16 +248,22 @@ async function serveSshGit(
       return { lines: read!.lines ?? [], truncated: read!.truncated };
     };
     if (req.path === '/git/diff') {
-      if (untracked.length > MAX_FILES_FOR_DETAILS) {
-        rejectSshWorkspaceOperation(
-          res,
-          `SSH Git diff supports up to ${MAX_FILES_FOR_DETAILS} untracked files. Use Git in the SSH terminal for this workspace.`,
-        );
-        return;
-      }
       const result = parseGitNumstat(
         (await git([...diffArgs, '--numstat', '-z', '--', '.'])).stdout,
       );
+      if (result.stats.filesCount + untracked.length > MAX_FILES_FOR_DETAILS) {
+        const filesCount = result.stats.filesCount + untracked.length;
+        res.json({
+          v: 1,
+          workspaceCwd: runtime.workspaceCwd,
+          available: true,
+          ...result.stats,
+          filesCount,
+          files: [],
+          hiddenCount: filesCount,
+        });
+        return;
+      }
       const deleted = parseDeletedFromNameStatus(
         (await git([...diffArgs, '--name-status', '-z', '--', '.'])).stdout,
       );

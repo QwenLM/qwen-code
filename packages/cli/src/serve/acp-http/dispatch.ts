@@ -289,6 +289,10 @@ const SSH_METHODS = new Set([
     'workspace/session_groups/delete',
     'workspace/trust',
     'workspace/trust/request',
+    'workspace/providers',
+    'workspace/tools',
+    'workspace/voice',
+    'workspace/voice/set',
     'workspace/permissions',
     'workspace/permissions/set',
     'workspace/auth/status',
@@ -4773,7 +4777,8 @@ export class AcpDispatcher {
           const matches = await fs.glob(pattern, {
             maxResults: maxResults + 1,
           });
-          const truncated = matches.length > maxResults;
+          const truncated =
+            matches.truncated === true || matches.length > maxResults;
           this.replyConn(conn, id, {
             pattern,
             matches: truncated ? matches.slice(0, maxResults) : matches,

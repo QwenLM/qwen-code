@@ -17,6 +17,7 @@ import {
   MAX_READ_BYTES,
   MAX_TEXT_SCAN_BYTES,
   enforceWriteSize,
+  assertTrustedForIntent,
 } from './policy.js';
 import type { Intent, ResolvedPath } from './paths.js';
 import type {
@@ -51,9 +52,7 @@ export function createSshWorkspaceFileSystemFactory(options: {
   const assertOpen = () => options.generationGuard?.assertOpen();
   const assertCanWrite = () => {
     assertOpen();
-    if (!options.trusted) {
-      throw new FsError('untrusted_workspace', 'SSH workspace is not trusted.');
-    }
+    assertTrustedForIntent(options.trusted, 'write');
   };
   const remotePath = (input: string): string => {
     if (input.includes('\0'))
@@ -119,7 +118,8 @@ export function createSshWorkspaceFileSystemFactory(options: {
                   ? 'stat'
                   : 'read';
         try {
-          assertCanWrite();
+          assertOpen();
+          assertTrustedForIntent(options.trusted, intent);
           const result = await client.request<T>(
             operation,
             params,
@@ -146,6 +146,23 @@ export function createSshWorkspaceFileSystemFactory(options: {
               case 'file_already_exists':
               case 'permission_denied':
                 failure = new FsError(error.code, error.message);
+                break;
+              case 'too_large':
+                failure = new FsError('file_too_large', error.message);
+                break;
+              case 'invalid_argument':
+              case 'unsupported_pattern':
+                failure = new FsError('parse_error', error.message);
+                break;
+              case 'unsupported_encoding':
+              case 'unsupported_file':
+              case 'not_file':
+              case 'not_directory':
+              case 'unsupported_ignore':
+              case 'unsupported_operation':
+                failure = new FsError('parse_error', error.message, {
+                  status: 422,
+                });
                 break;
               default:
                 failure = new FsError('io_error', error.message);
@@ -217,9 +234,21 @@ export function createSshWorkspaceFileSystemFactory(options: {
         return encoded;
       };
       const fileSystem: WorkspaceFileSystem = {
-        async resolve(input) {
-          assertCanWrite();
-          return localPath(input);
+        async resolve(input, intent) {
+          try {
+            assertOpen();
+            assertTrustedForIntent(options.trusted, intent);
+            return localPath(input);
+          } catch (error) {
+            audit.recordDenied(ctx, {
+              intent,
+              input,
+              errorKind:
+                error instanceof FsError ? error.kind : 'internal_error',
+              message: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          }
         },
         stat: (p) => request<FsStat>('stat', { path: remotePath(p) }),
         async readText(p, opts = {}) {
@@ -260,6 +289,8 @@ export function createSshWorkspaceFileSystemFactory(options: {
             );
           const text = read.content.replace(/^\ufeff/, '');
           const lines = text.split('\n');
+          const lineCount =
+            lines.length - (text.endsWith('\n') || text === '' ? 1 : 0);
           const start = (opts.line ?? 1) - 1;
           let content = lines
             .slice(
@@ -276,14 +307,14 @@ export function createSshWorkspaceFileSystemFactory(options: {
           }
           const hasMore =
             bytes.length > maxBytes ||
-            (opts.limit !== undefined && start + opts.limit < lines.length);
+            (opts.limit !== undefined && start + opts.limit < lineCount);
           return {
             content,
             meta: {
               ...metadata(read),
               truncated: content !== text,
               hasMore,
-              originalLineCount: lines.length,
+              originalLineCount: lineCount,
             },
           };
         },
@@ -333,7 +364,10 @@ export function createSshWorkspaceFileSystemFactory(options: {
         list: (p, opts = {}) =>
           request<FsEntry[]>('list', { path: remotePath(p), ...opts }),
         async glob(pattern, opts = {}) {
-          const result = await request<{ paths: string[] }>('glob', {
+          const result = await request<{
+            paths: string[];
+            truncated?: boolean;
+          }>('glob', {
             pattern,
             path: opts.cwd
               ? remotePath(opts.cwd)
@@ -341,7 +375,10 @@ export function createSshWorkspaceFileSystemFactory(options: {
             maxResults: opts.maxResults,
             includeIgnored: opts.includeIgnored,
           });
-          return result.paths.map(localPath);
+          return Object.assign(
+            result.paths.map(localPath),
+            result.truncated ? { truncated: true } : {},
+          );
         },
         async writeTextAtomic(p, content, opts) {
           const encoded = await encodeForWrite(p, content, opts, opts.mode);
@@ -381,7 +418,10 @@ export function createSshWorkspaceFileSystemFactory(options: {
               'text_not_found',
               'Text was not found in the remote file.',
             );
-          if (read.content.split(oldText).length !== 2)
+          if (
+            opts.expectedHash !== undefined &&
+            read.content.split(oldText).length !== 2
+          )
             throw new FsError(
               'ambiguous_text_match',
               'Text matches more than once.',
@@ -404,12 +444,15 @@ export function createSshWorkspaceFileSystemFactory(options: {
         },
         editAtomic: (p, oldText, newText, opts) =>
           fileSystem.edit(p, oldText, newText, opts),
-        writeBytesAtomic: (p, data) =>
-          request('write', {
+        async writeBytesAtomic(p, data) {
+          assertCanWrite();
+          enforceWriteSize(data.length, 16 * 1024 * 1024);
+          return request('write', {
             path: remotePath(p),
             data: data.toString('base64'),
             mode: 'create',
-          }),
+          });
+        },
         async mkdir(p, opts) {
           await request('mkdir', {
             path: remotePath(p),

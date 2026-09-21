@@ -16,11 +16,16 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import * as fsp from 'node:fs/promises';
 
 const { request, dispose } = vi.hoisted(() => ({
   request: vi.fn(),
   dispose: vi.fn(),
 }));
+vi.mock('node:fs/promises', async (original) => {
+  const actual = await original<typeof import('node:fs/promises')>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 vi.mock(
   '@qwen-code/qwen-code-core/services/ssh-workspace.js',
   async (original) => ({
@@ -99,5 +104,33 @@ describe('SSH workspace identity', () => {
       'Host key',
     );
     expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each([null, {}, { directory: 42 }])(
+    'rejects an invalid probe reply %j before persistence',
+    async (reply) => {
+      request.mockResolvedValueOnce(reply);
+      await expect(
+        prepareSshWorkspace('ssh://host/srv/project'),
+      ).rejects.toThrow('invalid workspace directory');
+      expect(await fsp.readdir(root)).toEqual([]);
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not turn a long remote path into a persisted display name', async () => {
+    const directory = '/srv/' + 'project/'.repeat(45) + 'app';
+    request.mockResolvedValueOnce({ directory });
+    const prepared = await prepareSshWorkspace('ssh://host/srv/project');
+    expect(prepared).not.toHaveProperty('displayName');
+    expect(readSshWorkspace(prepared.cwd)?.directory).toBe(directory);
+  });
+
+  it('preserves a descriptor write error when no temporary file was created', async () => {
+    const failure = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    vi.mocked(fsp.writeFile).mockRejectedValueOnce(failure);
+    await expect(prepareSshWorkspace('ssh://host/srv/project')).rejects.toBe(
+      failure,
+    );
   });
 });

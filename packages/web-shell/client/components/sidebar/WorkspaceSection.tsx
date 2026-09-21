@@ -39,7 +39,7 @@ import {
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
-import { workspaceLabel } from '../../utils/workspace';
+import { sshWorkspaceLabel, workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import {
@@ -810,7 +810,7 @@ export function WorkspaceSection({
                 className={styles.name}
                 title={
                   workspace.ssh
-                    ? `${workspace.ssh.host}:${workspace.ssh.directory}`
+                    ? sshWorkspaceLabel(workspace.ssh)
                     : workspace.cwd
                 }
               >
@@ -835,11 +835,7 @@ export function WorkspaceSection({
       {overviewEnabled && !renderHeader && !disabled ? (
         <WorkspaceDetailsTooltip
           label={workspaceLabel(workspace)}
-          cwd={
-            workspace.ssh
-              ? `${workspace.ssh.host}:${workspace.ssh.directory}`
-              : gitPollCwd
-          }
+          cwd={workspace.ssh ? sshWorkspaceLabel(workspace.ssh) : gitPollCwd}
           branch={gitStatus?.branch}
           gitStatus={gitStatus}
           sessions={stats}

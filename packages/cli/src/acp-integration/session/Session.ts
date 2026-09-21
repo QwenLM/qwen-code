@@ -15607,11 +15607,9 @@ export class Session implements SessionContext {
 
       case 'unsupported': {
         if (result.originalType === 'unsupported_action') {
-          throw new RequestError(
-            -32004,
-            'This action is not supported in this standalone session.',
-            { errorKind: 'unsupported_action' },
-          );
+          throw new RequestError(-32004, result.reason, {
+            errorKind: 'unsupported_action',
+          });
         }
         // Command returned an unsupported result type
         const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;

@@ -157,6 +157,7 @@ describe.skipIf(process.platform === 'win32')(
     afterEach(() => {
       rmSync(directory, { recursive: true, force: true });
       vi.clearAllMocks();
+      vi.unstubAllEnvs();
     });
 
     function git(...args: string[]) {
@@ -223,6 +224,122 @@ describe.skipIf(process.platform === 'win32')(
       expect(ssh.dispose).toHaveBeenCalledOnce();
     });
 
+    it('counts actual remote stashes', async () => {
+      init();
+      writeFileSync(join(remote, 'tracked.txt'), 'stash change');
+      git('add', '.');
+      git('stash', 'push', '-m', 'test stash');
+      const response = await supertest(app).get(url('/git'));
+      expect(response.status).toBe(200);
+      expect(response.body.stashCount).toBe(1);
+    });
+
+    it('rejects a bare repository with the declared working-tree error', async () => {
+      git('init', '--bare', '-q');
+      const response = await supertest(app).get(url('/git'));
+      expect(response.status).toBe(501);
+      expect(response.body.error).toContain('requires a working tree');
+    });
+
+    it('stops after an in-flight Git result when its runtime generation closes', async () => {
+      ssh.execute.mockImplementationOnce(async () => {
+        runtime.generationGuard!.close();
+        return { stdout: 'true\n', stderr: '', exitCode: 0 };
+      });
+      const response = await supertest(app).get(url('/git'));
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+      expect(ssh.execute).toHaveBeenCalledOnce();
+      expect(ssh.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('treats hostile file names literally and clears inherited Git selectors', async () => {
+      init();
+      const name = "file ' ; $(touch injected).txt";
+      writeFileSync(join(remote, name), 'before\n');
+      git('add', '--', name);
+      git('commit', '-qm', 'quoted file');
+      writeFileSync(join(remote, name), 'after\n');
+      vi.stubEnv('GIT_DIR', join(directory, 'wrong-repository'));
+      const response = await supertest(app)
+        .get(url('/git/diff/file'))
+        .query({ path: name });
+      expect(response.status).toBe(200);
+      expect(response.body.hunks[0].lines).toContain('+after');
+      const status = await supertest(app).get(url('/git'));
+      expect(status.body.untracked).toBe(0);
+    });
+
+    it('cancels an active remote Git request when the HTTP client disconnects', async () => {
+      let started!: () => void;
+      let cancelled!: () => void;
+      const start = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const cancel = new Promise<void>((resolve) => {
+        cancelled = resolve;
+      });
+      ssh.execute.mockImplementationOnce(
+        (_command, options) =>
+          new Promise((_resolve, reject) => {
+            options.signal.addEventListener(
+              'abort',
+              () => {
+                cancelled();
+                reject(
+                  new SshWorkspaceError('cancelled', 'client disconnected'),
+                );
+              },
+              { once: true },
+            );
+            started();
+          }),
+      );
+      const server = app.listen(0, '127.0.0.1');
+      const abort = new AbortController();
+      try {
+        await new Promise<void>((resolve) => server.once('listening', resolve));
+        const address = server.address();
+        if (!address || typeof address === 'string')
+          throw new Error('No HTTP address');
+        const response = fetch(
+          `http://127.0.0.1:${address.port}${url('/git')}`,
+          { signal: abort.signal },
+        ).catch((error: unknown) => error);
+        await start;
+        abort.abort();
+        await response;
+        await cancel;
+        expect(ssh.execute).toHaveBeenCalledOnce();
+        await vi.waitFor(() => expect(ssh.dispose).toHaveBeenCalledOnce());
+      } finally {
+        abort.abort();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it('returns counts without details above the 500-file threshold', async () => {
+      init();
+      for (let index = 0; index < 501; index++)
+        writeFileSync(join(remote, `file-${index}.txt`), 'line\n');
+      const response = await supertest(app).get(url('/git/diff'));
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        available: true,
+        filesCount: 501,
+        files: [],
+        hiddenCount: 501,
+      });
+      expect(ssh.request).not.toHaveBeenCalled();
+    });
+
+    it('keeps SSH workspace metadata, rename and removal on their owning routes', async () => {
+      expect((await supertest(app).get(url(''))).status).toBe(599);
+      expect((await supertest(app).patch(url(''))).status).toBe(599);
+      expect((await supertest(app).delete(url(''))).status).toBe(599);
+      expect(ssh.execute).not.toHaveBeenCalled();
+    });
+
     it('counts all untracked lines while limiting rendered rows to 50', async () => {
       init();
       for (let index = 0; index < 60; index++)
@@ -230,6 +347,7 @@ describe.skipIf(process.platform === 'win32')(
       const response = await supertest(app).get(url('/git/diff'));
       expect(response.status).toBe(200);
       expect(response.body).toMatchObject({
+        available: true,
         filesCount: 60,
         linesAdded: 120,
         linesRemoved: 0,
@@ -393,6 +511,12 @@ describe.skipIf(process.platform === 'win32')(
     it('preserves local session storage and runtime controls while rejecting project services', async () => {
       for (const suffix of [
         '/sessions',
+        '/file',
+        '/file/bytes',
+        '/stat',
+        '/list',
+        '/glob',
+        '/voice',
         '/sessions/search',
         '/sessions/live-state',
         '/session-info',
@@ -410,6 +534,9 @@ describe.skipIf(process.platform === 'win32')(
         expect((await supertest(app).get(url(suffix))).status).toBe(599);
       }
       for (const suffix of [
+        '/acp',
+        '/voice',
+        '/voice/transcribe',
         '/trust/request',
         '/permissions',
         '/runtime/ensure',

@@ -177,7 +177,7 @@ describe('handleSlashCommand', () => {
         action,
       },
     ]);
-    for (const command of ['/init', '/model', '/custom']) {
+    for (const command of ['/init', '/model']) {
       expect(
         (
           await handleSlashCommand(
@@ -194,6 +194,22 @@ describe('handleSlashCommand', () => {
       expect(loaders).toEqual([expect.any(BuiltinCommandLoader)]);
     }
   });
+
+  it.each(['/var is filling up', '/tmp is full', '/custom'])(
+    'sends an unknown SSH slash prefix to the model as text: %s',
+    async (query) => {
+      mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+      mockGetCommands.mockReturnValue([]);
+      expect(
+        await handleSlashCommand(
+          query,
+          abortController,
+          mockConfig,
+          mockSettings,
+        ),
+      ).toEqual({ type: 'no_command' });
+    },
+  );
 
   it('shows only SSH session commands and prevents model setting persistence', async () => {
     mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});

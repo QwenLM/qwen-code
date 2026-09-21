@@ -149,32 +149,6 @@ describe('AddWorkspaceDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('submits an SSH URL without asking the local directory browser for suggestions', async () => {
-    const onAdd = vi.fn().mockResolvedValue(undefined);
-    const onSuggest = vi.fn();
-    mount(
-      <AddWorkspaceDialog
-        onClose={vi.fn()}
-        onAdd={onAdd}
-        onSuggest={onSuggest}
-        browseDirectories
-      />,
-    );
-    type('ssh://alice@build-box:2222/srv/project');
-    submit();
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(onAdd).toHaveBeenCalledWith(
-      'ssh://alice@build-box:2222/srv/project',
-      true,
-    );
-    expect(onSuggest).not.toHaveBeenCalled();
-    expect(
-      document.querySelector('button[aria-label="Parent directory"]'),
-    ).toBeNull();
-  });
-
   it('submits an optional trimmed display name', async () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
@@ -328,6 +302,48 @@ describe('AddWorkspaceDialog', () => {
     });
     afterEach(() => {
       vi.useRealTimers();
+    });
+
+    it('submits an SSH URL with Enter without browsing the local filesystem', async () => {
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+          browseDirectories
+          initialPath="/local/"
+        />,
+      );
+      await settle();
+      expect(onSuggest).toHaveBeenCalledWith('/local/');
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).not.toBeNull();
+      expect(document.body.textContent).toContain('ssh://');
+      onSuggest.mockClear();
+      const url = 'ssh://alice@build-box:2222/srv/project';
+      type(`  ${url}  `);
+      await settle();
+      expect(onSuggest).not.toHaveBeenCalled();
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).toBeNull();
+      const enter = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        input().dispatchEvent(enter);
+      });
+      expect(enter.defaultPrevented).toBe(false);
+      expect(input().value.trim()).toBe(url);
+      await act(async () => {
+        input().form!.requestSubmit();
+      });
+      expect(onAdd).toHaveBeenCalledWith(url, true);
     });
 
     it('renders a persistent remote directory browser', async () => {

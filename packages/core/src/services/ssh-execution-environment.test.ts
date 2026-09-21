@@ -200,6 +200,7 @@ describe('SshExecutionEnvironment', () => {
         path: `${remote}/file.txt`,
         content: '$& edited\r\nsecond\r\n',
         mode: 'replace',
+        createParents: false,
         expectedHash: hash('first\r\nsecond\r\n'),
       },
       expect.any(AbortSignal),
@@ -360,6 +361,7 @@ describe('SshExecutionEnvironment', () => {
     await read();
     transport.execute.mockImplementationOnce(async (_command, options) => {
       options.onOutput?.('progress');
+      options.onOutput?.(' complete');
       return { stdout: 'done', stderr: 'warning', exitCode: 2 };
     });
     const { id } = await prepare(ToolNames.SHELL, {
@@ -379,8 +381,10 @@ describe('SshExecutionEnvironment', () => {
       'pwd',
       expect.objectContaining({ directory: `${remote}/src`, timeoutMs: 2000 }),
     );
-    expect(onOutput).toHaveBeenCalledWith('progress');
-    expect(output.error?.message).toContain('code 2');
+    expect(onOutput.mock.calls).toEqual([['progress'], ['progress complete']]);
+    expect(output.error).toBeUndefined();
+    expect(output.llmContent).toContain('Exit code: 2');
+    expect(output.llmContent).toContain('done');
     expect(output.llmContent).toContain('warning');
     await expect(
       prepare(ToolNames.WRITE_FILE, {
@@ -508,5 +512,128 @@ describe('SshExecutionEnvironment', () => {
     await environment.dispose();
     expect(transport.dispose).toHaveBeenCalled();
     await expect(read()).rejects.toThrow('disposed');
+  });
+  it.each([0, 2500])(
+    'honors the configured output threshold %s and retains the tail',
+    async (outputThreshold) => {
+      await environment.dispose();
+      environment = new SshExecutionEnvironment(
+        { host: 'host', directory: remote },
+        anchor,
+        { outputThreshold },
+      );
+      const content = 'head' + 'x'.repeat(20_000) + 'tail';
+      files.set(`${remote}/file.txt`, content);
+      const output = await read();
+      expect(String(output.llmContent)).toContain('head');
+      expect(String(output.llmContent)).toContain('tail');
+      if (outputThreshold === 0) expect(output.llmContent).toBe(content);
+      else {
+        expect(String(output.llmContent).length).toBeLessThan(2700);
+        expect(output.llmContent).toContain('truncated');
+      }
+    },
+  );
+
+  it.each([0, 45_000])(
+    'uses the configured shell deadline %s unless the call overrides it',
+    async (shellDefaultTimeoutMs) => {
+      await environment.dispose();
+      environment = new SshExecutionEnvironment(
+        { host: 'host', directory: remote },
+        anchor,
+        { shellDefaultTimeoutMs },
+      );
+      await execute(ToolNames.SHELL, { command: 'pwd' });
+      expect(transport.execute).toHaveBeenLastCalledWith(
+        'pwd',
+        expect.objectContaining({ timeoutMs: shellDefaultTimeoutMs }),
+      );
+      await execute(ToolNames.SHELL, { command: 'pwd', timeout: 1000 });
+      expect(transport.execute).toHaveBeenLastCalledWith(
+        'pwd',
+        expect.objectContaining({ timeoutMs: 1000 }),
+      );
+    },
+  );
+
+  it.each([-5000, 0.5, 2_147_483_648])(
+    'falls back to the normal shell deadline for an invalid setting %s',
+    async (shellDefaultTimeoutMs) => {
+      await environment.dispose();
+      environment = new SshExecutionEnvironment(
+        { host: 'host', directory: remote },
+        anchor,
+        { shellDefaultTimeoutMs },
+      );
+      await execute(ToolNames.SHELL, { command: 'pwd' });
+      expect(transport.execute).toHaveBeenLastCalledWith(
+        'pwd',
+        expect.objectContaining({ timeoutMs: 120_000 }),
+      );
+    },
+  );
+
+  it('extracts compound command roots after environment assignments for approval', async () => {
+    const { id } = await prepare(ToolNames.SHELL, {
+      command: 'FOO=1 npm test && git status',
+    });
+    expect(await environment.confirmation(id, signal)).toMatchObject({
+      rootCommand: 'npm, git',
+    });
+  });
+
+  it('invalidates every prior read when no paths are supplied', async () => {
+    await read();
+    await environment.invalidateReadCache();
+    await expect(
+      prepare(ToolNames.WRITE_FILE, { file_path: 'file.txt', content: 'bad' }),
+    ).rejects.toThrow('Read the remote file');
+  });
+  it('rejects a stale manual proposal independently of the current read hash', async () => {
+    await read();
+    await expect(
+      environment.prepare(
+        {
+          id: 'manual',
+          toolName: ToolNames.WRITE_FILE,
+          params: { file_path: 'file.txt', content: 'proposal' },
+          modification: {
+            oldContent: 'stale rendered preview',
+            newContent: 'manual replacement',
+          },
+        },
+        signal,
+      ),
+    ).rejects.toThrow('file changed while modifying');
+    expect(files.get(`${remote}/file.txt`)).toBe('first\r\nsecond\r\n');
+    await expect(
+      environment.prepare(
+        {
+          id: 'manual-read',
+          toolName: ToolNames.READ_FILE,
+          params: { file_path: 'file.txt' },
+          modification: { oldContent: '', newContent: '' },
+        },
+        signal,
+      ),
+    ).rejects.toThrow('does not support modification');
+    expect(
+      await environment.modificationContent(
+        ToolNames.EDIT,
+        { file_path: 'file.txt', old_string: 'first', new_string: 'revised' },
+        signal,
+      ),
+    ).toEqual({
+      current: 'first\r\nsecond\r\n',
+      proposed: 'revised\r\nsecond\r\n',
+    });
+    await expect(
+      environment.modificationContent(
+        ToolNames.READ_FILE,
+        { file_path: 'file.txt' },
+        signal,
+      ),
+    ).rejects.toThrow('does not support modification');
   });
 });
