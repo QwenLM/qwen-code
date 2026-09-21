@@ -5,14 +5,9 @@
  */
 
 import { execSync } from 'node:child_process';
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { INDEPENDENT_PACKAGES } from './release-packages.mjs';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -39,35 +34,15 @@ if (!versionType) {
   process.exit(1);
 }
 
-// 2. Bump the version in the root and all workspace package.json files.
-run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
-
-// 3. Get all workspaces and filter out the one we don't want to version.
-// We intend to maintain sdk, mobile-mcp, node-repl, and qwen-live versions
-// independently.
-const workspacesToExclude = [
-  '@qwen-code/sdk',
-  '@qwen-code/mobile-mcp',
-  '@qwen-code/node-repl-mcp',
-  '@qwen-code/qwen-live',
-];
-const workspaceNames = JSON.parse(
-  execSync('npm pkg get name --workspaces --json').toString(),
+// Resolve patch/minor/etc. once, then align all release workspaces to it.
+run(
+  `corepack pnpm version ${versionType} --no-git-tag-version --allow-same-version --no-git-checks`,
 );
-const allWorkspaces = Object.keys(workspaceNames);
-const workspacesToVersion = allWorkspaces.filter(
-  (wsName) => !workspacesToExclude.includes(wsName),
-);
-
-for (const workspaceName of workspacesToVersion) {
-  run(
-    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
-  );
-}
-
-// 4. Get the new version number from the root package.json
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
+run(
+  `corepack pnpm -r ${INDEPENDENT_PACKAGES.map((name) => `--filter="!${name}"`).join(' ')} version ${newVersion} --no-git-tag-version --allow-same-version --no-git-checks`,
+);
 
 // 5. Keep the published Mem0 Extension manifest aligned with its package.
 const mem0ManifestPath = resolve(
@@ -120,24 +95,6 @@ for (const entry of readdirSync(channelsDir)) {
       `Pinned @qwen-code/channel-base to ${newVersion} in ${pkg.name}`,
     );
   }
-}
-
-// 9. Refresh node_modules and package-lock.json against the pinned exact
-// versions so the adapters resolve channel-base to the workspace link again.
-// --ignore-scripts prevents the root `prepare` lifecycle from triggering a
-// redundant full build that fails with TS5055 when dist/ already exists from
-// the initial `npm ci` install.
-run('npm install --ignore-scripts');
-
-// 10. The per-workspace `npm version` reifies above nested a stale registry
-// copy of channel-base under each adapter while ranges briefly mismatched.
-// The install above cleans both lockfiles but can leave that directory on
-// disk, where it shadows the workspace link during tsc. Remove it.
-for (const entry of readdirSync(channelsDir)) {
-  rmSync(join(channelsDir, entry, 'node_modules', '@qwen-code'), {
-    recursive: true,
-    force: true,
-  });
 }
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

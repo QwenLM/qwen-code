@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getRelaunchEnvProvenance } from './config/environment.js';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   AuthType,
   type ChatRecord,
@@ -98,6 +100,7 @@ import {
 import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
@@ -629,15 +632,19 @@ export async function main() {
       argv.sandboxImage ??
       process.env['QWEN_SANDBOX_IMAGE'] ??
       settings.merged.tools?.sandboxImage;
-    if (
-      sandboxConfig &&
-      sandboxConfig.command !== 'sandbox-exec' &&
-      customSandboxImage
-    ) {
+    // Only the container backends run an image with its own in-process updater;
+    // `sandbox-exec` and `bwrap` confine this process in place, so neither the
+    // image handoff nor the host-update relaunch marker applies to them.
+    // Narrowed to the config (not a boolean) so `.image` stays type-safe below.
+    const containerSandbox =
+      sandboxConfig?.command === 'docker' || sandboxConfig?.command === 'podman'
+        ? sandboxConfig
+        : undefined;
+    if (containerSandbox?.image && customSandboxImage) {
       // Images built before this handoff protocol must be rebuilt; they cannot
       // be made to skip their in-process updater from the host.
-      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = sandboxConfig.image;
-    } else if (sandboxConfig && sandboxConfig.command !== 'sandbox-exec') {
+      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = containerSandbox.image;
+    } else if (containerSandbox) {
       const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
       process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
         Boolean(
@@ -661,6 +668,7 @@ export async function main() {
         [],
         // Pass separated hooks for proper source attribution
         {
+          systemHooks: settings.getSystemHooks(),
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
@@ -780,12 +788,19 @@ export async function main() {
       );
       process.exit(0);
     } else {
-      // Relaunch app so we always have a child process that can be internally
-      // restarted if needed.
+      // Interactive and streaming modes keep a supervisor for in-session
+      // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: privateAcpChildEnv,
+        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
         onUpdateRelaunch,
+        replaceProcess:
+          !isAcpMode &&
+          argv.inputFormat !== InputFormat.STREAM_JSON &&
+          !argv.promptInteractive &&
+          !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+          argv.jsonFd === undefined &&
+          Boolean(argv.prompt),
       });
     }
   }
@@ -968,6 +983,7 @@ export async function main() {
       argv.extensions,
       // Pass separated hooks for proper source attribution
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
@@ -1106,6 +1122,10 @@ export async function main() {
       }
     });
 
+    registerCleanup(() => config.shutdownExecutionEnvironments(), {
+      first: true,
+    });
+
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
@@ -1215,6 +1235,7 @@ export async function main() {
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.
+        prepareFileWatchersForProcessExit();
         await runExitCleanup();
       }
       process.exit(0);
@@ -1260,6 +1281,12 @@ export async function main() {
     profileCheckpoint('before_render');
 
     if (config.isInteractive()) {
+      // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      const interruptedWorkflowsNotice =
+        await getInterruptedWorkflowRunsNotice(config);
+      if (interruptedWorkflowsNotice) {
+        startupWarnings.push(interruptedWorkflowsNotice);
+      }
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
       // runNonInteractive's main/drain loops. In TUI mode the same call

@@ -14,6 +14,7 @@ import {
   FatalBudgetExceededError,
   ToolErrorType,
   createDebugLogger,
+  stripAnsiAndControl,
 } from '@qwen-code/qwen-code-core';
 import type { BudgetExceeded } from './runBudget.js';
 import { runExitCleanup } from './cleanup.js';
@@ -188,6 +189,25 @@ export async function handleError(
   }
 }
 
+/** Longest tool name echoed to stderr in a denied-tool warning. */
+const TOOL_NAME_ECHO_LIMIT = 64;
+
+/** Longest denial reason echoed to stderr in a denied-tool warning. */
+const DENIAL_REASON_ECHO_LIMIT = 500;
+
+/**
+ * A denial reason can be a hook's stderr or JSON `reason`, and a tool name
+ * comes from the model, so neither is trusted terminal output. Collapse
+ * whitespace to one line, drop terminal escapes, control and Unicode format
+ * characters (bidi overrides, zero-width), and bound the length.
+ */
+function sanitizeForStderr(text: string, limit: number): string {
+  const clean = stripAnsiAndControl(text.replace(/\s+/g, ' '))
+    .replace(/\p{Cf}/gu, '')
+    .trim();
+  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+}
+
 /**
  * Handles tool execution errors specifically.
  * In JSON/STREAM_JSON mode, outputs error message to stderr only and does not exit.
@@ -207,19 +227,32 @@ export function handleToolError(
   config: Config,
   errorCode?: string | number,
   resultDisplay?: string,
+  options: { approvalRequired?: boolean } = {},
 ): void {
-  // Check if this is a permission denied error in non-interactive mode
   const isExecutionDenied = errorCode === ToolErrorType.EXECUTION_DENIED;
   const isNonInteractive = !config.isInteractive();
   const isTextMode = config.getOutputFormat() === OutputFormat.TEXT;
 
-  // Show warning for permission denied errors in non-interactive text mode
+  // A denied tool call in non-interactive text mode gets one line on stderr.
+  // Only a call denied for lack of approval is fixed by an approval mode; a
+  // hook block, a deny rule or plan mode is not, so those report their reason.
   if (isExecutionDenied && isNonInteractive && isTextMode) {
-    const warningMessage =
-      `Warning: Tool "${toolName}" requires user approval but cannot execute in non-interactive mode.\n` +
-      `To enable automatic tool execution, use the -y flag (YOLO mode):\n` +
-      `Example: qwen -p 'your prompt' -y\n\n`;
-    process.stderr.write(warningMessage);
+    const displayName = sanitizeForStderr(toolName, TOOL_NAME_ECHO_LIMIT);
+    if (options.approvalRequired) {
+      process.stderr.write(
+        `Warning: Tool "${displayName}" requires user approval but cannot execute in non-interactive mode.\n` +
+          `To enable automatic tool execution, use the -y flag (YOLO mode):\n` +
+          `Example: qwen -p 'your prompt' -y\n\n`,
+      );
+    } else {
+      const reason = sanitizeForStderr(
+        resultDisplay || toolError.message,
+        DENIAL_REASON_ECHO_LIMIT,
+      );
+      process.stderr.write(
+        `Warning: Tool "${displayName}" was not run: ${reason || 'the call was denied.'}\n\n`,
+      );
+    }
   }
 
   debugLogger.error(

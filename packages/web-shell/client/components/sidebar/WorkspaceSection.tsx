@@ -22,6 +22,7 @@ import {
   CalendarClockIcon,
   FolderClosedIcon,
   FolderOpenIcon,
+  Globe2Icon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
@@ -85,15 +86,30 @@ function getSessionLabel(session: DaemonSessionSummary): string {
   return displayName || session.sessionId.slice(0, 8);
 }
 
-function WorkspaceFolderIcon({ open }: { open: boolean }) {
+function WorkspaceFolderIcon({
+  open,
+  remote,
+}: {
+  open: boolean;
+  remote: boolean;
+}) {
   const Icon = open ? FolderOpenIcon : FolderClosedIcon;
   return (
-    <Icon
-      className={styles.folderIcon}
-      size={14}
-      strokeWidth={1.4}
-      aria-hidden="true"
-    />
+    <span className={styles.folderIconWrap}>
+      <Icon
+        className={styles.folderIcon}
+        size={14}
+        strokeWidth={1.4}
+        aria-hidden="true"
+      />
+      {remote && (
+        <Globe2Icon
+          className={styles.folderRemoteBadge}
+          data-testid="remote-workspace-folder-icon"
+          aria-hidden="true"
+        />
+      )}
+    </span>
   );
 }
 
@@ -105,6 +121,7 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
   reloadToken: number;
@@ -198,10 +215,19 @@ interface WorkspaceSectionProps {
    * on the same machine.
    */
   onOpenTerminalLocally?: (cwd: string) => Promise<void>;
+  /**
+   * Open the working-tree Changes dialog for this workspace. When wired, the
+   * hover popover's branch row becomes the trigger for that workspace's Git
+   * picker; without it the row stays a plain-text summary.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
+  onOpenCommit?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
   workspace,
+  remote = false,
   renderHeader,
   client,
   reloadToken,
@@ -241,6 +267,8 @@ export function WorkspaceSection({
   isPinnedSectionMember,
   onOpenPathLocally,
   onOpenTerminalLocally,
+  onOpenGitDiff,
+  onOpenCommit,
 }: WorkspaceSectionProps) {
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [channelCatalog, setChannelCatalog] = useState<{
@@ -772,7 +800,7 @@ export function WorkspaceSection({
             <span
               className={cx(styles.chevron, expanded && styles.chevronOpen)}
             >
-              <WorkspaceFolderIcon open={expanded} />
+              <WorkspaceFolderIcon open={expanded} remote={remote} />
             </span>
             <span className={styles.headerContent}>
               <span className={styles.name} title={workspace.cwd}>
@@ -803,6 +831,21 @@ export function WorkspaceSection({
           sessions={stats}
           overview={overview ?? retainedOverview}
           items={overviewItems}
+          gitActions={
+            // Untrusted workspaces have no git runtime, and a synthetic
+            // fallback has no real cwd to scope the picker's routes with.
+            onOpenGitDiff && workspace.trusted && gitPollCwd
+              ? {
+                  workspaceCwd: workspace.cwd,
+                  onOpenDiff: () => onOpenGitDiff(workspace.cwd),
+                  onOpenCommit: onOpenCommit
+                    ? () => onOpenCommit(workspace.cwd)
+                    : undefined,
+                  onStatusRefreshed: setGitStatus,
+                  onBranchChanged: () => void loadGitStatus(),
+                }
+              : undefined
+          }
           onOpenChange={setDetailsOpen}
           onOpenPathLocally={
             onOpenPathLocally && gitPollCwd && workspace.trusted

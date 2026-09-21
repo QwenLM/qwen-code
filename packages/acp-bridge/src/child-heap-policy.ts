@@ -20,6 +20,8 @@ const MAX_MODELED_ACP_CHILDREN = 25;
  * refused. Nothing is applied: no child receives a derived
  * `--max-old-space-size`, and no spawn is refused.
  *
+ * `admit` — enforce only the modeled process count, retaining legacy heap flags.
+ *
  * There is deliberately no `enforce` yet. Applying the partition needs a way
  * to tell an operator beforehand whether their workload fits it, and that
  * observation does not exist: `refusals` below counts admission pressure, not
@@ -29,7 +31,7 @@ const MAX_MODELED_ACP_CHILDREN = 25;
  * that justifies it — peak old-space per child, compared against
  * `perChildCeilingMb`.
  */
-export type ChildHeapMode = 'off' | 'observe';
+export type ChildHeapMode = 'off' | 'observe' | 'admit';
 
 export interface ChildHeapPolicySnapshot {
   mode: ChildHeapMode;
@@ -146,6 +148,12 @@ export function createChildHeapPolicy(options: {
   // be the same contradiction from the other side.
   const maxConcurrentChildren = modelable ? admissible : 0;
   const perChildCeilingMb = modelable ? rawCeilingMb : null;
+
+  if (mode === 'admit' && maxConcurrentChildren === 0) {
+    throw new TypeError(
+      'ACP admission requires a memory budget that models at least one child.',
+    );
+  }
 
   return {
     decide(concurrentChildren) {
