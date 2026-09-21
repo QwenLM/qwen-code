@@ -33,6 +33,7 @@ describe('ZoomImageTool', () => {
       getTargetDir: () => root,
       getEffectiveInputModalities: () => ({ image: true }),
       getPlansDir: () => path.join(root, '.plans'),
+      getManagedExtensionsDir: () => undefined,
       getWorkspaceContext: () => createMockWorkspaceContext(root),
       storage: {
         getProjectTempDir: () => path.join(root, '.temp'),

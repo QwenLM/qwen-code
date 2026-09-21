@@ -3969,6 +3969,29 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('adds the deployment-managed extension root to ACP file system fallback roots', async () => {
+    const previousRoots = process.env[acpLocalReadRootsEnv];
+    delete process.env[acpLocalReadRootsEnv];
+
+    try {
+      const managedRoot = path.resolve('/deployment/prepared-extensions');
+      const expected = expectedDefaultAcpLocalReadRoots();
+      expected.splice(
+        expected.indexOf('/tmp/qwen-extensions') + 1,
+        0,
+        managedRoot,
+      );
+      await expectAcpLocalReadRoots(
+        'session-with-fs-managed',
+        expected,
+        '/runtime-a',
+        managedRoot,
+      );
+    } finally {
+      restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
+    }
+  });
+
   it('keeps the deployment extension root when a new session changes cwd', async () => {
     await setupSessionMocks('managed-session');
     const managedExtensions = '/deployment/prepared extensions';
@@ -4961,6 +4984,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hasSessionWriteOwnership: vi.fn().mockReturnValue(false),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue('/runtime-a'),
       getPlansDir: vi.fn().mockReturnValue('/home/test/.qwen/plans'),
+      getManagedExtensionsDir: vi.fn().mockReturnValue(undefined),
       activateProvisionalWorkspace: vi.fn().mockResolvedValue(undefined),
       setFileSystemService: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -5004,6 +5028,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     sessionId: string,
     expectedLocalReadRoots: string[],
     runtimeBaseDir = '/runtime-a',
+    managedExtensionsDir?: string,
   ): Promise<void> {
     const fsCapabilities = { readTextFile: true, writeTextFile: true };
     const fallbackFileSystem: Record<string, never> = {};
@@ -5012,6 +5037,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/project'),
       getSessionId: vi.fn().mockReturnValue(sessionId),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue(runtimeBaseDir),
+      getManagedExtensionsDir: vi.fn().mockReturnValue(managedExtensionsDir),
       getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
       setFileSystemService: vi.fn(),
       storage: {

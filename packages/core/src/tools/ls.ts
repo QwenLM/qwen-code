@@ -134,11 +134,14 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     const workspaceContext = this.config.getWorkspaceContext();
     const userSkillsDirs = this.config.storage.getUserSkillsDirs();
     const userExtensionsDir = Storage.getUserExtensionsDir();
+    const managedExtensionsDir = this.config.getManagedExtensionsDir();
 
     if (
       workspaceContext.isPathWithinWorkspace(dirPath) ||
       isSubpaths(userSkillsDirs, dirPath) ||
       isSubpath(userExtensionsDir, dirPath) ||
+      (managedExtensionsDir !== undefined &&
+        isSubpath(managedExtensionsDir, dirPath)) ||
       isSubpath(getMemoryBaseDir(), dirPath)
     ) {
       return 'allow';

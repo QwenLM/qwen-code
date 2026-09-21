@@ -2945,6 +2945,58 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('treats a retained managed policy whose package is gone as absent', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const managedId = 'b'.repeat(64);
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValue({
+      version: 2,
+      generation: 9,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [managedId]: {
+          name: 'demo',
+          managed: true,
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+      },
+    });
+    vi.mocked(
+      ExtensionManager.prototype.refreshCacheWithSnapshot,
+    ).mockResolvedValue({
+      version: 2,
+      generation: 9,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [managedId]: {
+          name: 'demo',
+          managed: true,
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+      },
+    });
+    // The deployment root no longer holds the package.
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
+      [],
+    );
+    try {
+      const response = await auth(
+        request(h.app).delete(`/extensions/${encodeURIComponent(managedId)}`),
+      );
+
+      expect(response.status).toBe(204);
+      expect(
+        ExtensionManager.prototype.uninstallExtensionById,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('rejects singular and batch activation on an untrusted target', async () => {
     const h = await makeHarness({ secondaryTrusted: false });
     mockExtensionManager();

@@ -309,6 +309,43 @@ describe('ExtensionStore', () => {
     },
   );
 
+  it('adopts a withdrawn managed settings directory whose casing differs from the retained policy name', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'b9'.repeat(32),
+      name: 'Configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'bf'.repeat(32), name: managed.name };
+    await store.ensureInitialized([managed]);
+    await store.setDefaultActivation(managed, 'disabled');
+    // The retained policy names one casing while the directory on disk —
+    // and the incoming install's destination — uses another. The sibling
+    // artifact lookup already matches case-insensitively; the adoption
+    // identity check must agree or the install dead-ends in a conflict.
+    const destination = path.join(extensionsDir, managed.name.toLowerCase());
+    await fsp.mkdir(destination);
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const after = await store.commitArtifact({
+      operation: 'install',
+      identity: user,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      initialActivation: { scope: 'user' },
+      allowManagedPolicyAdoption: true,
+    });
+    expect(after.extensions[user.id]).toMatchObject({
+      defaultActivation: 'disabled',
+      artifactGeneration: after.generation,
+    });
+    expect(after.extensions[managed.id]).toBeUndefined();
+    expect(
+      await fsp.readFile(path.join(destination, '.env'), 'utf8'),
+    ).toContain('SAVED=old\n');
+  });
+
   it.each([
     'notes.txt',
     'qwen-extension.json',

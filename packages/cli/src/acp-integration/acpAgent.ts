@@ -926,6 +926,7 @@ function defaultAcpOnlyLocalReadRoots(): string[] {
 }
 
 function buildAcpLocalReadRoots(config: Config): string[] {
+  const managedExtensionsDir = config.getManagedExtensionsDir();
   return [
     // SYNC: The first group mirrors ReadFileTool's default allowed local roots,
     // including auto-memory roots. The ACP-only additions below expand only
@@ -937,6 +938,7 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     getUserAutoMemoryRoot(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
+    ...(managedExtensionsDir ? [managedExtensionsDir] : []),
     // Saved plan files (see ReadFileTool.getDefaultPermission for why the
     // plans dir must be readable without a confirmation prompt).
     config.getPlansDir(),

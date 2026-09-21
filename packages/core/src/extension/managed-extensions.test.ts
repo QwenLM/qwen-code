@@ -572,19 +572,54 @@ describe('managed extensions', () => {
     const subject = manager();
     await subject.refreshCache();
     const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
     fs.rmSync(extensionPath, { recursive: true });
+    // The managed package is absent: uninstalling its retained identity is an
+    // idempotent no-op that leaves the store and the shadowed user artifact
+    // untouched.
     await expect(
       manager().uninstallExtensionById(managedId, false),
-    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    ).resolves.toEqual(before);
     await expect(
       manager({ managedExtensionsDir: undefined }).uninstallExtensionById(
         managedId,
         false,
       ),
-    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    ).resolves.toEqual(before);
     expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
       true,
     );
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
+  it('skips a dangling symlink in the managed root instead of aborting discovery', async () => {
+    writeExtension(managed, 'valid');
+    writeExtension(user, 'user-package');
+    fs.symlinkSync(
+      path.join(managed, 'missing-target'),
+      path.join(managed, 'dangling'),
+      'dir',
+    );
+    const subject = manager();
+    await subject.refreshCache();
+    expect(
+      subject
+        .getLoadedExtensions()
+        .map((extension) => extension.name)
+        .sort(),
+    ).toEqual(['user-package', 'valid']);
+  });
+
+  it('degrades to an empty managed set when the root becomes unreadable after construction', async () => {
+    writeExtension(managed, 'valid');
+    const subject = manager();
+    await subject.refreshCache();
+    expect(
+      subject.getLoadedExtensions().map((extension) => extension.name),
+    ).toEqual(['valid']);
+    fs.rmSync(managed, { recursive: true });
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([]);
   });
 
   it('rechecks managed ownership when committing a previously prepared user install', async () => {

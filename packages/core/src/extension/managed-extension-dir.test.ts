@@ -12,7 +12,7 @@ import { assertManagedExtensionStateSeparation } from './managed-extension-dir.j
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+  return { ...actual, lstatSync: vi.fn(actual.lstatSync) };
 });
 
 it('rejects an unavailable filesystem root instead of repeatedly checking its parent', () => {
@@ -20,25 +20,29 @@ it('rejects an unavailable filesystem root instead of repeatedly checking its pa
   const root = path.parse(path.resolve(managed)).root;
   const writable = path.join(root, 'qwen-unavailable-root', 'state');
   const unavailable = new Set([writable, path.dirname(writable), root]);
-  const exists = vi.mocked(fs.existsSync);
-  const originalExists = exists.getMockImplementation()!;
+  const lstat = vi.mocked(fs.lstatSync);
+  const originalLstat = lstat.getMockImplementation()!;
   let rootChecks = 0;
   let failure: unknown;
-  exists.mockImplementation((target) => {
+  lstat.mockImplementation((target, options) => {
     if (typeof target === 'string' && unavailable.has(target)) {
       if (target === root && ++rootChecks > 1) {
         throw new Error('Repeated the unavailable filesystem root');
       }
-      return false;
+      const error: NodeJS.ErrnoException = new Error(
+        `ENOENT: no such file or directory, lstat '${target}'`,
+      );
+      error.code = 'ENOENT';
+      throw error;
     }
-    return originalExists(target);
+    return originalLstat(target, options);
   });
   try {
     assertManagedExtensionStateSeparation(managed, [writable]);
   } catch (error) {
     failure = error;
   } finally {
-    exists.mockImplementation(originalExists);
+    lstat.mockImplementation(originalLstat);
     fs.rmSync(managed, { recursive: true, force: true });
   }
   expect(rootChecks).toBe(1);
@@ -97,6 +101,32 @@ it('keeps genuinely different case-sensitive directories separate', (ctx) => {
     fs.mkdirSync(writable);
     expect(() =>
       assertManagedExtensionStateSeparation(managed, [writable]),
+    ).not.toThrow();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it('rejects a symlink alias whose target does not exist yet', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-link-'));
+  const managed = path.join(root, 'deployment', 'extensions');
+  const writable = path.join(root, 'home', '.qwen', 'extensions');
+  fs.mkdirSync(managed, { recursive: true });
+  fs.mkdirSync(path.dirname(writable), { recursive: true });
+  try {
+    // The link target stays absent: existsSync follows links and reports the
+    // link itself as missing, which must not hide the alias.
+    fs.symlinkSync(path.join(managed, 'user-state'), writable, 'dir');
+    expect(fs.existsSync(writable)).toBe(false);
+    expect(() =>
+      assertManagedExtensionStateSeparation(managed, [writable]),
+    ).toThrow('must not overlap');
+    // A link pointing away from the managed root stays admissible.
+    const elsewhere = path.join(root, 'elsewhere');
+    const outsideLink = path.join(root, 'home', '.qwen', 'themes');
+    fs.symlinkSync(elsewhere, outsideLink, 'dir');
+    expect(() =>
+      assertManagedExtensionStateSeparation(managed, [outsideLink]),
     ).not.toThrow();
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

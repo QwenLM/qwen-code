@@ -1082,6 +1082,22 @@ export async function start_sandbox(
     }
   }
 
+  // Mount the deployment-managed extension root read-only and point the
+  // forwarded flag at the container path: the child re-validates it at
+  // argv-parse time, and no default mount covers an out-of-workspace root.
+  const managedExtensionsDir = cliConfig?.getManagedExtensionsDir();
+  if (managedExtensionsDir) {
+    const containerManagedDir = getContainerPath(managedExtensionsDir);
+    args.push('--volume', `${managedExtensionsDir}:${containerManagedDir}:ro`);
+    cliArgs = cliArgs.map((arg, index, argv) => {
+      if (arg.startsWith('--managed-extensions='))
+        return `--managed-extensions=${containerManagedDir}`;
+      if (index > 0 && argv[index - 1] === '--managed-extensions')
+        return containerManagedDir;
+      return arg;
+    });
+  }
+
   // mount paths listed in SANDBOX_MOUNTS
   if (process.env['SANDBOX_MOUNTS']) {
     for (let mount of process.env['SANDBOX_MOUNTS'].split(',')) {

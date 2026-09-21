@@ -8445,6 +8445,14 @@ export class Config {
   }
 
   /**
+   * The deployment-managed extension root, already resolved and validated at
+   * construction; undefined when the process runs without one.
+   */
+  getManagedExtensionsDir(): string | undefined {
+    return this.managedExtensionsDir;
+  }
+
+  /**
    * The plans-directory state (`plansDirectoryConfigured` / `plansDir`) is
    * installed by the canonical Config constructor and inherited by derived
    * Configs through the prototype chain. Derived agent/worktree profiles

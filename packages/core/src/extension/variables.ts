@@ -49,10 +49,19 @@ export function validateVariables(
   }
 }
 
+// Match only schema variables: an open-ended /\${(.*?)}/ scan pairs the first
+// `${` with the first `}` on the line, so a `${TMPDIR:-${...}}` nest or an
+// earlier unbalanced `${` would swallow a known variable inside the span.
+const HYDRATABLE_VARIABLE = new RegExp(
+  `\\$\\{(${Object.keys(VARIABLE_SCHEMA)
+    .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')})\\}`,
+  'g',
+);
+
 export function hydrateString(str: string, context: VariableContext): string {
   validateVariables(context, VARIABLE_SCHEMA);
-  const regex = /\${(.*?)}/g;
-  return str.replace(regex, (match, key) =>
+  return str.replace(HYDRATABLE_VARIABLE, (match, key) =>
     context[key as keyof VariableContext] == null
       ? match
       : (context[key as keyof VariableContext] as string),

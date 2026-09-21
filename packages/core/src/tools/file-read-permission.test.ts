@@ -56,6 +56,7 @@ function makeConfig(overrides: { plansDir?: string } = {}): Config {
     getWorkspaceContext: () => workspaceContext,
     getTargetDir: () => layout.workspace,
     getPlansDir: () => overrides.plansDir ?? layout.plansDir,
+    getManagedExtensionsDir: () => undefined,
     storage: {
       getProjectTempDir: () => layout.projectTempDir,
       getProjectDir: () => layout.projectDir,

@@ -34,19 +34,39 @@ export function resolveManagedExtensionsDir(
 }
 
 function canonicalDirectory(directory: string): string {
-  let existing = path.resolve(directory);
+  let current = path.resolve(directory);
   const missing: string[] = [];
-  while (!fs.existsSync(existing)) {
-    const parent = path.dirname(existing);
-    if (parent === existing) {
+  // Bound symlink chasing like the kernel's MAXSYMLINKS: a link loop falls
+  // back to its literal path, which nothing can be written through anyway.
+  let symlinkHops = 40;
+  for (;;) {
+    let stats: fs.Stats | undefined;
+    try {
+      stats = fs.lstatSync(current);
+    } catch {
+      stats = undefined;
+    }
+    if (stats?.isSymbolicLink()) {
+      // existsSync follows links, so a dangling link would otherwise look
+      // like a missing component and its target would escape the overlap
+      // check. Resolve the link — existent or not — against its parent.
+      const target = fs.readlinkSync(current);
+      current = path.resolve(path.dirname(current), target);
+      if (--symlinkHops < 0) return path.join(current, ...missing);
+      continue;
+    }
+    if (stats) {
+      return path.join(fs.realpathSync.native(current), ...missing);
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
       throw new Error(
-        `Invalid --managed-extensions: cannot resolve directory "${directory}" because filesystem root "${existing}" is unavailable.`,
+        `Invalid --managed-extensions: cannot resolve directory "${directory}" because filesystem root "${current}" is unavailable.`,
       );
     }
-    missing.unshift(path.basename(existing));
-    existing = parent;
+    missing.unshift(path.basename(current));
+    current = parent;
   }
-  return path.join(fs.realpathSync.native(existing), ...missing);
 }
 
 export function assertManagedExtensionStateSeparation(

@@ -22,6 +22,7 @@ export function getFileReadDefaultPermission(
   // the decision and the open agree on which bytes are meant.
   const filePath = realpathNearestExisting(path.resolve(requestedPath));
   const workspaceContext = config.getWorkspaceContext();
+  const managedExtensionsDir = config.getManagedExtensionsDir();
 
   // SYNC: Keep these base roots and the auto-memory check below aligned with
   // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
@@ -39,6 +40,11 @@ export function getFileReadDefaultPermission(
     Storage.getGlobalTempDir(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
+    // The one root below that is NOT agent-writable: a deployment-managed
+    // root is read-only by design, so no symlink can be planted in it, and a
+    // link shipped inside it still canonicalizes outside via the candidate
+    // realpath above.
+    ...(managedExtensionsDir ? [managedExtensionsDir] : []),
     // Approved plans are persisted here (default ~/.qwen/plans, outside
     // the workspace) and after approval nothing re-injects the plan text,
     // so the saved file is the model's only recovery route — reading it

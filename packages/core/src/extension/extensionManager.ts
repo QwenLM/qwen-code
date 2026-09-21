@@ -1566,7 +1566,9 @@ export class ExtensionManager {
     directory: string,
     source: 'managed' | 'user',
   ): string {
-    if (source === 'managed') resolveManagedExtensionsDir(directory);
+    // The managed root was validated at construction; re-validating here would
+    // throw out of a path that is written to degrade to 'dir:-' when the root
+    // becomes unreadable afterwards.
     let entries: string[];
     try {
       entries = fs.readdirSync(directory);
@@ -1778,7 +1780,8 @@ export class ExtensionManager {
     options: { manifestOnly?: boolean; source?: 'managed' | 'user' } = {},
   ): Promise<Extension[]> {
     const source = options.source ?? 'user';
-    if (source === 'managed') resolveManagedExtensionsDir(extensionsDir);
+    // See fingerprintExtensionsDir: the managed root was validated at
+    // construction, and an unreadable root degrades to an empty listing.
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);
@@ -1938,11 +1941,19 @@ export class ExtensionManager {
     } = {},
   ): Promise<Extension | null> {
     const { extensionDir } = context;
-    if (!fs.statSync(extensionDir).isDirectory()) {
+    const source = options.source ?? 'user';
+    try {
+      if (!fs.statSync(extensionDir).isDirectory()) {
+        return null;
+      }
+    } catch (error) {
+      // A dangling symlink in an admin-owned managed root must not take
+      // every other extension down with it; the user directory keeps its
+      // fail-closed stat so breakage there surfaces instead of vanishing.
+      if (source !== 'managed') throw error;
       return null;
     }
 
-    const source = options.source ?? 'user';
     let extension: Extension | undefined;
     try {
       // Destructured separately so `extension` stays visible in the catch
@@ -3329,9 +3340,6 @@ export class ExtensionManager {
     try {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
-      if (policy && extensionId === getManagedExtensionId(policy.name)) {
-        throw new ManagedExtensionReadOnlyError(policy.name);
-      }
       const extension =
         this.getLoadedExtensions().find(
           (candidate) => candidate.id === extensionId,
@@ -3339,6 +3347,13 @@ export class ExtensionManager {
         (await this.loadManagedExtensions(this.workspaceDir)).find(
           (candidate) => candidate.id === extensionId,
         );
+      if (policy && extensionId === getManagedExtensionId(policy.name)) {
+        if (extension) throw new ManagedExtensionReadOnlyError(policy.name);
+        // The policy is retained for a managed package that is no longer
+        // there: the extension is absent, so uninstall is an idempotent
+        // no-op (and can never reach a shadowed user artifact).
+        return snapshot;
+      }
       if (extension) await this.assertUserManagedExtension(extension);
       if (!policy || policy.declarationOnly) return snapshot;
       await this.assertUserManagedExtension(policy);

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import {
+  type Config,
   FatalSandboxError,
   PRIVATE_ACP_CAPABILITY_ENV,
   QWEN_DIR,
@@ -106,6 +107,59 @@ describe('start_sandbox', () => {
         }),
       }),
     );
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('mounts the managed extensions root read-only for a container sandbox', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const managedRoot = path.resolve('/opt/qwen-managed');
+    const cliConfig = {
+      getManagedExtensionsDir: () => managedRoot,
+    } as unknown as Config;
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      cliConfig,
+      [
+        process.execPath,
+        '/path/to/cli.js',
+        '--managed-extensions',
+        managedRoot,
+      ],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    // The root reaches the container read-only at its (translated) path...
+    expect(args).toContain(`${managedRoot}:${managedRoot}:ro`);
+    // ...and the forwarded flag still names that path, so the child's
+    // parse-time validation sees a directory that exists.
+    const entrypointCommand = args[args.length - 1];
+    expect(entrypointCommand).toContain('--managed-extensions');
+    expect(entrypointCommand).toContain(managedRoot);
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);

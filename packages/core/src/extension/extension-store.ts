@@ -720,10 +720,14 @@ export class ExtensionStore {
         }
         if (
           stats &&
-          path.resolve(
-            this.extensionsDir,
-            retainedPolicy.artifactDirectory ?? retainedPolicy.name,
-          ) === path.resolve(destinationDirectory)
+          // Case-folded like the sibling name/artifact lookups in this
+          // transaction.
+          path
+            .resolve(
+              this.extensionsDir,
+              retainedPolicy.artifactDirectory ?? retainedPolicy.name,
+            )
+            .toLowerCase() === path.resolve(destinationDirectory).toLowerCase()
         ) {
           const entries = await fsp.readdir(destinationDirectory, {
             withFileTypes: true,

@@ -31,7 +31,9 @@ Managed describes package ownership, not Qwen authorship or execution isolation.
 The CLI resolves the root against its startup cwd once. A missing, non-directory,
 or unreadable explicit root is a configuration error; an empty root is valid.
 ExtensionManager receives `managedExtensionsDir` separately from the writable
-ExtensionStore. Reject overlaps (including symlink and filesystem case aliases) with writable
+ExtensionStore. A container sandbox (docker/podman) mounts the resolved root
+read-only and forwards the flag with the container path; the bwrap and seatbelt
+backends already expose the host filesystem for reads. Reject overlaps (including symlink and filesystem case aliases) with writable
 extension/state directories to preserve the read-only boundary. Discovery and lookup share the same resolver: validate managed
 names using existing rules, reject duplicate managed names case-insensitively,
 then give managed precedence over user packages and diagnose shadowing. Resolve

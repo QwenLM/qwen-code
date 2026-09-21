@@ -136,6 +136,38 @@ describe('substituteHookVariables', () => {
     ).toBe('/home/user/.qwen/extensions/my-extension/setup/install.py');
   });
 
+  it('should substitute a root reference nested inside another expansion', () => {
+    const basePath = '/path/to/plugin';
+
+    const hooks = {
+      PreToolUse: [
+        {
+          hooks: [
+            {
+              type: HookType.Command as const,
+              command: '${TMPDIR:-${CLAUDE_PLUGIN_ROOT}/tmp}/run.sh',
+            },
+            {
+              type: HookType.Command as const,
+              command:
+                'if [ -z ${FOO ]; then ${CLAUDE_PLUGIN_ROOT}/guard.sh; fi',
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = substituteHookVariables(hooks, basePath);
+
+    const commands = result!['PreToolUse']![0].hooks!.map(
+      (hook) => (hook as { command: string }).command,
+    );
+    expect(commands).toEqual([
+      '${TMPDIR:-/path/to/plugin/tmp}/run.sh',
+      'if [ -z ${FOO ]; then /path/to/plugin/guard.sh; fi',
+    ]);
+  });
+
   it('should not modify non-command hooks', () => {
     const basePath = '/path/to/extension';
 
