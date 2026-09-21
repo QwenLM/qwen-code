@@ -969,13 +969,21 @@ function testZoomHotkeyScript() {
     { timeout: 5000 },
   );
 
+  let stopped = false;
   const dispatch = (event, properties) => {
     const registered = listeners.find((entry) => entry.event === event);
     assert.ok(registered, `The script must listen for ${event}.`);
     let prevented = false;
+    stopped = false;
     registered.listener({
       preventDefault: () => {
         prevented = true;
+      },
+      // Spied rather than left unstubbed: without it a stopPropagation() on any
+      // path throws a TypeError before send() and the failure names the stub
+      // instead of the gesture the script claims.
+      stopPropagation: () => {
+        stopped = true;
       },
       ...properties,
     });
@@ -1024,15 +1032,35 @@ function testZoomHotkeyScript() {
   assert.equal(dispatch('wheel', { ctrlKey: true, deltaY: -120 }), true);
   assert.equal(invoked.at(-1).command, 'change_zoom');
   assert.equal(invoked.at(-1).args.action, 'in');
+  // Cancelling the default is not enough: the notch keeps propagating, and the
+  // page's own wheel consumers then read a scroll that provably will not
+  // happen. TranscriptViewport drops the selection and scroll anchor and pages
+  // history in; MessageList marks user scroll intent.
+  assert.equal(
+    stopped,
+    true,
+    'A committed zoom step must stop propagating to the page wheel consumers.',
+  );
   assert.equal(dispatch('wheel', { ctrlKey: true, deltaY: 120 }), true);
   assert.equal(invoked.at(-1).args.action, 'out');
+  assert.equal(stopped, true, 'Both pinch directions must stop propagating.');
   // ctrl+shift+wheel is the horizontal-scroll gesture, not a pinch.
   assert.equal(
     dispatch('wheel', { ctrlKey: true, shiftKey: true, deltaY: -120 }),
     false,
     'ctrl+shift+wheel must reach the page instead of zooming.',
   );
+  assert.equal(
+    stopped,
+    false,
+    'ctrl+shift+wheel must keep propagating: the shell does not own it.',
+  );
   assert.equal(dispatch('wheel', { deltaY: -120 }), false);
+  assert.equal(
+    stopped,
+    false,
+    'Plain scrolling must keep propagating, or the desktop shell loses transcript scroll, edge history loading and wheel intent.',
+  );
   assert.equal(invoked.length, owned + 2);
 
   // A real pinch arrives as a burst of small deltas. Steps must follow the
@@ -1057,6 +1085,11 @@ function testZoomHotkeyScript() {
   assert.equal(
     dispatch('wheel', { ctrlKey: true, deltaX: 50, deltaY: 0 }),
     false,
+  );
+  assert.equal(
+    stopped,
+    false,
+    'A horizontal swipe carries no zoom: it and its scroll must pass through.',
   );
   assert.equal(invoked.length, afterBurst);
 }

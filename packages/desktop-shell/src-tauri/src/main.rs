@@ -84,6 +84,11 @@ const ZOOM_HOTKEY_SCRIPT: &str = r#"
       event.preventDefault();
       if (Math.abs(wheelDelta) < WHEEL_ZOOM_THRESHOLD) return;
       send(wheelDelta < 0 ? 'in' : 'out');
+      // This notch is ours now. preventDefault only cancels the native scroll,
+      // so without this the page's own wheel consumers still read the pinch as
+      // a scroll that just provably will not happen: they drop the transcript
+      // selection and anchor, and page older/newer history in.
+      event.stopPropagation();
       wheelDelta = 0;
     },
     { capture: true, passive: false },
