@@ -840,13 +840,20 @@ restored names form one selection whose owners are resolved as usual, with the
 workspace that listed a name breaking an otherwise ambiguous ownership tie. A
 name a non-primary workspace contributed is dropped, with a log identifying it,
 when it cannot be resolved, so one workspace's stale entry does not strand the
-others; the primary workspace's own names still fail the restore as a whole.
+others. A name only the primary workspace asks for still fails the restore as
+a whole; a name any other workspace also asks for is droppable, because the
+attribution that makes it droppable comes from the workspace that asked.
 `all` remains primary-only: it is ignored, and reported, anywhere else. A
 workspace registered after boot restores its own `serve.channels` through the
-same path, loading the channel runtime if nothing else has; a channel stopped
-through `POST /workspaces/:workspace/channels/:name/stop`, and every channel
-once `DELETE /workspace/channel` has stopped hosting, is left alone until the
-daemon restarts. With no explicit or configured selection, channel runtime
+same path, loading the channel runtime if nothing else has, and one name it
+cannot host does not stop the rest of its list. Registration answers before
+those channels are up: the restore runs after the response, so a worker that
+never becomes ready cannot hold the runtime-topology gate that registrations
+and trust reconciles share. An explicit `--channel` selection bounds what the
+daemon hosts for its whole life, so no workspace registered later adds to it; a
+channel stopped through `POST /workspaces/:workspace/channels/:name/stop`, and
+every channel once `DELETE /workspace/channel` has stopped hosting, is left
+alone until something enables it again or the daemon restarts. With no explicit or configured selection, channel runtime
 loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
