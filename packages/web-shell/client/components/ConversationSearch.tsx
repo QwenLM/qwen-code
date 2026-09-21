@@ -96,6 +96,24 @@ export function ConversationSearch({
       ).length,
     [blocks],
   );
+  const liveIdentity = useMemo(
+    () =>
+      JSON.stringify(
+        blocks.flatMap((block) =>
+          block.kind === 'user' || block.kind === 'assistant'
+            ? [
+                [
+                  block.id,
+                  block.sourceRecordIds,
+                  block.promptId ?? block.meta?.['promptId'],
+                  block.streaming,
+                ],
+              ]
+            : [],
+        ),
+      ),
+    [blocks],
+  );
 
   useEffect(() => {
     if (!active) {
@@ -149,8 +167,10 @@ export function ConversationSearch({
     active,
     history,
     liveCount,
+    liveIdentity,
     limit,
     navigation.mode,
+    navigation.totalTurns,
     viewportState.revision,
     viewportState.connected,
   ]);
@@ -221,6 +241,7 @@ export function ConversationSearch({
     if (!open || !needle) return [];
     const live: SearchResult[] = [];
     const liveRecords = new Set<string>();
+    const liveBlocks = new Set<string>();
     const recordsByBlock = new Map(
       blocks.map((block) => [block.id, block.sourceRecordIds ?? []]),
     );
@@ -229,6 +250,7 @@ export function ConversationSearch({
       const match = createConversationSearchSnippet(message.content, needle);
       if (!match) continue;
       for (const blockId of message.sourceBlockIds ?? []) {
+        liveBlocks.add(blockId);
         for (const id of recordsByBlock.get(blockId) ?? []) liveRecords.add(id);
       }
       live.push({
@@ -239,7 +261,11 @@ export function ConversationSearch({
       });
     }
     const older = (persisted?.hits ?? [])
-      .filter((hit) => !liveRecords.has(hit.recordId))
+      .filter(
+        (hit) =>
+          !liveRecords.has(hit.recordId) &&
+          !(hit.liveBlockId && liveBlocks.has(hit.liveBlockId)),
+      )
       .map((hit): SearchResult => ({ ...hit, key: hit.recordId, hit }));
     return [...older, ...live].slice(0, 200);
   }, [blocks, needle, open, persisted, t]);

@@ -3,7 +3,10 @@ import { act, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import type { ConversationSearchResult } from '../daemon/session/turn-navigation-store';
+import {
+  createDaemonTurnNavigationStore,
+  type ConversationSearchResult,
+} from '../daemon/session/turn-navigation-store';
 import { ConversationSearch } from './ConversationSearch';
 import type { MessageListHandle } from './MessageList';
 
@@ -177,6 +180,45 @@ it('probes unloaded history only far enough to establish the threshold', async (
     expect.objectContaining({ stopAfterMessages: 11 }),
   );
   expect(trigger()).not.toBeNull();
+});
+it('reprobes the threshold when live message identities settle without changing the count', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.transcript = {
+    blocks: blocks(10).map((block) =>
+      block.kind === 'assistant' ? { ...block, streaming: true } : block,
+    ),
+  };
+  mocks.scan
+    .mockResolvedValueOnce(result({ messageCount: 11 }))
+    .mockResolvedValue(result({ messageCount: 10 }));
+  await render();
+  expect(mocks.scan).toHaveBeenCalledTimes(1);
+  expect(trigger()).not.toBeNull();
+
+  mocks.transcript = {
+    blocks: mocks.transcript.blocks.map((block) =>
+      block.kind === 'assistant'
+        ? { ...block, text: `${block.text} streaming delta` }
+        : block,
+    ),
+  };
+  await render();
+  expect(mocks.scan).toHaveBeenCalledTimes(1);
+
+  mocks.transcript = {
+    blocks: mocks.transcript.blocks.map((block) =>
+      block.kind === 'assistant'
+        ? {
+            ...block,
+            streaming: false,
+            sourceRecordIds: [`record-${block.id}`],
+          }
+        : block,
+    ),
+  };
+  await render();
+  expect.soft(mocks.scan).toHaveBeenCalledTimes(2);
+  expect(trigger()).toBeNull();
 });
 it.each(['搜索', '[a.b]'])(
   'matches literal Chinese/code text and navigates to its message: %s',
@@ -796,3 +838,129 @@ it('reports no matches for legacy loaded-only search without a daemon connection
   );
   expect(document.querySelector('[role="alert"]')).toBeNull();
 });
+
+it('merges identity-free live echoes with actual scan hits without merging equal text across turns', async () => {
+  const recorded = blocks(5).map((block, index) => ({
+    ...block,
+    id: ['u1', 'a1', 'u2', 'pre-tool', 'a2'][index]!,
+    promptId: index < 2 ? 'prompt-u1' : 'prompt-u2',
+    sourceRecordIds: [['u1'], ['a1'], ['u2'], ['pre-tool'], ['a2']][index]!,
+    kind:
+      index === 0 || index === 2 ? ('user' as const) : ('assistant' as const),
+    text:
+      index === 0 || index === 2
+        ? 'Repeated prompt'
+        : index === 3
+          ? 'Before tool text'
+          : `Final answer ${index}`,
+  }));
+  mocks.transcript = {
+    blocks: [
+      {
+        ...recorded[2]!,
+        id: 'live-user',
+        sourceRecordIds: undefined,
+        promptId: undefined,
+      },
+      {
+        ...recorded[3]!,
+        id: 'live-pre-tool',
+        sourceRecordIds: undefined,
+      },
+      recorded[4]!,
+      {
+        ...recorded[2]!,
+        id: 'new-unpersisted-user',
+        sourceRecordIds: undefined,
+        promptId: undefined,
+      },
+    ],
+  };
+  const realStore = createDaemonTurnNavigationStore();
+  realStore.configure({
+    sessionId: 'session',
+    supported: true,
+    client: {
+      owner: {},
+      getTurnIndexPage: async () => ({
+        v: 1,
+        sessionId: 'session',
+        snapshot: 'frozen',
+        totalTurns: 2,
+        start: 0,
+        turns: ['u1', 'u2'].map((turnId, ordinal) => ({
+          ordinal,
+          turnId,
+          kind: 'prompt',
+          label: turnId,
+          promptId: `prompt-${turnId}`,
+        })),
+      }),
+      getTranscriptPage: async () => ({
+        v: 1,
+        sessionId: 'session',
+        targetRecordId: 'u1',
+        events: recorded.map((data) => ({ v: 1, type: 'test', data })),
+        hasMore: false,
+      }),
+      materializeTranscriptEvents: (events, nextOrdinal) => ({
+        blocks: events.map((event) => event.data as DaemonTranscriptBlock),
+        nextBlockOrdinal: nextOrdinal + events.length,
+        encounteredRecordIds: recorded.flatMap(
+          (block) => block.sourceRecordIds,
+        ),
+      }),
+    },
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  realStore.observeLiveBlocks(mocks.transcript.blocks);
+  realStore.recordPromptAdmitted({
+    promptId: 'prompt-u2',
+    blockId: 'live-user',
+    label: 'Repeated prompt',
+  });
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.scan.mockImplementation((query, options) =>
+    realStore.scanConversation(query, options),
+  );
+  await render({ threshold: 0 });
+  await open();
+  await type('Repeated prompt');
+  await debounce();
+  expect.soft(document.querySelectorAll('ol button')).toHaveLength(3);
+  await type('Before tool text');
+  await debounce();
+  expect(document.querySelectorAll('ol button')).toHaveLength(1);
+});
+
+it.each(['nonmatching', 'evicted'] as const)(
+  'keeps a persisted hit when its linked live block is %s',
+  async (liveState) => {
+    mocks.navigation = { mode: 'ready', sessionId: 'session' };
+    const hit = {
+      sessionId: 'session',
+      snapshot: 's',
+      revision: 0,
+      recordId: 'archived-record',
+      turnId: 'turn',
+      turnOrdinal: 0,
+      role: 'user' as const,
+      snippet: 'Archived needle',
+      matchStart: 0,
+      matchEnd: 8,
+      liveBlockId: liveState === 'nonmatching' ? 'message-0' : 'evicted-block',
+    };
+    mocks.scan.mockResolvedValue(result({ hits: [hit], matchCount: 1 }));
+    await render();
+    await open();
+    await type('Archived');
+    await debounce();
+    const rows = document.querySelectorAll<HTMLButtonElement>('ol button');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.textContent).toContain('Archived needle');
+    await act(async () => rows[0]!.click());
+    expect(scrollToSearchHit).toHaveBeenCalledWith(hit, expect.any(Function));
+  },
+);

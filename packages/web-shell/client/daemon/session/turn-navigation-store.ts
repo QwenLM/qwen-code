@@ -45,6 +45,7 @@ export interface ConversationSearchHit {
   snapshot: string;
   revision: number;
   recordId: string;
+  liveBlockId?: string;
   turnId: string;
   turnOrdinal: number;
   role: 'user' | 'assistant';
@@ -872,10 +873,13 @@ export function createDaemonTurnNavigationStore(
       ),
     );
     const liveByRecord = new Map<string, DaemonTranscriptBlock[]>();
+    const liveByBlockId = new Map(
+      [...remainingLive].map((block) => [block.id, block]),
+    );
     const unstampedByPrompt = new Map<string, DaemonTranscriptBlock[]>();
-    const promptKey = (block: DaemonTranscriptBlock) => {
+    const promptKey = (block: DaemonTranscriptBlock, promptId?: string) => {
       if (block.kind !== 'user' && block.kind !== 'assistant') return undefined;
-      const id = block.promptId ?? block.meta?.['promptId'];
+      const id = block.promptId ?? block.meta?.['promptId'] ?? promptId;
       return typeof id === 'string' ? `${block.kind}:${id}` : undefined;
     };
     for (const block of remainingLive) {
@@ -888,6 +892,15 @@ export function createDaemonTurnNavigationStore(
           block,
         ]);
     }
+    const retainedTextLimit = Math.max(
+      60,
+      query.length,
+      ...[...remainingLive].map((block) =>
+        block.kind === 'user' || block.kind === 'assistant'
+          ? block.text.length
+          : 0,
+      ),
+    );
     const revision = viewportSnapshot.revision;
     const current = () =>
       request.isCurrent() &&
@@ -923,7 +936,9 @@ export function createDaemonTurnNavigationStore(
     });
     let lastRecordId: string | undefined;
     let lastMatchedRecordId: string | undefined;
-    let previousTextTail = '';
+    let lastEchoBlockId: string | undefined;
+    let previousText = '';
+    let messageTextLength = 0;
     let previousCursor: string | undefined;
     while (true) {
       check();
@@ -964,19 +979,52 @@ export function createDaemonTurnNavigationStore(
         // 同一持久化消息可能投影为相邻块；只计一次，避免跨页重复结果。
         const recordId = ids[0]!;
         const sameMessage = recordId === lastRecordId;
+        const text = sameMessage ? previousText + block.text : block.text;
+        messageTextLength =
+          (sameMessage ? messageTextLength : 0) + block.text.length;
+        previousText = text.slice(-retainedTextLimit);
+        if (!sameMessage) lastEchoBlockId = undefined;
         let matchedLive = false;
         for (const id of ids) {
           for (const live of liveByRecord.get(id) ?? [])
             matchedLive = remainingLive.delete(live) || matchedLive;
         }
-        if (!sameMessage && !matchedLive) {
-          const key = promptKey(block);
-          const echo = key ? unstampedByPrompt.get(key)?.shift() : undefined;
-          if (echo) remainingLive.delete(echo);
+        let echo: DaemonTranscriptBlock | undefined;
+        if (
+          !sameMessage &&
+          !matchedLive &&
+          block.kind === 'user' &&
+          messageTurn
+        ) {
+          const blockId =
+            livePromptAliases.get(messageTurn.turnId)?.blockId ??
+            provisionals.find((turn) => turn.promptId === messageTurn.promptId)
+              ?.blockId;
+          const candidate = blockId ? liveByBlockId.get(blockId) : undefined;
+          if (candidate?.kind === 'user' && remainingLive.has(candidate))
+            echo = candidate;
+        }
+        if (!matchedLive && !echo && !lastEchoBlockId) {
+          const key = promptKey(block, messageTurn?.promptId);
+          const candidates = key ? unstampedByPrompt.get(key) : undefined;
+          const index = candidates?.findIndex(
+            (candidate) =>
+              remainingLive.has(candidate) &&
+              (candidate.kind === 'user' || candidate.kind === 'assistant') &&
+              candidate.text.length === messageTextLength &&
+              candidate.text === text,
+          );
+          if (index !== undefined && index >= 0)
+            echo = candidates?.splice(index, 1)[0];
+        }
+        if (echo) {
+          remainingLive.delete(echo);
+          lastEchoBlockId = echo.id;
+          const previousHit = result.hits.at(-1);
+          if (sameMessage && previousHit?.recordId === recordId)
+            previousHit.liveBlockId = echo.id;
         }
         if (!sameMessage) result.messageCount += 1;
-        const text = sameMessage ? previousTextTail + block.text : block.text;
-        previousTextTail = text.slice(-Math.max(60, query.length));
         lastRecordId = ids.at(-1);
         const match = targetRecordId
           ? ids.includes(targetRecordId)
@@ -992,6 +1040,7 @@ export function createDaemonTurnNavigationStore(
               snapshot: searchSnapshot,
               revision,
               recordId: targetRecordId ?? recordId,
+              ...(lastEchoBlockId ? { liveBlockId: lastEchoBlockId } : {}),
               turnId: messageTurn.turnId,
               turnOrdinal: messageTurn.ordinal,
               role: block.kind,

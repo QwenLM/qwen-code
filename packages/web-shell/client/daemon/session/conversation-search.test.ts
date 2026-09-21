@@ -522,6 +522,193 @@ describe('conversation search', () => {
     ).rejects.toThrow('omitted navigation turns');
   });
 
+  it('counts live users without IDs and pre-tool assistant fragments with only prompt identity once', async () => {
+    const { store, first, second, turns } = fixture();
+    turns.turns[1]!.promptId = 'prompt-2';
+    first[0]!.text = second[0]!.text = 'Repeated prompt';
+    second.splice(1, 0, {
+      ...second[1]!,
+      id: 'pre-tool',
+      sourceRecordIds: ['pre-tool'],
+      text: 'Checking before tool',
+    });
+    second.forEach((block) => {
+      block.promptId = 'prompt-2';
+    });
+    const live = [
+      {
+        ...second[0]!,
+        id: 'live-user',
+        sourceRecordIds: undefined,
+        promptId: undefined,
+      },
+      {
+        ...second[1]!,
+        id: 'live-pre-tool',
+        sourceRecordIds: undefined,
+      },
+      second[2]!,
+    ];
+    await ready(store);
+    store.observeLiveBlocks(live);
+    store.recordPromptAdmitted({
+      promptId: 'prompt-2',
+      blockId: 'live-user',
+      label: 'Repeated prompt',
+    });
+    const result = await store.scanConversation('Repeated prompt', {
+      isCurrent: () => true,
+    });
+    expect(result.messageCount).toBe(5);
+    expect(result.hits.map((hit) => hit.recordId)).toEqual(['u1', 'u2']);
+  });
+
+  it('uses the indexed turn prompt identity for a persisted assistant without prompt metadata', async () => {
+    const { store, second, turns } = fixture();
+    turns.turns[1]!.promptId = 'prompt-2';
+    expect(second[1]!.promptId).toBeUndefined();
+    await ready(store);
+    store.observeLiveBlocks([
+      {
+        ...second[1]!,
+        id: 'live-pre-tool',
+        promptId: 'prompt-2',
+        sourceRecordIds: undefined,
+      },
+    ]);
+    const result = await store.scanConversation('Newest answer', {
+      isCurrent: () => true,
+    });
+    expect.soft(result.messageCount).toBe(4);
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]).toMatchObject({
+      recordId: 'a2',
+      liveBlockId: 'live-pre-tool',
+    });
+  });
+
+  it('does not deduplicate an unpersisted later turn merely because its text repeats', async () => {
+    const { store, first, second, turns } = fixture();
+    turns.turns[1]!.promptId = 'prompt-2';
+    first[0]!.text = second[0]!.text = 'Repeated prompt';
+    await ready(store);
+    store.observeLiveBlocks([
+      {
+        ...second[0]!,
+        id: 'live-user',
+        sourceRecordIds: undefined,
+        promptId: undefined,
+      },
+      second[1]!,
+      {
+        ...second[0]!,
+        id: 'unpersisted-user',
+        sourceRecordIds: undefined,
+        promptId: undefined,
+      },
+    ]);
+    store.recordPromptAdmitted({
+      promptId: 'prompt-2',
+      blockId: 'live-user',
+      label: 'Repeated prompt',
+    });
+    const result = await store.scanConversation('Repeated prompt', {
+      isCurrent: () => true,
+    });
+    expect(result.messageCount).toBe(5);
+    expect(result.hits.map((hit) => hit.recordId)).toEqual(['u1', 'u2']);
+  });
+
+  it('matches an admitted local user when the search index is newer than the navigation head', async () => {
+    const { store, client, second, turns } = fixture();
+    const allTurns = [...turns.turns];
+    turns.turns = allTurns.slice(0, 1);
+    turns.totalTurns = 1;
+    await ready(store);
+    store.observeLiveBlocks([
+      {
+        ...second[0]!,
+        id: 'local-user',
+        sourceRecordIds: undefined,
+        promptId: undefined,
+      },
+      second[1]!,
+    ]);
+    store.recordPromptAdmitted({
+      promptId: 'new-prompt',
+      blockId: 'local-user',
+      label: 'new prompt',
+    });
+    expect(store.getSnapshot().provisionalTurns).toHaveLength(1);
+    vi.mocked(client.getTurnIndexPage).mockResolvedValue({
+      ...turns,
+      totalTurns: 2,
+      turns: [allTurns[0]!, { ...allTurns[1]!, promptId: 'new-prompt' }],
+    });
+    const result = await store.scanConversation('Second match', {
+      isCurrent: () => true,
+    });
+    expect(result.messageCount).toBe(4);
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]).toMatchObject({
+      recordId: 'u2',
+      liveBlockId: 'local-user',
+    });
+  });
+
+  it('retains the live echo identity when a persisted message matches only on its later page', async () => {
+    const { store, first, second } = fixture();
+    first[1]!.text = 'prefix ';
+    first[1]!.promptId = 'prompt-1';
+    second.unshift({ ...first[1]!, text: 'needle suffix' });
+    await ready(store);
+    store.observeLiveBlocks([
+      {
+        ...first[1]!,
+        id: 'live-answer',
+        text: 'prefix needle suffix',
+        sourceRecordIds: undefined,
+      },
+    ]);
+    const result = await store.scanConversation('needle', {
+      isCurrent: () => true,
+    });
+    expect(result.messageCount).toBe(4);
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]).toMatchObject({
+      recordId: 'a1',
+      liveBlockId: 'live-answer',
+    });
+  });
+
+  it('does not match an older assistant fragment to a retained different-text fragment in the same prompt', async () => {
+    const { store, first, second } = fixture();
+    first[1]!.text = 'Old reply before the retained window';
+    first[1]!.promptId = 'prompt-1';
+    const retained = {
+      ...first[1]!,
+      id: 'later-answer',
+      sourceRecordIds: ['later-answer'],
+      text: 'Later reply inside the retained window',
+    };
+    second.unshift(retained);
+    await ready(store);
+    store.observeLiveBlocks([
+      { ...retained, id: 'live-later', sourceRecordIds: undefined },
+    ]);
+    const result = await store.scanConversation('reply', {
+      isCurrent: () => true,
+    });
+    expect(result.messageCount).toBe(5);
+    expect(result.hits).toHaveLength(2);
+    expect(result.hits[0]).toMatchObject({ recordId: 'a1' });
+    expect(result.hits[0]!.liveBlockId).toBeUndefined();
+    expect(result.hits[1]).toMatchObject({
+      recordId: 'later-answer',
+      liveBlockId: 'live-later',
+    });
+  });
+
   it('counts the unpersisted live tail without double counting persisted blocks or local echoes', async () => {
     const { store, first, second } = fixture();
     first[0]!.promptId = 'prompt-1';
