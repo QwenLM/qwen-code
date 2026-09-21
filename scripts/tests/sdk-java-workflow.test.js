@@ -43,6 +43,12 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(managedAgentServerE2E).toContain(
       "security: sourceSettings['security']",
     );
+    expect(managedAgentServerE2E).toContain(
+      'QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey',
+    );
+    expect(managedAgentServerE2E).toContain(
+      "QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1'",
+    );
     for (const section of ['hooks', 'mcpServers', 'extensions', 'tools']) {
       expect(managedAgentServerE2E).not.toContain(
         `sourceSettings['${section}']`,

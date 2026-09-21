@@ -595,6 +595,24 @@ it.each([false, true])(
       'X-Qwen-Managed-Lease-Id': 'test-lease',
       'X-Qwen-Managed-Lease-Epoch': '1',
     };
+    const ownedManagedRuntime = {
+      type: 'boot' as const,
+      version: 1 as const,
+      runtimeInstanceId: 'test-runtime',
+      provisionRequestId: 'test-provision',
+      gatewayIncarnation: 'test-gateway',
+      leaseId: 'test-lease',
+      epoch: 1,
+      tenantId: body.tenantId,
+      workspaceId: body.workspaceId,
+      workspaceGeneration: 'test-workspace-generation',
+      workspaceCwd: workspace,
+      capabilityDigest: 'sha256:test-capability',
+      isolationClass: 'session' as const,
+      token: 'runtime-worker-secret',
+      outputRoot: workspace,
+      cliEntry: '/test/cli.js',
+    };
     const trackedFileBackups = Object.fromEntries(
       Array.from({ length: 100 }, (_, i) => [
         `${'directory/'.repeat(5)}file-${i}.txt`,
@@ -657,19 +675,7 @@ it.each([false, true])(
           managedRuntimeWorkerProvider: provider,
           ...(owned
             ? {
-                ownedManagedRuntime: {
-                  type: 'boot' as const,
-                  version: 1 as const,
-                  gatewayIncarnation: 'test-gateway',
-                  leaseId: 'test-lease',
-                  epoch: 1,
-                  tenantId: body.tenantId,
-                  workspaceId: body.workspaceId,
-                  workspaceCwd: workspace,
-                  token: 'runtime-worker-secret',
-                  outputRoot: workspace,
-                  cliEntry: '/test/cli.js',
-                },
+                ownedManagedRuntime,
               }
             : {}),
           preheatBridge: false,
@@ -697,6 +703,32 @@ it.each([false, true])(
             })
           ).status,
         ).toBe(404);
+        const attestation = await fetch(
+          `${handle.url}/internal/managed-runtime/v2/attest`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              protocolVersion: 2,
+              provisionRequestId: 'test-provision',
+              tenantId: body.tenantId,
+              workspaceId: body.workspaceId,
+              workspaceGeneration: 'test-workspace-generation',
+              workspaceCwd: workspace,
+              capabilityDigest: 'sha256:test-capability',
+              isolationClass: 'session',
+            }),
+          },
+        );
+        expect(attestation.status).toBe(200);
+        await expect(attestation.json()).resolves.toMatchObject({
+          protocolVersion: 2,
+          runtimeInstanceId: 'test-runtime',
+          runtimeIncarnation: 'test-gateway',
+          leaseId: 'test-lease',
+          epoch: 1,
+          provisionRequestId: 'test-provision',
+        });
       }
       await fetch(`${handle.url}${MANAGED_RUNTIME_ROUTE_PREFIX}/prepare`, {
         method: 'POST',

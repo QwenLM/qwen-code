@@ -360,6 +360,7 @@ try {
   const brokerPort = await freePort();
   const harnessToken = randomBytes(24).toString('base64url');
   const brokerToken = randomBytes(24).toString('base64url');
+  const credentialKey = randomBytes(32).toString('base64');
   const capabilityDigest = `sha256:${randomBytes(32).toString('hex')}`;
 
   const initialized = spawnSync(
@@ -433,6 +434,8 @@ try {
         QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
         QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
         QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
+        QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
+        QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
         QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
         QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: runtimeWorker,
         QWEN_MANAGED_AGENT_NODE_EXECUTABLE:

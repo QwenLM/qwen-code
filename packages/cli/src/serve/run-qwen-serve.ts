@@ -10621,7 +10621,7 @@ async function runQwenServeImpl(
               !(
                 (req.method === 'GET' && req.url === '/health') ||
                 (req.method === 'POST' &&
-                  /^\/internal\/managed-runtime\/(v1\/(prepare|manifest|execute|cancel|release)|v2\/(bind-history|checkpoint|history|manifest|begin-turn|prepare|confirmation|confirm|preflight|execute|status|cancel|release))$/.test(
+                  /^\/internal\/managed-runtime\/(v1\/(prepare|manifest|execute|cancel|release)|v2\/(attest|bind-history|checkpoint|history|manifest|begin-turn|prepare|confirmation|confirm|preflight|execute|status|cancel|release))$/.test(
                     req.url ?? '',
                   ))
               )
