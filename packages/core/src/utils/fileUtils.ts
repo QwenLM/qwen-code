@@ -1230,6 +1230,16 @@ export async function processSingleFileContent(
       ? 'text'
       : (options.fileType ??
         (bridgePreservesImage ? 'image' : await detectFileType(filePath)));
+    if (fileType === 'pdf' && config.getShellExecutionSandbox?.()) {
+      const message =
+        'PDF processing is unavailable in this sandbox mode. Use a PDF utility through the sandboxed Shell tool.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: message,
+        errorType: ToolErrorType.READ_CONTENT_FAILURE,
+      };
+    }
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
     const displayName = path.basename(displayPath);
