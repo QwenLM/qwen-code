@@ -1164,6 +1164,31 @@ describe('fileUtils', () => {
         actualNodeFs.unlinkSync(testBinaryFilePath);
     });
 
+    it.each([undefined, '1-2'])(
+      'rejects sandbox PDF processing before invoking host helpers (pages=%s)',
+      async (pages) => {
+        actualNodeFs.writeFileSync(testPdfFilePath, '%PDF-1.4\n');
+        const config = {
+          ...mockConfig,
+          getShellExecutionSandbox: () => ({
+            workspace: tempRootDir,
+            installation: '/installation',
+            state: '/state',
+            filesystem: 'workspace-write',
+            network: 'closed',
+          }),
+        } as Config;
+        const result = await processSingleFileContent(testPdfFilePath, config, {
+          fileType: 'pdf',
+          pages,
+        });
+        expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.error).toContain('sandboxed Shell');
+        expect(execFile).not.toHaveBeenCalled();
+        expect(mockRender).not.toHaveBeenCalled();
+      },
+    );
+
     it('should read a text file successfully', async () => {
       const content = 'Line 1\\nLine 2\\nLine 3';
       actualNodeFs.writeFileSync(testTextFilePath, content);
@@ -1360,10 +1385,13 @@ describe('fileUtils', () => {
       );
       const parts = result.llmContent as Part[];
       expect(parts[0]).toEqual({
+        // The shared stub declares tool_search and defers zoom_image, so the
+        // hint takes the bridge form: review through tool_search, invoke
+        // through tool_call.
         text:
-          'Image overview: 20x10; oriented source: 20x10. ' +
-          'If details are too small, use tool_search for "zoom image", then ' +
-          'call zoom_image with coordinates normalized from 0 to 1000.',
+          'Image overview: 20x10; oriented source: 20x10.' +
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
       });
       expect(parts[1]).toEqual({
         inlineData: {
@@ -1398,7 +1426,9 @@ describe('fileUtils', () => {
         declared: ['read_file', 'tool_search'],
         deferred: ['zoom_image'],
         bindings: [],
-        hint: ' If details are too small, use tool_search for "zoom image", then call zoom_image with coordinates normalized from 0 to 1000.',
+        hint:
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
       },
       {
         codeModeOnly: false,

@@ -424,6 +424,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   WorkflowJournalUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).WorkflowJournalUnavailableError,
+  WorkflowCheckpointUnwritableError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).WorkflowCheckpointUnwritableError,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
   withDaemonSpan: mockWithDaemonSpan,
@@ -1202,6 +1205,7 @@ import {
   GoalInvalidTransitionError,
   sessionIdContext,
   uiTelemetryService,
+  WorkflowCheckpointUnwritableError,
   WorkflowJournalUnavailableError,
   type Config,
   type GoalSnapshotV2,
@@ -17182,6 +17186,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         message: expect.stringContaining(
           'rerun it to start it from the beginning',
         ),
+      });
+      await daemon.stop();
+    });
+
+    // The record that keeps a second runner off this journal is what failed,
+    // so nothing started -- and that is the run's state, not a daemon fault.
+    it('answers a retry that could not be recorded with a named error the host can act on', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon({
+        execute: async () => {
+          throw new WorkflowCheckpointUnwritableError(runId);
+        },
+      });
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_not_recorded' },
+        message: expect.stringContaining('Nothing was started; try again.'),
       });
       await daemon.stop();
     });

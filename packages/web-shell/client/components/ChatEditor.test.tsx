@@ -3493,7 +3493,13 @@ describe('ChatEditor mobile composer actions', () => {
       cancelable: true,
     });
     previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(true);
+    expect(pointerDown.defaultPrevented).toBe(false);
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    previous.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
     composerCoreState.focus.mockClear();
     await clickButton('Previous input');
     await clickButton('Next input');
@@ -3502,6 +3508,46 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.focus).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(backend.textareaRef.current);
+  });
+
+  it('prevents mousedown default on the remaining migrated buttons', async () => {
+    mobileComposer('draft');
+    renderChatEditor({ visibleToolbarActions: [] });
+
+    const actions = document.querySelector(
+      '[data-web-shell-mobile-editing-actions]',
+    )!;
+    const historyButton = actions.querySelector<HTMLButtonElement>(
+      '[aria-label="Input history"]',
+    )!;
+    const shellButton = Array.from(actions.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Shell mode',
+    )!;
+
+    const expectMousedownPrevented = (button: HTMLButtonElement) => {
+      const pointerDown = new Event('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(pointerDown);
+      expect(pointerDown.defaultPrevented).toBe(false);
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(mouseDown);
+      expect(mouseDown.defaultPrevented).toBe(true);
+    };
+
+    expectMousedownPrevented(historyButton);
+    expectMousedownPrevented(shellButton);
+
+    await clickButton('Expand editor');
+    expectMousedownPrevented(
+      document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] [aria-label="Hide keyboard"]',
+      )!,
+    );
   });
 
   it('disables both history buttons when the composer is disabled', () => {

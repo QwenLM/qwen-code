@@ -677,12 +677,12 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      - name: 'Install Playwright Chromium'
+      - name: 'Install Playwright Chromium and WebKit'
         run: |-
-          node node_modules/playwright/cli.js install --with-deps chromium
+          node node_modules/playwright/cli.js install --with-deps chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium
+            node "${nested_cli}" install chromium webkit
           fi
 
       - name: 'Run transcript document browser gate'
