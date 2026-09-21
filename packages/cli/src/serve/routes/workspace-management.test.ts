@@ -3494,7 +3494,12 @@ describe('remote daemon proxy routes', () => {
 
   it('bounds the suggestion proxy and forwards the target credential', async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse({ dir: '/srv', sep: '/', suggestions: [], truncated: false }),
+      jsonResponse({
+        dir: '/srv',
+        sep: '/',
+        suggestions: [],
+        truncated: false,
+      }),
     );
     const { app } = createApp();
 
