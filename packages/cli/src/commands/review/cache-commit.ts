@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto';
 import type { CommandModule } from 'yargs';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
-import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { CONTROL, inertText } from './lib/inert-text.js';
 import { assertUnredirectedParent } from './lib/paths.js';
