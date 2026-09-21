@@ -1,10 +1,11 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import postcss from 'postcss';
 import selectorParser from 'postcss-selector-parser';
 import pkg from './package.json' with { type: 'json' };
+import { WEB_SHELL_BUILD_TARGET } from './vite.config';
 
 const COMPONENT_SCOPE =
   ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn], [data-web-shell-root][data-web-shell-shadcn] *, [data-web-shell-portal-root][data-web-shell-shadcn] *)';
@@ -149,8 +150,45 @@ function injectCssModules(): Plugin {
 // renderer. Built alongside the root entry, it would inherit the full
 // component stylesheet (editor, sidebar, …) that the `/export html`
 // document renderer inlines into every exported file (#11031).
+// The transcript renderer is inlined into every `/export html` document, under
+// a byte budget that web-templates enforces at build time. Strings for
+// surfaces the read-only transcript can never render have no business there:
+// the Live Voice dialog and setup card alone are ~200 entries. Matching on the
+// resolved id (not the specifier) keeps this working however the module is
+// imported. Vite's ids use forward slashes on every platform while
+// `path.resolve` returns backslashes on Windows, so both sides go through
+// `normalizePath`: compared raw, the stub would never apply there and the
+// Windows build would blow the budget this exists to protect.
+const LIVE_MESSAGES_MODULE = normalizePath(
+  resolve(__dirname, './client/live/messages.ts'),
+);
+const LIVE_MESSAGES_TRANSCRIPT_STUB = normalizePath(
+  resolve(__dirname, './client/live/messages.transcript-stub.ts'),
+);
+
+function stubTranscriptDeadMessages(): Plugin {
+  return {
+    name: 'web-shell-stub-transcript-dead-messages',
+    enforce: 'pre',
+    async resolveId(source, importer, options) {
+      const resolved = await this.resolve(source, importer, {
+        ...options,
+        skipSelf: true,
+      });
+      return resolved && normalizePath(resolved.id) === LIVE_MESSAGES_MODULE
+        ? LIVE_MESSAGES_TRANSCRIPT_STUB
+        : null;
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), tailwindcss(), injectCssModules()],
+  plugins: [
+    ...(mode === 'transcript' ? [stubTranscriptDeadMessages()] : []),
+    react(),
+    tailwindcss(),
+    injectCssModules(),
+  ],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -169,6 +207,11 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
+    // Same floor as the app build: the lib bundle minifies the same xterm
+    // (it is not external), and Vite 5's default target lowers its logical
+    // assignments into code that throws on the first mode query. Also covers
+    // the transcript entry inlined into /export html documents.
+    target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
         mode === 'transcript'

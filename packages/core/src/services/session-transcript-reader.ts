@@ -64,15 +64,6 @@ import {
   type GoalRecoveryRecord,
   type GoalRecoverySelection,
 } from '../goals/goal-persistence.js';
-import {
-  buildGoalEvidenceCheckpointWindow,
-  EvidenceSourceUnavailableError,
-  GoalEvidenceCheckpointAccumulator,
-  GoalEvidenceRecordIndexAccumulator,
-  InvalidGoalEvidenceReferenceError,
-  type GoalEvidenceCheckpointWindow,
-  type GoalEvidenceRecordIndexHint,
-} from '../goals/goal-evidence.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
@@ -280,6 +271,7 @@ export interface SessionRestoreReplayPage {
 
 export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
+  completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
   attributionSnapshot?: AttributionSnapshot;
@@ -300,7 +292,6 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
   goalRecords: GoalRecoveryRecord[];
   goalRecoverySourceUuid?: string;
-  goalCheckpointWindow?: GoalEvidenceCheckpointWindow;
   initialTurn: number;
   backgroundNotificationTaskIds: string[];
 }
@@ -373,7 +364,6 @@ interface UuidIndexEntry {
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
   goalRecoveryCandidate: boolean;
-  goalEvidenceHint: GoalEvidenceRecordIndexHint;
   turnHint: SessionTurnRecordHint;
   navigationKind?: SessionTranscriptNavigationTurnKind;
   navigationOrdinal?: number;
@@ -1657,7 +1647,6 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     total +=
       INDEX_ENTRY_BASE_BYTES +
       INDEX_HINT_BASE_BYTES * 2 +
-      (entry.goalEvidenceHint.parsedGoalContext ? INDEX_HINT_BASE_BYTES : 0) +
       INDEX_MAP_ENTRY_BYTES +
       INDEX_CONTAINER_BASE_BYTES +
       entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
@@ -1669,10 +1658,6 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.goalId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.turnId) +
-      estimateStringBytes(entry.goalEvidenceHint.claimedGoalId) +
-      estimateStringBytes(entry.goalEvidenceHint.provenance) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
   for (const turn of index.navigationTurns) {
@@ -1982,7 +1967,6 @@ function newIndexEntry(
   record: ChatRecord,
   sessionId: string,
   segments: RecordSegment[],
-  goalEvidenceAccumulator: GoalEvidenceRecordIndexAccumulator,
 ): UuidIndexEntry {
   const navigationKind = navigationKindForRecord(record);
   return {
@@ -2000,7 +1984,6 @@ function newIndexEntry(
     resumeTokenCountsCandidate: isResumeTokenCountsCandidate(record),
     attributionSnapshotCandidate: isAttributionSnapshotCandidate(record),
     goalRecoveryCandidate: isGoalRecoveryCandidate(record),
-    goalEvidenceHint: goalEvidenceAccumulator.finish(),
     turnHint: getSessionTurnRecordHint(record, sessionId),
     ...(navigationKind ? { navigationKind } : {}),
     navigationTextSuppressed:
@@ -2042,10 +2025,6 @@ async function buildIndex(params: {
   // Retain only the fields required by the shared branch resolver while the
   // frozen snapshot is parsed, so page reads never reopen the full active chain.
   const branchPointRecords = new Map<string, BranchPointRecord>();
-  const goalEvidenceAccumulators = new Map<
-    string,
-    GoalEvidenceRecordIndexAccumulator
-  >();
   let sequence = 0;
   const physicalRecords: PhysicalRecordHint[] = [];
   let sourceReadComplete = true;
@@ -2122,25 +2101,9 @@ async function buildIndex(params: {
               record as unknown as ChatRecord,
               sessionId,
             ).countsAsUserPrompt;
-            goalEvidenceAccumulators
-              .get(record.uuid)
-              ?.addFragment(record as unknown as ChatRecord);
           } else {
             const chatRecord = record as unknown as ChatRecord;
-            const goalEvidenceAccumulator =
-              new GoalEvidenceRecordIndexAccumulator(chatRecord);
-            const entry = newIndexEntry(
-              chatRecord,
-              sessionId,
-              [segment],
-              goalEvidenceAccumulator,
-            );
-            if (entry.goalEvidenceHint.provenance) {
-              goalEvidenceAccumulators.set(
-                record.uuid,
-                goalEvidenceAccumulator,
-              );
-            }
+            const entry = newIndexEntry(chatRecord, sessionId, [segment]);
             byUuid.set(record.uuid, entry);
           }
         }
@@ -2153,10 +2116,6 @@ async function buildIndex(params: {
     throw error;
   }
   sourceReadComplete &&= executionEngine.sourceComplete;
-
-  for (const [uuid, accumulator] of goalEvidenceAccumulators) {
-    byUuid.get(uuid)!.goalEvidenceHint = accumulator.finish();
-  }
 
   for (const [uuid, entry] of byUuid) {
     if (!entry.sessionIdMatchesFile) {
@@ -2586,38 +2545,6 @@ function selectArtifactUuids(index: TranscriptIndex): string[] {
   );
 }
 
-/**
- * The evidence window a resumed goal validates its cursor against.
- *
- * Scoped to the pending goal and its permit, so it can only be built once the
- * recovery source is known. The records handed to the shared builder are the
- * projected ones, because a Managed log's content lives in resource bodies the
- * index cannot see.
- */
-function managedGoalCheckpointWindow(
-  records: readonly ChatRecord[],
-  recovery: GoalRecoverySelection,
-): GoalEvidenceCheckpointWindow | undefined {
-  const pendingGoal =
-    recovery.recovery.kind === 'v2' ? recovery.recovery.payload : undefined;
-  const pendingCheckpoint = pendingGoal?.checkpointPending;
-  const goal = pendingGoal?.snapshot.goal;
-  if (!pendingCheckpoint || !goal) return undefined;
-  try {
-    return buildGoalEvidenceCheckpointWindow({
-      records,
-      goal,
-      permit: pendingCheckpoint.permit,
-    });
-  } catch (error) {
-    if (!(error instanceof EvidenceSourceUnavailableError)) throw error;
-    debugLogger.warn(
-      `restore projection: deferring unavailable Goal checkpoint evidence: ${error.message}`,
-    );
-    return undefined;
-  }
-}
-
 function indexHasManagedHeader(index: TranscriptIndex): boolean {
   return index.physicalRecords.some(
     (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
@@ -2738,19 +2665,14 @@ function managedPageIndex(
     }
     // The projection is already the whole record, so the segment carries no
     // offset to read from; its length is what the page byte budget measures.
-    const entry = newIndexEntry(
-      record,
-      sessionId,
-      [
-        {
-          offset: 0,
-          length: Buffer.byteLength(JSON.stringify(record), 'utf8'),
-          sequence: position,
-          fragmentIndex: 0,
-        },
-      ],
-      new GoalEvidenceRecordIndexAccumulator(record),
-    );
+    const entry = newIndexEntry(record, sessionId, [
+      {
+        offset: 0,
+        length: Buffer.byteLength(JSON.stringify(record), 'utf8'),
+        sequence: position,
+        fragmentIndex: 0,
+      },
+    ]);
     byUuid.set(record.uuid, entry);
     projectedRecords.set(record.uuid, record);
     appendBranchPointRecord(branchPointRecords, record);
@@ -3062,7 +2984,9 @@ export class SessionTranscriptReader {
       const entry = index.byUuid.get(uuid);
       if (
         position === compressionPosition ||
-        (entry?.type !== 'system' &&
+        ((entry?.type !== 'system' ||
+          entry?.subtype === 'goal_turn_end' ||
+          entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
       ) {
         modelSet.add(uuid);
@@ -3171,12 +3095,7 @@ export class SessionTranscriptReader {
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
-    let firstRecord: ChatRecord | undefined;
     let firstRecordSeen = false;
-    let goalCheckpointAccumulator:
-      | GoalEvidenceCheckpointAccumulator
-      | undefined;
-    let goalEvidenceSet = new Set<string>();
     const deferredPreReadRecords = new Map<string, ChatRecord>();
     const dispatchRecord = (record: ChatRecord): void => {
       if (modelSet.has(record.uuid)) apiHistory.add(record);
@@ -3228,9 +3147,6 @@ export class SessionTranscriptReader {
       }
       if (record.uuid === sourcesUuid) sourceRecords.push(record);
       if (artifactSet.has(record.uuid)) artifacts.add(record);
-      if (goalEvidenceSet.has(record.uuid)) {
-        goalCheckpointAccumulator?.capture(record);
-      }
       if (replaySet.has(record.uuid)) {
         replayRecordsByUuid.set(record.uuid, record);
       }
@@ -3243,10 +3159,7 @@ export class SessionTranscriptReader {
     );
     const selectedReadsStartedAt = performance.now();
     const selectedReadSet = new Set(preReadUuids);
-    let goalRecovery: {
-      selectedGoalRecovery: GoalRecoverySelection;
-      goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-    };
+    let goalRecovery: { selectedGoalRecovery: GoalRecoverySelection };
     try {
       goalRecovery = await withAggregatedRecordReadContext(
         index,
@@ -3265,7 +3178,6 @@ export class SessionTranscriptReader {
                   );
                 }
                 firstRecordSeen = true;
-                if (!goalSet.has(record.uuid)) firstRecord = record;
               }
               if (goalSet.has(record.uuid)) {
                 const normalized = normalizeGoalRecoveryRecord(record);
@@ -3310,36 +3222,6 @@ export class SessionTranscriptReader {
 
           const selectedGoalRecovery =
             selectGoalRecoveryFromRecords(goalRecords);
-          const pendingGoal =
-            selectedGoalRecovery.recovery.kind === 'v2'
-              ? selectedGoalRecovery.recovery.payload
-              : undefined;
-          const pendingCheckpoint = pendingGoal?.checkpointPending;
-          if (pendingCheckpoint && pendingGoal.snapshot.goal) {
-            try {
-              goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
-                index.runtimeUuids.map(
-                  (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
-                ),
-                pendingGoal.snapshot.goal,
-                pendingCheckpoint.permit,
-              );
-            } catch (error) {
-              if (!(error instanceof EvidenceSourceUnavailableError)) {
-                throw error;
-              }
-              debugLogger.warn(
-                `restore projection: deferring unavailable Goal checkpoint evidence: ${error.message}`,
-              );
-            }
-          }
-          goalEvidenceSet = new Set(
-            goalCheckpointAccumulator?.getCandidateUuids() ?? [],
-          );
-          if (firstRecord && goalEvidenceSet.has(firstRecord.uuid)) {
-            goalCheckpointAccumulator?.capture(firstRecord);
-          }
-          firstRecord = undefined;
           const selectedRuntimeUuids = index.runtimeUuids.filter(
             (uuid) =>
               modelSet.has(uuid) ||
@@ -3348,8 +3230,7 @@ export class SessionTranscriptReader {
               metadataSet.has(uuid) ||
               uiTelemetrySet.has(uuid) ||
               fileHistorySet.has(uuid) ||
-              replaySet.has(uuid) ||
-              goalEvidenceSet.has(uuid),
+              replaySet.has(uuid),
           );
           const preReadSet = new Set(preReadUuids);
           readContext.preloadedRecords = deferredPreReadRecords;
@@ -3370,18 +3251,7 @@ export class SessionTranscriptReader {
             readContext,
           );
 
-          let goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-          try {
-            goalCheckpointWindow = goalCheckpointAccumulator?.finish();
-          } catch (error) {
-            if (!(error instanceof InvalidGoalEvidenceReferenceError)) {
-              throw error;
-            }
-            debugLogger.warn(
-              `restore projection: deferring invalid Goal checkpoint evidence: ${error.message}`,
-            );
-          }
-          return { selectedGoalRecovery, goalCheckpointWindow };
+          return { selectedGoalRecovery };
         },
       );
     } finally {
@@ -3454,8 +3324,10 @@ export class SessionTranscriptReader {
     const restoredTokenCounts = resumeTokenCounts.finish();
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
+    const completedToolCallIds = apiHistory.getCompletedToolCallIds();
     const runtime: SessionRuntimeResumeState = {
       apiHistory: apiHistory.finish(),
+      ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }
         : {}),
@@ -3490,9 +3362,6 @@ export class SessionTranscriptReader {
             goalRecoverySourceUuid:
               goalRecovery.selectedGoalRecovery.sourceUuid,
           }
-        : {}),
-      ...(goalRecovery.goalCheckpointWindow
-        ? { goalCheckpointWindow: goalRecovery.goalCheckpointWindow }
         : {}),
       initialTurn: turnStateValue.initialTurn,
       backgroundNotificationTaskIds:
@@ -3590,10 +3459,6 @@ export class SessionTranscriptReader {
       ) ?? {};
     const turnStateValue = turnState.finish();
     const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
-    const goalCheckpointWindow = managedGoalCheckpointWindow(
-      records,
-      goalRecovery,
-    );
     const restoredTokenCounts = resumeTokenCounts.finish();
     const restoredFileHistory = fileHistory.finish();
     const runtime: SessionRuntimeResumeState = {
@@ -3624,7 +3489,6 @@ export class SessionTranscriptReader {
       ...(goalRecovery.sourceUuid
         ? { goalRecoverySourceUuid: goalRecovery.sourceUuid }
         : {}),
-      ...(goalCheckpointWindow ? { goalCheckpointWindow } : {}),
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }
         : {}),

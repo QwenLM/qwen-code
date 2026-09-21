@@ -107,7 +107,7 @@ export function assertExternalAgentSpawnPlatformSupported(
 ): void {
   if (platform === 'win32') {
     throw new Error(
-      'External ACP agents are not supported on Windows in this release: the executor spawn is POSIX-only. ' +
+      'External agents are not supported on Windows in this release: the executor spawn is POSIX-only. ' +
         'An npm-installed adapter resolves to a `.cmd` launcher that cannot be spawned without a shell, and the process-tree reaping is POSIX-specific. ' +
         'Run the external agent on macOS/Linux (or WSL). Windows support is a tracked follow-up.',
     );

@@ -4407,6 +4407,31 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
   });
 
+  it.each([
+    [7069, '8s'],
+    [0, '0s'],
+    ['1000', '14s'],
+    [-1, '14s'],
+    [NaN, '14s'],
+    [Infinity, '14s'],
+  ] as const)(
+    'uses valid cancellation duration %s for the processed summary',
+    (elapsedMs, expected) => {
+      const c = mount([
+        { ...userMsg('u1'), timestamp: 1_000 },
+        {
+          id: 't1',
+          role: 'thinking',
+          content: 'thinking before cancel',
+          timestamp: 2_000,
+        },
+        { ...asstMsg('a1'), timestamp: 3_000 },
+        { ...systemMsg('c1'), timestamp: 15_000, data: { elapsedMs } },
+      ]);
+      expect(c.textContent).toContain(`Processed ${expected}`);
+    },
+  );
+
   it('renders collapse metrics in the standalone turn row', () => {
     const c = mount([
       { ...userMsg('u1'), timestamp: 1_000 },
@@ -4431,6 +4456,26 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(text).toContain('1 thought');
     expect(text).not.toContain('1 step');
     expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('1 tool call'));
+  });
+
+  it('includes final subagent usage in the processing row', () => {
+    const agent = agentMsg('summary-agent');
+    agent.tools[0]!.rawOutput = {
+      type: 'task_execution',
+      status: 'completed',
+      executionSummary: { inputTokens: 1000, outputTokens: 200 },
+    };
+    const c = mount(
+      [
+        userMsg('u1'),
+        agent,
+        { ...asstMsg('a1'), usage: { inputTokens: 2000, outputTokens: 300 } },
+      ],
+      undefined,
+      { isResponding: true },
+    );
+    expect(c.textContent).toContain('Processing');
+    expect(c.textContent).toContain('↑3.0k ↓500');
   });
 
   it('does not add tool summary usage when full transcript usage includes it', () => {

@@ -66,6 +66,8 @@ import {
   SpeculationEvent,
   logWorkflowKeyword,
   WorkflowKeywordEvent,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuidelineSetting,
   startSpeculation,
   acceptSpeculation,
   abortSpeculation,
@@ -163,6 +165,7 @@ import {
   useVimModeActions,
 } from './contexts/VimModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
+import { ToolDetailsExpandedProvider } from './contexts/ToolDetailsExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -187,10 +190,8 @@ import {
   isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
-import {
-  detectWorkflowKeyword,
-  buildWorkflowSteeringNotice,
-} from './utils/workflow-keyword.js';
+import { buildWorkflowKeywordPrefix } from './utils/workflow-keyword.js';
+import { buildWorkflowSizeGuidelineChangePrefix } from './utils/workflow-size-notice.js';
 import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
@@ -968,6 +969,18 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, []);
 
+  const [expandedToolBatchIds, setExpandedToolBatchIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set<string>());
+  const expandToolBatch = useCallback((batchId: string) => {
+    setExpandedToolBatchIds((prev) => {
+      if (prev.has(batchId)) return prev;
+      const next = new Set(prev);
+      next.add(batchId);
+      return next;
+    });
+  }, []);
+
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const { stdin, setRawMode } = useStdin();
@@ -1014,6 +1027,10 @@ export const AppContainer = (props: AppContainerProps) => {
    * parent checkout. (PR #4174 review #3259975249.)
    */
   const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  // The size guideline the model was last told about; null until the first
+  // prompt, when the startup value (the one in the tool description) applies.
+  const announcedWorkflowSizeGuidelineRef =
+    useRef<WorkflowSizeGuidelineSetting | null>(null);
   // One-shot announcement of the context files (QWEN.md / context.fileName)
   // attached to the system prompt, shown alongside the first real prompt so
   // users can verify discovery (e.g., catch typos in context.fileName)
@@ -1698,7 +1715,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     openApprovalModeDialog,
     handleApprovalModeSelect,
-  } = useApprovalModeCommand(settings, config);
+  } = useApprovalModeCommand(settings, config, historyManager.addItem);
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
@@ -1887,6 +1904,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
+    logger,
   });
 
   const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
@@ -2331,6 +2349,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getContextRuleExcludes(),
         {
           loadReason: 'refresh',
+          extensionRuleSources: config.getExtensionRuleSources(),
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),
@@ -3160,14 +3179,46 @@ export const AppContainer = (props: AppContainerProps) => {
         // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
         // break the BTW routing check below (which tests `submittedValue`),
         // queuing the side question as a normal prompt instead.
-        !isBtwCommand(userPromptText) &&
-        detectWorkflowKeyword(userPromptText)
+        !isBtwCommand(userPromptText)
       ) {
-        setWorkflowKeywordActive(true);
-        logWorkflowKeyword(config, new WorkflowKeywordEvent());
-        submittedValue =
-          `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
-          submittedValue;
+        // A `null` result means no reminder for this submission: the keyword
+        // is absent, the Workflow tool is not in this session, or this is a
+        // shell-mode command, which goes to bash rather than to the model.
+        const prefix = buildWorkflowKeywordPrefix(config, userPromptText, {
+          shellMode: shellModeActive,
+        });
+        if (prefix) {
+          setWorkflowKeywordActive(true);
+          logWorkflowKeyword(config, new WorkflowKeywordEvent());
+          submittedValue = prefix + submittedValue;
+        }
+      }
+      // The Workflow tool description states the size guideline it was built
+      // with. When the user changes the setting mid-session, say so on the next
+      // prompt the model reads, and move the runtime thresholds with it.
+      if (
+        config.isWorkflowsEnabled() &&
+        !shellModeActive &&
+        !isSlashCommand(userPromptText) &&
+        !isBtwCommand(userPromptText)
+      ) {
+        const currentSizeGuideline = resolveWorkflowSizeGuidelineSetting(
+          settings.merged.tools?.workflowSizeGuideline,
+        );
+        const sizePrefix = buildWorkflowSizeGuidelineChangePrefix(
+          announcedWorkflowSizeGuidelineRef.current ??
+            config.getWorkflowSizeGuideline(),
+          currentSizeGuideline,
+        );
+        announcedWorkflowSizeGuidelineRef.current = currentSizeGuideline;
+        if (sizePrefix) {
+          config.setWorkflowSizeGuideline(
+            currentSizeGuideline.isDefault
+              ? undefined
+              : currentSizeGuideline.size,
+          );
+          submittedValue = sizePrefix + submittedValue;
+        }
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt);
@@ -3332,6 +3383,7 @@ export const AppContainer = (props: AppContainerProps) => {
       llmClient,
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
+      settings.merged.tools?.workflowSizeGuideline,
       setBufferText,
       shellModeActive,
       vimEnabled,
@@ -5468,6 +5520,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [thoughtExpanded, expandedThoughtHeadIds, toggleThoughtExpanded],
   );
 
+  const toolDetailsExpandedValue = useMemo(
+    () => ({
+      expandedBatchIds: expandedToolBatchIds,
+      expandBatch: expandToolBatch,
+    }),
+    [expandedToolBatchIds, expandToolBatch],
+  );
+
   return (
     <VirtualViewportContext.Provider value={useTerminalBuffer}>
       <UIStateContext.Provider value={uiState}>
@@ -5480,17 +5540,19 @@ export const AppContainer = (props: AppContainerProps) => {
               }}
             >
               <ThoughtExpandedProvider value={thoughtExpandedValue}>
-                <RenderModeProvider value={renderModeValue}>
-                  <TerminalOutputProvider value={writeRaw}>
-                    <ShellFocusContext.Provider value={isFocused}>
-                      <ContextMenuProvider
-                        onMenuChange={handleContextMenuChange}
-                      >
-                        <App />
-                      </ContextMenuProvider>
-                    </ShellFocusContext.Provider>
-                  </TerminalOutputProvider>
-                </RenderModeProvider>
+                <ToolDetailsExpandedProvider value={toolDetailsExpandedValue}>
+                  <RenderModeProvider value={renderModeValue}>
+                    <TerminalOutputProvider value={writeRaw}>
+                      <ShellFocusContext.Provider value={isFocused}>
+                        <ContextMenuProvider
+                          onMenuChange={handleContextMenuChange}
+                        >
+                          <App />
+                        </ContextMenuProvider>
+                      </ShellFocusContext.Provider>
+                    </TerminalOutputProvider>
+                  </RenderModeProvider>
+                </ToolDetailsExpandedProvider>
               </ThoughtExpandedProvider>
             </AppContext.Provider>
           </ConfigContext.Provider>

@@ -13,7 +13,6 @@ import { LlmChat, ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
 import type { ContentGenerator } from '../core/contentGenerator.js';
 import type { Content, GenerateContentResponse } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
-import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
 import { Storage } from './storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { getSessionWriterLockPath } from '../services/session-writer-lease.js';
@@ -1168,7 +1167,7 @@ describe('managed session log activation', () => {
       const written = (await fixture.config
         .getSessionService()
         .loadSession(sessionId))!.conversation.messages;
-      const [cursorRecord, evidenceRecord] = written;
+      const [cursorRecord] = written;
       const goal = {
         goalId: 'goal-1',
         revision: 1,
@@ -1185,7 +1184,6 @@ describe('managed session log activation', () => {
         v: 2,
         cause: 'turn_finished',
         snapshot: { v: 2, activity: 'idle', goal },
-        checkpointPending: { permit, recordUuid: evidenceRecord.uuid },
       } as never);
       await fixture.config.closeSessionWriter();
 
@@ -1200,23 +1198,6 @@ describe('managed session log activation', () => {
       expect(
         projection?.runtime.goalRecords.map((entry) => entry.subtype),
       ).toEqual(['goal_state']);
-
-      // Equal to what the shared builder computes over the same records: the
-      // Managed path agrees with the legacy one rather than merely producing
-      // some window of its own.
-      expect(projection?.runtime.goalCheckpointWindow).toEqual(
-        buildGoalEvidenceCheckpointWindow({
-          records: projection!.replay!.records,
-          goal: goal as never,
-          permit,
-        }),
-      );
-      // One evidence record is below the entry and byte thresholds, so no
-      // checkpoint is due; what matters is that a window is produced and that
-      // it agrees.
-      expect(projection?.runtime.goalCheckpointWindow?.shouldCheckpoint).toBe(
-        false,
-      );
     });
   });
 

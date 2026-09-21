@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
+import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
 import {
@@ -13,6 +15,11 @@ import {
   type SessionExecutionEnginePayload,
   type SessionExecutionEngineState,
 } from './session-execution-engine.js';
+import {
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
+} from '../utils/background-turn-context.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -315,11 +322,13 @@ export interface ChatRecord {
     | 'at_command'
     | 'attribution_snapshot'
     | 'notification'
+    | 'background_task_completed'
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'omni_recall'
     | 'session_model'
     | 'session_execution_engine'
     | 'rewind'
@@ -335,6 +344,7 @@ export interface ChatRecord {
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
+    | 'goal_turn_end'
     | 'realtime_message'
     | 'turn_result'
     | 'managed_session_header_v1'
@@ -344,6 +354,7 @@ export interface ChatRecord {
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
   goalContext?: GoalTurnPermit;
+  backgroundTurn?: BackgroundNotificationTurn;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -404,6 +415,7 @@ export interface ChatRecord {
     | SessionSourcesSnapshot
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
+    | GoalTurnEndRecordPayload
     | TurnResultRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -446,8 +458,10 @@ export interface NotificationRecordPayload {
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+    /** `peer`: a message from another session; `taskId` is the message id. */
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
     toolUseId?: string;
+    sourceTurnId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
     commandLabel?: string;
@@ -460,13 +474,15 @@ export interface UserPromptRecordPayload {
   /**
    * Core/headless: submitted projection, otherwise expanded pre-hook text.
    * ACP: display projection or raw request text before expansion. ACP omits
-   * this payload when neither a projection nor attachment references exist.
+   * this payload when no projection, attachment references, or resource links exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
   /** Daemon-owned attachment references used to restore prompt previews. */
   attachmentReferences?: UserPromptAttachmentReference[];
+  /** Original ACP resource references, independent of model-input expansion. */
+  resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
 }
 
 export interface UserPromptAttachmentReference {
@@ -529,6 +545,11 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  completedToolCallIds?: string[];
+}
+
+export interface GoalTurnEndRecordPayload {
+  toolCallId: string;
 }
 
 export interface SlashCommandRecordPayload {
@@ -790,6 +811,8 @@ export interface TurnResultRecordPayload {
   error?: TurnResultErrorPayload;
   /** Epoch ms the turn started executing (agent clock). */
   startedAt?: number;
+  /** Epoch ms the user-cancel signal was received (agent clock). */
+  cancelledAt?: number;
   /** Epoch ms the turn settled (agent clock). */
   endedAt: number;
   promptText?: string;
@@ -831,6 +854,7 @@ export function isTurnResultRecordPayload(
   if (
     !optionalString('stopReason', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
     !optionalTimestamp('startedAt') ||
+    !optionalTimestamp('cancelledAt') ||
     !optionalString('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('promptTextTruncated') ||
     !optionalString('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
@@ -1327,7 +1351,15 @@ export class ChatRecordingService {
     type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
     const cwd = this.config.getProjectRoot();
+    const background = backgroundTurnContext.getStore();
+    const backgroundTurn =
+      background?.active &&
+      background.sessionId === this.getSessionId() &&
+      !getCurrentAgentId()
+        ? background.turn
+        : undefined;
     return {
+      ...(backgroundTurn ? { backgroundTurn } : {}),
       uuid: randomUUID(),
       parentUuid: this.lastRecordUuid,
       sessionId: this.getSessionId(),
@@ -2012,6 +2044,18 @@ export class ChatRecordingService {
     }
   }
 
+  async recordGoalTurnEnd(
+    toolCallId: string,
+    goalContext: GoalTurnPermit,
+  ): Promise<void> {
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'goal_turn_end',
+      goalContext: copyGoalContext(goalContext),
+      systemPayload: { toolCallId },
+    });
+  }
+
   /**
    * Records a user message drained while tool results are being submitted.
    *
@@ -2059,6 +2103,20 @@ export class ChatRecordingService {
       undefined,
       goalContext,
     );
+  }
+
+  recordBackgroundTaskCompleted(payload: NotificationRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        subtype: 'background_task_completed',
+        systemPayload: payload,
+      };
+      delete record.backgroundTurn;
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving background task completion:', error);
+    }
   }
 
   /**
@@ -2157,7 +2215,10 @@ export class ChatRecordingService {
     turnId: string,
     usage: GenerateContentResponseUsageMetadata,
   ): void {
-    const total = usage.totalTokenCount;
+    this.billGoalTurnTokens(turnId, usage.totalTokenCount ?? 0);
+  }
+
+  billGoalTurnTokens(turnId: string, total: number): void {
     if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
       return;
     }
@@ -2401,11 +2462,11 @@ export class ChatRecordingService {
       const inputDisplay = toolCallResult?.resultDisplay;
       const inputValues = () => [
         ...toolResultPartDiagnosticValues(message),
-        ...(typeof inputDisplay === 'string'
+        ...(shellResultText(inputDisplay) !== undefined
           ? [
               {
                 representation: 'display' as const,
-                value: inputDisplay,
+                value: shellResultText(inputDisplay)!,
               },
             ]
           : []),
@@ -2454,11 +2515,11 @@ export class ChatRecordingService {
         mutated,
         values: () => [
           ...toolResultPartDiagnosticValues(message),
-          ...(typeof outputDisplay === 'string'
+          ...(shellResultText(outputDisplay) !== undefined
             ? [
                 {
                   representation: 'display' as const,
-                  value: outputDisplay,
+                  value: shellResultText(outputDisplay)!,
                 },
               ]
             : []),
@@ -2504,6 +2565,28 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving slash command record:', error);
+    }
+  }
+
+  /**
+   * Records the omni passive media-memory recall payload injected into the
+   * model-bound request (memory design M §9.3, D10 sideQuery mode). The
+   * reminder is assembled AFTER the user record is persisted, so without
+   * this record the transcript would never show what memory the model was
+   * given — the trajectory exporter reads it back as `turn.recall`.
+   */
+  recordOmniRecallReminder(payload: unknown): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'omni_recall',
+        systemPayload: payload as ChatRecord['systemPayload'],
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving omni recall record:', error);
     }
   }
 

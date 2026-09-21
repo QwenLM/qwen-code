@@ -8,8 +8,8 @@ Add runtime desired-state control for daemon-managed channel workers. A daemon
 may start without `--channel`, then enable, replace, inspect, reload, and stop
 its channel selection without restarting the daemon. Runtime changes are not
 persisted. The next daemon boot follows an explicit `--channel`, otherwise it
-restores the trusted primary workspace's `serve.channels`; without either it
-remains disabled.
+restores each trusted registered workspace's own `serve.channels`; without
+either it remains disabled.
 
 The control layer sits above the workspace-grouped worker implementation. It
 owns the committed selection, serializes lifecycle mutations, preserves the
@@ -67,10 +67,16 @@ daemon status continues to emit `channel_worker_partial_connect`.
 
 Boot-time `--channel` uses the same manager while retaining pre-listen lease
 reservation and ready-before-success behavior. On a flagless boot, the daemon
-restores `serve.channels` from the trusted primary workspace. The startup
+restores `serve.channels` from every trusted registered workspace, each
+contributing the list in its own workspace-scope settings. The startup
 selection uses persisted folder-trust settings; workspace ownership and trust
-are checked again before workers start. Secondary workspaces do not
-independently restore their own setting. Without an explicit or persisted
+are checked again before workers start. The workspace that listed a name breaks
+an otherwise ambiguous ownership tie, and keeps breaking it for as long as the
+daemon runs, so re-enabling a name the daemon stopped resolves as boot did. A
+name contributed only by non-primary workspaces is dropped with a log rather
+than failing the whole restore; a name the primary workspace listed keeps
+failing it. `all` stays primary-only and is reported when configured elsewhere.
+Without an explicit or persisted
 selection, the daemon does not reserve the channel service or load the heavy
 channel runtime until the first runtime mutation.
 

@@ -174,6 +174,27 @@ function TestContextConsumer() {
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
+// Records what AppContainer hands `useDeleteCommand` without changing what the hook
+// does. The `logger,` wiring at the call site is the only thing that makes the log
+// purge live, and every use inside the hook is `logger?.` — so dropping it is silent
+// in all three suites unless something observes the call site itself.
+const { deleteCommandOptions } = vi.hoisted(() => ({
+  deleteCommandOptions: [] as Array<Record<string, unknown> | undefined>,
+}));
+vi.mock('./hooks/useDeleteCommand.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./hooks/useDeleteCommand.js')>();
+  return {
+    ...actual,
+    useDeleteCommand: (options?: Record<string, unknown>) => {
+      deleteCommandOptions.push(options);
+      return actual.useDeleteCommand(
+        options as Parameters<typeof actual.useDeleteCommand>[0],
+      );
+    },
+  };
+});
+
 vi.mock('./App.js', () => ({
   App: TestContextConsumer,
 }));
@@ -309,6 +330,27 @@ import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
+  it('hands the delete command the session logger, so the log purge is live', async () => {
+    deleteCommandOptions.length = 0;
+    const { unmount } = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    await act(async () => {});
+
+    const options = deleteCommandOptions.at(-1);
+    expect(options).toBeDefined();
+    expect(
+      (options?.['logger'] as { removeSessionsMessages?: unknown } | undefined)
+        ?.removeSessionsMessages,
+    ).toBeInstanceOf(Function);
+    unmount();
+  });
+
   // One test below runs the real config.initialize(), which warms the tool
   // registry; under heavy parallel CI load that can exceed the default
   // timeout without any real hang.
@@ -553,6 +595,9 @@ describe('AppContainer State Management', () => {
     mockedUseLogger.mockReturnValue({
       getPreviousUserMessages: vi.fn().mockResolvedValue([]),
       removeLastUserMessage: vi.fn().mockResolvedValue(false),
+      // `/delete` calls this through useDeleteCommand; without it a test that
+      // drives a successful delete reports "Failed to delete session." instead.
+      removeSessionsMessages: vi.fn().mockResolvedValue(false),
     });
     mockedRestorePromptStash.mockReturnValue(false);
     mockedUseLoadingIndicator.mockReturnValue({
@@ -2992,6 +3037,82 @@ describe('AppContainer State Management', () => {
         'one more check',
       );
     });
+
+    // The shell-mode gate is load-bearing only through this call site: a
+    // shell-mode submission goes to bash, where a leading `<system-reminder>`
+    // is a syntax error, and is recorded as the command the user ran. Both arms
+    // go through the real handleFinalSubmit and the real shellModeActive state,
+    // so dropping `shellMode: shellModeActive` from the call turns the shell
+    // arm red while the ordinary arm keeps the assertion from passing vacuously.
+    it.each([
+      ['a shell-mode submission', true, false],
+      ['an ordinary prompt', false, true],
+    ])(
+      'adds the workflow keyword reminder only outside shell mode: %s',
+      (_case, shellMode, expectReminder) => {
+        const mockQueueMessage = vi.fn();
+        vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+          getAllToolNames: () => ['workflow'],
+          getTool: () => undefined,
+          getMcpClientManager: () => ({
+            getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+          }),
+        } as unknown as ReturnType<Config['getToolRegistry']>);
+        mockedUseLlmStream.mockReturnValue({
+          streamingState: 'idle',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        if (shellMode) {
+          act(() => {
+            capturedUIActions.setShellModeActive(true);
+          });
+        }
+        capturedUIActions.handleFinalSubmit('gh workflow list', {
+          submittedPrompt: 'gh workflow list',
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledTimes(1);
+        const submitted = mockQueueMessage.mock.calls[0][0] as string;
+        expect(submitted).toContain('gh workflow list');
+        // Asserted on the workflow reminder's own text: this call site gates
+        // only that reminder. The other notices the handler can prepend do not
+        // check shell mode yet (#11626).
+        const workflowReminder = 'includes the "workflow" keyword';
+        if (expectReminder) {
+          expect(submitted).toContain(workflowReminder);
+        } else {
+          expect(submitted).not.toContain(workflowReminder);
+        }
+      },
+    );
 
     it('preserves unchanged queue provenance across the input clear before submit', () => {
       const modelText =
@@ -7676,6 +7797,12 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'getExtensionContextFilePaths').mockReturnValue([
         'ext-context.md',
       ]);
+      const extensionRuleSources = [
+        { name: 'charts', dir: '/ext/charts/rules' },
+      ];
+      vi.spyOn(mockConfig, 'getExtensionRuleSources').mockReturnValue(
+        extensionRuleSources,
+      );
       vi.spyOn(mockConfig, 'getContextRuleExcludes').mockReturnValue([
         'exclude-rule',
       ]);
@@ -7713,7 +7840,7 @@ describe('AppContainer State Management', () => {
         true,
         expect.anything(),
         ['exclude-rule'],
-        expect.anything(),
+        expect.objectContaining({ extensionRuleSources }),
       );
       expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);
     });

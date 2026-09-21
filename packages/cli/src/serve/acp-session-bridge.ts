@@ -115,6 +115,7 @@ export type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 
 export {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,
   SessionNotFoundError,

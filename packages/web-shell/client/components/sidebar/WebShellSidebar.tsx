@@ -101,7 +101,7 @@ import {
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
-import { isLocalDaemon } from '../../config/daemon';
+import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
@@ -446,9 +446,11 @@ interface WebShellSidebarProps {
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /**
    * Open the working-tree Changes dialog for a workspace. Forwarded to each
-   * trusted workspace's folder header, where a live git chip fires it on click.
+   * trusted workspace's hover details, where the branch row fires it from the
+   * workspace's Git picker. Omit it and the row stays a plain-text summary.
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
   onOpenCommit?: (workspaceCwd: string) => void;
   /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
@@ -1961,6 +1963,7 @@ export function WebShellSidebar({
   );
   const canShowDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('delete') &&
       canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
     [
@@ -2061,6 +2064,7 @@ export function WebShellSidebar({
   );
   const canArchiveSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
       !session.hasActivePrompt &&
@@ -4404,11 +4408,11 @@ export function WebShellSidebar({
       const isCurrent = standalone?.active ?? isCurrentSession(session);
       const sessionWorkActive =
         !session.hasActivePrompt && session.activeWorkState === 'active';
-      const activityUnknown =
-        !session.hasActivePrompt && session.activeWorkState === 'unknown';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const backgroundRunning =
+        !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -4425,7 +4429,9 @@ export function WebShellSidebar({
       const showPin = !standalone && canOrganizeSession(session, 'pin');
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
-        : sessionActionItems.has('archive') && canMutateSessionArchive(session);
+        : session.sourceType !== 'qwen-live' &&
+          sessionActionItems.has('archive') &&
+          canMutateSessionArchive(session);
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
@@ -4456,7 +4462,7 @@ export function WebShellSidebar({
             styles.sessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
-            running && styles.runningSession,
+            running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
           )}
           onMouseEnter={(event) =>
@@ -4484,13 +4490,25 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {completedUnread ? (
+            {completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
+            {backgroundRunning && (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionBackgroundRunning,
+                )}
+                data-web-shell-session-background-running
+                role="img"
+                aria-label={t('background.running')}
+                title={t('background.running')}
+              />
+            )}
             {session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
@@ -4500,19 +4518,12 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !completedUnread ? (
+            ) : sessionWorkActive && !completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />
-            ) : activityUnknown && !completedUnread ? (
-              <span
-                className={styles.sessionStatusUnknown}
-                aria-label={t('sidebar.activityUnknown')}
-              >
-                ?
-              </span>
             ) : null}
           </span>
           {isEditing && showRename ? (
@@ -4575,7 +4586,7 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {session.hasActivePrompt || sessionWorkActive ? (
+                {running && !backgroundRunning ? (
                   <span
                     className={styles.sessionLoading}
                     aria-label={
@@ -5695,13 +5706,17 @@ export function WebShellSidebar({
                   className="w-full"
                   aria-label={t('sidebar.sessionSource')}
                 >
-                  <TabsTrigger value="default">
+                  <TabsTrigger value="default" className="min-w-0">
                     <ListTodoIcon />
-                    {t('sidebar.sessionSource.tasks')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.tasks')}
+                    </span>
                   </TabsTrigger>
-                  <TabsTrigger value="channel">
+                  <TabsTrigger value="channel" className="min-w-0">
                     <MessageCircleIcon />
-                    {t('sidebar.sessionSource.channels')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.channels')}
+                    </span>
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
@@ -5931,6 +5946,7 @@ export function WebShellSidebar({
                     <Fragment key={ws.id}>
                       <WorkspaceSection
                         workspace={ws}
+                        remote={!isPageOriginDaemon(workspace.baseUrl)}
                         renderHeader={
                           lockedWorkspaceCwd && lockedWorkspaceOptions?.render
                             ? (expanded) =>
@@ -6043,6 +6059,7 @@ export function WebShellSidebar({
                         }
                         showSessionDetails={sessionActionItems.has('details')}
                         overviewEnabled={workspaceOverviewEnabled}
+                        overviewMenuOpen={openWorkspaceMenuId === ws.id}
                         overviewItems={workspaceOverviewItems}
                         onOpenPathLocally={
                           localOpenEnabled
@@ -6166,20 +6183,9 @@ export function WebShellSidebar({
                                       }
                                     : {}),
                                 };
-                                // The section caps the folder name so the
-                                // git chip never slides under this overlay;
-                                // the count drives the cap's width. The
-                                // menu trigger is absent under a lock.
-                                const headerActionCount =
-                                  (ws.trusted
-                                    ? 1 + Number(canOrganizeWorkspace(ws.cwd))
-                                    : 0) + (lockedWorkspaceCwd ? 0 : 1);
                                 return (
                                   <div
                                     className={styles.workspaceHeaderActions}
-                                    data-workspace-action-count={
-                                      headerActionCount
-                                    }
                                     style={{
                                       visibility:
                                         visible || openWorkspaceMenuId === ws.id
@@ -6418,12 +6424,15 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {footerItems.has('localFiles') && (
-                <LocalFilesControl
-                  triggerClassName={styles.collapseButton}
-                  workspaces={workspaces}
-                />
-              )}
+              {footerItems.has('localFiles') &&
+                // The browser-local bridge is only offered when the connected
+                // daemon is the page's own origin (see isPageOriginDaemon).
+                isPageOriginDaemon(workspace.baseUrl) && (
+                  <LocalFilesControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                  />
+                )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}

@@ -20,6 +20,14 @@ const job = (name) => {
   return workflow.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 
+const step = (block, name) => {
+  const marker = `      - name: '${name}'`;
+  const start = block.indexOf(marker);
+  if (start < 0) throw new Error(`Missing workflow step: ${name}`);
+  const next = block.slice(start + 1).search(/\n {6}- name:/);
+  return block.slice(start, next < 0 ? undefined : start + 1 + next);
+};
+
 describe('SDK Java self-hosted workflow guards', () => {
   it('passes one Hosted Harness capability digest to the server and Java client', () => {
     expect(managedHostedE2E).toContain(
@@ -90,6 +98,19 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
+    );
+  });
+
+  it('runs Runtime Broker tests from the sibling module on self-hosted Java 21', () => {
+    const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
+    expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
+    expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
+    expect(block).toContain(
+      'mvn --batch-mode --no-transfer-progress clean test\n' +
+        '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
+        '            cd ../runtime-broker\n' +
+        '            mvn --batch-mode --no-transfer-progress clean test\n' +
+        '          fi',
     );
   });
 

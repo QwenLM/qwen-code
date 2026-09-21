@@ -267,6 +267,27 @@ describe('rateLimit', () => {
       expect(res.body).toMatchObject({ tier: 'mutation' });
     });
 
+    it.each(['/sessions/catalog', '/sessions/catalog/', '/SESSIONS/CATALOG'])(
+      'charges %s to the read quota without consuming mutation quota',
+      (path) => {
+        const next = vi.fn();
+        limiter.middleware(mockReq({ path }), mockRes(), next);
+        const res = mockRes();
+        limiter.middleware(mockReq({ path }), res, vi.fn());
+        expect(res.body).toMatchObject({ tier: 'read' });
+        limiter.middleware(mockReq({ path: '/session' }), mockRes(), next);
+        expect(next).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it('keeps neighboring catalog paths in the mutation tier', () => {
+      const path = '/sessions/catalog/extra';
+      limiter.middleware(mockReq({ path }), mockRes(), vi.fn());
+      const res = mockRes();
+      limiter.middleware(mockReq({ path }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'mutation' });
+    });
+
     it('classifies GET as read tier', () => {
       const next = vi.fn();
       limiter.middleware(

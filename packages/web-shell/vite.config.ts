@@ -1,9 +1,10 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { ProxyOptions } from 'vite';
+import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
+import { getAllowedDaemonOrigin } from './client/config/daemon';
 
 const daemonProxy: ProxyOptions = {
   target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
@@ -64,9 +65,58 @@ export const BRAND_ROUTE_PROXY = '^/brand/?$';
 // bridge hangs in `connecting`.
 export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 
+// Shared with vite.lib.config.ts so the app and lib builds can never drift
+// onto different syntax floors: esbuild miscompiles xterm's logical
+// assignments below ES2021 (#11643), and the lib build bundles the same
+// xterm for npm hosts.
+export const WEB_SHELL_BUILD_TARGET = 'es2021';
+
+// Development permits same-origin ancestors; production denies them by default.
+function developmentCsp(requestUrl: string): string {
+  const queryStart = requestUrl.indexOf('?');
+  const raw = new URLSearchParams(
+    queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
+  ).get('daemon');
+  const origin = getAllowedDaemonOrigin(raw || '');
+  const connectOrigins: string[] = [];
+  if (origin) {
+    const websocket = new URL(origin);
+    websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
+    connectOrigins.push(origin, websocket.origin);
+  }
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data:",
+    `connect-src 'self' ${connectOrigins.join(' ')}`.trim(),
+    "worker-src 'self' blob:",
+    "base-uri 'none'",
+    'frame-src http: https: blob:',
+    "frame-ancestors 'self'",
+  ].join('; ');
+}
+
+function configureCsp(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    next();
+  });
+}
+
 export default defineConfig(({ command }) => ({
   root: 'client',
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    {
+      name: 'web-shell-development-csp',
+      configureServer: configureCsp,
+      configurePreviewServer: configureCsp,
+    },
+  ],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -94,14 +144,39 @@ export default defineConfig(({ command }) => ({
     dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
+    // Avoid esbuild lowering xterm's logical assignments into invalid code.
+    target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    // The Live Voice capture worklet is loaded with audioWorklet.addModule(),
+    // which the Web Shell CSP (`script-src 'self'`, no `data:`) only allows
+    // from a same-origin URL. At ~2 KB it is under Vite's default inline
+    // limit and would be turned into a `data:` URL — silently, because the
+    // client then falls back to the main-thread capture node. Keep it a file.
+    assetsInlineLimit: (filePath) =>
+      /[\\/]live[\\/]capture-worklet\.js$/.test(filePath) ? false : undefined,
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'client/index.html'),
+        // This import-free worker must remain at the origin root so it can
+        // control all Web Shell navigation.
+        sw: resolve(__dirname, 'client/sw.js'),
+      },
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
+        format: 'es',
+      },
+    },
   },
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
   server: {
     cors: false,
+    headers: {
+      'Referrer-Policy': 'no-referrer',
+    },
     port: 5173,
     proxy: {
       [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,

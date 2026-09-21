@@ -299,6 +299,31 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result).not.toBe(originalRequest); // Should be a new object
     });
 
+    it('forwards a parameterless tool without a parameters key', () => {
+      // Negative pin for the MiniMax-only scoping in minimax.ts: the default
+      // provider must not synthesize a schema for zero-argument tools.
+      // converter.ts deliberately omits `parameters` for them (#11431), and
+      // the endpoints #10080 was written for (llama.cpp, LM Studio, vLLM)
+      // reject the empty-object shape. Assert on the serialized body because
+      // a converter-shaped tool carries `parameters: undefined` present,
+      // which JSON.stringify drops — matching what actually ships.
+      const result = provider.buildRequest(
+        {
+          model: 'some-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          tools: [
+            {
+              type: 'function',
+              function: { name: 'no_args', description: 'd' },
+            },
+          ],
+        },
+        'prompt-id',
+      );
+
+      expect(JSON.stringify(result.tools)).not.toContain('"parameters"');
+    });
+
     it('should set model max_tokens default when not configured', () => {
       const requestWithoutMaxTokens: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'gpt-4',
@@ -564,6 +589,29 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       expect(result['reasoning_effort']).toBe('xhigh');
       expect(result['reasoning']).toBeUndefined();
+    });
+
+    it('preserves generic clamping for a legacy non-GPT declaration', () => {
+      mockContentGeneratorConfig.authType =
+        'openai' as ContentGeneratorConfig['authType'];
+      mockCliConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high', 'max'],
+            defaultEffort: 'high',
+            disableField: 'thinking',
+          },
+        },
+      });
+      const request = {
+        model: 'deepseek-v4-pro',
+        messages: [],
+        reasoning: { effort: 'low' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+      expect(provider.buildRequest(request, 'prompt-id')).toMatchObject({
+        reasoning: { effort: 'low' },
+      });
     });
 
     it('keeps an unrecognized effort string as-is rather than rewriting it', () => {

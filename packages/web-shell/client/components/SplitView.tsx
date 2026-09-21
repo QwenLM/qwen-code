@@ -23,6 +23,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
+import type { RegisterContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -45,6 +46,8 @@ import {
   workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
+import { AssistantTurnSettlementObserver } from '../assistant-turn-settlement';
+import type { WebShellAssistantTurnSettledEvent } from '../customization';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
@@ -62,6 +65,7 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Report panes surfacing approvals, including hidden panes. Keep stable while
    * consumer inputs are unchanged; a new callback receives the current list.
@@ -76,6 +80,12 @@ export interface SplitViewProps {
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
     task: DaemonSessionMonitorTaskStatus,
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
+  registerContextUsageControls?: RegisterContextUsageControls;
+  onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
     sessionId: string,
     sessionActions: DaemonSessionActions,
   ) => void;
@@ -115,6 +125,7 @@ export function SplitView({
   sessionIds,
   showSessionDetails = true,
   onPanesChange,
+  onAssistantTurnSettled,
   onPendingPanesChange,
   onExit,
   onError,
@@ -124,6 +135,9 @@ export function SplitView({
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
+  registerContextUsageControls,
+  onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   renderPaneHeaderActions,
   includeOtherWorkspaces = true,
@@ -621,6 +635,11 @@ export function SplitView({
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
+                    {onAssistantTurnSettled ? (
+                      <AssistantTurnSettlementObserver
+                        onAssistantTurnSettled={onAssistantTurnSettled}
+                      />
+                    ) : null}
                     <ChatPane
                       title={titleById.get(sessionId)}
                       sessionSummary={
@@ -654,6 +673,11 @@ export function SplitView({
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}
                       onPaneArtifactsChange={onPaneArtifactsChange}
+                      registerContextUsageControls={
+                        registerContextUsageControls
+                      }
+                      onBeforeContextCompress={onBeforeContextCompress}
+                      onOpenContextUsage={onOpenContextUsage}
                       messageTurnOutputs={messageTurnOutputs}
                       sessionWorkflowEnabled={sessionWorkflowEnabled}
                       planControlVisible={planControlVisible}

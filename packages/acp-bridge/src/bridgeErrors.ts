@@ -28,6 +28,29 @@ import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
   'Not currently generating' as const;
 
+export interface AcpChildCapacity {
+  code: 'acp_child_capacity_exhausted';
+  maxConcurrentChildren: number;
+  committedAcpChildren: number;
+}
+
+export class AcpChildCapacityExceededError
+  extends Error
+  implements AcpChildCapacity
+{
+  override readonly name = 'AcpChildCapacityExceededError';
+  readonly code = 'acp_child_capacity_exhausted' as const;
+
+  constructor(
+    readonly maxConcurrentChildren: number,
+    readonly committedAcpChildren: number,
+  ) {
+    super(
+      'The service has reached its concurrent process limit. Try again later or cancel this operation.',
+    );
+  }
+}
+
 export class StandaloneSessionSpawnError extends Error {
   override readonly name = 'StandaloneSessionSpawnError';
 
@@ -748,5 +771,20 @@ export class McpAuthenticationInProgressError extends Error {
   constructor() {
     super('Another MCP authentication is already in progress');
     this.name = 'McpAuthenticationInProgressError';
+  }
+}
+
+export class WorkspaceRuntimeStopError extends Error {
+  constructor(
+    readonly code:
+      | 'workspace_runtime_stop_stale'
+      | 'workspace_runtime_stop_blocked',
+  ) {
+    super(
+      code === 'workspace_runtime_stop_stale'
+        ? 'The workspace changed. Refresh and confirm the affected sessions again.'
+        : 'The workspace cannot be stopped while other runtime work is pending.',
+    );
+    this.name = 'WorkspaceRuntimeStopError';
   }
 }

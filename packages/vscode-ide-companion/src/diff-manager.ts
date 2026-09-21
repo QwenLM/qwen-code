@@ -90,6 +90,24 @@ export class DiffManager {
   private readonly onDidChangeEmitter =
     new vscode.EventEmitter<JSONRPCNotification>();
   readonly onDidChange = this.onDidChangeEmitter.event;
+
+  private readonly onDidClosePermissionDiffEmitter = new vscode.EventEmitter<{
+    permissionRequestId: string;
+  }>();
+  /**
+   * Fires when a diff opened for a pending permission is closed without a vote.
+   *
+   * `onDidChange` carries `ide/diffClosed` to IDE-mode MCP transports, which no
+   * web-shell host is; a chat surface that opened the diff itself would
+   * otherwise never learn the user closed it, and would keep waiting for a
+   * decision on an edit the user can no longer see (#10557). `qwen.diff.accept`
+   * and `qwen.diff.cancel` do not reach here for a request-bound diff — they
+   * route the vote through `respondToPendingPermission` instead — and
+   * `closeDiffEditor` drops the entry before the tab closes, so a close the
+   * chat surface asked for does not echo back as a dismissal.
+   */
+  readonly onDidClosePermissionDiff =
+    this.onDidClosePermissionDiffEmitter.event;
   private diffDocuments = new Map<string, DiffInfo>();
   private readonly subscriptions: vscode.Disposable[] = [];
   // Dedupe: remember recent showDiff calls keyed by (file+content)
@@ -158,6 +176,7 @@ export class DiffManager {
     for (const subscription of this.subscriptions) {
       subscription.dispose();
     }
+    this.onDidClosePermissionDiffEmitter.dispose();
   }
 
   /**
@@ -406,6 +425,19 @@ export class DiffManager {
       const rightDoc = await vscode.workspace.openTextDocument(uriToClose);
       const modifiedContent = rightDoc.getText();
       await this.closeDiffEditor(uriToClose);
+      // An id-less close matches by path alone: that caller does not know an
+      // approval owns this diff, so it cannot tell the surface holding the
+      // request. Fire the dismissal here, because closeDiffEditor already
+      // dropped the entry and the onDidCloseTextDocument -> cancelDiff hop that
+      // follows finds nothing (#10557 through a second door: an IDE-mode CLI
+      // closing the tab leaves the shell locked on a diff that is gone). A
+      // caller that passed the id *is* that surface and has cleared its own
+      // state, so its close must not echo back.
+      if (permissionRequestId === undefined && openDiff.permissionRequestId) {
+        this.onDidClosePermissionDiffEmitter.fire({
+          permissionRequestId: openDiff.permissionRequestId,
+        });
+      }
       if (!suppressNotification) {
         this.onDidChangeEmitter.fire(
           IdeDiffClosedNotificationSchema.parse({
@@ -486,6 +518,12 @@ export class DiffManager {
         },
       }),
     );
+
+    if (diffInfo.permissionRequestId) {
+      this.onDidClosePermissionDiffEmitter.fire({
+        permissionRequestId: diffInfo.permissionRequestId,
+      });
+    }
   }
 
   private async onActiveEditorChange(editor: vscode.TextEditor | undefined) {

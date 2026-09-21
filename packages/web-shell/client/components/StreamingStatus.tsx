@@ -12,6 +12,7 @@ import styles from './StreamingStatus.module.css';
 
 interface StreamingStatusProps {
   startedAt?: number;
+  backgroundLabel?: string;
   /**
    * When false, hide the rotating "witty" loading phrase and skip its rotation
    * timer entirely — the spinner, elapsed time, token count, and cancel hint
@@ -32,6 +33,7 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 
 export function StreamingStatus({
   startedAt,
+  backgroundLabel,
   showPhrase = true,
   hasActivePrompt,
 }: StreamingStatusProps) {
@@ -129,7 +131,7 @@ export function StreamingStatus({
     return () => clearInterval(interval);
   }, [isActive]);
 
-  if (streamingState === 'idle' && !hasActivePrompt) return null;
+  if (!isActive) return null;
 
   const spinnerChar = SPINNER_FRAMES[dotFrame % SPINNER_FRAMES.length];
   const arrow = isReceivingContent ? '↓' : '↑';
@@ -142,8 +144,12 @@ export function StreamingStatus({
   return (
     <div className={styles.status}>
       <span className={styles.spinner}>{spinnerChar}</span>
-      {showPhrase && loadingPhrase && (
-        <span className={styles.label}>{loadingPhrase}</span>
+      {(backgroundLabel || (showPhrase && loadingPhrase)) && (
+        <span className={styles.label}>
+          {backgroundLabel
+            ? t('background.processing', { label: backgroundLabel })
+            : loadingPhrase}
+        </span>
       )}
       <span className={styles.meta}>
         ({timeStr}

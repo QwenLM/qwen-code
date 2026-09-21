@@ -1,0 +1,14 @@
+[Unit]
+Description=Clean stale Qwen CI Docker resources
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Type=oneshot units do NOT inherit DefaultTimeoutStartSec (systemd disables
+# the start timeout by default for oneshot), so this is the unit's only bound.
+# Keep it: without one, a wedged docker call hangs the run forever holding the
+# /run mutex, and every later elapse then skips. 1h clears the script's worst
+# case instead of cutting the sweep off mid-prune.
+TimeoutStartSec=1h
+ExecStart=/usr/local/sbin/qwen-docker-cleanup

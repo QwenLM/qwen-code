@@ -10,6 +10,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
 import { ToolNames } from './tool-names.js';
 import {
   DEFAULT_SHELL_OUTPUT_THRESHOLD,
@@ -35,6 +36,7 @@ import {
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { truncateToolOutput } from './truncation.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,
@@ -103,6 +105,7 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
+const APPENDED_METADATA_SEPARATOR = '\n\n';
 
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
@@ -1699,6 +1702,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   private getSedEditInfo(): SedEditInfo | null {
     if (
+      this.config.getShellExecutionSandbox?.() ||
       this.params.is_background ||
       LEADING_ENV_ASSIGNMENT_RE.test(this.params.command)
     ) {
@@ -2029,6 +2033,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getShellExecutionSandbox?.()) return 'ask';
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
     // unwraps `bash -c '...'` to its inner script — so for
@@ -2119,6 +2124,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
     for (const sub of subCommands) {
+      if (this.config.getShellExecutionSandbox?.()) {
+        confirmableSubCommands.push(sub);
+        continue;
+      }
       let isReadOnly = false;
       try {
         isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
@@ -2291,9 +2300,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // are preserved through to execution; the rewriters operate at the
     // top-level shell layer and become no-ops when the commit hides
     // inside a wrapper.
-    const processedCommand = this.addAttributionToPR(
-      this.addCoAuthorToGitCommit(this.params.command.trim()),
-    );
+    const processedCommand = this.config.getShellExecutionSandbox?.()
+      ? this.params.command.trim()
+      : this.addAttributionToPR(
+          this.addCoAuthorToGitCommit(this.params.command.trim()),
+        );
     const commandToExecute = processedCommand;
     const cwd = this.params.directory || this.config.getTargetDir();
 
@@ -2321,9 +2332,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // `git -C /other commit`), no consumer reads preHead and the
     // ~10–50 ms execFileSync is dead work that just blocks the
     // event loop before the user's real command spawns.
-    const preHead: string | null = commitCtx.attributableInCwd
-      ? this.getGitHeadSync(cwd)
-      : null;
+    const preHead: string | null =
+      !this.config.getShellExecutionSandbox?.() && commitCtx.attributableInCwd
+        ? this.getGitHeadSync(cwd)
+        : null;
 
     // Snapshot the attribution inputs BEFORE spawn so bindGhPrCreate can
     // tell a run that CREATED a PR from one that merely RESOLVED the
@@ -2338,7 +2350,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let preRunBranch: string | undefined;
     let preRunRepoKeys: AttributionRepoKeys | undefined;
     let preRunGhEnv: Readonly<Record<string, string | undefined>> | undefined;
-    if (commandRunsGhPrCreate(commandToExecute)) {
+    if (
+      !this.config.getShellExecutionSandbox?.() &&
+      commandRunsGhPrCreate(commandToExecute)
+    ) {
       // The verification legs must authenticate the way the create itself
       // does (inline GH_TOKEN with no ambient gh auth), or the gate's
       // advertised token shape binds nothing. The inline record is an
@@ -2596,7 +2611,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     let executionHandle;
     try {
-      executionHandle = await ShellExecutionService.execute(
+      executionHandle = await executeRuntimeShell(
+        this.config,
         commandToExecute,
         cwd,
         onShellOutputEvent,
@@ -2807,7 +2823,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         : '(none)';
 
       llmContent = [
-        `Command: ${this.params.command}`,
+        ...(getCurrentToolCallSource()?.kind === 'code_mode'
+          ? []
+          : [`Command: ${this.params.command}`]),
         `Directory: ${this.params.directory || '(root)'}`,
         `Output: ${result.output || '(empty)'}`,
         `Error: ${finalError}`, // Use the cleaned error string.
@@ -2826,8 +2844,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // while the stale per-file attribution stays around for a later
     // unrelated commit. attachCommitAttribution already gates on HEAD
     // movement, so it's a no-op when no commit was actually created.
+    // A non-null attributionWarning is surfaced on the tool result below
+    // (both llmContent and the TUI display) so the user knows their commit
+    // succeeded but the per-file git note didn't land — without it, the only
+    // signal is a QWEN_DEBUG_LOG_FILE entry the user has likely never set up.
     let attributionWarning: string | null = null;
-    if (commitCtx.attributableInCwd) {
+    if (
+      !this.config.getShellExecutionSandbox?.() &&
+      commitCtx.attributableInCwd
+    ) {
       // `git commit --amend` rewrites HEAD in place, so the standard
       // parent-vs-postHead diff (`${postHead}~1..${postHead}`) would
       // span the entire amended commit (the amended commit's parent
@@ -2948,17 +2973,52 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     let persistedOutputFiles: string[] | undefined;
+    let outputBudgetApplied = false;
+
+    // The advisory and attribution warning are appended after the truncation
+    // below (deliberately outside the truncation envelope — see the append
+    // loop), so their size comes out of the body budget here: the marker
+    // asserts the ASSEMBLED string fits the declared budget, and a body that
+    // fits whole must still fit once they land. The reservation and the
+    // append loop both iterate this one list, so the two cannot disagree.
+    const longRunHint = shouldAppendLongRunHint
+      ? buildLongRunningForegroundHint(elapsedMs)
+      : null;
+    const appendedMetadata = [longRunHint, attributionWarning].filter(
+      (s): s is string => s !== null,
+    );
+    const appendedMetadataChars = appendedMetadata.reduce(
+      (total, s) => total + APPENDED_METADATA_SEPARATOR.length + s.length,
+      0,
+    );
 
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
       const outputThreshold = getShellOutputThreshold(this.config);
+      // Clamp at 1: truncateToolOutput returns the body untouched on
+      // threshold <= 0, so an explicit threshold smaller than the reserved
+      // metadata (the setting has no schema minimum) would stand the pass
+      // down while outputBudgetApplied below still vouches for the body —
+      // leaving the failure path, whose only bound is that marker, unbounded.
+      // Cap the reservation at half the threshold: a sub-advisory explicit
+      // threshold would otherwise spend the whole budget on the reservation
+      // and leave a 1-char preview, dropping the trailing exit-code line
+      // the head-and-tail preview exists to keep. The assembled string can
+      // exceed the declared budget in that corner — a ~510-char truncation
+      // header already does on its own — but it stays bounded.
+      const bodyBudgetChars = Math.max(
+        1,
+        outputThreshold -
+          Math.min(appendedMetadataChars, Math.floor(outputThreshold / 2)),
+      );
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
         llmContent,
-        // Per-tool char budget; mirrors ShellTool.maxOutputChars. keep='both'
-        // preserves the command's start AND its trailing exit/error summary
+        // Per-tool char budget: ShellTool.maxOutputChars minus the metadata
+        // reserved above. keep='both' preserves the command's start AND its
+        // trailing exit/error summary
         // (where shell failures report). Kept in-tool (not deferred to the
         // scheduler) so the long-run hint below is appended OUTSIDE the
         // truncation envelope; the scheduler's sentinel makes its later pass a
@@ -2966,8 +3026,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          threshold: outputThreshold,
-          previewChars: Math.min(4000, outputThreshold),
+          threshold: bodyBudgetChars,
+          previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',
           lines: Number.POSITIVE_INFINITY,
         },
@@ -2983,54 +3043,35 @@ export class ShellToolInvocation extends BaseToolInvocation<
         persistedOutputFiles = [];
         llmContent = truncatedResult.content;
       }
+
+      // Set even when nothing was cut: the scheduler's generic gate sits BELOW
+      // this budget by default, so an unmarked body inside it gets re-bounded
+      // there under a stricter head-only policy.
+      outputBudgetApplied = true;
     }
 
-    // Append the long-run advisory AFTER truncation so the hint isn't
-    // wrapped in `truncateToolOutput`'s "Truncated part of the output"
-    // header (which the LLM might misread as part of the command's own
-    // output). The hint is process metadata about the command, not
-    // command output, so it belongs outside the truncation envelope.
-    const longRunHint = shouldAppendLongRunHint
-      ? buildLongRunningForegroundHint(elapsedMs)
-      : null;
-    if (longRunHint) {
+    // Append the metadata AFTER truncation so it isn't wrapped in
+    // `truncateToolOutput`'s "Truncated part of the output" header (which the
+    // LLM might misread as part of the command's own output). These are
+    // process metadata about the command — how long it blocked the agent, or
+    // that its commit landed but the per-file attribution note didn't — not
+    // command output, so they belong outside the truncation envelope. Both
+    // llmContent (so the agent can react) and returnDisplayMessage (so the
+    // human waiting in the TUI sees the same cue) get them, append-style,
+    // preserving any pre-existing display content (debug snapshot, truncation
+    // marker line, status line).
+    //
+    // Today shell.ts only emits string llmContent; the type union also allows
+    // structured `Part[]` content, in which case the metadata silently
+    // disappears here. Encoding it as a Part would require deciding on a
+    // rendering convention, and structured llmContent isn't on the roadmap.
+    // Revisit if someone adds a non-string return path.
+    for (const metadata of appendedMetadata) {
       if (typeof llmContent === 'string') {
-        llmContent += `\n\n${longRunHint}`;
-        // Surface the hint in the user-facing TUI too — the user is
-        // the one waiting for long commands and benefits from the
-        // same "consider backgrounding next time" cue the agent sees.
-        // Append (not replace) in BOTH modes so the truncation marker
-        // line ("Output too long and was saved to: ...") and any
-        // pre-existing returnDisplayMessage content (debug snapshot,
-        // status line, command output) are preserved.
+        llmContent += `${APPENDED_METADATA_SEPARATOR}${metadata}`;
         returnDisplayMessage +=
-          (returnDisplayMessage ? '\n\n' : '') + longRunHint;
+          (returnDisplayMessage ? APPENDED_METADATA_SEPARATOR : '') + metadata;
       }
-      // else: llmContent is a structured `Part[]` / `Part` rather than
-      // a plain string. Today shell.ts only emits string llmContent,
-      // but the type union allows structured content. If a future
-      // refactor changes that, the hint silently disappears here. We
-      // accept that risk for now — the alternative (encoding the hint
-      // as a Part) would require deciding on a rendering convention,
-      // and structured llmContent isn't on the roadmap. Revisit if
-      // someone adds a non-string return path.
-    }
-
-    // Surface AI-attribution failures (note exec failure, payload too
-    // large, diff-analysis exception, shallow clone, etc.) on the tool
-    // result so the user knows their commit succeeded but the per-file
-    // git note didn't land. Without this, the only signal is a
-    // QWEN_DEBUG_LOG_FILE entry the user has likely never set up.
-    // Appended to BOTH llmContent (so the agent can react / report) and
-    // returnDisplayMessage (so the human sees it in the TUI). Skipped
-    // when null (intentional skips like a bare `git commit` with no
-    // tracked AI edits don't need user-visible feedback).
-    if (attributionWarning) {
-      if (typeof llmContent === 'string') {
-        llmContent += `\n\n${attributionWarning}`;
-      }
-      returnDisplayMessage +=
-        (returnDisplayMessage ? '\n\n' : '') + attributionWarning;
     }
 
     // When `result.error` is set, `coreToolScheduler` builds the
@@ -3089,8 +3130,38 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
-      returnDisplay: returnDisplayMessage,
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: returnDisplayMessage,
+        output: result.output,
+        directory: cwd,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        pid: result.pid ?? null,
+        error:
+          timeoutSummary ??
+          (result.error
+            ? result.error.message.replace(
+                commandToExecute,
+                this.params.command,
+              )
+            : null),
+        outcome: wasTimeout
+          ? 'timed_out'
+          : result.aborted && !wasPromoteRefused
+            ? 'cancelled'
+            : result.error ||
+                isSignalTermination(result.signal) ||
+                isShellExitError(this.params.command, result.exitCode)
+              ? 'failed'
+              : 'completed',
+        notices: appendedMetadata,
+        truncated: false,
+        outputFiles: persistedOutputFiles ?? [],
+      },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+      ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
       ...executionError,
       ...(result.executionMethod === 'none'
         ? { executionStatus: 'not_started' as const }
@@ -3135,6 +3206,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     preRunRepoKeys: AttributionRepoKeys | undefined,
     ghCreateEnv?: Readonly<Record<string, string | undefined>>,
   ): void {
+    if (this.config.getShellExecutionSandbox?.()) return;
     void (async () => {
       try {
         if (!commandRunsGhPrCreate(command)) return;
@@ -3796,9 +3868,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         'Stripped trailing & from background shell command — managed path handles backgrounding',
       );
     }
-    const processedCommand = this.addAttributionToPR(
-      this.addCoAuthorToGitCommit(noTrailingAmp),
-    );
+    const processedCommand = this.config.getShellExecutionSandbox?.()
+      ? noTrailingAmp
+      : this.addAttributionToPR(this.addCoAuthorToGitCommit(noTrailingAmp));
     const cwd = this.params.directory || this.config.getTargetDir();
 
     // Output goes under the project temp dir (which `ReadFileTool`
@@ -3847,32 +3919,47 @@ export class ShellToolInvocation extends BaseToolInvocation<
       abortController: entryAc,
     };
 
-    const { result: resultPromise, pid } = await ShellExecutionService.execute(
-      processedCommand,
-      cwd,
-      (event: ShellOutputEvent) => {
-        if (event.type === 'data' && typeof event.chunk === 'string') {
-          // Strip ANSI escape codes (color, cursor-move, clear-screen) before
-          // writing — agents read the file as plain text, and dev servers /
-          // build tools spam plenty of escape sequences that would render as
-          // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
-          outputStream.write(stripAnsi(event.chunk));
-        }
-        // ANSI array chunks and binary streams are not written to the output
-        // file: agents read the file as plain text and binary spam would be
-        // unhelpful.
-      },
-      entryAc.signal,
-      // Background shells are non-interactive by design — no terminal to
-      // attach a PTY to, no human to type at it. Force the child_process
-      // path so we don't pull in node-pty for fire-and-forget commands.
-      false,
-      shellExecutionConfig ?? {},
-      // Stream stdout/stderr through to the output file as chunks arrive.
-      // Default child_process mode buffers until exit, which would leave
-      // dev-server / watcher output files empty until the process dies.
-      { streamStdout: true },
-    );
+    let executionHandle;
+    try {
+      executionHandle = await executeRuntimeShell(
+        this.config,
+        processedCommand,
+        cwd,
+        (event: ShellOutputEvent) => {
+          if (event.type === 'data' && typeof event.chunk === 'string') {
+            // Strip ANSI escape codes (color, cursor-move, clear-screen) before
+            // writing — agents read the file as plain text, and dev servers /
+            // build tools spam plenty of escape sequences that would render as
+            // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
+            outputStream.write(stripAnsi(event.chunk));
+          }
+          // ANSI array chunks and binary streams are not written to the output
+          // file: agents read the file as plain text and binary spam would be
+          // unhelpful.
+        },
+        entryAc.signal,
+        // Background shells are non-interactive by design — no terminal to
+        // attach a PTY to, no human to type at it. Force the child_process
+        // path so we don't pull in node-pty for fire-and-forget commands.
+        false,
+        shellExecutionConfig ?? {},
+        // Stream stdout/stderr through to the output file as chunks arrive.
+        // Default child_process mode buffers until exit, which would leave
+        // dev-server / watcher output files empty until the process dies.
+        { streamStdout: true },
+      );
+    } catch (error) {
+      outputStream.destroy();
+      try {
+        fs.rmSync(outputPath, { force: true });
+      } catch (cleanupError) {
+        debugLogger.warn(
+          `background shell ${shellId} output cleanup failed: ${getErrorMessage(cleanupError)}`,
+        );
+      }
+      throw error;
+    }
+    const { result: resultPromise, pid } = executionHandle;
 
     if (pid !== undefined) registration.pid = pid;
     const registry = this.config.getBackgroundShellRegistry();
@@ -4450,7 +4537,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
       );
       warning =
-        `AI attribution note skipped: ${getErrorMessage(err)}. ` +
+        `AI attribution note skipped: ${getErrorMessage(err).slice(0, 120)}. ` +
         'Co-authored-by trailer is unaffected.';
     } finally {
       // Partial clear: only drop tracking for files that landed in

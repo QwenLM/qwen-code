@@ -6,7 +6,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: calc(12px + var(--web-shell-desktop-titlebar-height, 0px)) 12px 12px;
   overflow: hidden;
   background: var(--sidebar-background);
   border-right: 1px solid var(--sidebar-border);
@@ -828,6 +828,58 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The branch row itself becomes a button when the workspace's Git picker is
+   wired, so the whole row is the target rather than a trailing control. */
+.sessionDetailsRowButton {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.sessionDetailsRowButton:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+/* Branch name and its severity dot stay tight together; the summary keeps its
+   own right-aligned column via margin-left: auto. */
+.sessionDetailsBranch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* The compact chip's badge dot, lifted beside the branch name: accent when the
+   tree is dirty, warning for an in-progress operation or detached HEAD, error
+   when conflicted. Absent on a clean tree. */
+.sessionDetailsGitDot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color, #4a9eff);
+}
+
+.sessionDetailsGitDot[data-tone='warning'] {
+  background: var(--warning-color, #d29922);
+}
+
+.sessionDetailsGitDot[data-tone='error'] {
+  background: var(--error-color, #e5534b);
+}
+
+/* The row's only hover cue: the branch icon and the chevron carry the muted
+   tone from `.sessionDetailsRow svg`, so a hover has to move them together. */
+.sessionDetailsRowButton:hover svg {
+  color: var(--popover-foreground);
+}
+
 .sessionDetailsRowIssue,
 .sessionDetailsRowIssue .sessionDetailsRowValue {
   color: var(--warning-color, #d29922);
@@ -1042,11 +1094,6 @@
   color: var(--success-color, #3fb950);
 }
 
-.sessionStatusUnknown {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
 .sessionSourceIcon {
   width: 28px;
   height: 28px;
@@ -1126,10 +1173,17 @@
   justify-content: flex-end;
 }
 
-.sessionMetaSlot:not(
-  :has(.sessionLoading, .sessionAttention, .sessionGitIcon, .sessionSourceIcon)
-) {
-  padding-right: 10px;
+@supports (selector(:has(*))) {
+  .sessionMetaSlot:not(
+    :has(
+      .sessionLoading,
+      .sessionAttention,
+      .sessionGitIcon,
+      .sessionSourceIcon
+    )
+  ) {
+    padding-right: 10px;
+  }
 }
 
 .sessionAttention {
@@ -1189,29 +1243,40 @@
   pointer-events: none;
 }
 
-.sessionActions:focus-within,
-.sessionActions:has([data-state='open']) {
-  opacity: 1;
-  pointer-events: auto;
+@supports (selector(:has(*))) {
+  .sessionActions:focus-within,
+  .sessionActions:has([data-state='open']) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (hover: hover) {
+    .sessionMetaSlot:has(.sessionActions:focus-within),
+    .sessionMetaSlot:has([data-state='open']) {
+      min-width: var(--session-actions-width, 78px);
+    }
+
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
+    .sessionMetaSlot:has([data-state='open']) .sessionLoading,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
+    .sessionMetaSlot:has([data-state='open']) .sessionAttention,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
+      opacity: 0;
+    }
+
+    .sessionRow:hover:not(.runningSession)
+      .sessionMetaSlot:has(.sessionActions)
+      .sessionSourceIcon,
+    .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+      opacity: 0;
+    }
+  }
 }
 
 @media (hover: hover) {
-  .sessionMetaSlot:has(.sessionActions:focus-within),
-  .sessionMetaSlot:has([data-state='open']) {
-    min-width: var(--session-actions-width, 78px);
-  }
-
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
-  .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
-  .sessionMetaSlot:has([data-state='open']) .sessionLoading,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
-  .sessionMetaSlot:has([data-state='open']) .sessionAttention,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
-  .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
-    opacity: 0;
-  }
-
   .sessionRow:hover .sessionMetaSlot {
     min-width: var(--session-actions-width, 78px);
   }
@@ -1220,11 +1285,7 @@
   .sessionRow:hover:not(.runningSession) .sessionAttention,
   .sessionMetaSlot:hover .sessionGitIcon,
   .sessionMetaSlot:hover .sessionLoading,
-  .sessionMetaSlot:hover .sessionAttention,
-  .sessionRow:hover:not(.runningSession)
-    .sessionMetaSlot:has(.sessionActions)
-    .sessionSourceIcon,
-  .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+  .sessionMetaSlot:hover .sessionAttention {
     opacity: 0;
   }
 
@@ -1369,6 +1430,7 @@
   z-index: 1100;
   width: 240px;
   max-height: min(320px, calc(100vh - 16px));
+  max-height: min(320px, calc(100dvh - 16px));
   padding: 6px;
   border: 1px solid var(--sidebar-border);
   border-radius: 8px;
@@ -2000,7 +2062,6 @@
   }
 }
 
-/* Registered workspace count next to the Projects label. */
 .projectsHeaderCount {
   display: inline-flex;
   align-items: center;
@@ -2013,4 +2074,17 @@
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+}
+
+.sessionBackgroundRunning {
+  color: var(--warning-color, #d29922);
+}
+
+/* Hover-gated: touch devices get no hover reveal, and a sticky tap-hover on
+   the background dot must not hide the always-visible row actions. */
+@media (hover: hover) {
+  .sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions {
+    opacity: 0;
+    pointer-events: none;
+  }
 }

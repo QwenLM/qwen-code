@@ -26,6 +26,8 @@ export interface SubagentExecutorCore {
 }
 
 export interface SubagentExecutor {
+  readonly continuationBlockedReason?: string;
+
   execute(
     context: ContextState,
     externalSignal?: AbortSignal,

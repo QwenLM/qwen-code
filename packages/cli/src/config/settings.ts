@@ -530,10 +530,14 @@ type TightenOnlyVerdict =
  * workspace does not set it.
  *
  * System wins outright, as it does for every setting. Otherwise the
- * workspace value is compared against whichever of User and SystemDefaults
- * sets the key — the stricter of the two if both do — and against the
- * feature's default when neither does. Strictly stricter is kept; equal
- * is dropped silently; looser is dropped with a warning.
+ * workspace value is compared against the value that would be in force
+ * without it — User's when User sets the key, since User overrides
+ * SystemDefaults in the merge, else SystemDefaults', else the feature's
+ * default. Strictly stricter is kept; equal is dropped silently; looser is
+ * dropped with a warning. Comparing against the stricter of User and
+ * SystemDefaults instead would call a workspace value "equal" to a
+ * SystemDefaults value that User already loosened, and drop the one
+ * tightening that would have taken effect.
  */
 function tightenOnlyVerdict(
   entry: TightenOnlyEntry,
@@ -549,20 +553,17 @@ function tightenOnlyVerdict(
   if (read(scopes.system) !== undefined) {
     return { kept: false, reason: 'system-sets' };
   }
-  let against: 'User' | 'SystemDefaults' | 'default' = 'default';
-  let baseline = entry.strictness(undefined);
-  for (const [name, settings] of [
-    ['SystemDefaults', scopes.systemDefaults],
-    ['User', scopes.user],
-  ] as const) {
-    const value = read(settings);
-    if (value === undefined) continue;
-    const rank = entry.strictness(value);
-    if (against === 'default' || rank > baseline) {
-      against = name;
-      baseline = rank;
-    }
-  }
+  const userValue = read(scopes.user);
+  const systemDefaultsValue = read(scopes.systemDefaults);
+  const against: 'User' | 'SystemDefaults' | 'default' =
+    userValue !== undefined
+      ? 'User'
+      : systemDefaultsValue !== undefined
+        ? 'SystemDefaults'
+        : 'default';
+  const baseline = entry.strictness(
+    userValue !== undefined ? userValue : systemDefaultsValue,
+  );
   const rank = entry.strictness(candidate);
   if (rank > baseline) return { kept: true };
   if (rank === baseline) return { kept: false, reason: 'same' };
@@ -840,6 +841,25 @@ export class LoadedSettings {
     }
     this._merged = this.computeMergedSettings();
     return false;
+  }
+
+  /**
+   * Get system-scope hooks: the SystemDefaults and System settings files,
+   * merged with the same strategy as the full merge (each `hooks.<Event>` list
+   * is concatenated), SystemDefaults first. Administrator configuration is not
+   * gated by folder trust, exactly like user hooks. Returns undefined, not an
+   * empty object, when neither file configures hooks, so callers can tell a
+   * scope with no data apart from one with data.
+   */
+  getSystemHooks(): Record<string, unknown> | undefined {
+    const merged = customDeepMerge(
+      getMergeStrategyForPath,
+      {},
+      { hooks: this.systemDefaults.settings.hooks ?? {} },
+      { hooks: this.system.settings.hooks ?? {} },
+    ) as Settings;
+    const hooks = merged.hooks;
+    return hooks && Object.keys(hooks).length > 0 ? hooks : undefined;
   }
 
   /**
@@ -1310,12 +1330,18 @@ function loadSettingsInternal(
     workspaceSettings.ui.theme = DEFAULT_DARK_THEME_NAME;
   }
 
-  // For the initial trust check, we can only use user and system settings.
+  // For the initial trust check we can only use the scopes that do not need
+  // the decision being computed. `system-defaults` participates so an operator
+  // enabling `security.folderTrust` there reaches the same "trust enabled"
+  // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
+  // use; the workspace scope stays out, since a workspace file that only a
+  // trusted workspace may contribute cannot decide its own trust.
   const initialTrustCheckSettings = customDeepMerge(
     getMergeStrategyForPath,
     {},
-    systemSettings,
+    systemDefaultSettings,
     userSettings,
+    systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
@@ -1324,7 +1350,7 @@ function loadSettingsInternal(
       undefined,
       realWorkspaceDir,
     ).isTrusted ??
-    true;
+    false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

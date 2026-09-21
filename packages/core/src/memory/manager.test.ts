@@ -16,6 +16,7 @@ import {
   clearAutoMemoryRootCache,
 } from './paths.js';
 import type { Config } from '../config/config.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { Content } from '@google/genai';
 import { captureAutoMemoryExtractionHistory } from './extractionAgentPlanner.js';
 
@@ -128,6 +129,37 @@ describe('MemoryManager', () => {
       delete process.env['QWEN_CODE_MEMORY_LOCAL'];
       clearAutoMemoryRootCache();
       await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('does not emit an unhandled rejection when the caller handles a failed extraction', async () => {
+      const failure = new Error('extract failed');
+      const unhandled = vi.fn();
+      vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(failure);
+      process.on('unhandledRejection', unhandled);
+
+      try {
+        const mgr = new MemoryManager();
+        await expect(
+          mgr.scheduleExtract({
+            projectRoot,
+            sessionId: 'sess',
+            extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
+            history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          }),
+        ).rejects.toBe(failure);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(unhandled).not.toHaveBeenCalled();
+        // The rejection handler must still untrack the task. Hollowing it out
+        // to `() => {}` keeps the assertion above green while the settled
+        // promise and its task id leak for the process lifetime — `inFlight`
+        // has no other delete site and no `clear()`.
+        expect(
+          (mgr as unknown as { inFlight: Map<string, unknown> }).inFlight.size,
+        ).toBe(0);
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
     });
 
     it('runs extract and records a completed task', async () => {
@@ -262,11 +294,25 @@ describe('MemoryManager', () => {
     });
 
     it.each([
-      ['private', '.qwen/memory/user/test.md'],
-      ['team', '.qwen/team-memory/test.md'],
+      ['private', '.qwen/memory/user/test.md', false, false],
+      ['team', '.qwen/team-memory/test.md', false, false],
+      ['bridged private', '.qwen/memory/user/test.md', true, false],
+      ['bridged team', '.qwen/team-memory/test.md', true, false],
+      [
+        'bridged private with JSON arguments',
+        '.qwen/memory/user/test.md',
+        true,
+        true,
+      ],
     ])(
       'skips extraction when history writes to a %s memory file',
-      async (_label, filePath) => {
+      async (_label, filePath, bridged, stringified) => {
+        const writeCall = {
+          name: 'write_file',
+          args: {
+            file_path: path.join(projectRoot, filePath),
+          },
+        };
         const mgr = new MemoryManager();
         const result = await mgr.scheduleExtract({
           projectRoot,
@@ -292,10 +338,15 @@ describe('MemoryManager', () => {
               parts: [
                 {
                   functionCall: {
-                    name: 'write_file',
-                    args: {
-                      file_path: path.join(projectRoot, filePath),
-                    },
+                    name: bridged ? ToolNames.TOOL_CALL : writeCall.name,
+                    args: bridged
+                      ? {
+                          name: writeCall.name,
+                          arguments: stringified
+                            ? JSON.stringify(writeCall.args)
+                            : writeCall.args,
+                        }
+                      : writeCall.args,
                   },
                 },
               ],
@@ -307,6 +358,44 @@ describe('MemoryManager', () => {
         expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
       },
     );
+
+    it('does not treat an unrelated bridged call as a memory write', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        extractionHistory: [],
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: ToolNames.TOOL_CALL,
+                  args: {
+                    name: 'web_fetch',
+                    arguments: {
+                      file_path: path.join(
+                        projectRoot,
+                        '.qwen/memory/user/test.md',
+                      ),
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (

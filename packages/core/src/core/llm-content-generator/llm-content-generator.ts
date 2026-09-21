@@ -29,12 +29,17 @@ import {
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
 import type { Config } from '../../config/config.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../reasoning-overrides.js';
 import { buildSessionIdHeaders } from '../outbound-session-id.js';
 import {
   expandDynamicHeaders,
   hasDynamicPlaceholder,
   warnIfDynamicHeadersDisabled,
 } from '../outbound-dynamic-headers.js';
+import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -182,10 +187,14 @@ export class LlmContentGenerator implements ContentGenerator {
         0.95,
       ),
       topK: getParameterValue<number>(configSamplingParams?.top_k, 'topK', 64),
-      maxOutputTokens: getParameterValue<number>(
-        configSamplingParams?.max_tokens,
-        'maxOutputTokens',
-      ),
+      maxOutputTokens:
+        configSamplingParams?.max_tokens !== undefined &&
+        requestConfig.maxOutputTokens !== undefined
+          ? Math.min(
+              configSamplingParams.max_tokens,
+              requestConfig.maxOutputTokens,
+            )
+          : (configSamplingParams?.max_tokens ?? requestConfig.maxOutputTokens),
       presencePenalty: getParameterValue<number>(
         configSamplingParams?.presence_penalty,
         'presencePenalty',
@@ -195,7 +204,7 @@ export class LlmContentGenerator implements ContentGenerator {
         'frequencyPenalty',
       ),
       thinkingConfig: getParameterValue(
-        this.buildThinkingConfig(),
+        this.buildThinkingConfig(request.model, requestConfig.thinkingConfig),
         'thinkingConfig',
         {
           includeThoughts: true,
@@ -205,10 +214,20 @@ export class LlmContentGenerator implements ContentGenerator {
     };
   }
 
-  private buildThinkingConfig():
-    | { includeThoughts: boolean; thinkingLevel?: ThinkingLevel }
-    | undefined {
-    const reasoning = this.contentGeneratorConfig?.reasoning;
+  private buildThinkingConfig(
+    model?: string,
+    requestThinking?: GenerateContentConfig['thinkingConfig'],
+  ): GenerateContentConfig['thinkingConfig'] {
+    const generation = this.contentGeneratorConfig;
+    const resolved =
+      generation && this.cliConfig
+        ? resolveReasoningForModel(this.cliConfig, generation, model)
+        : undefined;
+    if (resolved && requestThinking?.includeThoughts === false)
+      return requestThinking;
+    const reasoning = generation
+      ? getEffectiveReasoning(generation, resolved)
+      : undefined;
 
     if (reasoning === false) {
       return { includeThoughts: false };
@@ -349,6 +368,13 @@ export class LlmContentGenerator implements ContentGenerator {
 
     const result = { ...part };
 
+    // `partMetadata` is client-side bookkeeping only (the reattach boundary
+    // from issue #11627), never part of the wire payload. The Gemini Developer
+    // API route (`partToMldev`) copies it through, but the Vertex AI route
+    // (`partToVertex`) rejects it unconditionally when building the request,
+    // so drop it before the SDK sees it.
+    delete result.partMetadata;
+
     // Strip displayName from inlineData
     if (result.inlineData) {
       const { displayName: _, ...inlineDataWithoutDisplayName } =
@@ -361,6 +387,17 @@ export class LlmContentGenerator implements ContentGenerator {
       const { displayName: _, ...fileDataWithoutDisplayName } =
         result.fileData as { displayName?: string; [key: string]: unknown };
       result.fileData = fileDataWithoutDisplayName as Part['fileData'];
+    }
+
+    // `thoughtSignature` carries no origin marker, so a Responses-API
+    // reasoning replay payload (`{"id":…,"encrypted_content":…}`) reaches the
+    // Gemini wire unchanged after a provider switch. It is not a Gemini-native
+    // signature, so drop it — wire-only, since `result` is a copy and the
+    // caller's history keeps the payload for a later switch back. `thought`
+    // and `text` are untouched, so the visible reasoning summary survives.
+    // https://github.com/QwenLM/qwen-code/issues/9453
+    if (isResponsesReasoningSignature(result.thoughtSignature)) {
+      delete result.thoughtSignature;
     }
 
     // Handle functionResponse parts (which may contain nested media parts)
