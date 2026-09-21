@@ -6,6 +6,8 @@
 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
+import { getErrorMessage } from '../../utils/errors.js';
+import { LiveVisualCaptureStore } from './visual-capture-store.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import {
   LIVE_HOST_BUNDLE_ID,
@@ -119,6 +121,7 @@ export interface LiveHostCoordinatorOptions {
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
   appshotTimeoutMs?: number;
+  visualCaptures?: LiveVisualCaptureStore;
   now?: () => number;
 }
 
@@ -156,8 +159,12 @@ export class LiveUnavailableError extends Error {
 export class LiveBrowserHostUnsupportedError extends Error {
   readonly code = 'live_browser_host_unsupported' as const;
 
-  constructor(readonly feature: 'screen') {
-    super('Screen capture is unavailable in browser Live sessions.');
+  constructor(readonly feature: 'screen' | 'camera') {
+    super(
+      feature === 'camera'
+        ? 'Camera capture is unavailable in browser Live sessions.'
+        : 'This browser cannot share a screen with Live Voice.',
+    );
     this.name = 'LiveBrowserHostUnsupportedError';
   }
 }
@@ -232,6 +239,9 @@ function parseBrowserHello(
       audioOutput: selfChecks['audioOutput'],
       globalShortcut: false,
       appshot: false,
+      // Absent on a Host that predates the field, which then never gets asked
+      // for a screen.
+      screenShare: selfChecks['screenShare'] === true,
     },
   };
 }
@@ -383,7 +393,11 @@ function parseVisualCaptureResult(
       !isBoundedString(value['windowTitle'], 2_048)) ||
     typeof value['accessibilityText'] !== 'string' ||
     value['accessibilityText'].length > MAX_APPSHOT_TEXT_LENGTH ||
-    !isBoundedString(value['screenshotPath'], 4_096)
+    // A browser Host has no filesystem on this machine and sends no path; the
+    // daemon persists the image itself. Which Hosts may omit it is decided in
+    // `handleVisualCaptureResult`, where the lease kind is known.
+    (value['screenshotPath'] !== undefined &&
+      !isBoundedString(value['screenshotPath'], 4_096))
   ) {
     return undefined;
   }
@@ -400,7 +414,9 @@ function parseVisualCaptureResult(
       ? { windowTitle: value['windowTitle'] as string }
       : {}),
     accessibilityText: value['accessibilityText'],
-    screenshotPath: value['screenshotPath'] as string,
+    ...(value['screenshotPath'] !== undefined
+      ? { screenshotPath: value['screenshotPath'] as string }
+      : {}),
   };
 }
 
@@ -530,6 +546,7 @@ export class LiveHostCoordinator {
   private outputMuted = false;
   private lastCallError?: string;
   private readonly pendingAppshots = new Map<string, PendingAppshot>();
+  private readonly visualCaptures: LiveVisualCaptureStore;
   private pendingShortcut?: PendingShortcut;
   private readonly inactiveWaiters = new Set<() => void>();
 
@@ -544,6 +561,8 @@ export class LiveHostCoordinator {
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
     this.appshotTimeoutMs =
       options.appshotTimeoutMs ?? DEFAULT_APPSHOT_TIMEOUT_MS;
+    this.visualCaptures =
+      options.visualCaptures ?? new LiveVisualCaptureStore();
     const shortcut = options.shortcut?.trim();
     this.shortcut =
       shortcut && shortcut.length <= MAX_SHORTCUT_LENGTH
@@ -994,7 +1013,8 @@ export class LiveHostCoordinator {
   captureVisualContext(callerSessionId: string): Promise<LiveVisualCapture> {
     const call = this.call;
     const host = this.host;
-    if (host?.kind === 'browser') {
+    const browser = host?.kind === 'browser';
+    if (browser && host?.hello && !host.hello.selfChecks.screenShare) {
       return Promise.reject(new LiveBrowserHostUnsupportedError('screen'));
     }
     if (
@@ -1002,9 +1022,14 @@ export class LiveHostCoordinator {
       call.coordinator?.sessionId !== callerSessionId ||
       !host?.hello ||
       !this.isLeaseHealthy(host) ||
-      host.hello.permissions.accessibility !== 'granted' ||
-      host.hello.permissions.screenRecording !== 'granted' ||
-      !host.hello.selfChecks.appshot
+      // Accessibility, Screen Recording and the Appshot self-check describe the
+      // native Host's macOS surface. A browser has none of them: the user's own
+      // grant is the screen it chose to share, and it reports that it can be
+      // asked through `selfChecks.screenShare`.
+      (!browser &&
+        (host.hello.permissions.accessibility !== 'granted' ||
+          host.hello.permissions.screenRecording !== 'granted' ||
+          !host.hello.selfChecks.appshot))
     ) {
       return Promise.reject(
         new Error(
@@ -1119,6 +1144,7 @@ export class LiveHostCoordinator {
     }
     this.rejectPendingAppshots(new Error('Live Voice is shutting down.'));
     this.rejectPendingShortcut(new Error('Live Voice is shutting down.'));
+    this.visualCaptures.dispose();
     this.notifyInactive();
   }
 
@@ -1251,7 +1277,7 @@ export class LiveHostCoordinator {
       return;
     }
     if (message.type === 'host.visual_capture_result') {
-      this.handleVisualCaptureResult(message);
+      this.handleVisualCaptureResult(lease, message);
       return;
     }
     if (message.type === 'host.shortcut_result') {
@@ -1298,6 +1324,7 @@ export class LiveHostCoordinator {
   }
 
   private handleVisualCaptureResult(
+    lease: HostLease,
     message: LiveHostVisualCaptureResult,
   ): void {
     const pending = this.pendingAppshots.get(message.requestId);
@@ -1322,18 +1349,36 @@ export class LiveHostCoordinator {
       );
       return;
     }
+    const describe = (screenshotPath: string): LiveVisualCapture => ({
+      appName: message.appName,
+      ...(message.windowTitle ? { windowTitle: message.windowTitle } : {}),
+      accessibilityText: message.accessibilityText,
+      screenshotPath,
+    });
+    if (lease.kind === 'browser') {
+      // Whatever path a browser names would be a path on *this* machine that a
+      // remote page chose, so it is dropped unread. The daemon writes the image
+      // it has already bounded and checked, and owns the only path that leaves
+      // here.
+      this.visualCaptures
+        .store(Buffer.from(message.image, 'base64'))
+        .then((screenshotPath) => pending.resolve(describe(screenshotPath)))
+        .catch((error: unknown) =>
+          pending.reject(
+            new Error(
+              `The shared screen could not be saved: ${getErrorMessage(error)}`,
+            ),
+          ),
+        );
+      return;
+    }
     if (!message.screenshotPath) {
       pending.reject(
         new Error('Qwen Live Host did not persist the requested Appshot.'),
       );
       return;
     }
-    pending.resolve({
-      appName: message.appName,
-      ...(message.windowTitle ? { windowTitle: message.windowTitle } : {}),
-      accessibilityText: message.accessibilityText,
-      screenshotPath: message.screenshotPath,
-    });
+    pending.resolve(describe(message.screenshotPath));
   }
 
   private handleHello(lease: HostLease, hello: LiveHostHello): void {
