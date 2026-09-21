@@ -247,10 +247,11 @@ function otherLabel(
 }
 
 /**
- * Whether the fold found any recorded timing at all. A session written before
- * the daemon emitted timing frames folds into rows with no request rows and no
- * tool durations, which is worth saying out loud rather than showing as a
- * table of em dashes.
+ * Whether the fold found any recorded timing at all. A window with no request
+ * rows and no tool durations is worth saying out loud rather than showing as a
+ * table of em dashes. The notice states only that: a session older than timing
+ * frames and one whose first round is still in flight look the same from here,
+ * so it does not name a cause.
  */
 function hasAnyTiming(trajectory: Trajectory): boolean {
   return trajectory.rows.some(

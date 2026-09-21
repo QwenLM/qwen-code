@@ -203,6 +203,32 @@ describe('useTrajectoryWindow', () => {
     expect(rows[0]!.kind === 'user' && rows[0]!.block.text).toBe('fresh');
   });
 
+  it('drops a failure that a refresh has already superseded', async () => {
+    const stale = deferred<TrajectoryPageResult>();
+    let first = true;
+    const loadPage = vi.fn(async () => {
+      if (first) {
+        first = false;
+        return stale.promise;
+      }
+      return page([userText('fresh', 'rec-2')]);
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+
+    await act(async () => {
+      view.latest().refresh();
+    });
+    await act(async () => {
+      stale.reject(new Error('socket hang up'));
+    });
+
+    // The read that failed is not the one on screen, so its error is not
+    // this window's to report.
+    expect(view.latest().status).toBe('ready');
+    expect(view.latest().error).toBeUndefined();
+  });
+
   it('drops a reply that arrives after the loader changed', async () => {
     const stale = deferred<TrajectoryPageResult>();
     const first: TrajectoryPageLoader = vi.fn(async () => stale.promise);

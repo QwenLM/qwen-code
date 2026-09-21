@@ -252,11 +252,36 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('NaN');
   });
 
-  it('says so when the session predates timing frames', async () => {
+  it('says so when the window holds no recorded timing', async () => {
     const container = await render(async () => page([userText('go', 'rec-1')]));
 
     expect(container.textContent).toContain(
-      'written before per-request timing',
+      'No request or tool durations are recorded',
+    );
+  });
+
+  it('counts a tool duration as recorded timing', async () => {
+    // A window can hold a timed tool call with no request frame in it, when the
+    // page starts after the round's telemetry record. That is timing, so the
+    // notice must stay away.
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        toolCall('call-1', 'read_file', 'Read note.txt', 'rec-2'),
+        timingFrame(
+          {
+            kind: 'tool',
+            durationMs: 120,
+            callId: 'call-1',
+            toolName: 'read_file',
+          },
+          'rec-3',
+        ),
+      ]),
+    );
+
+    expect(container.textContent).not.toContain(
+      'No request or tool durations are recorded',
     );
   });
 
@@ -566,15 +591,27 @@ describe('TrajectoryPanel', () => {
     ).toBeNull();
   });
 
-  it('numbers every rendered row for assistive technology', async () => {
-    const container = await render(async () => page(REAL_EVENTS));
-    const grid = container.querySelector('[role="grid"]') as HTMLElement;
-
-    expect(Number(grid.getAttribute('aria-rowcount'))).toBe(
-      rowsOf(container).length,
+  it('numbers rows by their place in the whole table, not in the DOM', async () => {
+    // Forty prompts fold to forty turns of a header and a user row each: more
+    // rows than the viewport mounts, so the count and the indexes have to come
+    // from the table rather than from what happens to be rendered.
+    const prompts = Array.from({ length: 40 }, (_unused, index) =>
+      userText(`prompt ${index + 1}`, `rec-${index + 1}`),
     );
-    expect(
-      rowsOf(container).map((row) => row.getAttribute('aria-rowindex')),
-    ).toEqual(rowsOf(container).map((_row, index) => String(index + 1)));
+    const container = await render(async () => page(prompts));
+    const grid = container.querySelector('[role="grid"]') as HTMLElement;
+    const rendered = rowsOf(container);
+
+    expect(Number(grid.getAttribute('aria-rowcount'))).toBe(80);
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(rendered.length).toBeLessThan(80);
+    const indexes = rendered.map((row) =>
+      Number(row.getAttribute('aria-rowindex')),
+    );
+    expect(indexes[0]).toBeGreaterThanOrEqual(1);
+    expect(indexes.at(-1)).toBeLessThanOrEqual(80);
+    expect(indexes).toEqual(
+      indexes.map((_value, offset) => indexes[0]! + offset),
+    );
   });
 });
