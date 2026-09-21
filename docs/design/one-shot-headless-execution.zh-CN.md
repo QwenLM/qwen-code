@@ -31,7 +31,7 @@ CLI 会在父进程下重新启动自身，以应用 Node 内存参数。shell �
 
 去掉监督进程也意味着去掉它的 update-relaunch 处理逻辑：`onUpdateRelaunch` 不会触发，也没有父进程能根据退出码重新启动。这是有意为之。会请求 relaunch 的退出码来自交互式信任对话框（`RELAUNCH_EXIT_CODE`）和 `/update` 命令（`UPDATE_RELAUNCH_EXIT_CODE`），单次 prompt 到不了这些路径；而在没有 IPC 通道可发送请求时，`requestUpdateOnExit()` 本身就返回 `false`。
 
-当未配置 `tools.shell.enableInteractiveShell` 时，明确的单次 prompt 默认使用 `child_process`。交互式 TUI、ACP、stream-json 输入、仅 stdin 和文件输入会话仍默认使用 PTY。显式配置始终优先。
+当未配置 `tools.shell.enableInteractiveShell` 时，明确的单次 prompt 默认使用 `child_process`。交互式 TUI、ACP、stream-json 输入、仅 stdin 和文件输入会话仍默认使用 PTY。文件描述符输出（`--json-fd`）保留受监督 relaunch，但 shell 同样默认使用 pipe：它的消费方就是单次自动化。显式配置始终优先。
 
 schema 叶子仍然保留 `default` 成员，因为 `SettingDefinition` 要求它必填，但其值现在是 `undefined`。schema 默认值从不进入加载路径 —— `getDefaultValue()` 只服务于展示和重置路径 —— 所以实际 PTY 默认值一直来自 core 的 `params.shouldUseNodePtyShell ?? shouldDefaultToNodePty()`，Windows 的 ConPTY 版本门槛也包含在内。唯一用户可见的影响是：设置对话框里的“恢复默认值”现在会清除该键，而不是写入 `true`，这对基于模式的默认值来说才是正确语义。
 

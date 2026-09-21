@@ -31,7 +31,7 @@ For an explicit prompt outside ACP, stream-json input, prompt-interactive, file-
 
 Dropping the supervisor also drops its update-relaunch handler: `onUpdateRelaunch` never fires, and no parent remains to relaunch on an exit code. That is intended. The exit codes that request a relaunch come from the interactive trust dialogs (`RELAUNCH_EXIT_CODE`) and the `/update` command (`UPDATE_RELAUNCH_EXIT_CODE`), none of which a one-shot prompt can reach, and `requestUpdateOnExit()` already returns `false` when there is no IPC channel to send the request over.
 
-When `tools.shell.enableInteractiveShell` is unset, an explicit one-shot prompt defaults to `child_process`. Interactive TUI, ACP, stream-json input, stdin-only, and file-input sessions retain the PTY default. An explicit setting always wins.
+When `tools.shell.enableInteractiveShell` is unset, an explicit one-shot prompt defaults to `child_process`. Interactive TUI, ACP, stream-json input, stdin-only, and file-input sessions retain the PTY default. File-descriptor output (`--json-fd`) keeps the supervised relaunch but still takes the pipe shell default: its consumers are one-shot automation. An explicit setting always wins.
 
 The schema leaf keeps a `default` member because `SettingDefinition` requires one, but its value is now `undefined`. Schema defaults never reach the load path — `getDefaultValue()` feeds only the display and reset paths — so the effective PTY default has always come from core's `params.shouldUseNodePtyShell ?? shouldDefaultToNodePty()`, Windows ConPTY build cutoff included. The one user-visible consequence is that "reset to default" in the settings dialog now clears the key instead of writing `true`, which is the correct semantics for a mode-based default.
 

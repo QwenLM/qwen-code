@@ -2327,6 +2327,16 @@ export async function loadCliConfig(
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
+  // `undefined` is the meaningful third state here: it defers to core's
+  // `shouldDefaultToNodePty()`, so only an explicit one-shot prompt gets the
+  // pipe default while interactive and protocol-driven modes keep PTY.
+  const isExplicitOneShotPrompt =
+    !interactive &&
+    hasPrompt &&
+    !isAcpMode &&
+    !(argv.inputFile ?? settings.dualOutput?.inputFile) &&
+    inputFormat !== InputFormat.STREAM_JSON;
+
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
@@ -2599,13 +2609,7 @@ export async function loadCliConfig(
     ),
     shouldUseNodePtyShell:
       settings.tools?.shell?.enableInteractiveShell ??
-      (!interactive &&
-      hasPrompt &&
-      !isAcpMode &&
-      !(argv.inputFile ?? settings.dualOutput?.inputFile) &&
-      inputFormat !== InputFormat.STREAM_JSON
-        ? false
-        : undefined),
+      (isExplicitOneShotPrompt ? false : undefined),
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,

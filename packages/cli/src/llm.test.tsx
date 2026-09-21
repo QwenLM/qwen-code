@@ -1275,10 +1275,10 @@ describe('llm.tsx main function', () => {
   // Pins the process-replacement predicate in llm.tsx: a one-shot headless
   // prompt replaces the already-loaded process, while supervisor-backed
   // modes (ACP, -i, stream-json / file / json-fd input) keep the parent.
-  // The slash-command row pins the post-revert contract: a headless
-  // `/update` updates standalone installs in-process or prints manual
-  // instructions and never emits a relaunch exit code, so it keeps the
-  // execve optimization like any other one-shot prompt.
+  // The slash-command row pins the contract: a headless `/update` updates
+  // standalone installs in-process or prints manual instructions and never
+  // emits a relaunch exit code, so it keeps the execve optimization like any
+  // other one-shot prompt.
   describe('replaceProcess predicate', () => {
     const rows: Array<{
       label: string;

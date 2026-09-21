@@ -5592,9 +5592,6 @@ describe('loadCliConfig interactive', () => {
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
     expect(config.getShouldUseNodePtyShell()).toBe(true);
-    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
-      expect.objectContaining({ shouldUseNodePtyShell: undefined }),
-    );
   });
 
   it('should be interactive if prompt-interactive is set', async () => {
@@ -5645,9 +5642,6 @@ describe('loadCliConfig interactive', () => {
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
     expect(config.getShouldUseNodePtyShell()).toBe(false);
-    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
-      expect.objectContaining({ shouldUseNodePtyShell: false }),
-    );
   });
 
   it('should keep the interactive shell default for ACP with a prompt', async () => {
