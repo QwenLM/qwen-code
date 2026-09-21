@@ -569,6 +569,11 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     for (const [method, path, route] of [
       [
         'GET',
+        '/session/secondary-session/artifacts/saved-version/content',
+        'GET /session/:id/artifacts/:artifactId/content',
+      ],
+      [
+        'GET',
         '/session/secondary-session/rewind/snapshots',
         'GET /session/:id/rewind/snapshots',
       ],
@@ -1090,17 +1095,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 68 unique routes with the audited 66/2 attribution split', () => {
+  it('contains 73 unique routes with the audited 71/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(68);
-    expect(new Set(keys).size).toBe(68);
+    expect(keys).toHaveLength(73);
+    expect(new Set(keys).size).toBe(73);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(66);
+    ).toHaveLength(71);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

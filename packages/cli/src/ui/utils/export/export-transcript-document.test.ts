@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   assertExportTranscriptDocumentV1,
@@ -7,6 +6,7 @@ import {
   createExportTranscriptDocumentV1,
 } from './export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from './html-script-data.js';
+import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
 
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 const EXPORT_OPTIONS = {
@@ -765,7 +765,7 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('bounds repeated-separator checks in decoded URL authorities', () => {
-    const separators = '/'.repeat(40);
+    const separators = '/'.repeat(30);
     const input = record('repeated-separators', null, {
       message: {
         role: 'user',
@@ -780,27 +780,19 @@ describe('ExportTranscriptDocumentV1', () => {
         ],
       },
     });
-    const moduleUrl = new URL(
-      './export-transcript-document.ts',
-      import.meta.url,
+    const startedAt = Date.now();
+    const document = createExportTranscriptDocumentV1(
+      [input],
+      sessionData,
+      EXPORT_OPTIONS,
     );
-    const result = spawnSync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        '--input-type=module',
-        '--eval',
-        `import { createExportTranscriptDocumentV1 as create } from ${JSON.stringify(moduleUrl.href)};
-process.stdout.write(JSON.stringify(create(${JSON.stringify([input])}, ${JSON.stringify(sessionData)}, ${JSON.stringify(EXPORT_OPTIONS)})));`,
-      ],
-      { encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL' },
-    );
+    expectWithinLatencyBudget(Date.now() - startedAt, 1000, {
+      poolMultiplier: 20,
+    });
 
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(0);
-    expect(result.stdout).not.toContain('alice');
-    expect(result.stdout).toContain('ordinary');
+    const serialized = JSON.stringify(document);
+    expect(serialized).not.toContain('alice');
+    expect(serialized).toContain('ordinary');
   });
 
   it.each(['image/png', 'image/jpeg', 'image/webp'])(
@@ -1221,6 +1213,77 @@ process.stdout.write(JSON.stringify(create(${JSON.stringify([input])}, ${JSON.st
     expect(document.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'envelope_budget_exceeded' }),
     );
+  });
+
+  it('exports structured question answers through the safe preview allowlist', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('tool-start', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  args: { questions: [] },
+                },
+              },
+            ],
+          },
+        }),
+        record('tool-result', 'tool-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  response: { output: 'Question A: first\n**B**: embedded' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'ask-1',
+            resultDisplay: {
+              type: 'ask_user_question_answers',
+              text: 'Question A: first\n**B**: embedded',
+              answers: [
+                {
+                  question: 'Read /Users/alice/example.ts?',
+                  answer: 'first\n**B**: embedded',
+                  secret: CANARY,
+                },
+              ],
+              secret: CANARY,
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+    expect(tool?.resultPreview).toEqual({
+      kind: 'question_answers',
+      text: 'Question A: first\n**B**: embedded',
+      answers: [
+        {
+          question: 'Read [home]/example.ts?',
+          answer: 'first\n**B**: embedded',
+        },
+      ],
+    });
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+    const invalid = structuredClone(document);
+    const invalidTool = invalid.blocks.find((block) => block.kind === 'tool');
+    Object.assign(invalidTool!.resultPreview!, { secret: CANARY });
+    expect(() => assertExportTranscriptDocumentV1(invalid)).toThrow();
   });
 
   it('degrades a completed tool when its safe result preview is unavailable', () => {

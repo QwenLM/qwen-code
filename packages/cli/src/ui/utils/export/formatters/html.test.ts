@@ -48,35 +48,46 @@ const records = [
 ];
 
 describe('HTML export formatter', () => {
-  it('preserves the legacy formatter when source records are unavailable', () => {
-    const html = toHtml(sessionData);
-
-    expect(html).toContain('id="chat-data"');
-    expect(html).not.toContain('id="transcript-document"');
-  });
-
   it('uses the version-bound document renderer for the product export path', () => {
     const html = toHtml(sessionData, records);
     const secondHtml = toHtml(sessionData, records);
     const nonce = html.match(/script-src 'nonce-([^']+)'/)?.[1];
     const secondNonce = secondHtml.match(/script-src 'nonce-([^']+)'/)?.[1];
-
     expect(html).toContain('id="transcript-document"');
     expect(html).toContain('Hello from the document exporter.');
     expect(html).toContain("connect-src 'none'");
+    expect(html).toMatch(/script-src 'nonce-[^']+';/);
+    expect(html).toContain(
+      `https://unpkg.com/@qwen-code/qwen-code@${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`,
+    );
+    expect(html).toContain(
+      `https://unpkg.com/@qwen-code/qwen-code@${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.css`,
+    );
+    expect(html).toContain('id="transcript-stylesheet"');
+    expect(html).toContain('rel="stylesheet"');
+    expect(EXPORT_TRANSCRIPT_RENDERER_VERSION).toMatch(
+      /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\+[a-f0-9]{16}$/,
+    );
+    // The JS renderer and the CSS stylesheet each carry their own SRI digest.
+    expect(html.match(/integrity="sha384-[A-Za-z0-9+/]{64}"/g)).toHaveLength(2);
+    expect(html).toContain('crossorigin="anonymous"');
+    expect(html).not.toContain('qwen-code-assets.oss-cn-hangzhou.aliyuncs.com');
+    expect(html).not.toContain('type="importmap"');
+    expect(html).not.toContain('type="module"');
+    expect(html.length).toBeLessThan(500_000);
     expect(html).not.toContain('id="chat-data"');
     expect(html).not.toContain('session-secret');
     expect(html).not.toContain('/home/alice');
     expect(html).not.toContain('__EXPORT_NONCE__');
-    expect(html).toContain('data-document-metadata');
-    expect(html).toContain('Context Usage');
-    expect(html).toContain('data-document-expand-all');
-    expect(html).toContain('data-document-collapse-all');
-    expect(html).toContain('data-document-theme-toggle');
     expect(nonce).toBeTruthy();
     expect(secondNonce).toBeTruthy();
     expect(secondNonce).not.toBe(nonce);
     expect(html).toContain(`nonce="${nonce}"`);
+    const stylesheetLink =
+      html.match(/<link\s+rel="stylesheet"[\s\S]*?\/>/)?.[0] ?? '';
+    expect(stylesheetLink).not.toBe('');
+    expect(stylesheetLink).toContain(`nonce="${nonce}"`);
+    expect(stylesheetLink).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/);
   });
 
   it('fails closed when the product template loses its document slot', () => {

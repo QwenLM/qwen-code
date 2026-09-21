@@ -25,6 +25,11 @@ import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
 import type { ToolErrorType } from '../tools/tool-error.js';
+import type {
+  GoalLimitKind,
+  GoalStateCause,
+  GoalStatus,
+} from '../goals/goal-protocol.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -178,6 +183,8 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
   call_id?: string;
+  parent_call_id?: string;
+  source?: 'model' | 'code_mode';
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
@@ -199,6 +206,9 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.call_id = call.request.callId;
+    if (call.request.parentCallId)
+      this.parent_call_id = call.request.parentCallId;
+    if (call.request.source) this.source = call.request.source;
     this.function_name = call.request.name;
     // structured_output args ARE the user's final structured payload (the
     // command's actual answer, already emitted in stdout `result` /
@@ -1099,6 +1109,69 @@ export class SubagentExecutionEvent implements BaseTelemetryEvent {
   }
 }
 
+/**
+ * The Goal state causes a {@link GoalStateEvent} reports: the user's controls
+ * and the stops a user acts on. Per-turn `turn_finished` and `checkpoint`, the
+ * one-off `migrated`, and `verifier_accept` (always followed by the `complete`
+ * or `blocked` it accepted) are left out.
+ */
+export const GOAL_STATE_EVENT_CAUSES = [
+  'create',
+  'replace',
+  'edit',
+  'pause',
+  'resume',
+  'clear',
+  'complete',
+  'blocked',
+  'usage_limited',
+  'verifier_reject',
+] as const satisfies readonly GoalStateCause[];
+
+export type GoalStateEventCause = (typeof GOAL_STATE_EVENT_CAUSES)[number];
+
+/**
+ * A committed Goal state transition.
+ *
+ * Numbers and enums only. The objective, the stop reason and the checkpoint
+ * failure are free text a user or a model wrote, and `telemetry.logPrompts`
+ * defaults to on, so none of them is carried under any setting; the objective
+ * contributes its length.
+ */
+export interface GoalStateEvent extends BaseTelemetryEvent {
+  'event.name': 'goal_state';
+  cause: GoalStateEventCause;
+  goal_id: string;
+  revision: number;
+  /** Absent on `clear`, which leaves no Goal to describe. */
+  status?: GoalStatus;
+  limit_kind?: GoalLimitKind;
+  turn_count?: number;
+  tokens_used?: number;
+  no_progress_turns?: number;
+  token_budget?: number;
+  turn_budget?: number;
+  active_time_ms?: number;
+  active_time_budget_ms?: number;
+  /** Code points in the objective. */
+  objective_length?: number;
+}
+
+export function makeGoalStateEvent(
+  fields: Omit<GoalStateEvent, CommonFields>,
+): GoalStateEvent {
+  // Absent stays absent: a key holding `undefined` would still reach the log
+  // record's attributes and the analytics sink as an empty field.
+  const present = Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined),
+  ) as Omit<GoalStateEvent, CommonFields>;
+  return {
+    ...present,
+    'event.name': 'goal_state',
+    'event.timestamp': new Date().toISOString(),
+  };
+}
+
 export class AuthEvent implements BaseTelemetryEvent {
   'event.name': 'auth';
   'event.timestamp': string;
@@ -1247,6 +1320,7 @@ export type TelemetryEvent =
   | ContentRetryFailureEvent
   | ApiRetryEvent
   | SubagentExecutionEvent
+  | GoalStateEvent
   | ExtensionEnableEvent
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
@@ -1486,7 +1560,14 @@ export class WorkflowRunEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   status: string;
   agents_dispatched: number;
+  /** All settled dispatches; failed and cached are contained in this count. */
   agents_completed: number;
+  /** Settled dispatch traces whose terminal status is failed. */
+  agents_failed: number;
+  /** Settled dispatches served from a prior run's journal. */
+  agents_cached: number;
+  /** Dispatched calls re-run from a prior failed or interrupted attempt. */
+  agents_respawned: number;
   phase_count: number;
   tokens_spent: number;
   duration_ms: number;
@@ -1495,6 +1576,9 @@ export class WorkflowRunEvent implements BaseTelemetryEvent {
     status: string;
     agents_dispatched: number;
     agents_completed: number;
+    agents_failed?: number;
+    agents_cached?: number;
+    agents_respawned?: number;
     phase_count: number;
     tokens_spent: number;
     duration_ms: number;
@@ -1504,9 +1588,48 @@ export class WorkflowRunEvent implements BaseTelemetryEvent {
     this.status = params.status;
     this.agents_dispatched = params.agents_dispatched;
     this.agents_completed = params.agents_completed;
+    this.agents_failed = params.agents_failed ?? 0;
+    this.agents_cached = params.agents_cached ?? 0;
+    this.agents_respawned = params.agents_respawned ?? 0;
     this.phase_count = params.phase_count;
     this.tokens_spent = params.tokens_spent;
     this.duration_ms = params.duration_ms;
+  }
+}
+
+/** A running workflow crossed its large-run threshold (at most once per run). */
+export class WorkflowSizeWarningEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_size_warning';
+  'event.timestamp': string;
+  /** The threshold crossed first. */
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduled_agents: number;
+  total_tokens: number;
+  projected_tokens: number;
+  agent_cap: number;
+  token_cap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  cap_from_guideline: boolean;
+
+  constructor(warning: {
+    axis: 'agents' | 'tokens';
+    scheduledAgents: number;
+    totalTokens: number;
+    projectedTokens: number;
+    agentCap: number;
+    tokenCap: number;
+    capFromGuideline: boolean;
+  }) {
+    this['event.name'] = 'qwen-code.workflow_size_warning';
+    this['event.timestamp'] = new Date().toISOString();
+    this.axis = warning.axis;
+    this.scheduled_agents = warning.scheduledAgents;
+    this.total_tokens = warning.totalTokens;
+    this.projected_tokens = warning.projectedTokens;
+    this.agent_cap = warning.agentCap;
+    this.token_cap = warning.tokenCap;
+    this.cap_from_guideline = warning.capFromGuideline;
   }
 }
 

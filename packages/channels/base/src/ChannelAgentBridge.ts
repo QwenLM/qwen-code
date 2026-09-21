@@ -11,6 +11,17 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // strips it from untrusted callers and honors it only when an authenticated
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+export const CHANNEL_TASK_RESULT_META_KEY = 'qwen.channel.taskResult';
+export const CHANNEL_TASK_RESULT_PARTIAL_META_KEY =
+  'qwen.channel.taskResultPartial';
+export const CHANNEL_TASK_OUTPUT_META_KEY = 'qwen.channel.taskOutput';
+
+export class ChannelPromptCancelledError extends Error {
+  constructor() {
+    super('Channel task cancelled');
+  }
+}
 export const CHANNEL_BTW_METHOD = 'qwen/control/session/btw';
 // Private-parent capability handshake with the spawned `qwen --acp` child
 // (packages/core/src/utils/invocation-context.ts owns the same constants).
@@ -81,10 +92,73 @@ export interface PermissionResolvedEvent {
   outcome?: RequestPermissionResponse['outcome'];
 }
 
+export interface BackgroundResponseContext {
+  taskId: string;
+  status: string;
+  /** `peer`: a message from another session; `taskId` is the message id. */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
+  toolUseId?: string;
+  label?: string;
+  turnId?: string;
+  turnComplete?: boolean;
+  partial?: boolean;
+}
+
+export function parseBackgroundResponseContext(
+  value: unknown,
+): BackgroundResponseContext | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const taskId = record['taskId'];
+  const status = record['status'];
+  const kind = record['kind'];
+  if (
+    typeof taskId !== 'string' ||
+    !taskId ||
+    typeof status !== 'string' ||
+    !status ||
+    (kind !== 'agent' &&
+      kind !== 'monitor' &&
+      kind !== 'shell' &&
+      kind !== 'workflow' &&
+      kind !== 'peer')
+  ) {
+    return undefined;
+  }
+
+  const context: BackgroundResponseContext = { taskId, status, kind };
+  for (const field of ['toolUseId', 'label', 'turnId'] as const) {
+    const fieldValue = record[field];
+    if (typeof fieldValue === 'string' && fieldValue) {
+      context[field] = fieldValue;
+    }
+  }
+  if (typeof record['turnComplete'] === 'boolean') {
+    context.turnComplete = record['turnComplete'];
+  }
+  if (typeof record['partial'] === 'boolean') {
+    context.partial = record['partial'];
+  }
+  return context;
+}
+
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
+  /**
+   * Standalone ACP bridge process exit. Daemon bridges never emit this; they
+   * report per-session death through sessionDied instead. Listeners must
+   * clear only turn-scoped transient state: crash recovery restores the
+   * sessions on a fresh bridge, so routing state must stay.
+   */
+  disconnected: [code: number | null, signal: NodeJS.Signals | null];
   textChunk: [sessionId: string, chunk: string];
-  backgroundResponse: [sessionId: string, text: string];
+  backgroundResponse: [
+    sessionId: string,
+    text: string,
+    context?: BackgroundResponseContext,
+  ];
   responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
   permissionRequest: [PermissionRequestEvent];
@@ -119,6 +193,8 @@ export interface ChannelPromptImage {
 }
 
 export interface ChannelAgentBridgePromptOptions {
+  outputMode?: 'per_task';
+  onTaskResult?: (result: { partial: boolean }) => void;
   images?: ChannelPromptImage[];
   imageBase64?: string;
   imageMimeType?: string;
@@ -187,6 +263,17 @@ export interface ChannelAgentBridge {
     bindingToken?: object,
   ): Promise<string>;
   loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session and return the replacement's id. Bridges without daemon-side
+   * worktree reset support omit it; callers fail closed.
+   */
+  resetWorktreeSession?(
     sessionId: string,
     cwd: string,
     options?: ChannelAgentBridgeSessionOptions,

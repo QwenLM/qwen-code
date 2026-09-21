@@ -60,8 +60,6 @@ if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
 const itWithZip = zipAvailable ? it : it.skip;
 const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 
-vi.setConfig({ testTimeout: 30_000 });
-
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
     const script = readScript(
@@ -739,7 +737,66 @@ describe('standalone release packaging', () => {
     expect(releaseVerifyScript).not.toContain('assertInstallAliasMatches');
   });
 
+  it('allowlists every npm-published dist entry for standalone packaging', () => {
+    // Regression gate for PR #12067 review: prepare-package.js's npm `files`
+    // list and create-standalone-package.js's allowlists must not drift
+    // apart — an entry missing from both DIST_ALLOWED_ENTRIES (or its
+    // patterns) and DIST_NPM_PACKAGE_ONLY_ENTRIES aborts the release build
+    // with "Unexpected dist asset" at archive time, and an asset that must
+    // ship inside the archive (the sandbox workers) must land in
+    // DIST_ALLOWED_ENTRIES specifically, not the npm-only skip list.
+    const prepareScript = readScript('scripts/prepare-package.js');
+    const packageScript = readScript('scripts/create-standalone-package.js');
+    const filesBlock = /files:\s*\[([\s\S]*?)\]/.exec(prepareScript);
+    expect(filesBlock).not.toBeNull();
+    const entries = [...filesBlock[1].matchAll(/'([^']+)'/g)].map(
+      (match) => match[1],
+    );
+    expect(entries.length).toBeGreaterThan(0);
+    const allowedBlock =
+      /DIST_ALLOWED_ENTRIES = new Set\(\[([\s\S]*?)\]\)/.exec(packageScript);
+    const npmOnlyBlock =
+      /DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set\(\[([\s\S]*?)\]\)/.exec(
+        packageScript,
+      );
+    expect(allowedBlock).not.toBeNull();
+    expect(npmOnlyBlock).not.toBeNull();
+    for (const entry of entries) {
+      if (entry.includes('*')) {
+        // Glob entries (today: '*.sb') are covered by
+        // DIST_ALLOWED_ENTRY_PATTERNS rather than a literal name.
+        expect(packageScript).toContain('DIST_ALLOWED_ENTRY_PATTERNS');
+        continue;
+      }
+      const known =
+        allowedBlock[1].includes(`'${entry}'`) ||
+        npmOnlyBlock[1].includes(`'${entry}'`);
+      expect(known, `npm files entry '${entry}' unknown to packager`).toBe(
+        true,
+      );
+    }
+    // The sandbox workers are resolved from the installed bundle at
+    // execution time, so they must be copied into the archive's lib/ —
+    // the npm-only skip list is the wrong home for them — and they must be
+    // required, so an archive that somehow lacked them fails at build time
+    // rather than at first sandbox launch.
+    const requiredBlock = /DIST_REQUIRED_PATHS = \[([\s\S]*?)\]/.exec(
+      packageScript,
+    );
+    expect(requiredBlock).not.toBeNull();
+    for (const asset of ['sandboxBwrapRelay.js', 'sandboxFileWorker.js']) {
+      expect(allowedBlock[1]).toContain(`'${asset}'`);
+      expect(npmOnlyBlock[1]).not.toContain(`'${asset}'`);
+      expect(requiredBlock[1]).toContain(`'${asset}'`);
+    }
+  });
+
   it('loads the standalone release packaging helper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    expect(releaseScript).toMatch(
+      /let pnpmLockedKeys;[\s\S]*if \(isMainModule\(\)\)/,
+    );
+
     const output = execFileSync(
       process.execPath,
       ['scripts/build-standalone-release.js', '--help'],
@@ -850,6 +907,23 @@ describe('standalone release packaging', () => {
       '@teddyzhu/clipboard-linux-arm64-gnu@0.0.5',
       '@teddyzhu/clipboard-linux-x64-gnu@0.0.5',
       '@teddyzhu/clipboard-win32-x64-msvc@0.0.5',
+    ]);
+  });
+
+  it('stages the locked node-pty packages declared in the root manifest', async () => {
+    const { readNodePtyPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+
+    // The list tracks the root package.json optionalDependencies, so a newly
+    // pinned platform package (e.g. linux-arm64) is staged automatically.
+    expect(readNodePtyPackageSpecs()).toEqual([
+      '@lydell/node-pty@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-x64@1.2.0-beta.10',
+      '@lydell/node-pty-linux-x64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-x64@1.2.0-beta.10',
     ]);
   });
 
@@ -1814,117 +1888,129 @@ describe('standalone release packaging', () => {
     }
   });
 
-  itWithZip(
-    'packages a win-x64 standalone archive',
-    () => {
-      const createdDist = ensureMinimalDist();
-      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  itWithZip('packages a win-x64 standalone archive', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-      try {
-        const outDir = path.join(tmpDir, 'out');
-        execFileSync(
-          'node',
-          [
-            'scripts/create-standalone-package.js',
-            '--target',
-            'win-x64',
-            '--node-archive',
-            createFakeWindowsNodeArchive(tmpDir),
-            '--out-dir',
-            outDir,
-            '--version',
-            '0.0.0-test',
-          ],
-          { stdio: 'pipe' },
-        );
+    try {
+      const outDir = path.join(tmpDir, 'out');
+      execFileSync(
+        'node',
+        [
+          'scripts/create-standalone-package.js',
+          '--target',
+          'win-x64',
+          '--node-archive',
+          createFakeWindowsNodeArchive(tmpDir),
+          '--out-dir',
+          outDir,
+          '--version',
+          '0.0.0-test',
+        ],
+        { stdio: 'pipe' },
+      );
 
-        const archive = path.join(outDir, 'qwen-code-win-x64.zip');
-        const extractDir = path.join(tmpDir, 'extract');
-        mkdirSync(extractDir, { recursive: true });
-        extractZipForTest(archive, extractDir);
+      const archive = path.join(outDir, 'qwen-code-win-x64.zip');
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(archive, extractDir);
 
-        expect(existsSync(path.join(extractDir, 'qwen-code'))).toBe(true);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
-        ).toBe(true);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
-        ).toBe(true);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
-        ).toBe(true);
-        const shim = readScript(
-          path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
-        );
-        expect(shim).toContain(
-          'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
-        );
-        expect(shim).toContain(
-          '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
-        );
-        expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
-        expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
-          'qwen-code-win-x64.zip',
-        );
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-        restoreMinimalDist(createdDist);
-      }
-    },
-    30_000,
-  );
+      expect(existsSync(path.join(extractDir, 'qwen-code'))).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
+        existsSync(
+          path.join(extractDir, 'qwen-code', 'lib', 'execution-worker.js'),
+        ),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
+      ).toBe(true);
+      const shim = readScript(
+        path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
+      );
+      expect(shim).toContain(
+        'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
+      );
+      expect(shim).toContain(
+        '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
+      );
+      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
+      expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
+        'qwen-code-win-x64.zip',
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
 
-  itWithZip(
-    'skips npm-only artifacts staged in dist',
-    () => {
-      const createdDist = ensureMinimalDist({
-        includeNpmPackageArtifacts: true,
-      });
-      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  itWithZip('skips npm-only artifacts staged in dist', () => {
+    const createdDist = ensureMinimalDist({
+      includeNpmPackageArtifacts: true,
+    });
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-      try {
-        const outDir = path.join(tmpDir, 'out');
-        execFileSync(
-          'node',
-          [
-            'scripts/create-standalone-package.js',
-            '--target',
-            'win-x64',
-            '--node-archive',
-            createFakeWindowsNodeArchive(tmpDir),
-            '--out-dir',
-            outDir,
-            '--version',
-            '0.0.0-test',
-          ],
-          { stdio: 'pipe' },
-        );
+    try {
+      const outDir = path.join(tmpDir, 'out');
+      execFileSync(
+        'node',
+        [
+          'scripts/create-standalone-package.js',
+          '--target',
+          'win-x64',
+          '--node-archive',
+          createFakeWindowsNodeArchive(tmpDir),
+          '--out-dir',
+          outDir,
+          '--version',
+          '0.0.0-test',
+        ],
+        { stdio: 'pipe' },
+      );
 
-        const extractDir = path.join(tmpDir, 'extract');
-        mkdirSync(extractDir, { recursive: true });
-        extractZipForTest(
-          path.join(outDir, 'qwen-code-win-x64.zip'),
-          extractDir,
-        );
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(path.join(outDir, 'qwen-code-win-x64.zip'), extractDir);
 
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
-        ).toBe(true);
-        expect(
-          existsSync(
-            path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js'),
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js')),
+      ).toBe(false);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
+      ).toBe(false);
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'export-transcript-document.js',
           ),
-        ).toBe(false);
-        expect(
-          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
-        ).toBe(false);
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-        restoreMinimalDist(createdDist);
-      }
-    },
-    30_000,
-  );
+        ),
+      ).toBe(false);
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'export-transcript-document.css',
+          ),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
 
   it('requires the native audio prebuild when release packaging opts in', () => {
     const createdDist = ensureMinimalDist();
@@ -2146,6 +2232,42 @@ describe('standalone release packaging', () => {
       expect(
         existsSync(path.join(clipboardScope, 'clipboard-darwin-arm64')),
       ).toBe(false);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('does not package node-pty debug symbols', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeNodePtyModules(tmpDir);
+      const archive = packageFakeStandalone(tmpDir, {}, { nativeModulesDir });
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      // win-x64 is the target that ships PDBs, but the prebuild directory is
+      // the only thing that varies per target and the filter keys off the file
+      // name, so staging them under linux-x64's layout pins the same line
+      // without a Windows host.
+      const prebuildDir = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@lydell',
+        'node-pty-linux-x64',
+        'prebuilds',
+        'linux-x64',
+      );
+      expect(existsSync(path.join(prebuildDir, 'pty.node'))).toBe(true);
+      expect(existsSync(path.join(prebuildDir, 'pty.pdb'))).toBe(false);
+      expect(existsSync(path.join(prebuildDir, 'conpty.pdb'))).toBe(false);
     } finally {
       restoreMinimalDist(createdDist);
       rmSync(tmpDir, { recursive: true, force: true });
@@ -2451,28 +2573,35 @@ describe('standalone release packaging', () => {
 
   it('syncs standalone and hosted installation assets during release', () => {
     const releaseWorkflow = readScript('.github/workflows/release.yml');
+    const releaseStepScript = readScript('.github/scripts/run-release-step.sh');
     const ossWorkflow = readScript('.github/workflows/sync-release-to-oss.yml');
 
-    // release.yml builds standalone archives, verifies them, and creates GitHub Release
-    expect(releaseWorkflow).toContain('npm run package:standalone:release --');
+    // The step script builds standalone archives, verifies them, and creates
+    // the GitHub Release; release.yml keeps only the env wiring.
+    expect(releaseStepScript).toContain(
+      'npm run package:standalone:release --',
+    );
     expect(releaseWorkflow).toContain(
       'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
     );
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
-    expect(releaseWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
-    expect(releaseWorkflow).toContain('--include-opentui-preview');
+    // Pin the operator, not just the variable name: these two sites are the
+    // build-time decision, and an assertion that accepts either comparison
+    // lets the flavor's default polarity flip without the suite noticing.
+    expect(releaseWorkflow).toContain(
+      "vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true'",
+    );
+    expect(releaseStepScript).toContain(
+      '[[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]',
+    );
+    expect(releaseStepScript).toContain('--include-opentui-preview');
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
-    const createReleaseStepIndex = releaseWorkflow.indexOf(
-      "- name: 'Create GitHub Release and Tag'",
-    );
-    expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
-    const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
-    expect(createReleaseStep).toContain('dist/standalone/qwen-code-*');
-    expect(createReleaseStep).toContain('dist/standalone/SHA256SUMS');
+    expect(releaseStepScript).toContain('dist/standalone/qwen-code-*');
+    expect(releaseStepScript).toContain('dist/standalone/SHA256SUMS');
     // OSS upload logic must not remain in release.yml
     expect(releaseWorkflow).not.toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(releaseWorkflow).not.toContain(
@@ -2488,7 +2617,17 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
-    expect(ossWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(ossWorkflow).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(ossWorkflow).toContain('corepack pnpm install --frozen-lockfile');
+    expect(ossWorkflow).toContain('npm ci --no-audit --progress=false');
+    // The sync workflow can be re-dispatched for any tag, and its steps come
+    // from the default branch while the checkout and the assets come from that
+    // tag, so it derives the flavor from the archives the release actually
+    // shipped. A repository variable describes the default branch instead, and
+    // asking a pre-flavor tag for preview archives fails the sync.
+    expect(ossWorkflow).not.toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(ossWorkflow).toContain('dist/standalone/*-opentui-preview.*');
+    expect(ossWorkflow).toContain('steps.flavor.outputs.preview_args');
     expect(ossWorkflow).toContain('--include-opentui-preview');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
@@ -2655,6 +2794,20 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('hosted entrypoint');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
+    // The archives ship the node-pty wrapper plus the target prebuild, and the
+    // guide has to say so instead of sending PTY users to an npm install; the
+    // linux-arm64 gap it does not cover must stay named. Bare 'linux-arm64'
+    // also occurs in the release-artifact list, so pin the sentence itself:
+    // the prebuild package is published and the gap is a missing pin (#11898).
+    expect(guide).toContain('@lydell/node-pty');
+    const flattenedGuide = guide.replace(/\s+/g, ' ');
+    expect(flattenedGuide).toContain(
+      '`linux-arm64` is the exception: `@lydell/node-pty-linux-arm64` is published, but this repo does not pin it',
+    );
+    expect(flattenedGuide).not.toContain('package is published yet');
+    expect(guide).not.toContain(
+      'do not currently install every npm optional native module',
+    );
   });
 
   it('provides standalone uninstall scripts that clean install-owned files only', () => {
@@ -2860,10 +3013,7 @@ describe('redactUrlForLog', () => {
   });
 });
 
-// These end-to-end installs spawn child processes via execFileSync;
-// the default 5s vitest timeout is too tight on slow CI runners even
-// without Windows' cmd.exe + node.exe startup overhead.
-describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
+describe('Linux/macOS installer end-to-end', () => {
   itOnUnix(
     'installs a local standalone archive with checksum verification',
     () => {
@@ -4151,9 +4301,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
   });
 });
 
-// Windows runners are slower at spawning cmd.exe, powershell.exe, and
-// node.exe, so the default 5s vitest timeout is too tight for these E2E tests.
-describe('Windows installer end-to-end', { timeout: 60_000 }, () => {
+describe('Windows installer end-to-end', () => {
   itOnWindows(
     'installs a local standalone archive with checksum verification',
     () => {
@@ -4604,10 +4752,22 @@ function ensureMinimalDist({
     recursive: true,
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
+  writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxBwrapRelay.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxFileWorker.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
+    writeFileSync(path.join(distPath, 'execution-worker.js'), '');
   }
   if (includeNpmPackageArtifacts) {
+    writeFileSync(
+      path.join(distPath, 'export-transcript-document.js'),
+      'window.QwenExportRenderer = true;\n',
+    );
+    writeFileSync(
+      path.join(distPath, 'export-transcript-document.css'),
+      'body{color:red}\n',
+    );
     writeFileSync(
       path.join(distPath, 'postinstall.js'),
       'console.log("postinstall");\n',
@@ -4976,6 +5136,47 @@ function createFakeClipboardModules(tmpDir, nativePackages) {
     );
     writeFileSync(path.join(packageDir, `${binaryName}.node`), 'native\n');
   }
+
+  return modulesDir;
+}
+
+// The clipboard packages are mandatory for --native-modules-dir, and the
+// node-pty prebuild comes from the same directory, so both live here. The
+// .pdb files model the win-x64 prebuild package's payload.
+function createFakeNodePtyModules(tmpDir) {
+  const modulesDir = createFakeClipboardModules(tmpDir, [
+    '@teddyzhu/clipboard-linux-x64-gnu',
+  ]);
+  const wrapperDir = path.join(modulesDir, '@lydell', 'node-pty');
+  const prebuildDir = path.join(
+    modulesDir,
+    '@lydell',
+    'node-pty-linux-x64',
+    'prebuilds',
+    'linux-x64',
+  );
+
+  mkdirSync(path.join(wrapperDir, 'lib'), { recursive: true });
+  writeFileSync(
+    path.join(wrapperDir, 'package.json'),
+    JSON.stringify({ name: '@lydell/node-pty', version: '1.2.0-beta.10' }),
+  );
+  writeFileSync(
+    path.join(wrapperDir, 'lib', 'index.js'),
+    'module.exports = {};\n',
+  );
+
+  mkdirSync(prebuildDir, { recursive: true });
+  writeFileSync(
+    path.join(modulesDir, '@lydell', 'node-pty-linux-x64', 'package.json'),
+    JSON.stringify({
+      name: '@lydell/node-pty-linux-x64',
+      version: '1.2.0-beta.10',
+    }),
+  );
+  writeFileSync(path.join(prebuildDir, 'pty.node'), 'native\n');
+  writeFileSync(path.join(prebuildDir, 'pty.pdb'), 'debug symbols\n');
+  writeFileSync(path.join(prebuildDir, 'conpty.pdb'), 'debug symbols\n');
 
   return modulesDir;
 }

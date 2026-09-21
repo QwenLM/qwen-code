@@ -211,10 +211,17 @@
   user-select: none;
 }
 
-.brandLogo svg {
+.brandLogo svg,
+.brandLogo img {
   width: 26px;
   height: 26px;
   display: block;
+}
+
+/* A custom logo arrives as an <img>, which stretches to the box; the built-in
+   inline <svg> keeps its ratio through its viewBox instead. */
+.brandLogo img {
+  object-fit: contain;
 }
 
 .brandName {
@@ -821,6 +828,58 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The branch row itself becomes a button when the workspace's Git picker is
+   wired, so the whole row is the target rather than a trailing control. */
+.sessionDetailsRowButton {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.sessionDetailsRowButton:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+/* Branch name and its severity dot stay tight together; the summary keeps its
+   own right-aligned column via margin-left: auto. */
+.sessionDetailsBranch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* The compact chip's badge dot, lifted beside the branch name: accent when the
+   tree is dirty, warning for an in-progress operation or detached HEAD, error
+   when conflicted. Absent on a clean tree. */
+.sessionDetailsGitDot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color, #4a9eff);
+}
+
+.sessionDetailsGitDot[data-tone='warning'] {
+  background: var(--warning-color, #d29922);
+}
+
+.sessionDetailsGitDot[data-tone='error'] {
+  background: var(--error-color, #e5534b);
+}
+
+/* The row's only hover cue: the branch icon and the chevron carry the muted
+   tone from `.sessionDetailsRow svg`, so a hover has to move them together. */
+.sessionDetailsRowButton:hover svg {
+  color: var(--popover-foreground);
+}
+
 .sessionDetailsRowIssue,
 .sessionDetailsRowIssue .sessionDetailsRowValue {
   color: var(--warning-color, #d29922);
@@ -1029,15 +1088,6 @@
   animation: sidebarPulse 1.6s ease-in-out infinite;
 }
 
-.sessionStatusDotOverlay {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 5px;
-  height: 5px;
-  box-shadow: 0 0 0 1.5px var(--sidebar-background);
-}
-
 /* A running turn gets the same pulsing dot in green, so busy sessions are
    scannable without waiting for the right-edge spinner. */
 .sessionStatusDotRunning {
@@ -1045,8 +1095,8 @@
 }
 
 .sessionSourceIcon {
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1123,10 +1173,17 @@
   justify-content: flex-end;
 }
 
-.sessionMetaSlot:not(
-  :has(.sessionLoading, .sessionAttention, .sessionGitIcon)
-) {
-  padding-right: 10px;
+@supports (selector(:has(*))) {
+  .sessionMetaSlot:not(
+    :has(
+      .sessionLoading,
+      .sessionAttention,
+      .sessionGitIcon,
+      .sessionSourceIcon
+    )
+  ) {
+    padding-right: 10px;
+  }
 }
 
 .sessionAttention {
@@ -1146,13 +1203,6 @@
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
-}
-
-.sessionRow:hover .sessionMetaSlot,
-.sessionRow:focus-within .sessionMetaSlot,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible),
-.sessionMetaSlot:has([data-state='open']) {
-  min-width: var(--session-actions-width, 78px);
 }
 
 .sessionGitIcon {
@@ -1182,22 +1232,6 @@
   animation: sidebarSpin 0.8s linear infinite;
 }
 
-.sessionRow:hover:not(.runningSession) .sessionGitIcon,
-.sessionRow:focus-within:not(.runningSession) .sessionGitIcon,
-.sessionRow:hover:not(.runningSession) .sessionAttention,
-.sessionRow:focus-within:not(.runningSession) .sessionAttention,
-.sessionMetaSlot:hover .sessionGitIcon,
-.sessionMetaSlot:hover .sessionLoading,
-.sessionMetaSlot:hover .sessionAttention,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionGitIcon,
-.sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
-.sessionMetaSlot:has([data-state='open']) .sessionLoading,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,
-.sessionMetaSlot:has([data-state='open']) .sessionAttention {
-  opacity: 0;
-}
-
 .sessionActions {
   position: absolute;
   inset: 0;
@@ -1206,14 +1240,73 @@
   justify-content: flex-end;
   gap: 0;
   opacity: 0;
+  pointer-events: none;
 }
 
-.sessionRow:hover:not(.runningSession) .sessionActions,
-.sessionRow:focus-within:not(.runningSession) .sessionActions,
-.sessionMetaSlot:hover .sessionActions,
-.sessionActions:has(.sessionActionButton:focus-visible),
-.sessionActions:has([data-state='open']) {
-  opacity: 1;
+@supports (selector(:has(*))) {
+  .sessionActions:focus-within,
+  .sessionActions:has([data-state='open']) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (hover: hover) {
+    .sessionMetaSlot:has(.sessionActions:focus-within),
+    .sessionMetaSlot:has([data-state='open']) {
+      min-width: var(--session-actions-width, 78px);
+    }
+
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
+    .sessionMetaSlot:has([data-state='open']) .sessionLoading,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
+    .sessionMetaSlot:has([data-state='open']) .sessionAttention,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
+      opacity: 0;
+    }
+
+    .sessionRow:hover:not(.runningSession)
+      .sessionMetaSlot:has(.sessionActions)
+      .sessionSourceIcon,
+    .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+      opacity: 0;
+    }
+  }
+}
+
+@media (hover: hover) {
+  .sessionRow:hover .sessionMetaSlot {
+    min-width: var(--session-actions-width, 78px);
+  }
+
+  .sessionRow:hover:not(.runningSession) .sessionGitIcon,
+  .sessionRow:hover:not(.runningSession) .sessionAttention,
+  .sessionMetaSlot:hover .sessionGitIcon,
+  .sessionMetaSlot:hover .sessionLoading,
+  .sessionMetaSlot:hover .sessionAttention {
+    opacity: 0;
+  }
+
+  .sessionRow:hover:not(.runningSession) .sessionActions,
+  .sessionMetaSlot:hover .sessionActions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* Touch devices get no hover reveal, so the actions stay in the flow and
+   share the slot with the markers instead of overlaying and hiding them. */
+@media (hover: none) and (pointer: coarse) {
+  .sessionActions {
+    position: static;
+    opacity: 1;
+  }
+
+  .sessionActionButton {
+    pointer-events: auto;
+  }
 }
 
 @keyframes sidebarSpin {
@@ -1337,6 +1430,7 @@
   z-index: 1100;
   width: 240px;
   max-height: min(320px, calc(100vh - 16px));
+  max-height: min(320px, calc(100dvh - 16px));
   padding: 6px;
   border: 1px solid var(--sidebar-border);
   border-radius: 8px;
@@ -1491,35 +1585,6 @@
   width: 100%;
   border-radius: 8px;
   cursor: pointer;
-}
-
-.manageWorkspacesRow {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-  padding: 6px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  cursor: pointer;
-}
-
-.manageWorkspacesRow:hover,
-.manageWorkspacesRow:focus-visible {
-  background: var(--secondary);
-  color: var(--foreground);
-}
-
-.manageWorkspacesRow svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
 }
 
 .confirmContent {
@@ -1688,20 +1753,16 @@
   text-overflow: ellipsis;
 }
 
-.footerCompact,
-.footerTight {
+.footerCompact {
   gap: 4px;
 }
 
 .footerCompact .footerPrimary,
-.footerCompact .footerActions,
-.footerTight .footerPrimary,
-.footerTight .footerActions {
+.footerCompact .footerActions {
   gap: 4px;
 }
 
-.footerCompact .footerButton,
-.footerTight .footerButton {
+.footerCompact .footerButton {
   width: 26px;
   height: 28px;
   flex: 0 0 26px;
@@ -1709,13 +1770,11 @@
   padding: 0;
 }
 
-.footerCompact .footerButtonLabel,
-.footerTight .footerButtonLabel {
+.footerCompact .footerButtonLabel {
   display: none;
 }
 
-.footerCompact .collapseButton,
-.footerTight .collapseButton {
+.footerCompact .collapseButton {
   width: 26px;
   height: 28px;
 }
@@ -2003,7 +2062,6 @@
   }
 }
 
-/* Registered workspace count next to the Projects label. */
 .projectsHeaderCount {
   display: inline-flex;
   align-items: center;
@@ -2016,4 +2074,17 @@
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+}
+
+.sessionBackgroundRunning {
+  color: var(--warning-color, #d29922);
+}
+
+/* Hover-gated: touch devices get no hover reveal, and a sticky tap-hover on
+   the background dot must not hide the always-visible row actions. */
+@media (hover: hover) {
+  .sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions {
+    opacity: 0;
+    pointer-events: none;
+  }
 }

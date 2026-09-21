@@ -6,6 +6,7 @@
 
 import {
   SessionNotFoundError,
+  AcpChildCapacityExceededError,
   StandaloneSessionSpawnError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
@@ -110,6 +111,7 @@ interface Harness {
   stageStandaloneDirectory: ReturnType<typeof vi.fn>;
   restoreStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
   removeStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
+  discardEmptyConversationDirectory: ReturnType<typeof vi.fn>;
   confirmStandaloneRootDurability: ReturnType<typeof vi.fn>;
   getWorkspaceProvidersStatus: ReturnType<typeof vi.fn>;
   assertExactRoot: ReturnType<typeof vi.fn>;
@@ -227,6 +229,7 @@ function createHarness(): Harness {
   }));
   const restoreStagedStandaloneDirectory = vi.fn(async () => identity);
   const removeStagedStandaloneDirectory = vi.fn(async () => undefined);
+  const discardEmptyConversationDirectory = vi.fn(async () => true);
   const confirmStandaloneRootDurability = vi.fn(async () => undefined);
   const assertExactRoot = vi.fn(async () => root);
   const lifecycle = new SessionArchiveCoordinator();
@@ -247,6 +250,7 @@ function createHarness(): Harness {
         identity,
         created: true,
       })),
+      discardEmptyConversationDirectory,
       inspectStandaloneDirectory,
       ensureStandaloneDirectory,
       inspectStandaloneDeletionPaths,
@@ -284,6 +288,7 @@ function createHarness(): Harness {
     stageStandaloneDirectory,
     restoreStagedStandaloneDirectory,
     removeStagedStandaloneDirectory,
+    discardEmptyConversationDirectory,
     confirmStandaloneRootDurability,
     getWorkspaceProvidersStatus,
     assertExactRoot,
@@ -1799,6 +1804,336 @@ describe('StandaloneSessionService', () => {
     );
   });
 
+  it('rolls back a child before prompt admission when its model is not applied', async () => {
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    const storageParentSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId)
+      .mockResolvedValueOnce(storageParentSessionId)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(childSessionId)
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValue({
+        sourceType: 'standalone',
+        parentSessionId: storageParentSessionId,
+      });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const harness = createHarness();
+
+    await harness.service.createWithInitialPrompt({ sessionId }, 'parent task');
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId: childSessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      parentSessionPersisted: true,
+      modelApplied: false,
+    });
+    harness.bridge.sendPrompt.mockClear();
+
+    await expect(
+      harness.service.createChildWithInitialPrompt(
+        {
+          sessionId: childSessionId,
+          parentSessionId: sessionId,
+          promptId: 'prompt-child',
+          modelServiceId: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+        },
+        'child task',
+      ),
+    ).rejects.toMatchObject({
+      code: 'model_selection_failed',
+      sessionId: childSessionId,
+    });
+
+    expect(harness.bridge.killSession).toHaveBeenCalledWith(childSessionId, {
+      requireZeroAttaches: true,
+    });
+    expect(removeSession).toHaveBeenCalledWith(childSessionId);
+    expect(harness.discardEmptyConversationDirectory).toHaveBeenCalledWith(
+      childSessionId,
+    );
+    expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalled();
+  });
+
+  it('keeps a non-scheduled child when its selected model is not applied', async () => {
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    const storageParentSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId)
+      .mockResolvedValueOnce(storageParentSessionId)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(childSessionId)
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValue({
+        sourceType: 'standalone',
+        parentSessionId: storageParentSessionId,
+      });
+    const removeSession = vi.spyOn(SessionService.prototype, 'removeSession');
+    const harness = createHarness();
+
+    await harness.service.createWithInitialPrompt({ sessionId }, 'parent task');
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId: childSessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      parentSessionPersisted: true,
+      modelApplied: false,
+    });
+    harness.bridge.sendPrompt.mockClear();
+
+    await expect(
+      harness.service.createChildWithInitialPrompt(
+        {
+          sessionId: childSessionId,
+          parentSessionId: sessionId,
+          promptId: 'prompt-child',
+          modelServiceId: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'agent-run-7',
+        },
+        'child task',
+      ),
+    ).resolves.toMatchObject({
+      session: { sessionId: childSessionId, modelApplied: false },
+    });
+
+    expect(harness.bridge.killSession).not.toHaveBeenCalled();
+    expect(removeSession).not.toHaveBeenCalled();
+    expect(harness.discardEmptyConversationDirectory).not.toHaveBeenCalled();
+    expect(harness.bridge.sendPrompt).toHaveBeenCalled();
+  });
+
+  it('keeps a scheduled-task child when its selected model is applied', async () => {
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    const storageParentSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId)
+      .mockResolvedValueOnce(storageParentSessionId)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(childSessionId)
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValue({
+        sourceType: 'standalone',
+        parentSessionId: storageParentSessionId,
+      });
+    const removeSession = vi.spyOn(SessionService.prototype, 'removeSession');
+    const harness = createHarness();
+
+    await harness.service.createWithInitialPrompt({ sessionId }, 'parent task');
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId: childSessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      parentSessionPersisted: true,
+      modelApplied: true,
+    });
+    harness.bridge.sendPrompt.mockClear();
+
+    await expect(
+      harness.service.createChildWithInitialPrompt(
+        {
+          sessionId: childSessionId,
+          parentSessionId: sessionId,
+          promptId: 'prompt-child',
+          modelServiceId: 'model-x',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+        },
+        'child task',
+      ),
+    ).resolves.toMatchObject({
+      session: { sessionId: childSessionId, modelApplied: true },
+    });
+
+    expect(harness.bridge.killSession).not.toHaveBeenCalled();
+    expect(removeSession).not.toHaveBeenCalled();
+    expect(harness.discardEmptyConversationDirectory).not.toHaveBeenCalled();
+    expect(harness.bridge.sendPrompt).toHaveBeenCalled();
+  });
+
+  it('keeps the model failure when rollback directory cleanup fails', async () => {
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    const storageParentSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId)
+      .mockResolvedValueOnce(storageParentSessionId)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(childSessionId)
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValue({
+        sourceType: 'standalone',
+        parentSessionId: storageParentSessionId,
+      });
+    vi.spyOn(SessionService.prototype, 'removeSession').mockResolvedValue(true);
+    const harness = createHarness();
+    harness.discardEmptyConversationDirectory.mockRejectedValueOnce(
+      new Error('discard failed'),
+    );
+
+    await harness.service.createWithInitialPrompt({ sessionId }, 'parent task');
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId: childSessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      parentSessionPersisted: true,
+      modelApplied: false,
+    });
+
+    await expect(
+      harness.service.createChildWithInitialPrompt(
+        {
+          sessionId: childSessionId,
+          parentSessionId: sessionId,
+          promptId: 'prompt-child',
+          modelServiceId: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+        },
+        'child task',
+      ),
+    ).rejects.toMatchObject({
+      code: 'model_selection_failed',
+      sessionId: childSessionId,
+    });
+  });
+
+  it('preserves the child directory when model rollback requires runtime quarantine', async () => {
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    const storageParentSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId)
+      .mockResolvedValueOnce(storageParentSessionId)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(childSessionId);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValue({
+        sourceType: 'standalone',
+        parentSessionId: storageParentSessionId,
+      });
+    const removeSession = vi.spyOn(SessionService.prototype, 'removeSession');
+    const harness = createHarness();
+
+    await harness.service.createWithInitialPrompt({ sessionId }, 'parent task');
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId: childSessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      parentSessionPersisted: true,
+      modelApplied: false,
+    });
+    harness.bridge.killSession.mockResolvedValueOnce(false);
+
+    await expect(
+      harness.service.createChildWithInitialPrompt(
+        {
+          sessionId: childSessionId,
+          parentSessionId: sessionId,
+          promptId: 'prompt-child',
+          modelServiceId: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+        },
+        'child task',
+      ),
+    ).rejects.toMatchObject({
+      code: 'standalone_creation_outcome_unknown',
+      sessionId: childSessionId,
+    });
+
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
+    expect(removeSession).not.toHaveBeenCalled();
+    expect(harness.discardEmptyConversationDirectory).not.toHaveBeenCalled();
+  });
+
   it('returns an in-flight create without re-entering the runtime or storage', async () => {
     mockDurableStandalone();
     const getSessionListItem = vi
@@ -3305,6 +3640,69 @@ describe('StandaloneSessionService', () => {
     releaseSpawn();
     await expect(first).resolves.toMatchObject({ session: { sessionId } });
     expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('retains capacity only after a pre-dispatch absence check', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        false,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({
+      code: 'standalone_creation_rolled_back',
+      retryable: true,
+      capacity: {
+        code: 'acp_child_capacity_exhausted',
+        maxConcurrentChildren: 1,
+        committedAcpChildren: 1,
+      },
+    });
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+    expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps quarantine precedence when capacity rollback cannot verify absence', async () => {
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        false,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
+    expect(harness.reservation.release).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a post-dispatch capacity cause as safe rollback', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        true,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
   });
 
   it('cleanly rolls back a failure before newSession dispatch', async () => {

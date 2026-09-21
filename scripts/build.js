@@ -25,33 +25,36 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
-// npm install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
+// Install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
 if (!existsSync(join(root, 'node_modules'))) {
-  execSync('npm install', { stdio: 'inherit', cwd: root });
+  execSync('corepack pnpm install --frozen-lockfile', {
+    stdio: 'inherit',
+    cwd: root,
+  });
 }
 
 // build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
-// --cli-only: skip packages not needed by the CLI bundle. Web UI and Web
-// Shell still build because the self-contained HTML export bundles their
-// document renderer through web-templates.
+// --cli-only: skip packages not needed by the CLI bundle. Web Shell still
+// builds because the HTML export publishes its document renderer with npm.
 const cliOnly = process.argv.includes('--cli-only');
 
 // Build in dependency order:
+// 0. browser-use (built first so core can stage the builtin skill's runtime)
 // 1. core (foundation package, includes test-utils)
 // 2. channel-base (base channel infrastructure - used by channel adapters and cli)
 // 3. channel adapters (depend on channel-base)
 // 4. audio-capture (native microphone backend used by cli)
 // 5. acp-bridge (depends on core - used by cli)
 // 6. sdk (build-time devDep on acp-bridge for shared constants, used by cli channel worker)
-// 7. webui (shared UI components - used by web-shell and vscode companion)
-// 8. web-shell (document renderer used by web-templates)
-// 9. web-templates (embeddable web templates - used by cli)
-// 10. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
-// 11. vscode-ide-companion (depends on webui)
-// 12. external-context integrations (private Qwen extensions)
+// 7. web-shell (document renderer used by web-templates)
+// 8. web-templates (embeddable web templates - used by cli)
+// 9. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
+// 10. vscode-ide-companion
+// 11. external-context integrations (private Qwen extensions)
 const buildOrder = [
+  'packages/browser-use',
   'packages/core',
   'packages/channels/base',
   'packages/channels/telegram',
@@ -68,9 +71,9 @@ const buildOrder = [
   'packages/channels/plugin-example',
   'packages/audio-capture',
   'packages/node-repl',
+  'packages/browser-use',
   'packages/acp-bridge',
   'packages/sdk-typescript',
-  'packages/webui',
   'packages/web-shell',
   'packages/web-templates',
   'packages/cli',

@@ -14,7 +14,7 @@ on:
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
@@ -33,7 +33,7 @@ on:
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
@@ -162,7 +162,8 @@ jobs:
     # measured 4.0-5.9 min across 11 green runs and 19.9/22.6 min on the two
     # that died, which is the whole difference between them. At that factor the
     # setup alone needs ~44 min, so 30 cancelled the job before a single
-    # assertion ran. Matches the 45 tier release.yml's quality_build uses.
+    # assertion ran. Matches the release.yml quality_build tier
+    # (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES, default 45).
     timeout-minutes: 45
     steps:
       - name: 'Restore workspace ownership'
@@ -198,7 +199,7 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22'
-          cache: 'npm'
+          package-manager-cache: false
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -231,7 +232,7 @@ jobs:
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
       - name: 'Install Node.js dependencies'
-        run: 'npm ci --prefer-offline --no-audit --progress=false'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
 
       - name: 'Build Qwen Code'
         run: 'npm run build'

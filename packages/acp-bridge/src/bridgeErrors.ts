@@ -28,6 +28,29 @@ import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
   'Not currently generating' as const;
 
+export interface AcpChildCapacity {
+  code: 'acp_child_capacity_exhausted';
+  maxConcurrentChildren: number;
+  committedAcpChildren: number;
+}
+
+export class AcpChildCapacityExceededError
+  extends Error
+  implements AcpChildCapacity
+{
+  override readonly name = 'AcpChildCapacityExceededError';
+  readonly code = 'acp_child_capacity_exhausted' as const;
+
+  constructor(
+    readonly maxConcurrentChildren: number,
+    readonly committedAcpChildren: number,
+  ) {
+    super(
+      'The service has reached its concurrent process limit. Try again later or cancel this operation.',
+    );
+  }
+}
+
 export class StandaloneSessionSpawnError extends Error {
   override readonly name = 'StandaloneSessionSpawnError';
 
@@ -705,9 +728,43 @@ export class CdWhilePromptActiveError extends Error {
   }
 }
 
+/**
+ * Admission refusal for a session whose worktree ownership is being
+ * transferred to a replacement session (worktree reset). The daemon arms the
+ * barrier before the transfer's first side effect, so every prompt source and
+ * every other writer that could reach the session's checkout or cwd fails
+ * closed for its duration; the session id in the message is the superseded
+ * one.
+ */
+export class SessionResetPendingError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} is mid worktree reset; prompt admission is closed until the reset completes`,
+    );
+    this.name = 'SessionResetPendingError';
+    this.sessionId = sessionId;
+  }
+}
+
 export class McpAuthenticationInProgressError extends Error {
   constructor() {
     super('Another MCP authentication is already in progress');
     this.name = 'McpAuthenticationInProgressError';
+  }
+}
+
+export class WorkspaceRuntimeStopError extends Error {
+  constructor(
+    readonly code:
+      | 'workspace_runtime_stop_stale'
+      | 'workspace_runtime_stop_blocked',
+  ) {
+    super(
+      code === 'workspace_runtime_stop_stale'
+        ? 'The workspace changed. Refresh and confirm the affected sessions again.'
+        : 'The workspace cannot be stopped while other runtime work is pending.',
+    );
+    this.name = 'WorkspaceRuntimeStopError';
   }
 }

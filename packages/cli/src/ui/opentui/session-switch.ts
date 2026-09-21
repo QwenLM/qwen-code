@@ -22,15 +22,15 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { buildSessionRecoveryPlan } from '@qwen-code/qwen-code-core/core/session-recovery.js';
+import { SessionStartSource } from '@qwen-code/qwen-code-core/hooks/types.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   SessionService,
-  buildSessionRecoveryPlan,
   computeUniqueBranchTitle,
-  SessionStartSource,
-  type ChatRecord,
-  type Config,
-  type ResumedSessionData,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
+import type { ResumedSessionData } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';

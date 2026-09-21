@@ -11,7 +11,7 @@ import type {
   DaemonEvent,
   DaemonSessionArtifactChange,
 } from '../types.js';
-import { DAEMON_ERROR_KINDS } from '../types.js';
+import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
 import { isSettingsChangedData } from '../events.js';
 import type {
   DaemonUiEvent,
@@ -47,6 +47,7 @@ type NormalizedEventBase = Pick<
   | 'sourceRecordIds'
   | 'segmentId'
   | 'promptId'
+  | 'backgroundTurn'
   | 'branchRecordId'
   | 'originatorClientId'
   | 'rawEvent'
@@ -66,6 +67,14 @@ const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
 const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
+
+// Wire close-reason tokens are internal identifiers; render known ones as
+// copy and never echo an unknown token into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -132,11 +141,29 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'session_closed':
+      if (
+        isRecord(event.data) &&
+        event.data['persistenceUnconfirmed'] === true
+      ) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: false,
+            text: 'Workspace runtime stopped; session persistence is unconfirmed.',
+          },
+        ];
+      }
       return [
         {
           ...base,
           type: 'status',
-          text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
+          text:
+            getString(event.data, 'cause') === 'workspace_runtime_stop'
+              ? 'Workspace runtime stopped.'
+              : (SESSION_CLOSED_REASON_COPY[
+                  getString(event.data, 'reason') ?? ''
+                ] ?? 'Session closed'),
         },
       ];
     case 'session_recording_degraded': {
@@ -190,13 +217,17 @@ export function normalizeDaemonEvent(
         },
       ];
     case 'slow_client_warning':
-      return [
-        {
-          ...base,
-          type: 'status',
-          text: 'SSE stream is lagging',
-        },
-      ];
+      // The daemon reports this SSE subscriber's queue backing up — a
+      // transport diagnostic, not a user-facing failure. Surfacing it as a
+      // transcript status reads as a broken connection mid-turn, so log the
+      // queue watermarks to the console instead; `client_evicted` remains the
+      // real disconnect signal and flows through its own error path. Fires at
+      // most once per overflow episode (daemon-side hysteresis).
+      if (typeof console !== 'undefined') {
+        // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
+        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+      }
+      return [];
     case 'stream_error': {
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
@@ -251,6 +282,14 @@ export function normalizeDaemonEvent(
         { ...base, type: 'prompt.cancelled', ...(reason ? { reason } : {}) },
       ];
     }
+
+    case 'turn_complete':
+      return getString(event.data, 'stopReason') === 'cancelled'
+        ? normalizePromptCancellation(
+            isRecord(event.data) ? event.data['promptCancelled'] : undefined,
+            base,
+          )
+        : [];
 
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
@@ -367,6 +406,19 @@ export function normalizeDaemonEvent(
 
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
+
+    case 'source_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      const revision = isRecord(event.data)
+        ? event.data['revision']
+        : undefined;
+      return sessionId &&
+        typeof revision === 'number' &&
+        Number.isInteger(revision) &&
+        revision >= 0
+        ? [{ ...base, type: 'session.source.changed', sessionId, revision }]
+        : [];
+    }
 
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
@@ -655,12 +707,24 @@ function createBase(
   const sourceRecordIds = extractSourceRecordIds(event);
   const segmentId = extractTranscriptSegmentId(event);
   const branchRecordId = extractBranchRecordId(event);
+  const update = getSessionUpdatePayload(event.data);
+  const backgroundTurn = parseDaemonBackgroundTurn(
+    (update && isRecord(update['_meta'])
+      ? update['_meta']['backgroundTurn']
+      : undefined) ??
+      (isRecord(event.data) ? event.data['backgroundTurn'] : undefined),
+  );
+  const promptId =
+    event.promptId ??
+    getString(update?.['_meta'], 'promptId') ??
+    backgroundTurn?.turnId;
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
     ...(segmentId ? { segmentId } : {}),
-    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(promptId ? { promptId } : {}),
+    ...(backgroundTurn ? { backgroundTurn } : {}),
     ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
@@ -805,6 +869,27 @@ function normalizeSessionUpdate(
       }
       const meta = extractUpdateMeta(update);
       const content = update['content'];
+      if (
+        isRecord(content) &&
+        content['type'] === 'resource_link' &&
+        typeof content['uri'] === 'string' &&
+        content['uri'].length > 0 &&
+        typeof content['name'] === 'string'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'user.resource_link.delta',
+            resourceLink: {
+              ...content,
+              type: 'resource_link',
+              uri: content['uri'],
+              name: content['name'],
+            },
+            ...(meta ? { meta } : {}),
+          },
+        ];
+      }
       const part = extractContentPart(content);
       if (part) {
         if (part.kind === 'image') {
@@ -899,7 +984,27 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       const parentToolCallId = extractParentToolCallId(update);
       const meta = extractUpdateMeta(update);
+      if (
+        meta?.['source'] === 'background_task_completed' ||
+        meta?.['source'] === 'background_notification_turn_started'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'status',
+            source: meta['source'],
+            text: text ?? '',
+            data:
+              meta['source'] === 'background_task_completed'
+                ? meta['backgroundTask']
+                : meta['backgroundTurn'],
+          },
+        ];
+      }
       const events: DaemonUiEvent[] = [];
+      if (!parentToolCallId && meta?.['promptCancelled'] !== undefined) {
+        return normalizePromptCancellation(meta['promptCancelled'], base);
+      }
       if (text) {
         events.push({
           ...base,
@@ -948,7 +1053,8 @@ function normalizeSessionUpdate(
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
-        meta?.['shellProgress'] !== undefined
+        (meta?.['shellProgress'] !== undefined ||
+          meta?.subagentProgress === true)
       ) {
         return [];
       }
@@ -990,6 +1096,7 @@ function normalizeSessionUpdate(
     case 'plan':
       return [normalizePlanUpdate(update, base)];
     case 'current_mode_update':
+    case 'session_info_update':
     case 'usage_update':
       return [];
     default:
@@ -1133,6 +1240,11 @@ function normalizeToolUpdate(
       text: `Tool update missing toolCallId${title ? ` (${title})` : ''}`,
     };
   }
+  const subagentSessionReady =
+    isRecord(rawOutput) &&
+    typeof rawOutput['subagentSessionReady'] === 'boolean'
+      ? rawOutput['subagentSessionReady']
+      : metadata?.['subagentSessionReady'];
   const { provenance, serverId } = extractToolProvenance(update, toolName);
   // PR-K (post-rebase): daemon stamps `parentToolCallId` + `subagentType` in
   // `tool_call._meta` when the call was invoked inside a sub-agent
@@ -1168,6 +1280,9 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(typeof subagentSessionReady === 'boolean'
+      ? { subagentSessionReady }
+      : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(resultPreview ? { resultPreview } : {}),
@@ -2139,6 +2254,31 @@ function normalizeAuthDeviceFlowCancelled(
     );
   }
   return [{ ...base, type: 'auth.device_flow.cancelled', deviceFlowId }];
+}
+
+function normalizePromptCancellation(
+  value: unknown,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const elapsedMs = numberField(value, 'elapsedMs');
+  const cancelledAt = numberField(value, 'cancelledAt');
+  const promptId = stringField(value, 'promptId') ?? base.promptId;
+  if (
+    !promptId ||
+    elapsedMs === undefined ||
+    elapsedMs < 0 ||
+    cancelledAt === undefined
+  )
+    return [];
+  return [
+    {
+      ...base,
+      type: 'prompt.cancelled',
+      promptId,
+      elapsedMs,
+      serverTimestamp: cancelledAt,
+    },
+  ];
 }
 
 function numberField(value: unknown, key: string): number | undefined {

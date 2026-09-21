@@ -74,6 +74,8 @@ const createMockConfig = (
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
   getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
+  getCodeModeOnly: () => false,
+  isTodoWriteEnabled: () => false,
   // Read by resolveMainSessionOutputStyle: the peer inherits the style the
   // main session actually carries, so the main session's prompt-override and
   // interaction-mode state is part of that decision.
@@ -169,6 +171,27 @@ describe('ArenaManager', () => {
   });
 
   describe('start validation', () => {
+    it('refuses required-container sessions before initializing state or worktrees', async () => {
+      const manager = new ArenaManager({
+        ...mockConfig,
+        getAgentExecutionBackend: () => 'container',
+      } as never);
+      const onStart = vi.fn();
+      manager.getEventEmitter().on(ArenaEventType.SESSION_START, onStart);
+
+      await expect(manager.start(createValidStartOptions())).rejects.toThrow(
+        'Container execution is required',
+      );
+
+      expect(manager.getSessionId()).toBeUndefined();
+      expect(manager.getBackend()).toBeNull();
+      expect(manager.getAgentStates()).toEqual([]);
+      expect(onStart).not.toHaveBeenCalled();
+      expect(hoistedMockDetectBackend).not.toHaveBeenCalled();
+      expect(hoistedMockSetupWorktrees).not.toHaveBeenCalled();
+      expect(await fs.readdir(tempDir)).toEqual([]);
+    });
+
     it('should reject start with less than 2 models', async () => {
       const manager = new ArenaManager(mockConfig as never);
 
@@ -424,6 +447,7 @@ describe('ArenaManager', () => {
       mockConfig = {
         ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
         getOutputStyle: () => getBuiltInOutputStyle('Concise'),
+        isTodoWriteEnabled: () => true,
       };
       const manager = new ArenaManager(mockConfig as never);
 
@@ -442,6 +466,7 @@ describe('ArenaManager', () => {
           'This is a non-interactive, single-turn run',
         );
         expect(systemPrompt).toContain('# Output Style: Concise');
+        expect(systemPrompt).toContain('# Task Management');
       }
     });
 

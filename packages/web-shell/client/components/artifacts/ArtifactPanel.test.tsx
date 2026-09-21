@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, StrictMode } from 'react';
+import { Blob as NodeBlob } from 'node:buffer';
 import { createRoot, type Root } from 'react-dom/client';
+import { EditorView } from 'codemirror';
 import type {
   DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
@@ -70,6 +72,7 @@ const {
       },
       client: {
         workspaceByCwd: vi.fn(() => mockSecondaryWorkspaceActions),
+        readSessionArtifactContent: vi.fn(),
       },
     },
   };
@@ -81,6 +84,10 @@ vi.mock(
     ...(await importOriginal()),
     useActions: () => mockActions,
     useWorkspace: () => mockWorkspace,
+    useConnection: () => ({
+      sessionId: 'active-session',
+      clientId: 'active-viewer',
+    }),
     useWorkspaceActions: () => mockWorkspaceActions,
   }),
 );
@@ -227,13 +234,18 @@ function linkArtifact(): DaemonSessionArtifact {
 
 function artifactPanel(
   artifact: DaemonSessionArtifact,
-  owner: { workspaceCwd: string; workspaceId: string } | null = {
+  owner: {
+    workspaceCwd: string;
+    workspaceId: string;
+    sourceSessionId?: string;
+  } | null = {
     workspaceCwd: '/primary',
     workspaceId: 'primary-id',
   },
+  language: 'en' | 'zh-CN' = 'en',
 ) {
   return (
-    <I18nProvider language="en">
+    <I18nProvider language={language}>
       <ArtifactPanel
         artifacts={[artifact]}
         tabs={[
@@ -321,6 +333,10 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
+  // The boundary matrix spies on DOMParser.prototype per row; restore it so
+  // the leak cannot skew call-count assertions in later tests.
+  vi.restoreAllMocks();
   delete (window as { __TAURI__?: unknown }).__TAURI__;
   for (const { root, container } of mounted) {
     act(() => root.unmount());
@@ -367,6 +383,66 @@ afterEach(() => {
       },
     ],
   };
+});
+
+describe('ArtifactPanel context usage tabs', () => {
+  it('loads only the selected usage panel with its own actions', async () => {
+    const getContextUsage = vi.fn().mockResolvedValue({});
+    const getStats = vi.fn().mockResolvedValue({});
+    const contextActions = {
+      getContextUsage,
+    } as unknown as DaemonSessionActions;
+    const tokenActions = { getStats } as unknown as DaemonSessionActions;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (activeTabId: string) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            {
+              id: 'context',
+              kind: 'context_usage',
+              title: 'Context Usage',
+              sessionId: 'secondary',
+              sessionActions: contextActions,
+            },
+            {
+              id: 'token',
+              kind: 'token_usage',
+              title: 'Token Usage',
+              sessionId: 'primary',
+              sessionActions: tokenActions,
+            },
+          ]}
+          activeTabId={activeTabId}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    await act(async () => root.render(renderPanel('token')));
+    expect(getStats).toHaveBeenCalledOnce();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    await act(async () => root.render(renderPanel('context')));
+    expect(getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(getStats).toHaveBeenCalledOnce();
+    expect(
+      container.querySelector('button[title="Token Usage"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[title="Context Usage"]'),
+    ).not.toBeNull();
+  });
 });
 
 describe('ArtifactPanel terminal tabs', () => {
@@ -426,6 +502,52 @@ describe('ArtifactPanel terminal tabs', () => {
     expect(
       container.querySelector('[data-testid="right-panel-loading-skeleton"]'),
     ).toBeNull();
+  });
+});
+
+describe('ArtifactPanel web previews', () => {
+  it('keeps the application frame mounted across tab and viewport changes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (
+      activeTabId: string,
+      viewport: 'desktop' | 'mobile' = 'desktop',
+    ) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            {
+              id: 'preview',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: 'http://localhost:6543',
+              viewport,
+            },
+            { id: 'terminal', kind: 'terminal', title: 'Terminal' },
+          ]}
+          activeTabId={activeTabId}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(renderPanel('preview')));
+    const frame = container.querySelector('iframe');
+    expect(frame).not.toBeNull();
+    act(() => root.render(renderPanel('terminal')));
+    expect(container.querySelector('iframe')).toBe(frame);
+    expect(frame?.closest('[hidden]')).not.toBeNull();
+    act(() => root.render(renderPanel('preview', 'mobile')));
+    expect(container.querySelector('iframe')).toBe(frame);
+    expect(frame?.closest('[hidden]')).toBeNull();
+    expect(frame?.style.width).toBe('390px');
   });
 });
 
@@ -601,7 +723,93 @@ async function flush() {
   });
 }
 
+// jsdom completes FileReader reads via setImmediate, a macrotask the
+// microtask-only flush() never drains.
+async function flushPreview() {
+  await act(async () => {
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+}
+
 describe('ArtifactPanel code review artifacts', () => {
+  it('reads a saved artifact from the panel tab source session', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+      '<h1>Source session</h1>',
+    );
+    await act(async () =>
+      root.render(
+        artifactPanel(
+          {
+            ...linkArtifact(),
+            kind: 'html',
+            storage: 'published',
+            metadata: { artifactType: 'web_preview_snapshot' },
+          },
+          {
+            workspaceCwd: '/primary',
+            workspaceId: 'primary-id',
+            sourceSessionId: 'original-session',
+          },
+        ),
+      ),
+    );
+    expect(
+      mockWorkspace.client.readSessionArtifactContent,
+    ).toHaveBeenCalledWith('original-session', linkArtifact().id, {
+      clientId: undefined,
+      signal: expect.any(AbortSignal),
+    });
+    expect(
+      container
+        .querySelector('iframe[title="Saved webpage version"]')
+        ?.getAttribute('srcdoc'),
+    ).toContain('Source session');
+  });
+
+  it('uses the artifact format icon in the panel tab', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+
+    expect(
+      container.querySelector('[role="tab"] [data-artifact-icon="link"]'),
+    ).not.toBeNull();
+  });
+
+  it('marks overflowing panel tab titles for hover scrolling', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+
+    const tab = container.querySelector<HTMLElement>('[role="tab"]')!;
+    const title = tab.querySelector<HTMLElement>(
+      '[data-web-shell-session-title]',
+    )!;
+    Object.defineProperty(title, 'clientWidth', { value: 80 });
+    Object.defineProperty(title.firstElementChild, 'scrollWidth', {
+      value: 180,
+    });
+    act(() =>
+      tab.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+
+    expect(title.hasAttribute('data-web-shell-title-overflow')).toBe(true);
+    expect(
+      title.style.getPropertyValue('--session-title-scroll-distance'),
+    ).toBe('100px');
+  });
+
   it('fails closed when an artifact tab has no workspace owner', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: 'PRIMARY_WORKSPACE_SECRET',
@@ -621,6 +829,38 @@ describe('ArtifactPanel code review artifacts', () => {
     );
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('PRIMARY_WORKSPACE_SECRET');
+  });
+
+  it('renders a saved webpage version without a workspace owner', async () => {
+    mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+      '<h1>Saved version</h1>',
+    );
+    const artifact = {
+      ...linkArtifact(),
+      kind: 'html',
+      storage: 'published',
+      metadata: { artifactType: 'web_preview_snapshot' },
+    } as DaemonSessionArtifact;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    await act(async () => root.render(artifactPanel(artifact, null)));
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-saved-preview]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toContain(
+      'This workspace may have been removed',
+    );
+    expect(
+      container
+        .querySelector('iframe[title="Saved webpage version"]')
+        ?.getAttribute('srcdoc'),
+    ).toContain('Saved version');
   });
 
   it('fails closed when a file tab has no workspace owner', async () => {
@@ -704,7 +944,7 @@ describe('ArtifactPanel code review artifacts', () => {
     await flush();
 
     expect(
-      container.querySelector('[role="tab"] .lucide-file-text'),
+      container.querySelector('[role="tab"] [data-file-type-icon="md"]'),
     ).not.toBeNull();
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -771,9 +1011,56 @@ describe('ArtifactPanel code review artifacts', () => {
       ).click();
     });
     await flush();
-    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain(
+    expect(
+      new DOMParser()
+        .parseFromString(container.querySelector('iframe')!.srcdoc, 'text/html')
+        .querySelector('iframe')!.srcdoc,
+    ).toContain('<h1>Attachment page</h1>');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('keeps HTML source attachments in text mode without an executable preview', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:page.html',
+                kind: 'file',
+                title: 'page.html',
+                workspacePath: 'page.html',
+                attachmentId: 'page.html',
+                previewContent: '<h1>Attachment page</h1>',
+                previewMimeType: 'text/html',
+                previewOnly: true,
+                sourcePreview: true,
+              },
+            ]}
+            activeTabId="attachment:page.html"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('.cm-content')?.textContent).toContain(
       '<h1>Attachment page</h1>',
     );
+    expect(container.querySelector('button[aria-label="Preview"]')).toBeNull();
+    expect(container.querySelector('iframe')).toBeNull();
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
@@ -820,6 +1107,67 @@ describe('ArtifactPanel code review artifacts', () => {
     );
     expect(container.querySelector('.cm-content')).toBeNull();
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('downloads binary source attachments and releases their blob URL', async () => {
+    const revoke = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:source-binary'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revoke,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:report.xlsx',
+                kind: 'file',
+                title: 'report.xlsx',
+                workspacePath: 'report.xlsx',
+                previewData: new Blob(['PK'], {
+                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                }),
+                previewMimeType:
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewOnly: true,
+                sourcePreview: true,
+              },
+            ]}
+            activeTabId="attachment:report.xlsx"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Preview is not available for this file type.',
+    );
+    expect(container.querySelector('.cm-content')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    const download = container.querySelector<HTMLAnchorElement>(
+      'a[download="report.xlsx"]',
+    );
+    expect(download?.href).toBe('blob:source-binary');
+    act(() => root.render(null));
+    expect(revoke).toHaveBeenCalledWith('blob:source-binary');
   });
 
   it('opens PDF attachments in the browser PDF preview', async () => {
@@ -889,8 +1237,10 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.textContent).toContain('Authoritative verdict');
     expect(container.textContent).toContain('Verdict: Approve');
     expect(container.querySelector('.cm-editor')).toBeNull();
+    // The dedicated renderer reads the whole document, so it passes no window.
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       '.qwen/reviews/review.json',
+      undefined,
     );
   });
 
@@ -1106,6 +1456,7 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.textContent).not.toContain('Authoritative verdict');
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       '.qwen/reviews/review.json',
+      { maxBytes: 256 * 1024 },
     );
   });
 
@@ -2619,6 +2970,7 @@ describe('ArtifactPanel fullscreen toggle', () => {
     );
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle?.querySelector('.lucide-expand')).not.toBeNull();
     act(() => {
       toggle?.click();
     });
@@ -2637,6 +2989,7 @@ describe('ArtifactPanel fullscreen toggle', () => {
     );
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle?.querySelector('.lucide-shrink')).not.toBeNull();
   });
 
   it('omits the toggle when fullscreen is unsupported', () => {
@@ -2708,6 +3061,486 @@ describe('ArtifactPanel image preview tabs', () => {
 
 describe('ArtifactPanel workspace artifact previews', () => {
   it.each([
+    ['html', 'en', -1, false],
+    ['html', 'en', 0, false],
+    ['html', 'en', 1, false],
+    ['md', 'zh-CN', -1, false],
+    ['md', 'zh-CN', 0, false],
+    ['md', 'zh-CN', 1, false],
+    ['html', 'en', 1, true],
+    ['md', 'zh-CN', 1, true],
+  ] as const)(
+    'previews %s in %s at 1 MiB plus %i bytes (truncated: %s)',
+    async (extension, language, extraBytes, truncated) => {
+      const parseHtml = vi.spyOn(DOMParser.prototype, 'parseFromString');
+      const heading =
+        extension === 'html'
+          ? '<h1>Large document</h1>\n'
+          : '# Large document\n';
+      const paddingBytes =
+        1024 * 1024 + extraBytes - Buffer.byteLength(heading + '<!---->');
+      const content =
+        heading +
+        '<!--' +
+        '中'.repeat(Math.floor(paddingBytes / 3)) +
+        ' '.repeat(paddingBytes % 3) +
+        '-->';
+      mockWorkspaceActions.stat.mockResolvedValue({
+        type: 'file',
+        sizeBytes: Buffer.byteLength(content),
+        modifiedMs: 1,
+      });
+      mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+        content: truncated ? content.slice(0, 100) : content,
+        encoding: 'utf-8',
+        sizeBytes: Buffer.byteLength(content),
+        truncated,
+      });
+      if (truncated) {
+        vi.stubGlobal('Blob', NodeBlob);
+        const bytes = Buffer.from(content);
+        mockWorkspaceActions.readFileBytes.mockImplementation(
+          async (_path, { offset, maxBytes }) => {
+            const chunk = bytes.subarray(offset, offset + maxBytes);
+            return {
+              contentBase64: chunk.toString('base64'),
+              offset,
+              returnedBytes: chunk.length,
+              sizeBytes: bytes.length,
+            };
+          },
+        );
+      }
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          artifactPanel(
+            {
+              id: 'large-document',
+              kind: extension === 'html' ? 'html' : 'file',
+              storage: 'workspace',
+              source: 'tool',
+              status: 'available',
+              title: 'Large document',
+              workspacePath: `large.${extension}`,
+              retention: 'ephemeral',
+              clientRetained: false,
+              createdAt: '2026-09-16T00:00:00.000Z',
+              updatedAt: '2026-09-16T00:00:00.000Z',
+            },
+            undefined,
+            language,
+          ),
+        ),
+      );
+      await flush();
+      if (truncated)
+        expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(5);
+      if (extraBytes <= 0) {
+        expect(container.querySelector('.cm-editor')).toBeNull();
+        expect(
+          container.querySelector(extension === 'html' ? 'iframe' : 'h1'),
+        ).not.toBeNull();
+        return;
+      }
+      expect(container.querySelector('iframe, h1')).toBeNull();
+      expect(parseHtml).not.toHaveBeenCalled();
+      const editor = container.querySelector('.cm-editor')!;
+      expect(EditorView.findFromDOM(editor)?.state.doc.toString()).toBe(
+        content,
+      );
+      const toggle = Array.from(container.querySelectorAll('button')).find(
+        (button) =>
+          button.textContent ===
+          (language === 'en' ? 'Render full preview' : '完整排版预览'),
+      )!;
+      expect(container.textContent).toContain(
+        language === 'en'
+          ? 'File is large. Source is shown by default.'
+          : '文件过大，默认展示源码。',
+      );
+      expect(toggle).toBeTruthy();
+      act(() => toggle.click());
+      await flush();
+      expect(
+        container.querySelector(extension === 'html' ? 'iframe' : 'h1'),
+      ).not.toBeNull();
+      if (extension === 'md') {
+        expect(container.querySelector('iframe')).toBeNull();
+      }
+      expect(container.querySelector('.cm-editor')).toBeNull();
+      act(() => toggle.click());
+      await flush();
+      expect(
+        EditorView.findFromDOM(
+          container.querySelector('.cm-editor')!,
+        )?.state.doc.toString(),
+      ).toBe(content);
+    },
+  );
+
+  it('restores the DOMParser spy after the boundary matrix', () => {
+    expect(vi.isMockFunction(DOMParser.prototype.parseFromString)).toBe(false);
+  });
+
+  it('localizes the export preview loading placeholder', async () => {
+    vi.stubGlobal('__WEB_SHELL_VERSION__', '0.23.4');
+    const base = 'https://unpkg.com/@qwen-code/qwen-code@0.23.4/';
+    const integrity = `sha384-${'a'.repeat(64)}`;
+    const content = `<script id="transcript-document" type="application/json">{}</script><script id="transcript-renderer" integrity="${integrity}" src="${base}export-transcript-document.js"></script><link id="transcript-stylesheet" rel="stylesheet" integrity="${integrity}" href="${base}export-transcript-document.css">`;
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: content.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content,
+      encoding: 'utf-8',
+      truncated: false,
+    });
+    // The renderer fetch never settles, so the placeholder stays on screen.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise(() => {})),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel(
+          {
+            id: 'export-preview',
+            kind: 'html',
+            storage: 'workspace',
+            source: 'client',
+            status: 'available',
+            title: 'export.html',
+            workspacePath: 'export.html',
+            mimeType: 'text/html; charset=utf-8',
+            clientRetained: false,
+            createdAt: '2026-09-16T00:00:00.000Z',
+            updatedAt: '2026-09-16T00:00:00.000Z',
+          },
+          undefined,
+          'zh-CN',
+        ),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('正在加载预览...');
+    expect(container.textContent).not.toContain('Loading preview...');
+  });
+
+  it('surfaces a failed export preview instead of loading forever', async () => {
+    vi.stubGlobal('__WEB_SHELL_VERSION__', '0.23.4');
+    const base = 'https://unpkg.com/@qwen-code/qwen-code@0.23.4/';
+    const integrity = `sha384-${'a'.repeat(64)}`;
+    const content = `<script id="transcript-document" type="application/json">{}</script><script id="transcript-renderer" integrity="${integrity}" src="${base}export-transcript-document.js"></script><link id="transcript-stylesheet" rel="stylesheet" integrity="${integrity}" href="${base}export-transcript-document.css">`;
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: content.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content,
+      encoding: 'utf-8',
+      truncated: false,
+    });
+    // An SRI mismatch rejects the renderer fetch; the panel must surface that
+    // failure rather than leaving the placeholder up forever.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new TypeError('Integrity mismatch')),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'export-preview',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'export.html',
+          workspacePath: 'export.html',
+          mimeType: 'text/html; charset=utf-8',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flushPreview();
+
+    expect(container.textContent).toContain(
+      'Could not load preview: Integrity mismatch',
+    );
+    expect(container.textContent).not.toContain('Loading preview...');
+  });
+
+  it('reuses the built export preview when toggling between source and rendered views', async () => {
+    vi.stubGlobal('__WEB_SHELL_VERSION__', '0.23.4');
+    const base = 'https://unpkg.com/@qwen-code/qwen-code@0.23.4/';
+    const integrity = `sha384-${'a'.repeat(64)}`;
+    const padding = 'x'.repeat(1024 * 1024 + 512);
+    const content = `<script id="transcript-document" type="application/json">{"padding":"${padding}"}</script><script id="transcript-renderer" integrity="${integrity}" src="${base}export-transcript-document.js"></script><link id="transcript-stylesheet" rel="stylesheet" integrity="${integrity}" href="${base}export-transcript-document.css">`;
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: Buffer.byteLength(content),
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content,
+      encoding: 'utf-8',
+      truncated: false,
+    });
+    const fetchMock = vi.fn(async () => new Response('verified bytes'));
+    vi.stubGlobal('fetch', fetchMock);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'export-preview-toggle',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'export-toggle.html',
+          workspacePath: 'export-toggle.html',
+          mimeType: 'text/html; charset=utf-8',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flushPreview();
+
+    const clickToggle = (label: string) => {
+      const button = Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent === label,
+      );
+      expect(button?.textContent).toBe(label);
+      act(() => button!.click());
+    };
+    // Large documents open in source view; nothing is fetched until the user
+    // asks for the rendered preview.
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    clickToggle('Render full preview');
+    await flushPreview();
+    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    clickToggle('Show source');
+    await flushPreview();
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+
+    clickToggle('Render full preview');
+    await flushPreview();
+    expect(container.querySelector('iframe')).not.toBeNull();
+    // The remount must not re-fetch and re-encode the renderer assets.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('gates a large preview without copying the content into a Blob when no size is known', async () => {
+    const content = `<h1>Large document</h1>\n<!--${'中'.repeat(400_000)}-->`;
+    // The stat never resolves, so neither the reader's sizeBytes nor a
+    // catalog size is available: the 1 MiB gate must measure the seeded
+    // preview content without allocating a Blob copy of it.
+    mockWorkspaceActions.stat.mockReturnValue(new Promise(() => {}));
+    const blobSpy = vi.fn();
+    const OriginalBlob = globalThis.Blob;
+    vi.stubGlobal(
+      'Blob',
+      class extends OriginalBlob {
+        constructor(...args: ConstructorParameters<typeof Blob>) {
+          blobSpy(...args);
+          super(...args);
+        }
+      },
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[
+              {
+                id: 'large-export',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'client',
+                status: 'available',
+                title: 'large-export.html',
+                workspacePath: 'large-export.html',
+                mimeType: 'text/html; charset=utf-8',
+                retention: 'ephemeral',
+                clientRetained: false,
+                createdAt: '2026-09-16T00:00:00.000Z',
+                updatedAt: '2026-09-16T00:00:00.000Z',
+              },
+            ]}
+            tabs={[
+              {
+                id: 'artifact:large-export',
+                kind: 'artifact',
+                title: 'large-export.html',
+                artifactId: 'large-export',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+                previewContent: content,
+              },
+            ]}
+            activeTabId="artifact:large-export"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    // The gate decided from the seeded content alone: source view first.
+    expect(container.textContent).toContain(
+      'File is large. Source is shown by default.',
+    );
+    expect(
+      blobSpy.mock.calls.some(
+        ([parts]) => Array.isArray(parts) && parts.includes(content),
+      ),
+    ).toBe(false);
+  });
+
+  it('uses the catalog sizeBytes for the large-document gate before the file is read', async () => {
+    const content = '<h1>Small export</h1>';
+    // The stat never resolves, so only the catalog sizeBytes threaded from
+    // the artifact detail can drive the 1 MiB gate.
+    mockWorkspaceActions.stat.mockReturnValue(new Promise(() => {}));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[
+              {
+                id: 'catalog-sized-export',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'client',
+                status: 'available',
+                title: 'catalog-sized.html',
+                workspacePath: 'catalog-sized.html',
+                mimeType: 'text/html; charset=utf-8',
+                sizeBytes: 2 * 1024 * 1024,
+                retention: 'ephemeral',
+                clientRetained: false,
+                createdAt: '2026-09-16T00:00:00.000Z',
+                updatedAt: '2026-09-16T00:00:00.000Z',
+              },
+            ]}
+            tabs={[
+              {
+                id: 'artifact:catalog-sized-export',
+                kind: 'artifact',
+                title: 'catalog-sized.html',
+                artifactId: 'catalog-sized-export',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+                previewContent: content,
+              },
+            ]}
+            activeTabId="artifact:catalog-sized-export"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    // Tiny content, large catalog size: the gate proves the threaded
+    // sizeBytes won over measuring the content.
+    expect(container.textContent).toContain(
+      'File is large. Source is shown by default.',
+    );
+  });
+
+  it('reads a secondary-workspace file through the capped preview window', async () => {
+    mockSecondaryWorkspaceActions.fileStat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 2,
+      modifiedMs: 1,
+    });
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: '{}',
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel(
+          {
+            id: 'secondary-file',
+            kind: 'file',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'report.json',
+            workspacePath: 'report.json',
+            retention: 'ephemeral',
+            clientRetained: false,
+            createdAt: '2026-09-16T00:00:00.000Z',
+            updatedAt: '2026-09-16T00:00:00.000Z',
+          },
+          { workspaceCwd: '/secondary', workspaceId: 'secondary-id' },
+        ),
+      ),
+    );
+    await flush();
+
+    expect(
+      mockSecondaryWorkspaceActions.readWorkspaceFile,
+    ).toHaveBeenCalledWith('report.json', { maxBytes: 256 * 1024 });
+  });
+
+  it.each([
     {
       label: 'Markdown',
       mimeType: 'text/markdown; charset=utf-8',
@@ -2755,6 +3588,7 @@ describe('ArtifactPanel workspace artifact previews', () => {
 
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       'reports/preview',
+      { maxBytes: 256 * 1024 },
     );
     if (testCase.label === 'Markdown') {
       expect(container.querySelector('h1')?.textContent).toBe(
@@ -2762,9 +3596,162 @@ describe('ArtifactPanel workspace artifact previews', () => {
       );
     } else {
       expect(
-        container.querySelector('iframe')?.getAttribute('srcdoc'),
+        new DOMParser()
+          .parseFromString(
+            container.querySelector('iframe')!.srcdoc,
+            'text/html',
+          )
+          .querySelector('iframe')!.srcdoc,
       ).toContain(testCase.content);
     }
+  });
+
+  it('loads the complete bytes when a text read is truncated without a cursor', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    const content =
+      '# Exported session\n\n' + '中'.repeat(100_000) + '\n\n## Later turn';
+    const bytes = Buffer.from(content);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: bytes.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: content.slice(0, 100),
+      encoding: 'utf-8',
+      truncated: true,
+      hasMore: true,
+      nextCursor: null,
+    });
+    mockWorkspaceActions.readFileBytes.mockImplementation(
+      async (_path, { offset, maxBytes }) => {
+        const chunk = bytes.subarray(offset, offset + maxBytes);
+        return {
+          contentBase64: chunk.toString('base64'),
+          offset,
+          returnedBytes: chunk.length,
+          sizeBytes: bytes.length,
+        };
+      },
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'file',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          workspacePath: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          mimeType: 'text/markdown; charset=utf-8',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenNthCalledWith(
+      1,
+      'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+      { maxBytes: 256 * 1024 },
+    );
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Exported session');
+    expect(container.textContent).toContain('Later turn');
+    expect(container.textContent).not.toContain(
+      'Preview is truncated because the file is too large.',
+    );
+  });
+
+  it.each(['html', 'md', 'txt'])(
+    'stops showing loading when a %s file read fails',
+    async (extension) => {
+      mockWorkspaceActions.stat.mockResolvedValue({
+        type: 'file',
+        sizeBytes: 200,
+        modifiedMs: 1,
+      });
+      mockWorkspaceActions.readWorkspaceFile.mockRejectedValue(
+        new Error('File changed while loading.'),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          artifactPanel({
+            id: 'failed-preview',
+            kind: extension === 'html' ? 'html' : 'file',
+            storage: 'workspace',
+            source: 'client',
+            status: 'available',
+            title: `failed.${extension}`,
+            workspacePath: `failed.${extension}`,
+            clientRetained: false,
+            createdAt: '2026-09-16',
+            updatedAt: '2026-09-16',
+          }),
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain('File changed while loading.');
+      expect(container.textContent).not.toMatch(/Loading (?:preview|file)/);
+      expect(container.querySelector('iframe, .cm-editor')).toBeNull();
+    },
+  );
+
+  it('rejects a full preview above the existing download size ceiling', async () => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 200 * 1024 * 1024,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockImplementation(async () => ({
+      content: 'x',
+      truncated: true,
+      hasMore: true,
+      nextCursor: null,
+      returnedBytes: 256 * 1024,
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'file',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          workspacePath: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          mimeType: 'text/markdown; charset=utf-8',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'File is too large to preview or download.',
+    );
+    expect(container.textContent).not.toMatch(/Loading (?:preview|file)/);
   });
 
   it('renders a document artifact as download-only and does not preview it', async () => {

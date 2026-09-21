@@ -5,7 +5,6 @@
  */
 
 import { spawn } from 'node:child_process';
-import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
 import { CLIENT_METHODS, type AnyMessage } from '@agentclientprotocol/sdk';
@@ -35,10 +34,12 @@ import {
   validateNdJsonStreamLimits,
 } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
+import { AcpChildCapacityExceededError } from './bridgeErrors.js';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
 import type { ChildHeapPolicy } from './child-heap-policy.js';
 import { estimateJsonStringBytes } from './json-string-bytes.js';
+import { detectAvailableMemoryMb } from './daemon-memory-budget.js';
 
 let cachedMemoryArgs: string[] | undefined;
 export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
@@ -319,14 +320,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
-  const constrainedMemory = (process as { constrainedMemory?: () => number })
-    .constrainedMemory;
-  const constrained =
-    typeof constrainedMemory === 'function' ? constrainedMemory() : 0;
-  const totalBytes =
-    constrained && constrained > 0 ? constrained : os.totalmem();
-  const totalMB = Math.floor(totalBytes / (1024 * 1024));
-  const targetMB = Math.min(Math.floor(totalMB * 0.5), 16_384);
+  const { memoryMb } = detectAvailableMemoryMb();
+  const targetMB = Math.min(Math.floor(memoryMb * 0.5), 16_384);
   const currentLimitMB = Math.floor(
     getHeapStatistics().heap_size_limit / (1024 * 1024),
   );
@@ -421,6 +416,7 @@ export interface SpawnChannelFactoryOptions {
    * direct-embed), which keeps the host-derived ceiling.
    */
   childHeapPolicy?: ChildHeapPolicy;
+  reclaimIdleChild?: (signal?: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -436,11 +432,20 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
+  if (
+    !options.processRegistry &&
+    options.childHeapPolicy?.snapshot().mode === 'admit'
+  ) {
+    throw new TypeError(
+      'ACP admission requires an explicit shared process registry.',
+    );
+  }
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
   const factory: ChannelFactory = async (
     workspaceCwd,
     childEnvOverrides,
     signal,
+    startup,
   ) => {
     if (signal?.aborted) {
       throw signal.reason instanceof Error
@@ -468,7 +473,7 @@ export function createSpawnChannelFactory(
     // Reserve BEFORE deciding: the reservation is what makes this spawn
     // visible to any other spawn racing it, so the count below includes this
     // child and two concurrent spawns cannot both be told they are alone.
-    const reservation = processRegistry.reserve();
+    let reservation = processRegistry.reserve();
     let child;
     // Everything between `reserve()` and `attach()` belongs inside this try.
     // `childHeapPolicy` is a public `createSpawnChannelFactory` option, so an
@@ -476,10 +481,58 @@ export function createSpawnChannelFactory(
     // reject the spawn while leaving the reservation held forever, inflating
     // `committedProcessCount` for every later spawn.
     try {
-      // Observation only: the policy is asked what it *would* decide so the
-      // refusal count is real, but nothing here acts on the answer — no
-      // derived ceiling reaches the child and no spawn is refused.
-      options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
+      let decision = options.childHeapPolicy?.decide(
+        processRegistry.committedProcessCount,
+      );
+      if (
+        decision?.refuse &&
+        options.childHeapPolicy?.snapshot().mode === 'admit' &&
+        options.reclaimIdleChild
+      ) {
+        reservation.cancel();
+        if (startup) {
+          startup.getTimeoutError = () =>
+            new AcpChildCapacityExceededError(
+              options.childHeapPolicy!.snapshot().maxConcurrentChildren!,
+              processRegistry.committedProcessCount,
+            );
+        }
+        try {
+          await options.reclaimIdleChild(signal);
+        } catch (error) {
+          options.onDiagnosticLine?.(
+            `Idle ACP reclamation failed: ${String(error)}`,
+            'warn',
+          );
+        } finally {
+          if (startup) delete startup.getTimeoutError;
+        }
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error('ACP channel spawn was aborted');
+        }
+        const limit = options.childHeapPolicy.snapshot().maxConcurrentChildren!;
+        if (processRegistry.committedProcessCount >= limit) {
+          throw new AcpChildCapacityExceededError(
+            limit,
+            processRegistry.committedProcessCount,
+          );
+        }
+        reservation = processRegistry.reserve();
+        decision = options.childHeapPolicy.decide(
+          processRegistry.committedProcessCount,
+        );
+      }
+      if (decision?.refuse) {
+        const policy = options.childHeapPolicy!.snapshot();
+        if (policy.mode === 'admit') {
+          throw new AcpChildCapacityExceededError(
+            policy.maxConcurrentChildren!,
+            processRegistry.committedProcessCount - 1,
+          );
+        }
+      }
       const memoryArgs = getAcpMemoryArgs();
       child = spawn(
         process.execPath,
@@ -628,6 +681,7 @@ export function createSpawnChannelFactory(
       kill: () => trackedChild.terminate(),
       killSync: () => trackedChild.killSync(),
       exited: trackedChild.exited,
+      registryReleased: trackedChild.registryReleased,
     };
   };
   markChannelFactoryForwardsChildEnv(factory);

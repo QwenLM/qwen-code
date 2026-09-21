@@ -7,7 +7,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
 
-const envMock = vi.hoisted(() => ({ language: 'en' }));
+const envMock = vi.hoisted(() => ({
+  language: 'en',
+  remoteName: undefined as string | undefined,
+}));
 
 vi.mock('vscode', () => ({
   env: envMock,
@@ -41,6 +44,7 @@ describe('WebViewContent', () => {
 
   beforeEach(() => {
     envMock.language = 'en';
+    envMock.remoteName = undefined;
   });
 
   it('generates HTML when given a raw Webview', () => {
@@ -100,6 +104,25 @@ describe('WebViewContent', () => {
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).toContain('font-src data:;');
+  });
+
+  it('limits connect-src to the loopback in a local window', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('connect-src http://127.0.0.1:* ws://127.0.0.1:*;');
+  });
+
+  it('grants the tunnelled localhost origins in a remote window', () => {
+    envMock.remoteName = 'ssh-remote';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    // The loopback pair stays alongside the tunnelled one: the extension host
+    // is still co-located with the daemon.
+    expect(html).toContain(
+      'connect-src http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*;',
+    );
   });
 
   it('fills the VS Code webview without inherited body padding', () => {

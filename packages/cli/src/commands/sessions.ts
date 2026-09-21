@@ -5,6 +5,7 @@
  */
 
 import type { CommandModule, Argv } from 'yargs';
+import { controllersCommand } from './sessions/controllers.js';
 import { listCommand } from './sessions/list.js';
 import { psCommand } from './sessions/ps.js';
 
@@ -15,6 +16,7 @@ export const sessionsCommand: CommandModule = {
     yargs
       .command(listCommand)
       .command(psCommand)
+      .command(controllersCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   // demandCommand(1) ensures a subcommand is always required;

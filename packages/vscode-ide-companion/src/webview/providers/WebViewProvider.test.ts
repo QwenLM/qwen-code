@@ -14,7 +14,6 @@ const {
   mockConfigUpdate,
   mockGetGlobalTempDir,
   mockGetPanel,
-  mockMessageHandlerInstances,
   mockOnDidChangeConfiguration,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
@@ -30,13 +29,12 @@ const {
   endTurnCallbackRef,
   streamChunkCallbackRef,
   transcriptUpdateCallbackRef,
-  toolCallCallbackRef,
-  permissionRequestCallbackRef,
-  askUserQuestionCallbackRef,
   mockShowInformationMessage,
   mockWindowState,
   mockQwenAgentManagerInstances,
   mockClipboardWriteText,
+  mockEnvRemoteName,
+  mockAsExternalUri,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
     (event: { affectsConfiguration: (section: string) => boolean }) => unknown
@@ -53,12 +51,6 @@ const {
   mockGetPanel: vi.fn<() => { webview: { postMessage: unknown } } | null>(
     () => null,
   ),
-  mockMessageHandlerInstances: [] as Array<{
-    permissionHandler?: (message: {
-      type: string;
-      data: { optionId?: string };
-    }) => void;
-  }>,
   mockOnDidChangeConfiguration: vi.fn(
     (
       handler: (event: {
@@ -110,29 +102,18 @@ const {
       | ((notification: Record<string, unknown>) => void)
       | undefined,
   },
-  toolCallCallbackRef: {
-    current: undefined as
-      | ((update: Record<string, unknown>) => void)
-      | undefined,
-  },
-  permissionRequestCallbackRef: {
-    current: undefined as ((request: unknown) => Promise<string>) | undefined,
-  },
-  askUserQuestionCallbackRef: {
-    current: undefined as
-      | ((request: unknown) => Promise<{ optionId: string }>)
-      | undefined,
-  },
   mockShowInformationMessage: vi.fn<
     (message: string, ...items: string[]) => Thenable<string | undefined>
   >(() => Promise.resolve(undefined)),
   mockWindowState: { focused: true },
   mockQwenAgentManagerInstances: [] as Array<{
-    permissionRequestCallback?: (request: unknown) => Promise<string>;
-    cancelCurrentPrompt: ReturnType<typeof vi.fn>;
     disconnect: ReturnType<typeof vi.fn>;
   }>,
   mockClipboardWriteText: vi.fn(),
+  // `vscode.env.remoteName` is undefined in a local window and a string
+  // ('ssh-remote', 'dev-container', 'wsl', ...) in a remote one.
+  mockEnvRemoteName: { current: undefined as string | undefined },
+  mockAsExternalUri: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -219,8 +200,13 @@ vi.mock('vscode', () => ({
       fsPath: `${base.fsPath ?? ''}/${parts.join('/')}`.replace(/\/+/g, '/'),
     })),
     file: vi.fn((filePath: string) => ({ fsPath: filePath })),
+    parse: vi.fn((value: string) => ({ toString: () => value })),
   },
   env: {
+    get remoteName() {
+      return mockEnvRemoteName.current;
+    },
+    asExternalUri: mockAsExternalUri,
     openExternal: mockOpenExternal,
     clipboard: {
       writeText: mockClipboardWriteText,
@@ -246,7 +232,10 @@ vi.mock('vscode', () => ({
   },
 }));
 
-vi.mock('../../services/settingsWriter.js', () => ({
+vi.mock('../../services/settingsWriter.js', async (importOriginal) => ({
+  resolveProviderSettings: (
+    await importOriginal<typeof import('../../services/settingsWriter.js')>()
+  ).resolveProviderSettings,
   writeCodingPlanConfig: mockWriteCodingPlanConfig,
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
@@ -299,36 +288,27 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onEndTurn = vi.fn((cb: (reason?: string, source?: string) => void) => {
       endTurnCallbackRef.current = cb;
     });
-    onToolCall = vi.fn(
-      (callback: (update: Record<string, unknown>) => void) => {
-        toolCallCallbackRef.current = callback;
-      },
-    );
+    onToolCall = vi.fn();
     onPlan = vi.fn();
-    onPermissionRequest = vi.fn(
-      (callback: (request: unknown) => Promise<string>) => {
-        this.permissionRequestCallback = callback;
-        permissionRequestCallbackRef.current = callback;
-      },
-    );
-    onAskUserQuestion = vi.fn(
-      (callback: (request: unknown) => Promise<{ optionId: string }>) => {
-        askUserQuestionCallbackRef.current = callback;
-      },
-    );
     onTranscriptUpdate = vi.fn(
       (callback: (notification: Record<string, unknown>) => void) => {
         transcriptUpdateCallbackRef.current = callback;
       },
     );
     onDisconnected = vi.fn();
-    permissionRequestCallback?: (request: unknown) => Promise<string>;
-    cancelCurrentPrompt = vi.fn();
     disconnect = vi.fn();
     constructor() {
       mockQwenAgentManagerInstances.push(this);
     }
   },
+}));
+
+const conversationStoreMocks = vi.hoisted(() => ({
+  getAllConversations: vi.fn(
+    async (): Promise<
+      Array<{ id: string; title: string; messages: unknown[] }>
+    > => [],
+  ),
 }));
 
 vi.mock('../../services/conversationStore.js', () => ({
@@ -340,6 +320,7 @@ vi.mock('../../services/conversationStore.js', () => ({
     });
     addMessage = vi.fn().mockResolvedValue(undefined);
     getCurrentConversationId = vi.fn(() => null);
+    getAllConversations = conversationStoreMocks.getAllConversations;
   },
 }));
 
@@ -361,30 +342,7 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
 
 vi.mock('./MessageHandler.js', () => ({
   MessageHandler: class {
-    constructor(
-      _agentManager: unknown,
-      _conversationStore: unknown,
-      _currentConversationId: string | null,
-      _sendToWebView: (message: unknown) => void,
-    ) {
-      mockMessageHandlerInstances.push(this);
-    }
     setAuthInteractiveHandler = vi.fn();
-    permissionHandler?: (message: {
-      type: string;
-      data: { optionId?: string };
-    }) => void;
-    setPermissionHandler = vi.fn(
-      (
-        handler: (message: {
-          type: string;
-          data: { optionId?: string };
-        }) => void,
-      ) => {
-        this.permissionHandler = handler;
-      },
-    );
-    setAskUserQuestionHandler = vi.fn();
     setCurrentConversationId = vi.fn();
     getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
@@ -437,7 +395,14 @@ import {
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
 import { logger } from '../../utils/logger.js';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -544,20 +509,18 @@ beforeEach(() => {
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
   transcriptUpdateCallbackRef.current = undefined;
-  toolCallCallbackRef.current = undefined;
-  permissionRequestCallbackRef.current = undefined;
-  askUserQuestionCallbackRef.current = undefined;
   mockWindowState.focused = true;
   mockShowInformationMessage.mockReset();
   mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
   mockClipboardWriteText.mockReset();
   mockClipboardWriteText.mockResolvedValue(undefined);
+  mockEnvRemoteName.current = undefined;
+  mockAsExternalUri.mockReset();
 });
 
 describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
     mockConfigGet.mockImplementation(
@@ -919,153 +882,6 @@ describe('WebViewProvider.attachToView', () => {
     expect(panelPostMessage).not.toHaveBeenCalled();
   });
 
-  it('marks rejected switch_mode permission requests as failed without cancelling the session', async () => {
-    const postMessage = vi.fn();
-    const webview = {
-      options: undefined as unknown,
-      html: '',
-      postMessage,
-      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-        toString: () => `webview:${uri.fsPath}`,
-      })),
-      onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })),
-    };
-
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-
-    await provider.attachToView(
-      {
-        webview,
-        visible: true,
-        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
-      } as never,
-      'qwen-code.chatView.sidebar',
-    );
-
-    const agentManager = mockQwenAgentManagerInstances.at(-1);
-    const messageHandler = mockMessageHandlerInstances.at(-1);
-
-    expect(agentManager?.permissionRequestCallback).toBeTypeOf('function');
-
-    const permissionPromise = agentManager?.permissionRequestCallback?.({
-      options: [
-        {
-          optionId: 'proceed_once',
-          name: 'Yes',
-          kind: 'allow_once',
-        },
-        {
-          optionId: 'cancel',
-          name: 'No, keep planning (esc)',
-          kind: 'reject_once',
-        },
-      ],
-      toolCall: {
-        toolCallId: 'tool-call-1',
-        title: 'Would you like to proceed?',
-        kind: 'switch_mode',
-        status: 'pending',
-      },
-    });
-
-    expect(messageHandler?.permissionHandler).toBeTypeOf('function');
-
-    messageHandler?.permissionHandler?.({
-      type: 'permissionResponse',
-      data: { optionId: 'cancel' },
-    });
-
-    await expect(permissionPromise).resolves.toBe('cancel');
-    expect(agentManager?.cancelCurrentPrompt).not.toHaveBeenCalled();
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'streamEnd',
-      }),
-    );
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'toolCall',
-      data: expect.objectContaining({
-        type: 'tool_call_update',
-        toolCallId: 'tool-call-1',
-        kind: 'switch_mode',
-        status: 'failed',
-      }),
-    });
-  });
-
-  it('settles a matching pending permission when the tool call becomes terminal', async () => {
-    const { postMessage } = await setupAttachedProvider();
-    const agentManager = mockQwenAgentManagerInstances.at(-1);
-    const permissionPromise = agentManager?.permissionRequestCallback?.({
-      options: [
-        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
-        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
-      ],
-      toolCall: {
-        toolCallId: 'tool-call-aborted',
-        title: 'Run command',
-        kind: 'execute',
-        status: 'pending',
-      },
-    });
-
-    toolCallCallbackRef.current?.({
-      sessionUpdate: 'tool_call_update',
-      toolCallId: 'tool-call-aborted',
-      status: 'failed',
-    });
-
-    await expect(permissionPromise).resolves.toBe('cancel');
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'permissionResolved',
-      data: { optionId: 'cancel' },
-    });
-  });
-
-  it('rejects one workflow approval without cancelling the parent prompt', async () => {
-    const { postMessage } = await setupAttachedProvider();
-    const agentManager = mockQwenAgentManagerInstances.at(-1);
-    const messageHandler = mockMessageHandlerInstances.at(-1);
-    const permissionPromise = agentManager?.permissionRequestCallback?.({
-      options: [
-        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
-        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
-      ],
-      toolCall: {
-        toolCallId: 'workflow-approval-1',
-        title: 'Run command',
-        kind: 'execute',
-        status: 'pending',
-        _meta: { workflowApproval: true },
-      },
-    });
-
-    messageHandler?.permissionHandler?.({
-      type: 'permissionResponse',
-      data: { optionId: 'cancel' },
-    });
-
-    await expect(permissionPromise).resolves.toBe('cancel');
-    await vi.waitFor(() => {
-      expect(postMessage).toHaveBeenCalledWith({
-        type: 'toolCall',
-        data: expect.objectContaining({
-          type: 'tool_call_update',
-          toolCallId: 'workflow-approval-1',
-          status: 'failed',
-        }),
-      });
-    });
-    expect(agentManager?.cancelCurrentPrompt).not.toHaveBeenCalled();
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'streamEnd' }),
-    );
-  });
-
   it('replays available skills to the webview after webviewReady', async () => {
     let messageHandler:
       | ((message: { type: string; data?: unknown }) => Promise<void>)
@@ -1207,7 +1023,6 @@ describe('WebViewProvider.attachToView', () => {
 describe('WebViewProvider transcript forwarding', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
   });
@@ -1748,80 +1563,6 @@ describe('Notification & dot indicator', () => {
     expect(mockShowInformationMessage).not.toHaveBeenCalled();
   });
 
-  it('shows blue dot and notification for permission requests when panel is not active', async () => {
-    const mockPanel = {
-      active: false,
-      visible: false,
-      webview: { postMessage: vi.fn() },
-      iconPath: undefined as unknown,
-    };
-    mockGetPanel.mockReturnValue(mockPanel as never);
-    mockWindowState.focused = false;
-
-    await setupAttachedProvider();
-
-    // Trigger permission request — don't await, it blocks on user response
-    void permissionRequestCallbackRef.current?.({
-      toolCall: { title: 'Bash' },
-      options: [],
-    });
-
-    // Blue dot
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-
-    // Notification with tool name
-    expect(mockShowInformationMessage).toHaveBeenCalledWith(
-      'Qwen Code: Needs your permission to use Bash.',
-      'Show',
-    );
-  });
-
-  it('blue dot takes priority over orange dot', async () => {
-    const mockPanel = {
-      active: false,
-      visible: false,
-      webview: { postMessage: vi.fn() },
-      iconPath: undefined as unknown,
-    };
-    mockGetPanel.mockReturnValue(mockPanel as never);
-    mockWindowState.focused = false;
-
-    await setupAttachedProvider();
-
-    // First: task completes, orange dot
-    streamChunkCallbackRef.current?.('chunk');
-    vi.advanceTimersByTime(25_000);
-    endTurnCallbackRef.current?.('end_turn');
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-orange.png'),
-      }),
-    );
-
-    // Then: permission request, should upgrade to blue
-    void permissionRequestCallbackRef.current?.({
-      toolCall: { title: 'Read' },
-      options: [],
-    });
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-
-    // Another endTurn should NOT downgrade back to orange
-    endTurnCallbackRef.current?.('end_turn');
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-  });
-
   it('does not send duplicate idle notifications for multi-turn tasks', async () => {
     const mockPanel = {
       active: false,
@@ -2018,37 +1759,6 @@ describe('Notification & dot indicator', () => {
       'Show',
     );
   });
-
-  it('shows blue dot and notification for askUserQuestion when panel is not active', async () => {
-    const mockPanel = {
-      active: false,
-      visible: false,
-      webview: { postMessage: vi.fn() },
-      iconPath: undefined as unknown,
-    };
-    mockGetPanel.mockReturnValue(mockPanel as never);
-    mockWindowState.focused = false;
-
-    await setupAttachedProvider();
-
-    // Trigger askUserQuestion — don't await, it blocks on user response
-    void askUserQuestionCallbackRef.current?.({
-      questions: [{ question: 'Which option?' }],
-    });
-
-    // Blue dot
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-
-    // Notification without tool name (generic message)
-    expect(mockShowInformationMessage).toHaveBeenCalledWith(
-      'Qwen Code: Waiting for your input.',
-      'Show',
-    );
-  });
 });
 
 describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
@@ -2085,6 +1795,211 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     ).sendMessageToWebView = vi.fn();
     return provider;
   }
+
+  it('keeps a first-time service save without claiming authentication or rolling it back', async () => {
+    const { minimaxProvider, resolveBaseUrl } = await import(
+      '@qwen-code/qwen-code-core'
+    );
+    const provider = makeProvider();
+    const initialize = vi.fn();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = initialize;
+    await provider['handleAuthInteractive'](minimaxProvider, {
+      baseUrl: resolveBaseUrl(minimaxProvider),
+      apiKey: 'test-image',
+      modelIds: ['image-01'],
+    });
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+    expect(
+      (
+        provider as unknown as {
+          sendMessageToWebView: ReturnType<typeof vi.fn>;
+        }
+      ).sendMessageToWebView,
+    ).toHaveBeenCalledExactlyOnceWith({
+      type: 'authState',
+      data: { authenticated: false },
+    });
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Service models saved. Configure a conversation model to start chatting.',
+    );
+  });
+
+  it('retains saved model fields when reconnecting through the extension', async () => {
+    const model = {
+      id: inputs.modelIds[0],
+      baseUrl: inputs.baseUrl,
+      envKey: 'DEEPSEEK_API_KEY',
+      name: '[DeepSeek] My tuned model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        customHeaders: { 'X-Route': '${ROUTE}' },
+      },
+    };
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: [model] },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](providerConfig, inputs);
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(
+      mockApplyProviderInstallPlanToFile.mock.calls[0][0].modelProviders[0]
+        .models,
+    ).toEqual([model]);
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'Responses-only reconnect',
+      sibling: false,
+      savedAuth: undefined,
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Responses beside Chat',
+      sibling: true,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Chat beside Responses',
+      sibling: true,
+      savedAuth: 'openai',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'new endpoint',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: true,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'explicit Chat choice',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: true,
+      expected: 'openai',
+    },
+  ])(
+    'preserves preset routes and selects the identified wire: $name',
+    async ({ sibling, savedAuth, otherEndpoint, explicitChat, expected }) => {
+      const model = {
+        id: inputs.modelIds[0],
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        name: '[DeepSeek] Tuned',
+        wireApi: 'responses',
+        generationConfig: { contextWindowSize: 32000 },
+      };
+      mockSnapshotSettingsForRollback.mockReturnValue({
+        modelProviders: {
+          openai: [
+            ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+            model,
+          ],
+        },
+        model: { name: model.id },
+        security: { auth: { selectedType: savedAuth } },
+      });
+      const provider = makeProvider();
+      (
+        provider as unknown as {
+          doInitializeAgentConnection: () => Promise<void>;
+        }
+      ).doInitializeAgentConnection = vi.fn(async () => {
+        (provider as unknown as { authState: boolean }).authState = true;
+      });
+      await provider['handleAuthInteractive'](providerConfig, {
+        ...inputs,
+        ...(otherEndpoint ? { baseUrl: 'https://another.example/v1' } : {}),
+        ...(explicitChat ? { wireApi: 'chat-completions' as const } : {}),
+      });
+      expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+      const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+      expect(plan.authType).toBe(expected);
+      if (!otherEndpoint && !explicitChat) {
+        expect(plan.modelProviders[0].models).toEqual([
+          ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+          model,
+        ]);
+      } else {
+        expect(plan.modelProviders[0].models).toHaveLength(1);
+        expect(plan.modelProviders[0].models[0]).toMatchObject({
+          id: model.id,
+          baseUrl: otherEndpoint
+            ? 'https://another.example/v1'
+            : inputs.baseUrl,
+          ...(explicitChat ? { wireApi: 'chat-completions' } : {}),
+        });
+        if (otherEndpoint) {
+          expect(plan.modelProviders[0].models[0].wireApi).toBeUndefined();
+        }
+      }
+    },
+  );
+
+  it('reconnects a mixed preset without changing either API or the selected model', async () => {
+    const models = [
+      {
+        id: 'deepseek-v4-pro',
+        name: '[DeepSeek] Pro',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+      },
+      {
+        id: 'deepseek-v4-flash',
+        name: '[DeepSeek] Flash',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        wireApi: 'responses',
+      },
+    ];
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: models },
+      model: { name: 'deepseek-v4-flash', baseUrl: inputs.baseUrl },
+      security: { auth: { selectedType: 'openai-responses' } },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](
+      { ...providerConfig, models: models.map(({ id }) => ({ id })) },
+      { ...inputs, modelIds: models.map(({ id }) => id) },
+    );
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+    expect(plan.modelProviders[0].models).toEqual(models);
+    expect(plan.authType).toBe('openai-responses');
+    expect(plan.modelSelection).toEqual({ modelId: 'deepseek-v4-flash' });
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
 
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
@@ -2284,11 +2199,56 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     };
   }
 
+  /**
+   * A view-host context whose Memento only answers the keys it is seeded with,
+   * and writes through — so a migration that retires an entry is observable.
+   */
+  function createSessionStateContext(entries: Record<string, unknown>) {
+    return {
+      subscriptions: [],
+      workspaceState: {
+        get: vi.fn((key: string) => entries[key]),
+        update: vi.fn((key: string, value: unknown) => {
+          if (value === undefined) {
+            delete entries[key];
+          } else {
+            entries[key] = value;
+          }
+          return Promise.resolve();
+        }),
+      },
+    };
+  }
+
+  const WEB_SHELL_SESSION_KEY_PREFIX = 'qwenCode.webShellSessionId:';
+
+  /** Run `body` against a folder reachable only through a symlink. */
+  async function withSymlinkedWorkspace<T>(
+    body: (paths: { alias: string; canonical: string }) => Promise<T>,
+  ): Promise<T> {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const target = path.join(root, 'workspace');
+    const alias = path.join(root, 'workspace-link');
+    mkdirSync(target);
+    symlinkSync(
+      target,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    try {
+      setWorkspaceFolders([alias]);
+      return await body({ alias, canonical: realpathSync.native(target) });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
+    conversationStoreMocks.getAllConversations.mockReset();
+    conversationStoreMocks.getAllConversations.mockResolvedValue([]);
     mockConfigGet.mockImplementation(
       (_key: string, defaultValue: unknown) => defaultValue,
     );
@@ -2300,6 +2260,223 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       },
       'initializeAgentConnection',
     ).mockResolvedValue(undefined);
+  });
+
+  it('canonicalizes a symlinked workspace before bootstrapping the daemon', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Seed a restorable id ONLY under the canonical key. The write side keys
+      // off the canonical payload, so a read still keyed off the raw alias
+      // would split the very identity this PR exists to unify.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'session-restored-1',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(daemonMocks.instances[0].boundCwd).toBe(canonical);
+      expect(context.workspaceState.get).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+      );
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            // Every `activeEditorChanged` sender posts VS Code's raw
+            // `uri.fsPath`, which keeps the alias spelling; the webview needs
+            // it to relativize the active file.
+            editorWorkspaceCwd: alias,
+            sessionId: 'session-restored-1',
+          }),
+        }),
+      );
+    });
+  });
+
+  it('persists and restores a terminal session without source sidecar state', async () => {
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    await setup.messageHandler?.({
+      type: 'webShellSessionChanged',
+      data: { sessionId: 'terminal-session', workspaceCwd: '/workspace-a' },
+    });
+    expect(
+      context.workspaceState.get(WEB_SHELL_SESSION_KEY_PREFIX + '/workspace-a'),
+    ).toBe('terminal-session');
+
+    const reloaded = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    await reloaded.messageHandler?.({ type: 'webShellReady' });
+    const bootstrap = reloaded.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: Record<string, unknown> },
+      )
+      .find((message) => message.type === 'webShellBootstrap');
+    expect(bootstrap?.data?.sessionId).toBe('terminal-session');
+    expect(bootstrap?.data).not.toHaveProperty('sessionHistorySource');
+    expect(
+      context.workspaceState.update.mock.calls.map(([key]) => key),
+    ).not.toContain(
+      'qwenCode.webShellSessionSource:/workspace-a:terminal-session',
+    );
+  });
+
+  it('restores a session id persisted under the pre-canonicalization key', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Someone who chatted in this folder before the state key was
+      // canonicalized has their id under the raw spelling. Without a legacy
+      // read the upgrade silently opens a fresh sidebar conversation.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            sessionId: 'pre-upgrade-session-id',
+          }),
+        }),
+      );
+
+      // Clearing the session posts `sessionId: undefined` against the
+      // canonical cwd, which deletes only the canonical key. Without the
+      // legacy entry being retired by the bootstrap above, the next bootstrap
+      // resurrects the id the user just cleared.
+      await setup.messageHandler?.({
+        type: 'webShellSessionChanged',
+        data: { sessionId: undefined, workspaceCwd: canonical },
+      });
+      setup.postMessage.mockClear();
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as {
+              type?: string;
+              data?: { sessionId?: string };
+            },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap).toBeDefined();
+      expect(secondBootstrap?.data?.sessionId).toBeUndefined();
+      expect(context.workspaceState.update).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`,
+        undefined,
+      );
+    });
+  });
+
+  it('keeps the binding when the bootstrap is interrupted before the echo', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // The canonical key's only other writer (`webShellSessionChanged`) runs
+      // after the shell attaches. Retiring the alias without moving the id
+      // first would lose the folder->session binding for good if the window
+      // reloads inside that window.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+      setup.postMessage.mockClear();
+      // No `webShellSessionChanged` in between: this is the interrupted path.
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap?.data?.sessionId).toBe('pre-upgrade-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('pre-upgrade-session-id');
+    });
+  });
+
+  it('does not let the alias id overwrite an existing canonical one', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // A user who opened the same folder under both spellings before
+      // upgrading has an entry under each. The canonical one is authoritative;
+      // the alias is retired without clobbering it.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'canonical-session-id',
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'alias-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const bootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(bootstrap?.data?.sessionId).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`),
+      ).toBeUndefined();
+    });
+  });
+
+  it('leaves the stored id alone when the folder is not symlinked', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const workspace = realpathSync.native(root);
+    try {
+      // Here the legacy and canonical keys are the same string, so a
+      // retirement that is not gated on an alias actually existing would
+      // delete the entry it just read.
+      setWorkspaceFolders([workspace]);
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`]: 'existing-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`,
+        ),
+      ).toBe('existing-session-id');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('surfaces the failure to an attached webview when another host switches the shared daemon workspace', async () => {
@@ -2410,12 +2587,133 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     );
     expect(firstErrors).toHaveLength(0);
   });
+
+  function bootstrapPayloads(postMessage: ReturnType<typeof vi.fn>) {
+    return postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: Record<string, unknown> },
+      )
+      .filter((message) => message.type === 'webShellBootstrap')
+      .map((message) => message.data);
+  }
+
+  it('hands the webview the tunnelled daemon URL in a remote window', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://localhost:52100',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    // The daemon binds the loopback of the machine hosting the extension
+    // process, but the shell renders on the client, where that address points
+    // at the client's own loopback. Only the forwarded URL is reachable.
+    const [bootstrap] = bootstrapPayloads(setup.postMessage);
+    expect(bootstrap?.baseUrl).toBe('http://localhost:52100');
+    expect(bootstrap?.token).toBe('token-1');
+    // The tunnel is resolved from the daemon's own loopback URL, which stays
+    // the source of truth for everything the host does with it.
+    const resolvedFrom = mockAsExternalUri.mock.calls[0]?.[0] as {
+      toString(): string;
+    };
+    expect(resolvedFrom.toString()).toBe('http://127.0.0.1:4101');
+  });
+
+  it('leaves the daemon URL untouched in a local window', async () => {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    const [bootstrap] = bootstrapPayloads(setup.postMessage);
+    expect(bootstrap?.baseUrl).toBe('http://127.0.0.1:4101');
+    expect(mockAsExternalUri).not.toHaveBeenCalled();
+  });
+
+  it('re-resolves the tunnel on every bootstrap instead of caching it', async () => {
+    mockEnvRemoteName.current = 'dev-container';
+    mockAsExternalUri
+      .mockResolvedValueOnce({ toString: () => 'http://localhost:52100' })
+      .mockResolvedValueOnce({ toString: () => 'http://localhost:52101' });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    // A restarted extension host forwards to a fresh client-side port, so a
+    // cached resolution would point every later panel at a dead one.
+    expect(
+      bootstrapPayloads(setup.postMessage).map((data) => data?.baseUrl),
+    ).toEqual(['http://localhost:52100', 'http://localhost:52101']);
+  });
+
+  it('refuses a resolution that is not a forwarded loopback address', async () => {
+    // A browser-based remote resolves to a relay origin. The bootstrap payload
+    // carries the daemon's bearer token, so it must not be handed to a webview
+    // pointed at a third-party host.
+    mockEnvRemoteName.current = 'codespaces';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'https://4101-space.app.github.dev',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: { message?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data?.message).toContain(
+      'not a forwarded loopback address',
+    );
+  });
+
+  it('refuses an IPv6 loopback that the webview CSP cannot express', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://[::1]:52100',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: { message?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data?.message).toContain(
+      'cannot connect to an IPv6 literal',
+    );
+  });
 });
 
 describe('WebViewProvider web-shell permission bridge', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
     mockConfigGet.mockImplementation(
@@ -2523,6 +2821,20 @@ describe('WebViewProvider web-shell permission bridge', () => {
     provider.respondToPendingPermission('allow');
 
     expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('relays a permission diff dismissal to the webview under requestId', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.notifyPermissionDiffClosed('req-1');
+
+    // The receiver in the webview reads data.requestId only and treats any
+    // other key as "not a dismissal", so the rename this wire invites has to
+    // be pinned here.
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'permissionDiffClosed',
+      data: { requestId: 'req-1' },
+    });
   });
 
   it('does not vote before permission ownership state arrives', async () => {

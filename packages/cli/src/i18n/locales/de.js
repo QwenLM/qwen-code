@@ -117,11 +117,10 @@ export default {
   'Search:': 'Suche:',
   'type to filter…': 'Tippen zum Filtern…',
   'No skills are currently available.': 'Derzeit sind keine Skills verfügbar.',
-  'All available skills are locked at a higher scope (see below).':
-    'Alle verfügbaren Skills sind in einer höheren Ebene gesperrt (siehe unten).',
   'No skills match the search.': 'Keine Skills passen zur Suche.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
+  'Locked by settings entries you cannot toggle here:':
+    'Gesperrt durch Einstellungseinträge, die hier nicht umgeschaltet werden können:',
+  '{{count}} locked not shown': '{{count}} gesperrte Skills nicht angezeigt',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',
@@ -409,6 +408,7 @@ export default {
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
   'Hide Tips': 'Tipps ausblenden',
+  'Show Tool Call Arguments': 'Tool-Aufrufargumente anzeigen',
   'Show Line Numbers in Code': 'Zeilennummern im Code anzeigen',
   'Show Citations': 'Quellenangaben anzeigen',
   'Custom Witty Phrases': 'Benutzerdefinierte Witzige Sprüche',
@@ -556,6 +556,10 @@ export default {
     'Diese Erweiterung wird folgende Fähigkeiten installieren:',
   'This extension will install the following subagents:':
     'Diese Erweiterung wird folgende Unteragenten installieren:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Diese Erweiterung wird folgende Workflows installieren (JavaScript-Skripte, die Unteragenten starten können):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Diese Workflow-Skripte wurden seit der installierten Version geändert: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation von "{{name}}" abgebrochen.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -724,6 +728,12 @@ export default {
   '{{count}} hooks configured': '{{count}} Hooks konfiguriert',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Dieses Menü ist schreibgeschützt. Um Hooks hinzuzufügen oder zu ändern, bearbeiten Sie settings.json direkt oder fragen Sie Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Öffnen Sie dieses Menü erneut, um Hook-Definitionen neu zu laden.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook-Steuerungsoptionen und HTTP-Sicherheitseinstellungen erfordern einen Neustart.',
+  'Failed to reload hook definitions: {{error}}':
+    'Hook-Definitionen konnten nicht neu geladen werden: {{error}}',
   'Enter to select · Esc to cancel': 'Enter zum Auswählen · Esc zum Abbrechen',
   // Hooks - Detail Step
   'Exit codes:': 'Exit-Codes:',
@@ -797,8 +807,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input, tool_use_id, error, error_type, is_interrupt und is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der Textprojektion der unterstützten interaktiven TUI).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der an einer unterstützten Übermittlungsgrenze erfassten Textprojektion).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':
@@ -1128,6 +1138,13 @@ export default {
   'Clear Authentication': 'Authentifizierung löschen',
   disabled: 'deaktiviert',
   enabled: 'aktiviert',
+  'disabled (bare mode)': 'deaktiviert (Bare-Modus)',
+  'disabled (safe mode)': 'deaktiviert (Sicherheitsmodus)',
+  'disabled (disableAllHooks)': 'deaktiviert (disableAllHooks)',
+  'disabled (folder not trusted)':
+    'deaktiviert (Ordner nicht vertrauenswürdig)',
+  'disabled (turned off for this session)':
+    'deaktiviert (für diese Sitzung ausgeschaltet)',
   'Server:': 'Server:',
   Reconnect: 'Neu verbinden',
   'View tools': 'Werkzeuge anzeigen',
@@ -1533,6 +1550,11 @@ export default {
   'No tasks currently running': 'Derzeit laufen keine Aufgaben',
   'No entry to show.': 'Kein Eintrag zum Anzeigen.',
   'needs approval': 'wartet auf Genehmigung',
+  'Large workflow': 'Großer Workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Großer Workflow: {{agents}} Agenten eingeplant (Warnschwelle {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Großer Workflow: ~{{tokens}} Ausgabe-Tokens erwartet (Warnschwelle {{cap}}).',
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
@@ -1843,6 +1865,9 @@ export default {
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
+  'Startup context': 'Startkontext',
+  Unattributed: 'Nicht zugeordnet',
+  'Cached prefix': 'Zwischengespeichertes Präfix',
   'Run /context detail for per-item breakdown.':
     'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
   active: 'aktiv',
@@ -2134,6 +2159,7 @@ export default {
 
   // === Same-as-English optimization ===
   'Agents:': 'Agenten:',
+  'Workflows:': 'Workflows:',
   Prompt: 'Eingabe',
   'Prompts:': 'Eingaben:',
   'Resources:': 'Ressourcen:',
@@ -2253,6 +2279,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

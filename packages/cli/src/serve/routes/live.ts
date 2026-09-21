@@ -12,7 +12,6 @@ import { ConversationRuntimeOwnershipError } from '../conversations/conversation
 
 export interface RegisterLiveRoutesDeps {
   coordinator: LiveHostCoordinator;
-  ensureRuntimeReady?: () => Promise<void>;
   mutate: (options?: { strict?: boolean }) => RequestHandler;
   persistShortcut?: (shortcut: string) => Promise<void>;
 }
@@ -43,8 +42,7 @@ export function registerLiveRoutes(
 
   app.post('/live/start', deps.mutate(), async (_req, res) => {
     try {
-      await deps.ensureRuntimeReady?.();
-      res.status(200).json(deps.coordinator.start('resume').status);
+      res.status(200).json(await deps.coordinator.requestStart('resume'));
     } catch (error) {
       if (sendUnavailable(res, error)) return;
       throw error;
@@ -53,8 +51,7 @@ export function registerLiveRoutes(
 
   app.post('/live/new', deps.mutate(), async (_req, res) => {
     try {
-      await deps.ensureRuntimeReady?.();
-      res.status(200).json(deps.coordinator.start('new').status);
+      res.status(200).json(await deps.coordinator.requestStart('new'));
     } catch (error) {
       if (sendUnavailable(res, error)) return;
       throw error;

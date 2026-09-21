@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect } from 'vitest';
-import { createEventMapper, renderResultDisplay } from './event-adapter.js';
+import {
+  createEventMapper,
+  renderResultDisplay,
+  toolResultEvent,
+} from './event-adapter.js';
 
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
@@ -52,7 +56,20 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       type: 'tool_call_request',
       value: { callId: 'c1', name: 'shell' },
     } as unknown as AnyEv);
-    expect(s[0].type).toBe('tool-start');
+    expect(s).toEqual([
+      { type: 'tool-start', id: 'c1', tool: 'shell', title: 'shell' },
+    ]);
+    // ink's `ui.showToolCallArgs` row reads the call's raw arguments, so they
+    // ride the stream right behind the card that opens.
+    expect(
+      map({
+        type: 'tool_call_request',
+        value: { callId: 'c2', name: 'shell', args: { command: 'ls -la' } },
+      } as unknown as AnyEv),
+    ).toEqual([
+      { type: 'tool-start', id: 'c2', tool: 'shell', title: 'shell' },
+      { type: 'tool-args', id: 'c2', args: '{"command":"ls -la"}' },
+    ]);
     expect(
       map({
         type: 'tool_call_response',
@@ -465,6 +482,20 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('maps goal_settlement_failed to a warning', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'goal_settlement_failed',
+        value: 'The approved Goal could not be started.',
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'warning',
+          text: 'The approved Goal could not be started.',
+        },
+      ]);
+    });
+
     it('maps user_prompt_submit_blocked to reason + original prompt', () => {
       const map = createEventMapper();
       const out = map({
@@ -604,7 +635,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
-    it('ignores the legacy active_goal projection (ink parity)', () => {
+    it('ignores an event type it does not know', () => {
       const map = createEventMapper();
       expect(
         map({
@@ -740,6 +771,16 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ).toBe('◌ [2] working');
     });
 
+    it('renders structured question answers as their display text', () => {
+      expect(
+        renderResultDisplay({
+          type: 'ask_user_question_answers',
+          text: 'Deploy where?\nStaging',
+          answers: [{ question: 'Deploy where?', answer: 'Staging' }],
+        }),
+      ).toBe('Deploy where?\nStaging');
+    });
+
     it('renders mcp_app with its fallbackText only', () => {
       expect(
         renderResultDisplay({
@@ -748,6 +789,44 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           fallbackText: 'app fallback',
         }),
       ).toBe('app fallback');
+    });
+  });
+
+  describe('toolResultEvent payload precedence', () => {
+    it('keeps a todo list structured instead of flattening it to JSON', () => {
+      const todos = [
+        { id: '1', content: 'write the design', status: 'completed' },
+        { id: '2', content: 'run the matrix', status: 'in_progress' },
+      ];
+      expect(toolResultEvent('c1', { type: 'todo_list', todos })).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: '',
+        todos,
+      });
+    });
+
+    it('falls back to the flattened text, and to no event at all', () => {
+      expect(toolResultEvent('c1', 'plain')).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: 'plain',
+      });
+      expect(toolResultEvent('c1', { type: 'task_list', message: 'y' })).toBe(
+        null,
+      );
+    });
+
+    it('rides the vision-bridge notice on whichever payload wins', () => {
+      expect(
+        toolResultEvent('c1', { type: 'todo_list', todos: [] }, 'bridged 2'),
+      ).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: '',
+        todos: [],
+        visionBridgeNotice: 'bridged 2',
+      });
     });
   });
 });
