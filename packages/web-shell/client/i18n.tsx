@@ -7695,15 +7695,25 @@ const ZH: Messages = {
     '在发布到 GitHub 的审查正文和内联评论中附加署名信息（模型名称和 CLI 版本）。',
   'settings.label.review.sandbox': '沙箱运行审查代码：审查',
   'settings.description.review.sandbox': '在沙箱环境中运行被审查的代码。',
+  'settings.option.review.sandbox.off': '关闭（直接运行被审查的代码）',
+  'settings.option.review.sandbox.auto': '自动（有可用容器时使用容器）',
+  'settings.option.review.sandbox.required': '必需（绝不不加沙箱地运行）',
   'settings.label.review.effort': '默认审查力度：审查',
   'settings.description.review.effort':
     '当未指定 --effort 且无项目记忆级别时，/review 的默认审查力度。',
+  'settings.option.review.effort.auto': '自动（PR 用 high，本地用 medium）',
+  'settings.option.review.effort.low': '低',
+  'settings.option.review.effort.medium': '中',
+  'settings.option.review.effort.high': '高',
   'settings.label.review.comment': '默认发布评论：审查',
   'settings.description.review.comment':
     '将每次 PR /review 视为传入了 --comment：审查发现会自动发布到拉取请求上。',
   'settings.label.review.severityFloor': '发布严重度下限：审查',
   'settings.description.review.severityFloor':
     '未指定 --severity-floor 时，PR /review 发布的最低严重级别。',
+  'settings.option.review.severityFloor.auto': '自动（第 6 轮起仅 Critical）',
+  'settings.option.review.severityFloor.critical': '仅 Critical（每轮）',
+  'settings.option.review.severityFloor.suggestion': 'Suggestion 与 Critical',
   'settings.label.review.reverseAuditRounds': '反向审计轮次上限：审查',
   'settings.description.review.reverseAuditRounds':
     '降低 /review 的反向审计轮次上限。',
@@ -7764,6 +7774,13 @@ const ZH: Messages = {
   'settings.label.tools.workflowSizeGuideline': '动态工作流规模',
   'settings.description.tools.workflowSizeGuideline':
     '模型编写的动态工作流的建议规模指导。',
+  'settings.option.tools.workflowSizeGuideline.small': '小型（5 个以内智能体）',
+  'settings.option.tools.workflowSizeGuideline.medium':
+    '中型（15 个以内智能体）',
+  'settings.option.tools.workflowSizeGuideline.large':
+    '大型（50 个以内智能体）',
+  'settings.option.tools.workflowSizeGuideline.unrestricted':
+    '不限制（无指导）',
   'settings.label.tools.workflowNameOnly': '仅命名工作流',
   'settings.description.tools.workflowNameOnly':
     '限制模型只能运行已命名的工作流。',
@@ -7771,6 +7788,8 @@ const ZH: Messages = {
   'settings.label.goals.modelProposed': '模型提议目标',
   'settings.description.goals.modelProposed':
     '控制 propose_goal 工具，允许模型为你提议一个会话目标供审批。',
+  'settings.option.goals.modelProposed.alwaysAsk': '始终询问',
+  'settings.option.goals.modelProposed.disabled': '禁用',
 
   'settings.label.experimental.cron': '启用 Cron/Loop 工具',
   'settings.description.experimental.cron':
