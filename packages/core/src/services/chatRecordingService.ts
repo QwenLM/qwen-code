@@ -2437,11 +2437,11 @@ export class ChatRecordingService {
         mutated,
         values: () => [
           ...toolResultPartDiagnosticValues(message),
-          ...(typeof outputDisplay === 'string'
+          ...(shellResultText(outputDisplay) !== undefined
             ? [
                 {
                   representation: 'display' as const,
-                  value: outputDisplay,
+                  value: shellResultText(outputDisplay)!,
                 },
               ]
             : []),

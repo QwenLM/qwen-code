@@ -4,11 +4,11 @@
 
 ## Scope
 
-Replace the Web Shell completed-result text parser with a versioned structured Shell result. Keep model-facing llmContent unchanged and keep the existing human display text for terminal consumers. Legacy records render verbatim. Background launch acknowledgments are not completed process results and retain their existing format. No streaming transport changes.
+Replace the Web Shell completed-result text parser with a versioned structured Shell result. Keep model-facing llmContent unchanged and keep the existing human display text for terminal consumers. Legacy records render verbatim. Background launch acknowledgments and early returns (including cancellation before execution) retain their existing string format. No streaming transport changes.
 
 ## Contract and flow
 
-Core produces a shell_result version 1 returnDisplay containing text, output (combined stdout/stderr), directory, exitCode, signal, pid, error, outcome, notices, truncated, and outputFiles. Outcome distinguishes completed, failed, cancelled and timed_out. Empty output is an empty string, without sentinels. Notices never become stdout. The scheduler and recording/replay retain the existing resultDisplay path; ACP exposes it as rawOutput. Web Shell validates the discriminator and fields, never parses text. Terminal and text-only consumers use text.
+Core produces a shell_result version 1 returnDisplay containing text, output (combined stdout/stderr), directory, exitCode, signal, pid, error, outcome, notices, truncated, and outputFiles. Outcome distinguishes completed, failed, cancelled and timed_out. Empty output is an empty string, without sentinels. Notices never become stdout. The scheduler and recording/replay retain the existing resultDisplay path; ACP exposes it as rawOutput. Web Shell validates the discriminator and fields, never parses text. Terminal and text-only consumers use text. The producer keeps its original human display text, including short failure messages. On non-timeout execution errors the scheduler replaces text with its final error message (including failure-hook context), matching the legacy error-display fallback; structured output remains the raw command output.
 
 ## Bounds and compatibility
 
@@ -18,6 +18,6 @@ Keep producer display text intact through PostToolUse; apply existing display co
 
 Check real producer success, nonzero exit, empty/literal output, timeout/cancellation, long-run notices, truncation, saved record replay, ACP byte bounds, terminal text, SDK preview/export and Web Shell rendering. Run scoped tests/build/typecheck and review the full diff. Existing repository build failures are reported separately.
 
-Shell outcome follows the existing exit-error policy: exit 1 from grep/rg/diff/test is a completed negative result, not an execution failure. Web Shell trusts the structured outcome and retains the numeric exit code in details. PostToolUse and PostToolBatch hooks keep string display fields through shared normalization; UI/history retain structured data. Running elapsed time is visible beside the status.
+Shell outcome follows the existing exit-error policy: exit 1 from grep/rg/diff/test is a completed negative result, not an execution failure. Web Shell trusts the structured outcome and retains the numeric exit code in details. PostToolUse and PostToolBatch hooks keep string display fields through shared normalization. Failed PostToolBatch calls already carried the scheduler error message before this change and continue to do so; UI/history retain structured data. Running elapsed time is visible beside the status.
 
 Exported version 1 documents without structured metadata render the complete text fallback without the live categorized card. The directory field is the resolved execution directory. Signal termination, cancellation and timeout do not display a potentially synthetic exit code. Container cleanup failures append a notice to compatible text and structured notices, leaving command output intact.

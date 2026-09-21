@@ -3153,10 +3153,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       returnDisplay: {
         type: 'shell_result',
         version: 1,
-        text:
-          executionError.error && !timeoutSummary
-            ? executionError.error.message
-            : returnDisplayMessage,
+        text: returnDisplayMessage,
         output: result.output,
         directory: cwd,
         exitCode: result.exitCode,

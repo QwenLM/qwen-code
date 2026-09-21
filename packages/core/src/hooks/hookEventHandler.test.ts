@@ -1436,9 +1436,13 @@ describe('HookEventHandler', () => {
     });
   });
 
-  it.each(['use', 'batch'])(
-    'preserves shell text for %s hooks without mutating the UI result',
-    async (event) => {
+  it.each([
+    ['use', 'completed'],
+    ['batch', 'completed'],
+    ['batch', 'failed'],
+  ] as const)(
+    'preserves shell text for %s hooks with %s results without mutating the UI result',
+    async (event, outcome) => {
       vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
         createMockExecutionPlan([
           {
@@ -1455,14 +1459,14 @@ describe('HookEventHandler', () => {
       const display = Object.freeze({
         type: 'shell_result',
         version: 1,
-        text: 'line one\nline two',
+        text: outcome === 'failed' ? 'Exit Code: 7' : 'line one\nline two',
         output: 'line one\nline two',
         directory: '/tmp',
-        exitCode: 0,
+        exitCode: outcome === 'failed' ? 7 : 0,
         signal: null,
         pid: 42,
         error: null,
-        outcome: 'completed',
+        outcome,
         notices: [],
         truncated: false,
         outputFiles: [],
@@ -1485,7 +1489,7 @@ describe('HookEventHandler', () => {
             tool_name: 'run_shell_command',
             tool_input: {},
             tool_use_id: 'shell-1',
-            status: 'success',
+            status: outcome === 'failed' ? 'error' : 'success',
             tool_response: response,
           },
         ]);

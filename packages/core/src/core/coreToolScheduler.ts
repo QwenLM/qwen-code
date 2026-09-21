@@ -6638,6 +6638,7 @@ export class CoreToolScheduler {
         }
 
         const error = new Error(errorMessage);
+        // Match createErrorResponse's legacy string fallback, including failure-hook context.
         let errorResponse = createErrorResponse(
           scheduledCall.request,
           error,

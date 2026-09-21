@@ -3748,35 +3748,39 @@ describe('ShellTool', () => {
       },
     );
 
-    it('reports a foreground non-zero exit as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'failing-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: 'failed output',
-        exitCode: 3,
-        error: null,
-      });
+    it.each(['failed output', ''])(
+      'reports a foreground non-zero exit with output %j as a tool error',
+      async (output) => {
+        const invocation = shellTool.build({
+          command: 'failing-command',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output,
+          exitCode: 3,
+          error: null,
+        });
 
-      const result = await promise;
+        const result = await promise;
 
-      expect(shellResultText(result.returnDisplay)).toContain('failed output');
-      expect(result.error).toEqual({
-        message: expect.stringContaining('Exit Code: 3'),
-        type: ToolErrorType.SHELL_EXECUTE_ERROR,
-      });
-      expect(result.error?.message).toContain('failed output');
-      expect(shellResultText(result.returnDisplay)).toContain('Exit Code: 3');
-      expect(result.returnDisplay).toMatchObject({
-        type: 'shell_result',
-        version: 1,
-        outcome: 'failed',
-        output: 'failed output',
-        exitCode: 3,
-      });
-    });
+        expect(shellResultText(result.returnDisplay)).toBe(
+          output || 'Command exited with code: 3',
+        );
+        expect(result.error).toEqual({
+          message: expect.stringContaining('Exit Code: 3'),
+          type: ToolErrorType.SHELL_EXECUTE_ERROR,
+        });
+        expect(result.error?.message).toContain(output || 'Output: (empty)');
+        expect(result.returnDisplay).toMatchObject({
+          type: 'shell_result',
+          version: 1,
+          outcome: 'failed',
+          output,
+          exitCode: 3,
+        });
+      },
+    );
 
     it('reports a foreground signal termination as a tool error', async () => {
       const invocation = shellTool.build({
@@ -3798,7 +3802,9 @@ describe('ShellTool', () => {
         message: expect.stringContaining('Signal: 15'),
         type: ToolErrorType.SHELL_EXECUTE_ERROR,
       });
-      expect(shellResultText(result.returnDisplay)).toContain('Signal: 15');
+      expect(shellResultText(result.returnDisplay)).toBe(
+        'Command terminated by signal: 15',
+      );
     });
 
     it('keeps a successful PTY exit code successful with signal 0 metadata', async () => {
