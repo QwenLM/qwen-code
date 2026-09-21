@@ -241,7 +241,7 @@ extension 的内容按性质分三层：
 4. **旧会话恢复。** 被 `tools.eager` 降级的工具若出现在历史里会自动补发 schema（`client.ts:1783-1822`）；被 deny 的不会。上线前拿几条旧会话恢复试一下。
 5. **skill 的 `allowedTools` 只给自动放行，不声明也不加载工具**（`skills/types.ts:38-56`）。依赖被 deny 工具的 skill 要到运行时才失败。
 6. **作用域外溢。** `permissions.deny` 写在 settings 里会作用于所有读这份 settings 的客户端（CLI、web-shell）；`--system-prompt` 只能按进程生效。需要独立的 settings 与进程池。
-7. **DeepSeek 系模型上整条路线不成立。** `cli/src/config/config.ts:1993-2013`：模型名匹配 `/deepseek-(v3|v4|chat)/i` 且未显式配置时，`tool_search` 被推进 deny 列表，随后 `client.ts:1851-1880` **主动揭示所有延迟工具**。这是有意为之——注释说明 DeepSeek 的前缀缓存折扣最高到 1/120，稳定前缀比省 token 更值钱。这类部署只剩 `tools.eager` + `permissions.deny` + 压缩描述三条路。
+7. **DeepSeek 系模型上整条路线不成立（2026-09-20 起作废）。** 该判断依据的自动退出分支已被 #10410 删除：`cli/src/config/config.ts` 里已无 `deepseek` 引用，唯一的桥接开关是显式 `tools.toolSearch.enabled: false`（`config.ts:2102-2114`，同时 deny `tool_search` 与 `tool_call`）。这类部署现在与其他部署同路；若想要旧的「全部急揭示」行为，手工设置该开关即可。
 8. **`tools.disabled` 的已知缺口，一半已修**：#11814 报告 `zoom_image` 已移出 registry 但 schema 仍会发给模型。经排查该 issue 实为两件事：**指引**无条件推荐 `zoom_image`（已由 PR #12271 修好——指引现在只在该工具可直接调用或能经 `tool_search` 揭示时才发送），以及**schema 泄漏**（未能复现，仍挂在 #11814 下）。以"被禁用工具不得出现在请求 schema 中"为验收项的部署，仍应自己拉一次真实请求体核对，不要只看 `/tools`。
 
 ---
