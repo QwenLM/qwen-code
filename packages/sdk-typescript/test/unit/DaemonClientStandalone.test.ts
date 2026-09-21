@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 import { DaemonHttpError } from '../../src/daemon/DaemonHttpError.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonStandaloneProtocolError,
   isStandaloneCreationOutcomeUnknown,
+  parseStandaloneSession,
 } from '../../src/daemon/standalone-sessions.js';
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -31,12 +32,47 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-function capabilityResponse(enabled = true): Response {
+function capabilityResponse(
+  enabled = true,
+  optionsEnabled = enabled,
+): Response {
   return jsonResponse(200, {
     v: 1,
     mode: 'serve',
-    features: enabled ? ['standalone_sessions_v1'] : [],
+    features: [
+      ...(enabled ? ['standalone_sessions_v1'] : []),
+      ...(optionsEnabled ? ['standalone_session_options_v1'] : []),
+    ],
   });
+}
+
+function standaloneOptions() {
+  return {
+    v: 1,
+    initialized: true,
+    current: { authType: 'openai', modelId: 'qwen-test' },
+    approvalMode: 'default',
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen-test',
+            baseModelId: 'qwen-test',
+            name: 'Qwen Test',
+            contextLimit: 131072,
+            modalities: { image: true },
+            isCurrent: true,
+            isRuntime: false,
+            configOptions: [],
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function standaloneSummary(sessionId = SESSION_ID) {
@@ -99,6 +135,102 @@ function recordingFetch(
 }
 
 describe('DaemonClient standalone sessions', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('gates standalone options with their dedicated capability', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      capabilityResponse(true, false),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(client.getStandaloneSessionOptions()).rejects.toMatchObject({
+      name: 'DaemonCapabilityMissingError',
+      capability: 'standalone_session_options_v1',
+    });
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/capabilities',
+    ]);
+  });
+
+  it('reads and validates standalone options', async () => {
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(200, standaloneOptions()),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(client.getStandaloneSessionOptions()).resolves.toEqual(
+      standaloneOptions(),
+    );
+    expect(calls[1]).toMatchObject({
+      url: 'http://daemon/standalone/session-options',
+      method: 'GET',
+    });
+  });
+
+  it.each([
+    [
+      { ...standaloneOptions(), workspaceCwd: '/conversations' },
+      'workspace internals',
+    ],
+    [{ ...standaloneOptions(), acpChannelLive: true }, 'workspace internals'],
+    [{ ...standaloneOptions(), v: 2 }, 'expected v=1'],
+    [{ ...standaloneOptions(), providers: null }, 'expected providers[]'],
+    [{ ...standaloneOptions(), errors: {} }, 'expected errors[]'],
+    [
+      {
+        ...standaloneOptions(),
+        errors: [{ kind: 'a', status: 'degraded' }],
+      },
+      'invalid status',
+    ],
+    [
+      { ...standaloneOptions(), approvalMode: 'yolo-plus' },
+      'invalid approvalMode',
+    ],
+    [
+      {
+        ...standaloneOptions(),
+        current: { modelId: 'q', visionModelId: 7 },
+      },
+      'expected visionModelId string',
+    ],
+    [
+      {
+        ...standaloneOptions(),
+        providers: [
+          {
+            ...standaloneOptions().providers[0],
+            models: [
+              {
+                ...standaloneOptions().providers[0]!.models[0],
+                isCurrent: 'yes',
+              },
+            ],
+          },
+        ],
+      },
+      'expected isCurrent boolean',
+    ],
+  ])('rejects malformed standalone options: %s', async (body, detail) => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(200, body),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(client.getStandaloneSessionOptions()).rejects.toEqual(
+      expect.objectContaining<Partial<DaemonStandaloneProtocolError>>({
+        name: 'DaemonStandaloneProtocolError',
+        message: expect.stringContaining(detail),
+      }),
+    );
+  });
+
   it('gates standalone operations before calling their routes', async () => {
     const { fetch, calls } = recordingFetch(() => capabilityResponse(false));
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -176,6 +308,84 @@ describe('DaemonClient standalone sessions', () => {
     expect(body).not.toHaveProperty('cwd');
     expect(body).not.toHaveProperty('workspaceCwd');
     expect(created.sessionId).toBe(body['sessionId']);
+  });
+
+  it.each([
+    [0x00, '00000000-0000-4000-8000-000000000000'],
+    [0xff, 'ffffffff-ffff-4fff-bfff-ffffffffffff'],
+  ])(
+    'creates a UUID without randomUUID from random byte %i',
+    async (byte, id) => {
+      const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(byte));
+      vi.stubGlobal('crypto', { getRandomValues });
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? capabilityResponse()
+          : jsonResponse(200, standaloneSession(id)),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const created = await client.createStandaloneSession();
+
+      expect(getRandomValues).toHaveBeenCalledOnce();
+      expect(getRandomValues.mock.calls[0]?.[0]).toHaveLength(16);
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/standalone/sessions',
+        method: 'POST',
+        body: JSON.stringify({ sessionId: id }),
+      });
+      expect(created.sessionId).toBe(id);
+    },
+  );
+
+  it('preserves a caller UUID without requiring browser crypto', async () => {
+    vi.stubGlobal('crypto', undefined);
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(200, standaloneSession()),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const created = await client.createStandaloneSession({
+      sessionId: UPPER_SESSION_ID,
+    });
+
+    expect(created.sessionId).toBe(SESSION_ID);
+    expect(calls[1]?.body).toBe(JSON.stringify({ sessionId: SESSION_ID }));
+  });
+
+  it('exposes modelApplied from the create response', async () => {
+    const { fetch } = recordingFetch((request) => {
+      if (request.url.endsWith('/capabilities')) return capabilityResponse();
+      const body = JSON.parse(request.body ?? '{}') as { sessionId: string };
+      return jsonResponse(200, {
+        ...standaloneSession(body.sessionId),
+        modelApplied: false,
+      });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const created = await client.createStandaloneSession({
+      modelServiceId: 'qwen-prod',
+    });
+
+    expect(created.modelApplied).toBe(false);
+  });
+
+  it('rejects a create response with a non-boolean modelApplied', () => {
+    expect(() =>
+      parseStandaloneSession(
+        { ...standaloneSession(), modelApplied: 'yes' },
+        'POST /standalone/sessions',
+      ),
+    ).toThrow(DaemonStandaloneProtocolError);
+    expect(() =>
+      parseStandaloneSession(
+        { ...standaloneSession(), modelApplied: 'yes' },
+        'POST /standalone/sessions',
+      ),
+    ).toThrow(/expected modelApplied boolean/);
   });
 
   it('canonicalizes a caller UUID and exercises the complete route family', async () => {
@@ -495,52 +705,62 @@ describe('DaemonClient standalone sessions', () => {
     });
   });
 
-  it('recovers the generated UUID after a create transport timeout', async () => {
-    let createAttempts = 0;
-    let generatedSessionId: string | undefined;
-    const { fetch } = recordingFetch((request) => {
-      const url = new URL(request.url);
-      if (url.pathname === '/capabilities') return capabilityResponse();
-      if (url.pathname === '/standalone/sessions') {
-        createAttempts += 1;
-        generatedSessionId = (
-          JSON.parse(request.body ?? '{}') as { sessionId: string }
-        ).sessionId;
-        return new Promise<Response>((_resolve, reject) => {
-          request.signal?.addEventListener('abort', () => {
-            reject(request.signal?.reason);
-          });
+  it.each([true, false])(
+    'recovers the generated UUID after a create transport timeout (randomUUID available: %s)',
+    async (randomUUIDAvailable) => {
+      if (!randomUUIDAvailable) {
+        vi.stubGlobal('crypto', {
+          getRandomValues: globalThis.crypto.getRandomValues.bind(
+            globalThis.crypto,
+          ),
         });
       }
-      return jsonResponse(200, standaloneSummary(generatedSessionId));
-    });
-    const client = new DaemonClient({
-      baseUrl: 'http://daemon',
-      fetch,
-      fetchTimeoutMs: 10,
-    });
+      let createAttempts = 0;
+      let generatedSessionId: string | undefined;
+      const { fetch } = recordingFetch((request) => {
+        const url = new URL(request.url);
+        if (url.pathname === '/capabilities') return capabilityResponse();
+        if (url.pathname === '/standalone/sessions') {
+          createAttempts += 1;
+          generatedSessionId = (
+            JSON.parse(request.body ?? '{}') as { sessionId: string }
+          ).sessionId;
+          return new Promise<Response>((_resolve, reject) => {
+            request.signal?.addEventListener('abort', () => {
+              reject(request.signal?.reason);
+            });
+          });
+        }
+        return jsonResponse(200, standaloneSummary(generatedSessionId));
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 10,
+      });
 
-    const error = await client
-      .createStandaloneSession()
-      .catch((reason: unknown) => reason);
+      const error = await client
+        .createStandaloneSession()
+        .catch((reason: unknown) => reason);
 
-    expect(error).toMatchObject({
-      name: 'DaemonStandaloneCreationOutcomeUnknownError',
-      sessionId: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
-      ),
-      recovery: {
-        state: 'existing',
-        session: { sessionId: expect.any(String) },
-      },
-    });
-    expect(error).toHaveProperty('sessionId', generatedSessionId);
-    expect(error).toHaveProperty(
-      'recovery.session.sessionId',
-      generatedSessionId,
-    );
-    expect(createAttempts).toBe(1);
-  });
+      expect(error).toMatchObject({
+        name: 'DaemonStandaloneCreationOutcomeUnknownError',
+        sessionId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+        ),
+        recovery: {
+          state: 'existing',
+          session: { sessionId: expect.any(String) },
+        },
+      });
+      expect(error).toHaveProperty('sessionId', generatedSessionId);
+      expect(error).toHaveProperty(
+        'recovery.session.sessionId',
+        generatedSessionId,
+      );
+      expect(createAttempts).toBe(1);
+    },
+  );
 
   it('maps structured unknown outcome to an exact creating recovery', async () => {
     const { fetch } = recordingFetch((request) => {

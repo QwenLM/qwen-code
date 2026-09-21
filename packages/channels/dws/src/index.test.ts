@@ -16,14 +16,30 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'profile',
       'groupPolicy',
+      'dmPolicy',
       'senderPolicy',
       'allowedUsers',
       'watchTodos',
+      'startReaction',
+      'endReaction',
     ]);
   });
 
   it('accepts the default @ message source', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
+  });
+
+  it('exposes independent direct-message access with the existing open default', () => {
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'dmPolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    });
   });
 
   it('defaults sender and group access to pairing', () => {
@@ -45,6 +61,29 @@ describe('DWS channel plugin', () => {
       plugin.management?.fields.find((field) => field.key === 'watchTodos')
         ?.default,
     ).toBeUndefined();
+  });
+
+  it('exposes configurable task reactions', () => {
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'startReaction')
+        ?.default,
+    ).toBe('🤔');
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'endReaction')
+        ?.default,
+    ).toBeUndefined();
+    expect(
+      plugin.management?.validateConfig?.({
+        startReaction: '👏',
+        endReaction: '赞',
+      }),
+    ).toBeUndefined();
+    expect(plugin.management?.validateConfig?.({ startReaction: 1 })).toContain(
+      'startReaction must be a string',
+    );
+    expect(
+      plugin.management?.validateConfig?.({ endReaction: false }),
+    ).toContain('endReaction must be a string');
   });
 
   it('ignores removed source settings', () => {

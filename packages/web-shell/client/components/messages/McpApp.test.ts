@@ -78,6 +78,17 @@ describe('MCP App host helpers', () => {
     );
   });
 
+  it('keeps MCP App sandboxes available on the complete IPv4 loopback range', () => {
+    expect(
+      resolveMcpAppSandboxUrl(
+        'http://127.0.0.2:4170',
+        'http://127.0.0.2:4170/session/demo',
+      ),
+    ).toBe(
+      'http://127.0.0.2:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2F127.0.0.2%3A4170',
+    );
+  });
+
   it('omits CSP from the sandbox URL when it would overflow the request line', () => {
     const sandboxUrl =
       'http://localhost:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2F127.0.0.1%3A4170';

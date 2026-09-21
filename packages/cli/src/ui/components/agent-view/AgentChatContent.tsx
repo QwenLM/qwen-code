@@ -12,19 +12,18 @@
 
 import { Box, Text, Static } from 'ink';
 import { useMemo, useState, useEffect, useCallback, useRef } from 'react';
-import {
-  AgentStatus,
-  AgentEventType,
-  getGitBranch,
-  type AgentCore,
-  type AgentInteractive,
-  type AgentStatusChangeEvent,
-} from '@qwen-code/qwen-code-core';
+import type { AgentCore } from '@qwen-code/qwen-code-core/agents/runtime/agent-core.js';
+import { AgentEventType } from '@qwen-code/qwen-code-core/agents/runtime/agent-events.js';
+import type { AgentStatusChangeEvent } from '@qwen-code/qwen-code-core/agents/runtime/agent-events.js';
+import type { AgentInteractive } from '@qwen-code/qwen-code-core/agents/runtime/agent-interactive.js';
+import { AgentStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import { getGitBranch } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useAgentViewActions } from '../../contexts/AgentViewContext.js';
 import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
+import { useThoughtExpanded } from '../../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus } from '../../types.js';
 import { theme } from '../../semantic-colors.js';
 import { RespondingSpinner } from '../RespondingSpinner.js';
@@ -61,6 +60,11 @@ export const AgentChatContent = ({
   const { historyRemountKey, availableTerminalHeight, constrainHeight } =
     uiState;
   const { columns: terminalWidth } = useTerminalSize();
+  // Ctrl+O full-detail, matching MainContent. Thinking blocks in this view
+  // already honored the toggle (HistoryItemDisplay reads the context itself),
+  // but the tool side never received it — so a truncated args row could
+  // advertise `(ctrl+o)` for a key that did nothing here.
+  const { allExpanded: fullDetail } = useThoughtExpanded();
   const contentWidth = terminalWidth - 4;
 
   // Force re-render on message updates and status changes.
@@ -239,6 +243,7 @@ export const AgentChatContent = ({
               terminalWidth={terminalWidth}
               mainAreaWidth={contentWidth}
               thoughtHeadId={thoughtHeadIdByItem.get(item)}
+              fullDetail={fullDetail}
             />
           )),
         ]}
@@ -255,6 +260,7 @@ export const AgentChatContent = ({
           isPending={true}
           terminalWidth={terminalWidth}
           mainAreaWidth={contentWidth}
+          fullDetail={fullDetail}
           availableTerminalHeight={
             constrainHeight ? availableTerminalHeight : undefined
           }

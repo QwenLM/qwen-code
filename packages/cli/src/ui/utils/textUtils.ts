@@ -375,6 +375,16 @@ export function escapeAnsiCtrlCodes<T>(obj: T): T {
     return obj;
   }
 
+  const record = obj as Record<string, unknown>;
+  if (
+    !Array.isArray(obj) &&
+    typeof record['data'] === 'string' &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].toLowerCase().startsWith('image/')
+  ) {
+    return obj;
+  }
+
   if (Array.isArray(obj)) {
     let newArr: unknown[] | null = null;
 

@@ -45,6 +45,7 @@ try {
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
+  testRuntimeNodePtyTargetMapping();
   testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
@@ -313,28 +314,44 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
-  const ripgrepStart = workflow.indexOf('# ripgrep vendor binaries');
-  const ripgrepEnd = workflow.indexOf('# Node.js runtime binary');
-  assert.ok(
-    ripgrepStart !== -1 && ripgrepEnd > ripgrepStart,
-    'the vendor signing step must keep its ripgrep/Node section markers',
-  );
-  const ripgrepSigningBlock = workflow.slice(ripgrepStart, ripgrepEnd);
-  assert.doesNotMatch(
-    ripgrepSigningBlock,
-    /--entitlements/,
-    'ripgrep must not inherit the app entitlements',
+  // The step used to name the binaries it signed. It now discovers them,
+  // because the runtime is a copy of the CLI's dist tree and gains native
+  // payload without this package changing — an unsigned renderer library
+  // reached the notary service that way. These assertions pin the discovery
+  // and the properties the old list guaranteed by construction.
+  assert.match(
+    workflow,
+    /if \[ "\$\(file -b --mime-type "\$file"\)" = 'application\/x-mach-binary' \]; then/,
+    'the vendor signing step must discover Mach-O binaries rather than list them',
   );
   assert.match(
     workflow,
-    /--options runtime --timestamp \\\n\s+\{\} \+/,
-    'ripgrep codesign failures must fail the signing step',
+    /done < <\(find "\$runtime_dir" -type f -print0\)/,
+    'Mach-O discovery must cover the whole staged runtime',
   );
   assert.ok(
     workflow.includes(
-      '--entitlements src-tauri/NodeEntitlements.plist "$node_bin"',
+      '--entitlements src-tauri/NodeEntitlements.plist "$file"',
     ),
     'Node.js must use its minimal helper entitlements',
+  );
+  const entitlementFlags = workflow
+    .slice(
+      workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'"),
+      workflow.indexOf(
+        "name: 'Refresh bundled runtime checksums after signing",
+      ),
+    )
+    .match(/--entitlements/g);
+  assert.deepStrictEqual(
+    entitlementFlags,
+    ['--entitlements'],
+    'only the Node.js branch may pass entitlements; everything else signs without them',
+  );
+  assert.match(
+    workflow,
+    /codesign --verify --strict "\$file"/,
+    'the signing step must verify what it signed instead of leaving it to the notary service',
   );
   const nodeEntitlements = fs.readFileSync(
     path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
@@ -370,8 +387,8 @@ function testDesktopReleaseSigningWorkflow() {
   );
   assert.match(
     workflow,
-    /Ripgrep vendor directory not found at \$rg_dir/,
-    'missing ripgrep binaries must be visible in release logs',
+    /No Mach-O binary found under \$runtime_dir/,
+    'a runtime with no native binary must fail rather than silently sign nothing',
   );
   assert.match(
     workflow,
@@ -461,6 +478,53 @@ function testDesktopReleaseHardening() {
   );
 }
 
+function testRuntimeNodePtyTargetMapping() {
+  const prepareRuntime = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'prepare-runtime.js'),
+    'utf8',
+  );
+  const literal =
+    /const NODE_PTY_PREBUILD_PACKAGE = new Map\(\[([\s\S]*?)\]\);/.exec(
+      prepareRuntime,
+    );
+  assert.ok(
+    literal,
+    'runtime preparation must map desktop targets to node-pty prebuild packages',
+  );
+  const mapping = vm.runInNewContext(`new Map([${literal[1]}])`);
+  const allowList = /!\[\s*([\s\S]*?)\]\.includes\(resolved\)/.exec(
+    prepareRuntime,
+  );
+  assert.ok(allowList, 'desktopTarget() must keep validating its targets');
+  const supported = vm.runInNewContext(`[${allowList[1]}]`);
+  assert.deepEqual(
+    [...mapping.keys()].sort(),
+    [...supported].sort(),
+    'every target desktopTarget() accepts needs a node-pty prebuild package',
+  );
+  for (const target of supported) {
+    // The wrapper requires `@lydell/node-pty-${process.platform}-${process.arch}`
+    // at runtime, and the standalone packager keys Windows as 'win-x64': reusing
+    // that map here would stage '@lydell/node-pty-undefined' for 'win32-x64'.
+    assert.equal(
+      mapping.get(target),
+      `@lydell/node-pty-${target}`,
+      `${target} must stage the prebuild package its own wrapper requires`,
+    );
+  }
+
+  // Cross-built prebuilds must stay exact so staging fetches the same version
+  // that the frozen root install verified (#11872).
+  const rootPackage = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
+  );
+  assert.match(
+    rootPackage.optionalDependencies?.['@lydell/node-pty-darwin-x64'],
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/,
+    'the darwin-x64 prebuild must stay pinned so a cross-building leg can fetch its locked version',
+  );
+}
+
 function testRuntimePreparation(directory) {
   const testPackageDir = path.join(directory, 'packages', 'desktop-shell');
   const testScript = path.join(testPackageDir, 'scripts', 'prepare-runtime.js');
@@ -468,24 +532,35 @@ function testRuntimePreparation(directory) {
   const runtimeDir = path.join(testPackageDir, 'runtime');
   const cacheRoot = path.join(directory, 'cache');
   const nodeVersion = process.versions.node;
-  const archiveName = `node-v${nodeVersion}-darwin-arm64.tar.gz`;
+  // darwin-x64 on purpose: this test runs on a linux-x64 CI host, so the
+  // target's prebuild can never come from a host node_modules — the same shape
+  // as the release matrix's x86_64-apple-darwin leg, which cross-builds on an
+  // arm64 macos-15 runner (#11872).
+  const archiveName = `node-v${nodeVersion}-darwin-x64.tar.gz`;
   const cacheDir = path.join(cacheRoot, `v${nodeVersion}`);
   const cachedArchivePath = path.join(cacheDir, archiveName);
   const archivePath = path.join(directory, archiveName);
   const checksumsPath = path.join(directory, 'SHASUMS256.txt');
   const fetchLog = path.join(directory, 'fetch.log');
   const fetchMock = path.join(directory, 'mock-fetch.mjs');
-  const extractedRoot = path.join(
-    directory,
-    `node-v${nodeVersion}-darwin-arm64`,
-  );
+  const npmLog = path.join(directory, 'npm.log');
+  const npmStub = path.join(directory, 'mock-npm.mjs');
+  const extractedRoot = path.join(directory, `node-v${nodeVersion}-darwin-x64`);
 
   fs.mkdirSync(path.join(sourceRoot, 'dist', 'web-shell', 'assets'), {
     recursive: true,
   });
+  // The exact pins staging resolves its package specs from.
+  const nodePtyPins = {
+    '@lydell/node-pty': '0.0.0-test',
+    '@lydell/node-pty-darwin-x64': '0.0.0-test',
+  };
   fs.writeFileSync(
     path.join(sourceRoot, 'package.json'),
-    JSON.stringify({ version: '0.0.0-test' }),
+    JSON.stringify({
+      version: '0.0.0-test',
+      optionalDependencies: nodePtyPins,
+    }),
   );
   fs.mkdirSync(path.dirname(testScript), { recursive: true });
   fs.copyFileSync(
@@ -510,6 +585,34 @@ function testRuntimePreparation(directory) {
   ]) {
     fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
   }
+  // Staging installs the target's pinned packages into a throwaway prefix
+  // instead of reading a host node_modules that cannot hold a cross-built
+  // target's addon (#11872), so npm is stubbed: it records the argv it is
+  // given and materializes those packages under --prefix. Nothing here creates
+  // sourceRoot/node_modules, and the assertions below check it stays absent.
+  fs.writeFileSync(
+    npmStub,
+    `import fs from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.QWEN_TEST_NPM_LOG, JSON.stringify(args) + '\\n');
+const modules = path.join(args[args.indexOf('--prefix') + 1], 'node_modules');
+for (const spec of args.filter((arg) => arg.startsWith('@lydell/'))) {
+  const at = spec.lastIndexOf('@');
+  const name = spec.slice(0, at);
+  const dir = path.join(modules, name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name }));
+  fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = {};\\n');
+  const prebuild = name.slice('@lydell/node-pty-'.length);
+  if (!prebuild) continue;
+  const addonDir = path.join(dir, 'prebuilds', prebuild);
+  fs.mkdirSync(addonDir, { recursive: true });
+  fs.writeFileSync(path.join(addonDir, 'pty.node'), 'test addon');
+  fs.writeFileSync(path.join(addonDir, 'pty.pdb'), 'test symbols');
+}
+`,
+  );
   fs.mkdirSync(path.join(extractedRoot, 'bin'), { recursive: true });
   fs.writeFileSync(path.join(extractedRoot, 'bin', 'node'), 'node');
   fs.writeFileSync(path.join(extractedRoot, 'LICENSE'), 'node license');
@@ -545,8 +648,9 @@ globalThis.fetch = async (url) => {
     QWEN_CODE_ROOT: sourceRoot,
     QWEN_DESKTOP_NODE_CACHE_DIR: cacheRoot,
     QWEN_DESKTOP_SKIP_BUILD: '1',
-    QWEN_DESKTOP_TARGET: 'darwin-arm64',
+    QWEN_DESKTOP_TARGET: 'x86_64-apple-darwin',
     QWEN_TEST_FETCH_LOG: fetchLog,
+    QWEN_TEST_NPM_LOG: npmLog,
     QWEN_TEST_NODE_ARCHIVE: archivePath,
     QWEN_TEST_NODE_CHECKSUMS: checksumsPath,
     NODE_OPTIONS: [
@@ -555,7 +659,7 @@ globalThis.fetch = async (url) => {
     ]
       .filter(Boolean)
       .join(' '),
-    npm_execpath: process.env.npm_execpath || process.argv[1],
+    npm_execpath: npmStub,
   };
   const first = spawnSync(process.execPath, [testScript], {
     encoding: 'utf8',
@@ -566,6 +670,70 @@ globalThis.fetch = async (url) => {
   assert.ok(fs.existsSync(cachedArchivePath));
   assert.ok(
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
+  );
+
+  // The Web Terminal resolves its PTY backend from lib/, so the runtime has to
+  // carry the wrapper and this target's prebuild under lib/node_modules
+  // (#11872).
+  const stagedLydellDir = path.join(
+    runtimeDir,
+    'qwen-code',
+    'lib',
+    'node_modules',
+    '@lydell',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(stagedLydellDir, 'node-pty', 'index.js'), 'utf8'),
+    'module.exports = {};\n',
+  );
+  const stagedAddon = path.join(
+    stagedLydellDir,
+    'node-pty-darwin-x64',
+    'prebuilds',
+    'darwin-x64',
+    'pty.node',
+  );
+  assert.ok(fs.existsSync(stagedAddon));
+  assert.equal(
+    fs.existsSync(path.join(path.dirname(stagedAddon), 'pty.pdb')),
+    false,
+    'debug symbols must not be bundled into the runtime',
+  );
+  const stagedChecksums = JSON.parse(
+    fs.readFileSync(
+      path.join(runtimeDir, 'qwen-code', 'checksums.json'),
+      'utf8',
+    ),
+  );
+  assert.equal(
+    stagedChecksums[
+      'lib/node_modules/@lydell/node-pty-darwin-x64/prebuilds/darwin-x64/pty.node'
+    ],
+    crypto.createHash('sha256').update('test addon').digest('hex'),
+    'the staged prebuild must be checksummed so signing refresh and smoke verification cover it',
+  );
+
+  // ...and it has to get there by fetching the TARGET's pinned package, at the
+  // version package.json pins, not out of a host node_modules that cannot
+  // contain a darwin-x64 addon.
+  const installs = fs
+    .readFileSync(npmLog, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(installs.length, 1);
+  assert.deepEqual(
+    installs[0].filter((arg) => arg.startsWith('@lydell/')),
+    ['@lydell/node-pty@0.0.0-test', '@lydell/node-pty-darwin-x64@0.0.0-test'],
+  );
+  assert.ok(
+    installs[0].includes('--force'),
+    'npm must be allowed to install a prebuild whose os/cpu do not match this host',
+  );
+  assert.equal(
+    fs.existsSync(path.join(sourceRoot, 'node_modules')),
+    false,
+    'staging must not read or need a host node_modules',
   );
 
   const second = spawnSync(process.execPath, [testScript], {
@@ -597,6 +765,26 @@ globalThis.fetch = async (url) => {
     3,
   );
   assert.equal(fs.existsSync(path.join(cacheDir, 'SHASUMS256.txt')), false);
+
+  // A target the repo pins nothing for must still produce a runtime: the root
+  // package.json does not pin @lydell/node-pty-linux-arm64 (upstream publishes
+  // it), and failing the build there would trade a missing Web Terminal for no
+  // app at all (#11872). Dropping the pins reproduces that for this fixture's
+  // target.
+  fs.writeFileSync(
+    path.join(sourceRoot, 'package.json'),
+    JSON.stringify({ version: '0.0.0-test' }),
+  );
+  const degraded = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(degraded.status, 0, degraded.stderr);
+  assert.match(degraded.stderr, /@lydell\/node-pty-darwin-x64 is not pinned/);
+  assert.equal(
+    fs.existsSync(path.join(runtimeDir, 'qwen-code', 'lib', 'node_modules')),
+    false,
+  );
 
   const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
   fs.writeFileSync(marker, 'preserve me');

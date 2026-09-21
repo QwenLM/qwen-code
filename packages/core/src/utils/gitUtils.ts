@@ -7,13 +7,64 @@
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('GIT');
 const GIT_STATUS_TIMEOUT_MS = 5000;
 const DETACHED_HEAD_LABEL = '(detached HEAD)';
+
+/**
+ * A git config setting that stops a repository from making a git command
+ * execute a program of its choosing.
+ *
+ * `core.fsmonitor` names a helper git runs on every index refresh — measured
+ * firing on `status`, `ls-files`, `check-ignore`, `diff`, `diff-tree`, and on
+ * the index-mutating `add`, `reset` and `stash create` — and
+ * `--no-optional-locks` does not suppress it, since locking has nothing to do
+ * with the hook. A repo-local `.git/config` never arrives through `git clone`,
+ * which carries no config, but it does travel with a tree obtained as files: an
+ * archive, a shared drive, a sync folder. Opening such a directory is then
+ * enough to run whatever that config names, before the user has read a line of
+ * it. An empty value is what git reads as "no helper". The other command-valued
+ * keys a diff reaches, `diff.external` and `diff.<name>.textconv` — the latter
+ * bound to a path by a `.gitattributes` the same tree carries — cannot be
+ * emptied this way, so each diff call site passes `--no-ext-diff --no-textconv`
+ * itself.
+ *
+ * This bare `key=value` form is for APIs that add the `-c` themselves, such as
+ * simple-git's `config` option; {@link NO_EXEC_CONFIG} is the argv form.
+ */
+export const NO_EXEC_CONFIG_SETTING = 'core.fsmonitor=';
+
+/**
+ * The program-valued config keys a repository can point a git command at, each
+ * expressed as the bare `key=value` form simple-git's `config` option and the
+ * `-c` argv both read.
+ *
+ * `core.fsmonitor` names the helper git runs on every index refresh.
+ * `log.showSignature=false` closes the `log.showSignature` → `gpg.program`
+ * vector: a repo-local `gpg.program` is reached whenever `log.showSignature`
+ * is true and a `gpgsig`-bearing commit is walked, and git verifies the
+ * signature regardless of whether `--format` prints `%G*`.
+ */
+export const NO_EXEC_CONFIG_SETTINGS = [
+  NO_EXEC_CONFIG_SETTING,
+  'log.showSignature=false',
+] as const;
+
+/**
+ * {@link NO_EXEC_CONFIG_SETTINGS} as `git` argv, to spread into a command's
+ * arguments.
+ *
+ * Passed to every git call rather than only the ones measured to refresh, so
+ * the guard does not rest on which subcommand a given git version refreshes on.
+ */
+export const NO_EXEC_CONFIG = NO_EXEC_CONFIG_SETTINGS.flatMap((setting) => [
+  '-c',
+  setting,
+]) as readonly string[];
 
 // Bound the read: these files are one short line, never megabytes.
 const MAX_GIT_METADATA_BYTES = 4096;
@@ -128,19 +179,23 @@ export function findGitRoot(directory: string): string | null {
  */
 export const getGitBranch = (cwd: string): string | undefined => {
   try {
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    const branch = execFileSync(
+      'git',
+      [...NO_EXEC_CONFIG, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    ).trim();
     return branch || undefined;
   } catch {
     return undefined;
   }
 };
 
-// Memoize git branch per cwd for the agent-launch path. `getGitBranch` shells
-// out to `git rev-parse` synchronously; caching avoids the per-launch execSync
+// Memoize git branch per cwd for the agent-launch path. `getGitBranch` runs
+// `git rev-parse` synchronously; caching avoids the per-launch subprocess
 // on paths that run every time a subagent starts — AgentTool's foreground and
 // background launches, and every workflow `agent()` dispatch, which fans out
 // dozens at a time. Branches don't change within a process under normal use;
@@ -163,11 +218,15 @@ export const getCachedGitBranch = (cwd: string): string | undefined => {
 export const getGitRepoName = (cwd: string): string | undefined => {
   try {
     // Try to get the repository name from the remote URL
-    const remoteUrl = execSync('git remote get-url origin', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    const remoteUrl = execFileSync(
+      'git',
+      [...NO_EXEC_CONFIG, 'remote', 'get-url', 'origin'],
+      {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    ).trim();
 
     if (remoteUrl) {
       // Extract owner/repo from various URL formats:
@@ -237,8 +296,15 @@ export function getRecentGitStatus(cwd: string): string | null {
   try {
     // The branch header lets one Git process provide both values while the
     // short status remainder keeps the existing path and color configuration.
-    const statusWithBranch = execSync(
-      'git --no-optional-locks status --short --branch',
+    const statusWithBranch = execFileSync(
+      'git',
+      [
+        ...NO_EXEC_CONFIG,
+        '--no-optional-locks',
+        'status',
+        '--short',
+        '--branch',
+      ],
       {
         cwd,
         encoding: 'utf8',
@@ -262,12 +328,16 @@ export function getRecentGitStatus(cwd: string): string | null {
         : branchName;
     const status = statusLines.join('\n').trim();
 
-    const log = execSync('git --no-optional-locks log --oneline -n 5', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: GIT_STATUS_TIMEOUT_MS,
-    }).trim();
+    const log = execFileSync(
+      'git',
+      [...NO_EXEC_CONFIG, '--no-optional-locks', 'log', '--oneline', '-n', '5'],
+      {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: GIT_STATUS_TIMEOUT_MS,
+      },
+    ).trim();
 
     // Truncate status if too long (>2k chars)
     const MAX_STATUS_CHARS = 2000;

@@ -34,13 +34,14 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
-    eventRingSize: 8000,
+    eventRingSize: 8_000,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
     journalGrowth: null,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
+    sessionPromptSettledCloseGraceMs: 0,
   },
   sessionCount: 0,
   pendingPermissionCount: 0,
@@ -130,6 +131,27 @@ describe('buildDaemonStatusResponse', () => {
     const response = await buildDaemonStatusResponse('summary', options);
 
     expect(response.limits.maxTotalSessions).toBe(50);
+  });
+
+  it('separates enforced process admission from advisory heap limits', async () => {
+    const options = makeOptions();
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
+    const policy = createChildHeapPolicy({ budget, mode: 'admit' });
+    options.opts.daemonMemoryBudget = budget;
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
+    options.childAdmissionEnforced = true;
+    options.getCommittedAcpChildCount = () => 6;
+    const response = await buildDaemonStatusResponse('summary', options);
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: {
+        mode: 'admit',
+        admissionEnforced: true,
+        maxConcurrentChildren: 6,
+        perChildCeilingMb: 544,
+      },
+    });
+    expect(response.runtime.memory).toMatchObject({ committedAcpChildren: 6 });
   });
 
   it('reports the modeled partition without claiming it is applied', async () => {
@@ -292,6 +314,7 @@ describe('buildDaemonStatusResponse', () => {
 
     // The single bound workspace has a live channel in BASE_BRIDGE_SNAPSHOT.
     expect(response.runtime.memory).toEqual({
+      committedAcpChildren: null,
       registeredWorkspaces: 1,
       activeAcpChildren: 1,
       childRssCoverage: 'active_children',
@@ -343,6 +366,7 @@ describe('buildDaemonStatusResponse', () => {
     const response = await buildDaemonStatusResponse('summary', options);
 
     expect(response.runtime.memory).toEqual({
+      committedAcpChildren: null,
       registeredWorkspaces: 0,
       activeAcpChildren: 0,
       childRssCoverage: 'active_children',

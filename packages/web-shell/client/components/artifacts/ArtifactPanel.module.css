@@ -78,10 +78,43 @@
 }
 
 .tabTitle {
+  position: relative;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tabTitle[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
+.tabTitleInner {
+  display: inline-block;
+  min-width: max-content;
+}
+
+.tabItem:hover .tabTitleInner,
+.tabItem:focus-within .tabTitleInner {
+  animation: artifactTabTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+@keyframes artifactTabTitleScroll {
+  to {
+    transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabItem:hover .tabTitleInner,
+  .tabItem:focus-within .tabTitleInner {
+    animation: none;
+  }
 }
 
 .tabIcon {
@@ -98,6 +131,10 @@
   width: 16px;
   height: 16px;
   display: block;
+}
+
+.tabArtifactIcon {
+  filter: grayscale(1);
 }
 
 .tabItem:hover .tabIcon,
@@ -1051,7 +1088,8 @@ button.treeRow:hover {
 }
 
 .htmlPreviewWrap {
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1075,6 +1113,7 @@ button.treeRow:hover {
   display: block;
   max-width: 100%;
   max-height: calc(100vh - 120px);
+  max-height: calc(100dvh - 120px);
   object-fit: contain;
 }
 
@@ -1137,8 +1176,9 @@ button.treeRow:hover {
 
 .htmlPreview {
   width: 100%;
+  height: 100%;
   flex: 1 1 auto;
-  min-height: 520px;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
@@ -1152,7 +1192,9 @@ button.treeRow:hover {
 }
 
 .filePreviewWrap {
-  min-height: 100%;
+  position: absolute;
+  inset: 12px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1160,7 +1202,7 @@ button.treeRow:hover {
 .codeMirrorFile {
   min-width: 0;
   flex: 1 1 auto;
-  min-height: 520px;
+  min-height: 0;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1168,13 +1210,14 @@ button.treeRow:hover {
 }
 
 .codeMirrorFile :global(.cm-editor) {
-  min-height: 520px;
+  height: 100%;
   font-size: 12px;
   background: var(--background);
   color: var(--foreground);
 }
 
 .codeMirrorFile :global(.cm-scroller) {
+  overflow: auto;
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     'Courier New', monospace;

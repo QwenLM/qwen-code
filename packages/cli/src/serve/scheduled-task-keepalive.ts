@@ -100,7 +100,10 @@ export interface KeepaliveBridge {
   markSessionCatalogChanged?(): void;
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    },
   ): unknown;
 }
 
@@ -194,6 +197,7 @@ async function bindAndNameSessions(
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: scheduledTaskSessionName(task.prompt),
+          titleSource: 'auto',
         });
         renamed.add(sessionId);
       } catch {
@@ -243,6 +247,7 @@ async function bindAndNameSessions(
     try {
       bridge.updateSessionMetadata(sessionId, {
         displayName: scheduledTaskSessionName(task.prompt),
+        titleSource: 'auto',
       });
       renamed.add(sessionId);
     } catch (err) {
@@ -252,6 +257,7 @@ async function bindAndNameSessions(
 }
 
 export interface ScheduledTaskKeepalive {
+  readonly activeWork: boolean;
   /** Stops the periodic heartbeat. Idempotent. */
   stop(): void;
   /** Runs one heartbeat pass immediately. Exposed for tests / eager warm-up. */
@@ -409,13 +415,20 @@ export function startScheduledTaskKeepalive(
       cleanupSession,
     );
   };
-  const tick = (): Promise<void> =>
-    opts.runtimeBaseDir === undefined
-      ? tickInRuntime()
-      : Storage.runWithResolvedRuntimeBaseDir(
-          opts.runtimeBaseDir,
-          tickInRuntime,
-        );
+  let activeTicks = 0;
+  const tick = async (): Promise<void> => {
+    activeTicks++;
+    try {
+      await (opts.runtimeBaseDir === undefined
+        ? tickInRuntime()
+        : Storage.runWithResolvedRuntimeBaseDir(
+            opts.runtimeBaseDir,
+            tickInRuntime,
+          ));
+    } finally {
+      activeTicks--;
+    }
+  };
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
   // the revive timeout), so skip a tick while the previous is still running —
@@ -474,6 +487,9 @@ export function startScheduledTaskKeepalive(
 
   let stopped = false;
   return {
+    get activeWork() {
+      return activeTicks > 0 || reviving.size > 0 || binding.size > 0;
+    },
     stop: () => {
       if (stopped) return;
       stopped = true;

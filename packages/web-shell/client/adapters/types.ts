@@ -108,12 +108,15 @@ export interface PermissionRequest {
   toolKind?: string;
   /** Canonical tool name (from the ACP frame's `_meta.toolName`). */
   toolName?: string;
+  /** Whether this permission includes a diff the host can preview. */
+  hasDiffPreview?: boolean;
   todoPlan?: {
     planId: string;
     sourceCallId: string;
   };
   content: ContentBlock[];
   options: PermissionOption[];
+  contentIsInput?: boolean;
   rawInput?: Record<string, unknown>;
   kind?: string;
 }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -24,6 +24,7 @@ import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -65,6 +66,26 @@ describe('OpenAIContentConverter', () => {
       responseParsingOptions: { taggedThinkingTags: true },
       taggedThinkingParser: new TaggedThinkingParser(),
     };
+  }
+
+  function withQwen3TaggedThinkingStreamParser(): RequestContext {
+    return {
+      ...withStreamParser(),
+      model: 'qwen3.8-max',
+      responseParsingOptions: {
+        contentOnlyThinkingTagLeaks: true,
+        taggedThinkingTagsAfterReasoning: true,
+      },
+    };
+  }
+
+  function openAIStreamChunk(
+    delta: Record<string, unknown>,
+    finishReason: string | null = null,
+  ): OpenAI.Chat.ChatCompletionChunk {
+    return {
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
   }
 
   function hasOpenAIToolCalls(
@@ -1604,6 +1625,180 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('moves an omni degradation disclosure together with its media part when splitting tool media', () => {
+      // The omni pipeline emits a disclosure text Part IMMEDIATELY before
+      // each lossy derivative's media Part. When splitToolMedia relocates
+      // the media into the follow-up user message, the disclosure must move
+      // WITH it — stranded in the text-only tool message, the model could
+      // not attribute it to the media. Ordinary text parts stay behind.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'Image content' },
+                  parts: [
+                    { text: 'ordinary tool text' },
+                    { text: '【媒体降质】photo.png：downsampled to 1568px' },
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'base64encodedimagedata',
+                      },
+                    },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage?.content).toBe('Image content\nordinary tool text');
+
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+      ]);
+      expect(userContent[0].text).toBe(
+        '(attached media from previous tool call)',
+      );
+      // Disclosure sits immediately before its media part.
+      expect(userContent[1].text).toBe(
+        '【媒体降质】photo.png：downsampled to 1568px',
+      );
+      expect(userContent[2].image_url?.url).toBe(
+        'data:image/png;base64,base64encodedimagedata',
+      );
+    });
+
+    it('moves a bare keyframe timestamp marker together with its frame', () => {
+      // Per-frame markers (`<MM:SS>`) carry no 【媒体降质】 prefix — the
+      // degradation notice rode once on the first frame's header — but they
+      // must still migrate WITH their image so each frame keeps its label.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'frames' },
+                  parts: [
+                    { text: '<00:34>' },
+                    {
+                      inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: 'framebytes',
+                      },
+                    },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      // The marker did NOT stay stranded in the tool message text.
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage?.content).toBe('frames');
+
+      const userContent = messages.find((m) => m.role === 'user')
+        ?.content as Array<{ type: string; text?: string }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+      ]);
+      expect(userContent[1].text).toBe('<00:34>');
+    });
+
+    it('gives a disclosure only to the media part directly following it', () => {
+      // Two media parts after one disclosure: only the adjacent one owns
+      // it — the second media part must not pull the disclosure past the
+      // first (prev-tracking, not "last disclosure seen").
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'two images' },
+                  parts: [
+                    { text: '【媒体降质】a.png：lossy' },
+                    { inlineData: { mimeType: 'image/png', data: 'first' } },
+                    { inlineData: { mimeType: 'image/png', data: 'second' } },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+        'image_url',
+      ]);
+      expect(userContent[1].text).toBe('【媒体降质】a.png：lossy');
+      expect(userContent[2].image_url?.url).toBe('data:image/png;base64,first');
+    });
+
     it('should keep all tool messages contiguous and merge split media into a single follow-up user message for parallel tool calls (issue #3616)', () => {
       // Two assistant tool calls in parallel. Both responses come back in the
       // same `user` content as separate functionResponse parts. The first
@@ -2449,6 +2644,176 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('should pass oss:// video fileData in a user message through to video_url unchanged (omni upload delivery)', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'Describe this video' },
+              {
+                fileData: {
+                  mimeType: 'video/mp4',
+                  fileUri:
+                    'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
+                  displayName: 'video.mp4',
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeDefined();
+      const contentArray = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        video_url?: { url: string };
+      }>;
+      const videoPart = contentArray.find((p) => p.type === 'video_url');
+      expect(videoPart?.video_url?.url).toBe(
+        'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
+      );
+    });
+
+    it('should convert oss:// audio fileData to input_audio with the bare URL (omni upload delivery)', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'What is this sound?' },
+              {
+                fileData: {
+                  mimeType: 'audio/mpeg',
+                  fileUri:
+                    'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
+                  displayName: 'tone.mp3',
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const userMessage = messages.find((message) => message.role === 'user');
+      const contentArray = userMessage?.content as Array<{
+        type: string;
+        input_audio?: { data: string; format: string };
+      }>;
+      const audioPart = contentArray.find((p) => p.type === 'input_audio');
+      // Bare oss URL — no data: prefix (unlike the inline branch).
+      expect(audioPart?.input_audio?.data).toBe(
+        'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
+      );
+      expect(audioPart?.input_audio?.format).toBe('mp3');
+    });
+
+    it('should convert flac/ogg/m4a audio fileData instead of textifying', () => {
+      for (const [mime, format] of [
+        ['audio/flac', 'flac'],
+        ['audio/ogg', 'ogg'],
+        ['audio/mp4', 'm4a'],
+      ] as const) {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  fileData: {
+                    mimeType: mime,
+                    fileUri: 'oss://bucket/key',
+                    displayName: 'clip',
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        const messages = converter.convertLlmRequestToOpenAI(
+          request,
+          requestContext,
+        );
+        const userMessage = messages.find((m) => m.role === 'user');
+        const contentArray = userMessage?.content as Array<{
+          type: string;
+          input_audio?: { data: string; format: string };
+          text?: string;
+        }>;
+        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+        expect(audioPart?.input_audio?.format).toBe(format);
+        expect(
+          contentArray.some((p) =>
+            p.text?.includes('Unsupported file media type'),
+          ),
+        ).toBe(false);
+      }
+    });
+
+    it('should convert inline flac/ogg/m4a audio instead of textifying', () => {
+      // Mirrors the fileData case above: the inline branch shares
+      // getAudioFormat, and a regression that re-textifies inline
+      // flac/ogg/m4a must not ship green.
+      for (const [mime, format] of [
+        ['audio/flac', 'flac'],
+        ['audio/ogg', 'ogg'],
+        ['audio/mp4', 'm4a'],
+      ] as const) {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mime,
+                    data: 'YXVkaW8=',
+                    displayName: 'clip',
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        const messages = converter.convertLlmRequestToOpenAI(
+          request,
+          requestContext,
+        );
+        const userMessage = messages.find((m) => m.role === 'user');
+        const contentArray = userMessage?.content as Array<{
+          type: string;
+          input_audio?: { data: string; format: string };
+          text?: string;
+        }>;
+        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+        expect(audioPart?.input_audio?.format).toBe(format);
+        expect(audioPart?.input_audio?.data).toBe(
+          `data:${mime};base64,YXVkaW8=`,
+        );
+        expect(
+          contentArray.some((p) =>
+            p.text?.includes('Unsupported inline media type'),
+          ),
+        ).toBe(false);
+      }
+    });
+
     it('should render unsupported inlineData file types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
@@ -2510,7 +2875,7 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[1].text).toContain('archive.zip');
     });
 
-    it('should render unsupported fileData types (including audio) as a text block', () => {
+    it('should render unsupported fileData types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -2537,9 +2902,9 @@ describe('OpenAIContentConverter', () => {
                   parts: [
                     {
                       fileData: {
-                        mimeType: 'audio/mpeg',
-                        fileUri: 'https://example.com/audio.mp3',
-                        displayName: 'audio.mp3',
+                        mimeType: 'application/zip',
+                        fileUri: 'https://example.com/archive.zip',
+                        displayName: 'archive.zip',
                       },
                     },
                   ],
@@ -2567,8 +2932,8 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[0].text).toBe('File content');
       expect(contentArray[1].type).toBe('text');
       expect(contentArray[1].text).toContain('Unsupported file media type');
-      expect(contentArray[1].text).toContain('audio/mpeg');
-      expect(contentArray[1].text).toContain('audio.mp3');
+      expect(contentArray[1].text).toContain('application/zip');
+      expect(contentArray[1].text).toContain('archive.zip');
     });
 
     it('should create tool message with text-only content when no media parts', () => {
@@ -5846,9 +6211,198 @@ describe('OpenAIContentConverter', () => {
         { text: 'still thinking', thought: true },
       ]);
     });
+
+    it('should stream ordinary Qwen3 reasoning and content immediately', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      const reasoningChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const contentChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'answer' }),
+        context,
+      );
+
+      expect(reasoningChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+      ]);
+      expect(contentChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should parse a balanced Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const openingChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: '<thi' }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'nking>step 2</thinking>answer' }, 'stop'),
+        context,
+      );
+
+      expect(openingChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 2', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should reject an unclosed Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: '<thinking>step 2' }, 'stop'),
+          context,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('should suppress a replayed short Qwen3 thinking block', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const replayedBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(replayedBlock.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
+    it('should suppress a replayed short Qwen3 thinking opener', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const opener = '<think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const replayedOpener = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'x</think>answer' }, 'stop'),
+        context,
+      );
+
+      expect(replayedOpener.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should suppress a replayed Qwen3 snapshot beyond the detection window', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = `<thinking>${'x'.repeat(1200)}</thinking>answer`;
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      for (let offset = 0; offset < block.length; offset += 100) {
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: block.slice(offset, offset + 100) }),
+          context,
+        );
+      }
+
+      const replay = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const rewind = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block.slice(0, -1) }),
+        context,
+      );
+      const extension = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: `${block}!` }),
+        context,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(rewind.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(extension.candidates?.[0]?.content?.parts).toEqual([
+        { text: '!' },
+      ]);
+    });
+
+    it('should preserve repeated short blocks for eager tagged parsing', () => {
+      const context = withTaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const secondBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(secondBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+    });
   });
 
   describe('convertLlmToolsToOpenAI', () => {
+    it('compiles a stable tool schema only once', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [{ name: 'stable', parametersJsonSchema }],
+        },
+      ] as Tool[];
+      const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');
+
+      try {
+        await converter.convertLlmToolsToOpenAI(tools);
+        await converter.convertLlmToolsToOpenAI(tools);
+        expect(compileStrict).toHaveBeenCalledTimes(1);
+      } finally {
+        compileStrict.mockRestore();
+      }
+    });
+
     it('removes uniqueItems from function-calling wire schemas', async () => {
       const parametersJsonSchema = {
         type: 'object',
@@ -5893,6 +6447,274 @@ describe('OpenAIContentConverter', () => {
         },
       ]);
       expect(parametersJsonSchema.properties.blockedBy.uniqueItems).toBe(true);
+    });
+
+    it('only relaxes grammar constraints backed by local validation', async () => {
+      const supportedSchema = {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const openSchema = {
+        type: 'object',
+        properties: {},
+      };
+      const draft2020Schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      // Says nothing about its arguments -- not the same claim as an empty
+      // argument list, so it keeps `parameters`.
+      const unspecifiedSchema = {
+        type: 'object',
+      };
+      // Explicitly accepts arguments it does not name; also keeps them.
+      const permissiveSchema = {
+        type: 'object',
+        properties: {},
+        additionalProperties: true,
+      };
+      const unsupportedSchema = {
+        $schema: 'https://json-schema.org/draft/2019-09/schema',
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedVocabularySchema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'supported', parametersJsonSchema: supportedSchema },
+            { name: 'open', parametersJsonSchema: openSchema },
+            { name: 'draft_2020', parametersJsonSchema: draft2020Schema },
+            {
+              name: 'annotated',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {},
+                title: 'NoArgs',
+              },
+            },
+            {
+              name: 'closed',
+              parametersJsonSchema: {
+                type: 'object',
+                additionalProperties: false,
+              },
+            },
+            {
+              name: 'constrained',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {},
+                minProperties: 1,
+              },
+            },
+            {
+              name: 'nullable',
+              parametersJsonSchema: {
+                type: ['object', 'null'],
+                properties: {},
+              },
+            },
+            { name: 'unspecified', parametersJsonSchema: unspecifiedSchema },
+            { name: 'permissive', parametersJsonSchema: permissiveSchema },
+            { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
+            {
+              name: 'unsupported_vocabulary',
+              parametersJsonSchema: unsupportedVocabularySchema,
+            },
+            {
+              name: 'without_local_schema',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {},
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        { name: 'supported', description: '' },
+        { name: 'open', description: '' },
+        { name: 'draft_2020', description: '' },
+        { name: 'annotated', description: '' },
+        { name: 'closed', description: '' },
+        {
+          name: 'constrained',
+          description: '',
+          parameters: { type: 'object', minProperties: 1 },
+        },
+        {
+          name: 'nullable',
+          description: '',
+          parameters: { type: ['object', 'null'] },
+        },
+        {
+          name: 'unspecified',
+          description: '',
+          parameters: { type: 'object' },
+        },
+        {
+          name: 'permissive',
+          description: '',
+          parameters: { type: 'object', additionalProperties: true },
+        },
+        {
+          name: 'unsupported',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+        {
+          name: 'unsupported_vocabulary',
+          description: '',
+          parameters: unsupportedVocabularySchema,
+        },
+        {
+          name: 'without_local_schema',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ]);
+      expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters');
+      expect(supportedSchema).toEqual({
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      });
+      expect(unsupportedSchema.$schema).toBe(
+        'https://json-schema.org/draft/2019-09/schema',
+      );
+      expect(
+        unsupportedVocabularySchema.properties.tuple.prefixItems[0]
+          .additionalProperties,
+      ).toBe(false);
+    });
+
+    it('does not omit constraints lost during OpenAPI 3.0 conversion', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {},
+        patternProperties: { '^x': { type: 'string' } },
+        additionalProperties: false,
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'patterned', parametersJsonSchema },
+            {
+              name: 'dependent',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {},
+                dependencies: { a: ['b'] },
+              },
+            },
+            {
+              name: 'nullable',
+              parametersJsonSchema: {
+                type: ['object', 'null'],
+                properties: {},
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(
+        tools,
+        'openapi_30',
+      );
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        {
+          name: 'patterned',
+          description: '',
+          parameters: { type: 'object' },
+        },
+        {
+          name: 'dependent',
+          description: '',
+          parameters: { type: 'object' },
+        },
+        {
+          name: 'nullable',
+          description: '',
+          parameters: { type: 'object', nullable: true },
+        },
+      ]);
+    });
+
+    it('keeps grammar constraints for schemas with a top-level $id', async () => {
+      const sharedId = 'https://qwen-code.test/shared-tool-schema';
+      const makeSchema = () => ({
+        $id: sharedId,
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      });
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'first', parametersJsonSchema: makeSchema() },
+            { name: 'second', parametersJsonSchema: makeSchema() },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        {
+          name: 'first',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+        {
+          name: 'second',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {
+              value: { type: 'string', maxLength: 1999 },
+            },
+          },
+        },
+      ]);
     });
 
     it('should convert Gemini tools with parameters field', async () => {

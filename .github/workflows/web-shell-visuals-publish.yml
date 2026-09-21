@@ -67,9 +67,8 @@ jobs:
       - name: 'Install ossutil'
         id: 'install-ossutil'
         # Evidence hosting is best-effort: a setup failure must not block the
-        # no-image marker-comment path, which has no external dependency
-        # (mirrors the qwen-triage.yml twins). The upload below stays loud:
-        # with images present it still aborts the publish step.
+        # marker-comment path. When images exist, the publish step records the
+        # hosting failure and refreshes the comment without broken image URLs.
         continue-on-error: true
         env:
           OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
@@ -272,6 +271,8 @@ jobs:
           # skips the upload entirely; RAW_BASE stays empty and the
           # comment below is image-less ("no screenshot changes").
           RAW_BASE=''
+          HOSTING_STATUS_FILE="${RUNNER_TEMP}/visuals-hosting-status.txt"
+          echo 'success' > "${HOSTING_STATUS_FILE}"
           if [ "${HAS_IMAGES}" = "1" ]; then
             ASSET_PREFIX="pr-assets/web-shell-visuals/${PR}/${RUN_HEAD_SHA}/${RUN_ID}/${RUN_ATTEMPT}"
             # Same PATH discipline as qwen-triage.yml's publish-verify: never
@@ -283,15 +284,20 @@ jobs:
             # pool.
             node_bin="$(command -v node)"
             trusted_bin="$(mktemp -d)"
-            install -m 0755 "${RUNNER_TEMP}/ossutil" "$trusted_bin/ossutil"
-            PATH="$trusted_bin" "$node_bin" scripts/upload-aliyun-oss-assets.js \
-              --bucket "${ALIYUN_OSS_BUCKET}" \
-              --config "${RUNNER_TEMP}/.ossutilconfig" \
-              --prefix "${ASSET_PREFIX}" \
-              "${STAGE}"/*
+            if install -m 0755 "${RUNNER_TEMP}/ossutil" "$trusted_bin/ossutil" &&
+              PATH="$trusted_bin" "$node_bin" scripts/upload-aliyun-oss-assets.js \
+                --bucket "${ALIYUN_OSS_BUCKET}" \
+                --config "${RUNNER_TEMP}/.ossutilconfig" \
+                --prefix "${ASSET_PREFIX}" \
+                "${STAGE}"/*
+            then
+              RAW_BASE="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${ASSET_PREFIX}"
+              echo "Web-shell visuals hosted at ${RAW_BASE}."
+            else
+              echo "::warning::Failed to host web-shell visuals; updating the PR comment with a hosting-failure note."
+              echo 'failure' > "${HOSTING_STATUS_FILE}"
+            fi
             rm -rf "$trusted_bin"
-            RAW_BASE="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${ASSET_PREFIX}"
-            echo "Web-shell visuals hosted at ${RAW_BASE}."
           fi
 
           # --- Changed paths, for triaging an EMPTY preview ------------------
@@ -325,7 +331,8 @@ jobs:
             "${RAW_BASE}" \
             "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}" \
             "${CHANGED_PATHS_FILE}" \
-            "${RENDER_STATUS_FILE}"
+            "${RENDER_STATUS_FILE}" \
+            "${HOSTING_STATUS_FILE}"
 
           # --- Post or update the PR comment --------------------------------
           # Dedup only against OUR OWN prior comment (bot author + marker), and

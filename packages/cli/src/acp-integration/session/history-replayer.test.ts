@@ -80,6 +80,17 @@ describe('HistoryReplayer', () => {
     timestamp: toEpochMs(record.timestamp),
     qwenTranscript: { sourceRecordIds: [record.uuid] },
   });
+  const replayTextMeta = (
+    record: ChatRecord,
+    segmentOrdinal = 0,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    ...replayMeta(record, extra),
+    qwenTranscript: {
+      sourceRecordIds: [record.uuid],
+      segmentId: `${record.uuid}:${segmentOrdinal}`,
+    },
+  });
   const sentUpdates = () =>
     sendUpdateSpy.mock.calls.map(
       (call: unknown[]) => call[0] as Record<string, unknown>,
@@ -183,7 +194,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'Hello, world!' },
-        _meta: replayMeta(record),
+        _meta: replayTextMeta(record),
       });
     });
 
@@ -212,7 +223,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'save logs' },
-        _meta: replayMeta(record, {
+        _meta: replayTextMeta(record, 0, {
           source: 'mid_turn_message_injected',
           qwenDiscreteMessage: true,
         }),
@@ -230,7 +241,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'I can help with that.' },
-        _meta: replayMeta(record),
+        _meta: replayTextMeta(record),
       });
     });
 
@@ -243,7 +254,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Thinking about this...' },
-        _meta: replayMeta(record),
+        _meta: replayTextMeta(record),
       });
     });
 
@@ -266,17 +277,17 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy.mock.calls[0][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'First part' },
-        _meta: replayMeta(record),
+        _meta: replayTextMeta(record, 0),
       });
       expect(sendUpdateSpy.mock.calls[1][0]).toEqual({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Second part' },
-        _meta: replayMeta(record),
+        _meta: replayTextMeta(record, 1),
       });
       expect(sendUpdateSpy.mock.calls[2][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Third part' },
-        _meta: replayMeta(record),
+        _meta: replayTextMeta(record, 2),
       });
     });
   });
@@ -1211,7 +1222,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Context compressed.' },
-        _meta: replayMeta(systemRecord, {
+        _meta: replayTextMeta(systemRecord, 0, {
           source: 'slash_command',
         }),
       });
@@ -1305,8 +1316,6 @@ describe('HistoryReplayer', () => {
     it('refuses to replay a goal card whose condition is empty', async () => {
       // A transcript is a file: a corrupted or hand-edited condition would
       // otherwise ride out to every client inside `_meta.goalStatus`.
-      // `restoreGoalFromHistory` refuses the same card, so neither the card nor
-      // the hook survives — they stay consistent.
       await replayer.replay([
         goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
       ]);
@@ -1482,7 +1491,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(1, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Hello!' },
-        _meta: replayMeta(record),
+        _meta: replayTextMeta(record),
       });
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(2, {
         sessionUpdate: 'agent_message_chunk',
@@ -1639,5 +1648,116 @@ describe('collectHistoryReplayUpdates restore skip', () => {
       'tool_call',
       'tool_call_update',
     ]);
+  });
+});
+
+describe('HistoryReplayer timing frames', () => {
+  const SESSION_ID = 'timing-session';
+  const TIMESTAMP = '2026-07-14T00:00:06.544Z';
+
+  function telemetryRecord(): ChatRecord {
+    return {
+      uuid: 'telemetry-record',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: TIMESTAMP,
+      type: 'system',
+      subtype: 'ui_telemetry',
+      cwd: '/workspace',
+      version: '1.0.0',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': TIMESTAMP,
+          response_id: 'chatcmpl-abc',
+          model: 'qwen3.8-max',
+          duration_ms: 6544,
+          ttft_ms: 2344,
+          prompt_id: `${SESSION_ID}########0`,
+        },
+      },
+    } as unknown as ChatRecord;
+  }
+
+  function timingsFrom(updates: Array<Record<string, unknown>>) {
+    return updates
+      .map(
+        (update) =>
+          (update as { _meta?: { timing?: Record<string, unknown> } })._meta
+            ?.timing,
+      )
+      .filter(Boolean);
+  }
+
+  function makeReplayer() {
+    const sent: Array<Record<string, unknown>> = [];
+    const context = {
+      sessionId: SESSION_ID,
+      config: {
+        getToolRegistry: () => ({ getTool: vi.fn().mockReturnValue(null) }),
+      } as unknown as Config,
+      sendUpdate: vi.fn(async (update: Record<string, unknown>) => {
+        sent.push(update);
+      }),
+      setActiveRecordId: vi.fn(),
+    } as unknown as SessionContext;
+    return { replayer: new HistoryReplayer(context), sent };
+  }
+
+  it('emits a timing frame when a page opts in', async () => {
+    const { replayer, sent } = makeReplayer();
+
+    await replayer.replayPage([telemetryRecord()], { includeTiming: true });
+
+    expect(timingsFrom(sent)).toEqual([
+      {
+        kind: 'request',
+        status: 'ok',
+        durationMs: 6544,
+        ttftMs: 2344,
+        startedAt: Date.parse(TIMESTAMP) - 6544,
+        responseId: 'chatcmpl-abc',
+        promptId: `${SESSION_ID}########0`,
+        model: 'qwen3.8-max',
+      },
+    ]);
+  });
+
+  it('emits nothing for a page that does not opt in', async () => {
+    const { replayer, sent } = makeReplayer();
+
+    await replayer.replayPage([telemetryRecord()]);
+
+    expect(sent).toEqual([]);
+  });
+
+  it('emits nothing on the bulk replay path', async () => {
+    // The bulk path runs against a fixed update cap, so timing stays off
+    // there even though the same records flow through it.
+    const { replayer, sent } = makeReplayer();
+
+    await replayer.replay([telemetryRecord()]);
+
+    expect(sent).toEqual([]);
+  });
+
+  it('leaves the bulk path update count unchanged by telemetry records', async () => {
+    const assistant = {
+      uuid: 'assistant-record',
+      parentUuid: 'telemetry-record',
+      sessionId: SESSION_ID,
+      timestamp: TIMESTAMP,
+      type: 'assistant',
+      cwd: '/workspace',
+      version: '1.0.0',
+      message: { role: 'model', parts: [{ text: 'answer' }] },
+    } as unknown as ChatRecord;
+
+    const withTelemetry = makeReplayer();
+    await withTelemetry.replayer.replay([telemetryRecord(), assistant]);
+    const withoutTelemetry = makeReplayer();
+    await withoutTelemetry.replayer.replay([assistant]);
+
+    expect(withTelemetry.sent).toEqual(withoutTelemetry.sent);
   });
 });

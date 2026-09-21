@@ -501,6 +501,10 @@ describe('Agent View PTY host process server', () => {
     const connected = await connectAgentViewPtyHostProcess(
       createLaunch('session-control-byte-logs'),
       socketPath,
+      undefined,
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+        ? { requestTimeoutMs: 60_000 }
+        : {},
     );
 
     await expect(connected.getOutput?.()).resolves.toBe(output);

@@ -6,6 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { HookEventHandler } from './hookEventHandler.js';
+import { HookRunner as RealHookRunner } from './hookRunner.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
+import { MessageBusType } from '../confirmation-bus/types.js';
+import type { HookProgress } from '../confirmation-bus/types.js';
 import {
   HookEventName,
   HookType,
@@ -32,6 +36,9 @@ import type {
 import type { HookConfig, HookOutput, PermissionSuggestion } from './types.js';
 import type { HookExecutionResult } from './types.js';
 import { logHookCall } from '../telemetry/loggers.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 
 // Mock the telemetry loggers module
 vi.mock('../telemetry/loggers.js', () => ({
@@ -52,6 +59,7 @@ describe('HookEventHandler', () => {
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       getSessionSourceId: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
     } as unknown as Config;
 
@@ -573,6 +581,7 @@ describe('HookEventHandler', () => {
         getSessionSourceType: vi.fn().mockReturnValue(undefined),
         getSessionSourceId: vi.fn().mockReturnValue(undefined),
         getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+        getApprovalMode: vi.fn().mockReturnValue('default'),
         getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
       } as unknown as Config;
 
@@ -1218,6 +1227,102 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('project-skill trust gate at fire time', () => {
+    // The second side of the gate `applySideEffects` enforces on the way
+    // in: a hook registered from a repository's `.qwen/skills/` frontmatter
+    // fires only while the folder is STILL trusted. `isTrustedFolder()` is
+    // live under an IDE connection, so a revocation mid-session must
+    // silence the hook at its next event — no restart, no unregistration.
+    const gated = {
+      hookId: 'gated',
+      eventName: HookEventName.PreToolUse,
+      matcher: 'shell',
+      config: { type: HookType.Command, command: './exfil.sh' },
+      trustGated: true,
+    };
+    const ungated = {
+      hookId: 'plain',
+      eventName: HookEventName.PreToolUse,
+      matcher: 'shell',
+      config: { type: HookType.Command, command: './mine.sh' },
+    };
+    const trust = (value: boolean) => {
+      (
+        mockConfig as unknown as { isTrustedFolder: () => boolean }
+      ).isTrustedFolder = vi.fn().mockReturnValue(value);
+    };
+    const fire = async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      return hookEventHandler.firePreToolUseEvent(
+        'shell',
+        { command: 'ls' },
+        'toolu_123',
+        PermissionMode.Default,
+      );
+    };
+
+    it('runs the gated hook while the folder is trusted', async () => {
+      trust(true);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+      ] as never);
+      await fire();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [gated.config],
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('skips the gated hook once trust is revoked, and only that one', async () => {
+      trust(false);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+        ungated,
+      ] as never);
+      await fire();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [ungated.config],
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('fires nothing when the gated hook was the only one — and never consults trust without a gated entry', async () => {
+      trust(false);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+      ] as never);
+      const result = await fire();
+      expect(result.success).toBe(true);
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+      // An ungated-only set is executed without touching folder trust: the
+      // gate costs nothing on rounds that registered no project-skill hook.
+      const probe = vi.fn().mockReturnValue(false);
+      (
+        mockConfig as unknown as { isTrustedFolder: () => boolean }
+      ).isTrustedFolder = probe;
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        ungated,
+      ] as never);
+      await fire();
+      expect(probe).not.toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('sequential vs parallel execution', () => {
     it('should execute hooks sequentially when plan.sequential is true', async () => {
       const mockPlan = createMockExecutionPlan(
@@ -1332,6 +1437,52 @@ describe('HookEventHandler', () => {
   });
 
   describe('firePostToolBatchEvent', () => {
+    it('preserves question text for batch hooks without changing other results', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      const display = Object.freeze({
+        type: 'ask_user_question_answers',
+        text: 'Original answer text',
+        answers: [{ question: 'Continue?', answer: 'Yes' }],
+      });
+      const response = Object.freeze({
+        result_display: display,
+        response_parts: [],
+      });
+      const calls = ['ask_user_question', 'other_tool'].map((tool_name) =>
+        Object.freeze({
+          tool_name,
+          tool_input: {},
+          tool_use_id: tool_name,
+          status: 'success' as const,
+          tool_response: response,
+        }),
+      );
+      await hookEventHandler.firePostToolBatchEvent(calls);
+      expect(
+        vi.mocked(mockHookRunner.executeHooksParallel).mock.calls[0][2],
+      ).toMatchObject({
+        tool_calls: [
+          {
+            tool_response: { result_display: display.text, response_parts: [] },
+          },
+          { tool_response: { result_display: display, response_parts: [] } },
+        ],
+      });
+      expect(calls[0].tool_response.result_display).toBe(display);
+    });
+
     it('should execute hooks for PostToolBatch without matcher context', async () => {
       const mockPlan = createMockExecutionPlan([]);
       const mockAggregated = createMockAggregatedResult(true);
@@ -1647,6 +1798,114 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('common input fields', () => {
+    const fireAndCaptureInput = async (
+      fire: () => Promise<unknown>,
+    ): Promise<Record<string, unknown>> => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      await fire();
+      const calls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      return calls[calls.length - 1][2] as Record<string, unknown>;
+    };
+
+    it('reports the session approval mode on events without their own mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+
+      const input = await fireAndCaptureInput(() =>
+        hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+      );
+
+      expect(input['permission_mode']).toBe(PermissionMode.Yolo);
+    });
+
+    it('keeps the permission mode an event reports itself', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+
+      const input = await fireAndCaptureInput(() =>
+        hookEventHandler.firePreToolUseEvent(
+          'shell',
+          {},
+          'toolu_mode',
+          PermissionMode.Plan,
+        ),
+      );
+
+      expect(input['permission_mode']).toBe(PermissionMode.Plan);
+    });
+
+    it('adds agent_id and prompt_id only when they are known', async () => {
+      const outside = await fireAndCaptureInput(() =>
+        hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+      );
+      expect(outside).not.toHaveProperty('agent_id');
+      expect(outside).not.toHaveProperty('prompt_id');
+
+      const inside = await fireAndCaptureInput(() =>
+        runWithAgentContext('agent-7', () =>
+          promptIdContext.run('prompt-9', () =>
+            hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear),
+          ),
+        ),
+      );
+      expect(inside['agent_id']).toBe('agent-7');
+      expect(inside['prompt_id']).toBe('prompt-9');
+    });
+
+    it('reports duration_ms on PostToolUse and PostToolUseFailure when given', async () => {
+      const post = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseEvent(
+          'shell',
+          {},
+          {},
+          'toolu_post',
+          PermissionMode.Default,
+          undefined,
+          'call-post',
+          42,
+        ),
+      );
+      expect(post['duration_ms']).toBe(42);
+
+      const failure = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseFailureEvent(
+          'toolu_failure',
+          'shell',
+          {},
+          'boom',
+          false,
+          PermissionMode.Default,
+          undefined,
+          'call-failure',
+          7,
+        ),
+      );
+      expect(failure['duration_ms']).toBe(7);
+
+      const withoutDuration = await fireAndCaptureInput(() =>
+        hookEventHandler.firePostToolUseEvent(
+          'shell',
+          {},
+          {},
+          'toolu_untimed',
+          PermissionMode.Default,
+        ),
+      );
+      expect(withoutDuration).not.toHaveProperty('duration_ms');
+    });
+  });
+
   describe('firePreToolUseEvent', () => {
     it('should execute hooks for PreToolUse event', async () => {
       const mockPlan = createMockExecutionPlan([]);
@@ -1945,6 +2204,56 @@ describe('HookEventHandler', () => {
   });
 
   describe('firePostToolUseEvent', () => {
+    it.each(['ask_user_question', 'other_tool'])(
+      'preserves the hook display contract for %s without mutating results',
+      async (toolName) => {
+        vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+          createMockExecutionPlan([
+            {
+              type: HookType.Command,
+              command: 'echo test',
+              source: HooksConfigSource.Project,
+            },
+          ]),
+        );
+        vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+        vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+          createMockAggregatedResult(true),
+        );
+        const text =
+          'User has provided the following answers:\n\n**A**: first\n**B**: embedded';
+        const display = Object.freeze({
+          type: 'ask_user_question_answers',
+          text,
+          answers: [
+            { question: 'Question A?', answer: 'first\n**B**: embedded' },
+          ],
+        });
+        const response = Object.freeze({
+          llmContent: text,
+          returnDisplay: display,
+        });
+
+        await hookEventHandler.firePostToolUseEvent(
+          toolName,
+          {},
+          response,
+          'toolu_question',
+          PermissionMode.Default,
+        );
+
+        expect(
+          vi.mocked(mockHookRunner.executeHooksParallel).mock.calls[0][2],
+        ).toMatchObject({
+          tool_response: {
+            llmContent: text,
+            returnDisplay: toolName === 'ask_user_question' ? text : display,
+          },
+        });
+        expect(response.returnDisplay).toBe(display);
+      },
+    );
+
     it('should execute hooks for PostToolUse event', async () => {
       const mockPlan = createMockExecutionPlan([]);
       const mockAggregated = createMockAggregatedResult(true);
@@ -4160,6 +4469,795 @@ describe('HookEventHandler', () => {
           toolUseID: 'toolu_test',
         }),
       );
+    });
+  });
+
+  describe('hook progress events', () => {
+    type ProgressMessage = Record<string, unknown>;
+    let publish: Mock;
+
+    beforeEach(() => {
+      publish = vi.fn().mockResolvedValue(undefined);
+      Object.assign(mockConfig, {
+        getMessageBus: vi.fn().mockReturnValue({ publish }),
+      });
+    });
+
+    const commandHook = (
+      command: string,
+      extra: Partial<HookConfig> = {},
+    ): HookConfig =>
+      ({
+        type: HookType.Command,
+        command,
+        source: HooksConfigSource.Project,
+        ...extra,
+      }) as HookConfig;
+
+    const progress = (): ProgressMessage[] =>
+      publish.mock.calls.map(([message]) => message as ProgressMessage);
+
+    /**
+     * Drives the runner the way the real one does: onHookStart, then the
+     * result, then onHookEnd with the same index.
+     */
+    const runWith = (
+      configs: HookConfig[],
+      resultFor: (
+        config: HookConfig,
+        index: number,
+      ) => Partial<HookExecutionResult>,
+      sequential = false,
+    ) => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan(configs, sequential),
+      );
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      const run = async (
+        hookConfigs: HookConfig[],
+        eventName: HookEventName,
+        _input: unknown,
+        onHookStart?: (config: HookConfig, index: number) => void,
+        onHookEnd?: (
+          config: HookConfig,
+          result: HookExecutionResult,
+          index: number,
+        ) => void,
+      ): Promise<HookExecutionResult[]> => {
+        const results: HookExecutionResult[] = [];
+        for (let index = 0; index < hookConfigs.length; index++) {
+          const config = hookConfigs[index];
+          onHookStart?.(config, index);
+          const result = {
+            hookConfig: config,
+            eventName,
+            success: true,
+            duration: 5,
+            ...resultFor(config, index),
+          } as HookExecutionResult;
+          onHookEnd?.(config, result, index);
+          results.push(result);
+        }
+        return results;
+      };
+      vi.mocked(mockHookRunner.executeHooksParallel).mockImplementation(run);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockImplementation(run);
+    };
+
+    it('publishes a start for each hook with its position in the batch', async () => {
+      runWith([commandHook('first'), commandHook('second')], () => ({}));
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      const starts = progress().filter((m) => m['phase'] === 'start');
+      expect(starts).toEqual([
+        {
+          type: 'hook-progress',
+          phase: 'start',
+          eventName: HookEventName.UserPromptSubmit,
+          hookName: 'first',
+          hookType: 'command',
+          invocationId: expect.stringMatching(/^hook-\d+$/),
+          index: 0,
+          total: 2,
+        },
+        {
+          type: 'hook-progress',
+          phase: 'start',
+          eventName: HookEventName.UserPromptSubmit,
+          hookName: 'second',
+          hookType: 'command',
+          invocationId: expect.stringMatching(/^hook-\d+$/),
+          index: 1,
+          total: 2,
+        },
+      ]);
+    });
+
+    it('carries the configured statusMessage on both phases', async () => {
+      runWith([commandHook('lint', { statusMessage: 'Linting…' })], () => ({}));
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(progress().map((m) => m['statusMessage'])).toEqual([
+        'Linting…',
+        'Linting…',
+      ]);
+    });
+
+    it('omits statusMessage when none is configured', async () => {
+      runWith([commandHook('plain')], () => ({}));
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      for (const message of progress()) {
+        expect('statusMessage' in message).toBe(false);
+      }
+    });
+
+    it('reports a timeout with its duration and error message', async () => {
+      runWith([commandHook('slow')], () => ({
+        success: false,
+        outcome: 'timeout',
+        duration: 1234,
+        error: new Error('Hook timed out after 2s'),
+      }));
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(progress().find((m) => m['phase'] === 'end')).toMatchObject({
+        outcome: 'timeout',
+        durationMs: 1234,
+        error: 'Hook timed out after 2s',
+      });
+    });
+
+    it.each([
+      [{ success: false }, 'error'],
+      [{ success: true }, 'success'],
+      [{ success: false, outcome: 'non_blocking_error' }, 'error'],
+      [{ success: false, outcome: 'cancelled' }, 'cancelled'],
+    ] as Array<[Partial<HookExecutionResult>, string]>)(
+      'maps result %o to outcome %s',
+      async (result, expected) => {
+        runWith([commandHook('mapped')], () => result);
+
+        await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+        expect(progress().find((m) => m['phase'] === 'end')?.['outcome']).toBe(
+          expected,
+        );
+      },
+    );
+
+    it('reports a blocking result as blocked with its reason', async () => {
+      runWith([commandHook('gate')], () => ({
+        success: false,
+        outcome: 'blocking',
+        output: { decision: 'deny', reason: 'nope' },
+      }));
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(progress().find((m) => m['phase'] === 'end')).toMatchObject({
+        outcome: 'blocked',
+        blockedReason: 'nope',
+      });
+    });
+
+    it('reports a clean exit that denies a tool call as blocked', async () => {
+      runWith([commandHook('policy')], () => ({
+        success: true,
+        outcome: 'success',
+        output: {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'writes outside the repo',
+          },
+        },
+      }));
+
+      await hookEventHandler.firePreToolUseEvent(
+        'write_file',
+        {},
+        'tool-1',
+        PermissionMode.Default,
+      );
+
+      expect(progress().find((m) => m['phase'] === 'end')).toMatchObject({
+        outcome: 'blocked',
+        blockedReason: 'writes outside the repo',
+      });
+    });
+
+    it("carries the hook's own systemMessage and exit code on end", async () => {
+      runWith([commandHook('warn')], () => ({
+        success: false,
+        outcome: 'non_blocking_error',
+        exitCode: 127,
+        output: { systemMessage: 'Warning: command not found' },
+      }));
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(progress().find((m) => m['phase'] === 'end')).toMatchObject({
+        systemMessage: 'Warning: command not found',
+        exitCode: 127,
+      });
+    });
+
+    it('marks a hook handed to the async registry', async () => {
+      runWith([commandHook('bg')], () => ({ success: true, isAsync: true }));
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(progress().find((m) => m['phase'] === 'end')).toMatchObject({
+        async: true,
+      });
+    });
+
+    it('names non-command hooks by url, id, or a shortened prompt', async () => {
+      const longPrompt = `Check   that ${'x'.repeat(200)}`;
+      runWith(
+        [
+          {
+            type: HookType.Http,
+            url: 'https://hooks.example.com/audit',
+            source: HooksConfigSource.Project,
+          },
+          {
+            type: HookType.Function,
+            id: 'goal-stop-hook',
+            callback: vi.fn(),
+            errorMessage: 'failed',
+            source: HooksConfigSource.Session,
+          } as unknown as HookConfig,
+          {
+            type: HookType.Prompt,
+            prompt: longPrompt,
+            source: HooksConfigSource.Project,
+          },
+        ],
+        () => ({}),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      const names = progress()
+        .filter((m) => m['phase'] === 'start')
+        .map((m) => m['hookName'] as string);
+      expect(names[0]).toBe('https://hooks.example.com/audit');
+      expect(names[1]).toBe('goal-stop-hook');
+      expect(names[2].startsWith('Check that x')).toBe(true);
+      expect(names[2].length).toBe(80);
+      expect(names[2].endsWith('…')).toBe(true);
+    });
+
+    it('still returns the aggregated result when there is no bus', async () => {
+      Object.assign(mockConfig, {
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+      });
+      runWith([commandHook('solo')], () => ({}));
+
+      const result = await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(result.success).toBe(true);
+      expect(publish).not.toHaveBeenCalled();
+    });
+
+    it('still runs hooks when the config has no message bus accessor', async () => {
+      delete (mockConfig as { getMessageBus?: unknown }).getMessageBus;
+      runWith([commandHook('solo')], () => ({}));
+
+      const result = await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(result.success).toBe(true);
+      expect(publish).not.toHaveBeenCalled();
+    });
+
+    it('ignores a publish that rejects without leaving it unhandled', async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        // A plain function, not vi.fn(): a spy attaches handlers to the
+        // promise it returns, which would hide an unhandled rejection.
+        let publishCalls = 0;
+        Object.assign(mockConfig, {
+          getMessageBus: () => ({
+            publish: () => {
+              publishCalls++;
+              return Promise.reject(new Error('bus down'));
+            },
+          }),
+        });
+        runWith([commandHook('solo')], () => ({}));
+
+        const result = await hookEventHandler.fireUserPromptSubmitEvent('hi');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(result.success).toBe(true);
+        expect(publishCalls).toBe(2);
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('publishes start and end in execution order for sequential hooks', async () => {
+      runWith([commandHook('one'), commandHook('two')], () => ({}), true);
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+      expect(progress().map((m) => `${m['phase']}:${m['index']}`)).toEqual([
+        'start:0',
+        'end:0',
+        'start:1',
+        'end:1',
+      ]);
+    });
+
+    it('publishes progress for events other than the one it was tested on', async () => {
+      runWith([commandHook('notify')], () => ({}));
+
+      await hookEventHandler.fireNotificationEvent(
+        'Waiting for input',
+        NotificationType.IdlePrompt,
+      );
+
+      expect(progress().map((m) => `${m['eventName']}:${m['phase']}`)).toEqual([
+        `${HookEventName.Notification}:start`,
+        `${HookEventName.Notification}:end`,
+      ]);
+    });
+
+    /**
+     * What each runner returns for each way a hook can end (the runner tests
+     * pin these shapes), and the outcome the bus must report for it. HTTP keeps
+     * `success: true` on its non-blocking failures, so the projection has to
+     * follow `outcome`, not `success`.
+     */
+    it.each([
+      [
+        'command',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'http',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'function',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'prompt',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'command',
+        'cancelled while running',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'http',
+        'cancelled while running',
+        { success: true, outcome: 'cancelled', output: { continue: true } },
+        'cancelled',
+      ],
+      [
+        'function',
+        'cancelled while running',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'prompt',
+        'cancelled while running',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'command',
+        'timed out',
+        { success: false, outcome: 'timeout' },
+        'timeout',
+      ],
+      [
+        'http',
+        'timed out',
+        { success: true, outcome: 'timeout', output: { continue: true } },
+        'timeout',
+      ],
+      [
+        'function',
+        'timed out',
+        { success: false, outcome: 'timeout' },
+        'timeout',
+      ],
+      [
+        'prompt',
+        'timed out',
+        { success: false, outcome: 'timeout' },
+        'timeout',
+      ],
+      ['command', 'allowed', { success: true, outcome: 'success' }, 'success'],
+      [
+        'http',
+        'allowed',
+        { success: true, outcome: 'success', output: { continue: true } },
+        'success',
+      ],
+      [
+        'function',
+        'allowed',
+        { success: true, outcome: 'success', output: { continue: true } },
+        'success',
+      ],
+      [
+        'prompt',
+        'allowed',
+        {
+          success: true,
+          outcome: 'success',
+          output: { continue: true, decision: 'allow' },
+        },
+        'success',
+      ],
+      [
+        'command',
+        'blocked',
+        { success: false, outcome: 'blocking' },
+        'blocked',
+      ],
+      [
+        'http',
+        'blocked',
+        {
+          success: true,
+          outcome: 'blocking',
+          output: { decision: 'block', reason: 'no' },
+        },
+        'blocked',
+      ],
+      [
+        'function',
+        'blocked',
+        {
+          success: false,
+          outcome: 'blocking',
+          output: { continue: false, decision: 'block' },
+        },
+        'blocked',
+      ],
+      [
+        'prompt',
+        'blocked',
+        {
+          success: false,
+          outcome: 'blocking',
+          output: { continue: false, decision: 'block' },
+        },
+        'blocked',
+      ],
+      [
+        'command',
+        'failed to spawn',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'http',
+        'non-2xx response',
+        {
+          success: true,
+          outcome: 'non_blocking_error',
+          error: new Error('HTTP hook returned 500'),
+          output: { continue: true },
+        },
+        'error',
+      ],
+      [
+        'http',
+        'connection failure',
+        {
+          success: true,
+          outcome: 'non_blocking_error',
+          error: new TypeError('fetch failed'),
+          output: { continue: true },
+        },
+        'error',
+      ],
+      [
+        'http',
+        'URL not allowed',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'function',
+        'callback threw',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'prompt',
+        'provider error',
+        {
+          success: false,
+          outcome: 'non_blocking_error',
+          output: { continue: true },
+        },
+        'error',
+      ],
+      [
+        'command',
+        'malformed output',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'command',
+        'non-zero exit',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'command',
+        'internal error',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'command',
+        'async hand-off',
+        {
+          success: true,
+          outcome: 'success',
+          isAsync: true,
+          output: { continue: true },
+        },
+        'success',
+      ],
+      [
+        'command',
+        'async refused',
+        {
+          success: false,
+          outcome: 'non_blocking_error',
+          isAsync: true,
+          output: { continue: true },
+        },
+        'error',
+      ],
+    ] as Array<[string, string, Partial<HookExecutionResult>, string]>)(
+      'reports a %s hook that %s as %s on the bus',
+      async (_runner, _ending, result, expected) => {
+        runWith([commandHook('matrix')], () => result);
+
+        await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+        expect(progress().find((m) => m['phase'] === 'end')?.['outcome']).toBe(
+          expected,
+        );
+      },
+    );
+
+    /**
+     * The command runner now states the outcome of its internal catch and of
+     * the async hand-off and refusal. Each must project to what the bus
+     * reported before the outcome was filled in.
+     */
+    it.each([
+      [
+        'internal error',
+        { success: false, error: new Error('boom') },
+        'non_blocking_error',
+      ],
+      [
+        'async refused',
+        {
+          success: false,
+          isAsync: true,
+          error: new Error('too many'),
+          output: { continue: true },
+        },
+        'non_blocking_error',
+      ],
+      [
+        'async hand-off',
+        { success: true, isAsync: true, output: { continue: true } },
+        'success',
+      ],
+    ] as Array<
+      [string, Partial<HookExecutionResult>, HookExecutionResult['outcome']]
+    >)(
+      'reports the same %s progress with and without an explicit outcome',
+      async (_ending, result, outcome) => {
+        runWith([commandHook('implicit')], () => result);
+        await hookEventHandler.fireUserPromptSubmitEvent('hi');
+        const implicit = progress().find((m) => m['phase'] === 'end');
+
+        publish.mockClear();
+        runWith([commandHook('implicit')], () => ({ ...result, outcome }));
+        await hookEventHandler.fireUserPromptSubmitEvent('hi');
+        const explicit = progress().find((m) => m['phase'] === 'end');
+
+        // Two firings are two invocations, so the identity is the one field
+        // that has to differ; everything the outcome decides must not.
+        expect(implicit?.['invocationId']).toMatch(/^hook-\d+$/);
+        expect(explicit?.['invocationId']).not.toBe(implicit?.['invocationId']);
+        expect(explicit).toEqual({
+          ...implicit,
+          invocationId: expect.stringMatching(/^hook-\d+$/),
+        });
+      },
+    );
+  });
+  describe('hook invocation identity in progress events', () => {
+    let bus: MessageBus;
+    let events: HookProgress[];
+    let handler: HookEventHandler;
+
+    beforeEach(() => {
+      bus = new MessageBus();
+      events = [];
+      bus.subscribe<HookProgress>(MessageBusType.HOOK_PROGRESS, (message) => {
+        events.push(message);
+      });
+      Object.assign(mockConfig, { getMessageBus: () => bus });
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      // The real runner, so start/end come from executeHooksParallel exactly
+      // as in production.
+      handler = new HookEventHandler(
+        mockConfig,
+        mockHookPlanner,
+        new RealHookRunner(),
+        mockHookAggregator,
+        mockSessionHooksManager,
+      );
+    });
+
+    const functionHook = (
+      id: string,
+      callback: () => Promise<HookOutput | undefined> = async () => undefined,
+    ): HookConfig =>
+      ({
+        type: HookType.Function,
+        id,
+        callback,
+        errorMessage: `${id} failed`,
+        source: HooksConfigSource.Session,
+      }) as unknown as HookConfig;
+
+    const planWith = (configs: HookConfig[]) => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan(configs, false),
+      );
+    };
+
+    const ofPhase = (phase: 'start' | 'end') =>
+      events.filter((event) => event.phase === phase);
+
+    it('gives a hook the same invocationId on start and end', async () => {
+      planWith([functionHook('solo')]);
+
+      await handler.fireUserPromptSubmitEvent('hi');
+
+      expect(events).toHaveLength(2);
+      const [start, end] = events;
+      expect(start.invocationId).toMatch(/^hook-\d+$/);
+      expect(end.invocationId).toBe(start.invocationId);
+    });
+
+    it('gives each hook in one batch its own invocationId', async () => {
+      planWith([functionHook('first'), functionHook('second')]);
+
+      await handler.fireUserPromptSubmitEvent('hi');
+
+      const starts = ofPhase('start');
+      expect(starts.map((event) => event.index)).toEqual([0, 1]);
+      expect(starts[0].invocationId).not.toBe(starts[1].invocationId);
+    });
+
+    it('pairs start and end by invocationId when batches of one event overlap', async () => {
+      const releases: Array<() => void> = [];
+      const gated = functionHook(
+        'gated',
+        () =>
+          new Promise<undefined>((resolve) => {
+            releases.push(() => resolve(undefined));
+          }),
+      );
+      planWith([gated]);
+
+      const first = handler.fireUserPromptSubmitEvent('one');
+      const second = handler.fireUserPromptSubmitEvent('two');
+      await vi.waitFor(() => expect(releases).toHaveLength(2));
+      // The first batch ends only after the second batch started.
+      releases[0]();
+      await first;
+      releases[1]();
+      await second;
+
+      expect(events.map((event) => `${event.phase}:${event.index}`)).toEqual([
+        'start:0',
+        'start:0',
+        'end:0',
+        'end:0',
+      ]);
+      const [firstStart, secondStart, firstEnd, secondEnd] = events;
+      expect(firstStart.invocationId).not.toBe(secondStart.invocationId);
+      expect(firstEnd.invocationId).toBe(firstStart.invocationId);
+      expect(secondEnd.invocationId).toBe(secondStart.invocationId);
+    });
+
+    it('tags both phases with the agent that ran the hook', async () => {
+      planWith([functionHook('in-agent')]);
+
+      await runWithAgentContext('agent-1', () =>
+        handler.fireUserPromptSubmitEvent('hi'),
+      );
+
+      expect(events.map((event) => event.agentId)).toEqual([
+        'agent-1',
+        'agent-1',
+      ]);
+    });
+
+    it('omits agentId outside an agent context', async () => {
+      planWith([functionHook('main')]);
+
+      await handler.fireUserPromptSubmitEvent('hi');
+
+      expect(events).toHaveLength(2);
+      for (const event of events) {
+        expect('agentId' in event).toBe(false);
+      }
+    });
+
+    it('keeps the agentId read at batch start when the end runs elsewhere', async () => {
+      let release: (() => void) | undefined;
+      planWith([
+        functionHook(
+          'crossing',
+          () =>
+            new Promise<undefined>((resolve) => {
+              release = () => resolve(undefined);
+            }),
+        ),
+      ]);
+
+      const run = runWithAgentContext('agent-2', () =>
+        handler.fireUserPromptSubmitEvent('hi'),
+      );
+      await vi.waitFor(() => expect(release).toBeDefined());
+      // Settle the hook from a different agent frame.
+      await runWithAgentContext('agent-other', async () => {
+        release!();
+      });
+      await run;
+
+      const [start, end] = events;
+      expect(end.invocationId).toBe(start.invocationId);
+      expect(start.agentId).toBe('agent-2');
+      expect(end.agentId).toBe(start.agentId);
     });
   });
 });

@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import type Parser from 'web-tree-sitter';
+import { carriedReferenceEdits, carriedVarEdits } from './cell-bindings.js';
 import type {
   NodeReplBindingDescriptor,
   NodeReplBindingKind,
@@ -336,13 +337,15 @@ function generatedPrefix(
 
 function snapshotAssignments(
   snapshotName: string,
+  references: string,
   bindings: Iterable<NodeReplBindingDescriptor>,
   maxChars: number,
 ): string {
   const assignments: string[] = [];
   let length = 0;
   for (const { name } of bindings) {
-    const assignment = `${snapshotName}[${JSON.stringify(name)}] = ${name};`;
+    const key = JSON.stringify(name);
+    const assignment = `${snapshotName}[${key}] = {binding:${references}[${key}],value:${references}[${key}].value};`;
     length += assignment.length + 1;
     if (length > maxChars) {
       throw new Error('Transformed JavaScript cell exceeds the sanity limit');
@@ -359,12 +362,14 @@ function snapshotAssignments(
 function snapshotDeclarator(
   helperName: string,
   snapshotName: string,
+  references: string,
   bindings: Iterable<NodeReplBindingDescriptor>,
   maxChars: number,
 ): string {
-  const assignments = [...bindings].map(
-    ({ name }) => `${snapshotName}[${JSON.stringify(name)}] = ${name}`,
-  );
+  const assignments = [...bindings].map(({ name }) => {
+    const key = JSON.stringify(name);
+    return `${snapshotName}[${key}] = {binding:${references}[${key}],value:${references}[${key}].value}`;
+  });
   const expression =
     assignments.length > 0
       ? `${assignments.join(', ')}, undefined`
@@ -419,6 +424,48 @@ function isSourceItem(node: Parser.SyntaxNode): boolean {
   return node.type !== 'comment' && node.type !== 'hash_bang_line';
 }
 
+function cancellationGuardEdits(root: Parser.SyntaxNode): Edit[] {
+  const edits: Edit[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (node.type === 'await_expression') {
+      const awaited = node.namedChildren[0];
+      if (awaited) {
+        edits.push({
+          start: awaited.startIndex,
+          end: awaited.startIndex,
+          text: ' nodeRepl.signal.guardAwait(',
+        });
+        edits.push({
+          start: awaited.endIndex,
+          end: awaited.endIndex,
+          text: ')',
+        });
+      }
+    } else if (
+      node.type === 'for_in_statement' &&
+      /^for\s+await\b/.test(node.text)
+    ) {
+      const iterable = node.childForFieldName('right');
+      if (iterable) {
+        edits.push({
+          start: iterable.startIndex,
+          end: iterable.startIndex,
+          text: 'nodeRepl.signal.guardAsyncIterable(',
+        });
+        edits.push({
+          start: iterable.endIndex,
+          end: iterable.endIndex,
+          text: ')',
+        });
+      }
+    }
+    for (const child of node.namedChildren) pending.push(child);
+  }
+  return edits;
+}
+
 export async function prepareNodeReplCell(
   code: string,
   options: PrepareNodeReplCellOptions,
@@ -433,10 +480,27 @@ export async function prepareNodeReplCell(
   }
 
   const parser = await getParser();
-  const tree = parser.parse(code);
+  let tree = parser.parse(code);
   if (!tree) throw new Error('JavaScript parser returned no syntax tree');
 
   try {
+    if (tree.rootNode.hasError) {
+      throw new Error('JavaScript syntax could not be parsed safely');
+    }
+    const carriedNames = new Set(
+      options.previousBindings.map(({ name }) => name),
+    );
+    const carriedVars = carriedVarEdits(
+      tree.rootNode,
+      carriedNames,
+      generatedPrefix(tree.rootNode, options.cellId, options.previousBindings),
+    );
+    if (carriedVars.edits.length > 0) {
+      code = applyEdits(code, carriedVars.edits);
+      tree.delete();
+      tree = parser.parse(code);
+      if (!tree) throw new Error('JavaScript parser returned no syntax tree');
+    }
     const root = tree.rootNode;
     if (root.hasError) {
       throw new Error('JavaScript syntax could not be parsed safely');
@@ -460,6 +524,7 @@ export async function prepareNodeReplCell(
       collectDeclarationNames(item, currentBindings);
       collectTopLevelLoopVarBindings(item, currentBindings);
     }
+    for (const name of carriedVars.privateNames) currentBindings.delete(name);
     // A persisted top-level binding that shadows a host-injected global would
     // permanently break it for the rest of the session (e.g. declaring
     // `nodeRepl` silently disables nodeRepl.write with no way back except a
@@ -535,6 +600,7 @@ export async function prepareNodeReplCell(
     const previousNamespace = `${prefix}_previous`;
     const snapshotName = `${prefix}_snapshot`;
     const snapshotExportName = `${prefix}_snapshot_export`;
+    const references = `${prefix}_references`;
 
     // Joined into a SINGLE line so the user's first line is always physical
     // line 2. The kernel compensates with lineOffset: -1 (see LINE_OFFSET) so
@@ -542,17 +608,34 @@ export async function prepareNodeReplCell(
     const prelude = [
       `import * as ${previousNamespace} from '@prev';`,
       `const ${snapshotName} = { __proto__: null };`,
+      `const ${references} = {__proto__:null,${allBindings
+        .map(({ name }) => {
+          const key = JSON.stringify(name);
+          return `[${key}]:${
+            previousBindingsByName.has(name)
+              ? `${previousNamespace}[${key}]`
+              : `{get value(){return ${name};},set value(${prefix}value){${name}=${prefix}value;}}`
+          }`;
+        })
+        .join(',')}};`,
       ...previousBindings.map(
         ({ name }) =>
-          `${snapshotName}[${JSON.stringify(name)}] = ${previousNamespace}[${JSON.stringify(name)}];`,
+          `${snapshotName}[${JSON.stringify(name)}] = {binding:${previousNamespace}[${JSON.stringify(name)}],value:${previousNamespace}[${JSON.stringify(name)}].value};`,
       ),
       ...previousBindings.map(
         ({ name, kind }) =>
-          `${kind} ${name} = ${previousNamespace}[${JSON.stringify(name)}];`,
+          `${kind} ${name} = ${previousNamespace}[${JSON.stringify(name)}].value;`,
       ),
     ].join('');
 
-    const edits: Edit[] = [];
+    // Guard every user-authored async suspension point. Cancelling a cell must
+    // prevent its continuation from resuming later even when the awaited value
+    // itself cannot be cancelled. Explicit terminal barriers registered by an
+    // API through signal.waitUntil are still drained by the kernel.
+    const edits = [
+      ...cancellationGuardEdits(root),
+      ...carriedReferenceEdits(root, carriedNames, previousNamespace),
+    ];
     const activeBindings = new Map(previousBindingsByName);
     // `var` declarations hoist to the top of module scope and exist (as
     // undefined) before their declaring statement runs. Seed them up front so a
@@ -577,9 +660,14 @@ export async function prepareNodeReplCell(
           if (declarator.type !== 'variable_declarator') continue;
           const name = declarator.childForFieldName('name');
           if (name) addPatternBindings(name, kind, completedBindings);
+          for (const name of carriedVars.privateNames)
+            completedBindings.delete(name);
+          for (const name of exportedBindings.keys())
+            completedBindings.delete(name);
           const marker = snapshotDeclarator(
             `${prefix}commit_${commitCounter++}`,
             snapshotName,
+            references,
             [...completedBindings]
               .map(([bindingName, bindingKind]) => ({
                 name: bindingName,
@@ -604,6 +692,7 @@ export async function prepareNodeReplCell(
       const declaredHere = new Map<string, NodeReplBindingKind>();
       collectDeclarationNames(item, declaredHere);
       collectTopLevelLoopVarBindings(item, declaredHere);
+      for (const name of carriedVars.privateNames) declaredHere.delete(name);
       for (const [name, kind] of declaredHere) {
         if (!exportedBindings.has(name) && !activeBindings.has(name)) {
           activeBindings.set(name, kind);
@@ -611,6 +700,7 @@ export async function prepareNodeReplCell(
       }
       const commit = snapshotAssignments(
         snapshotName,
+        references,
         [...activeBindings]
           .map(([name, kind]) => ({ name, kind }))
           .sort((left, right) =>
@@ -638,13 +728,15 @@ export async function prepareNodeReplCell(
       bindingKind: kind,
       exportName: `${prefix}_binding_${index}`,
     }));
+    const exportDeclarations = bindingExports.map(
+      ({ bindingName, exportName }) =>
+        `const ${exportName} = ${references}[${JSON.stringify(bindingName)}];`,
+    );
     const exports = [
-      ...bindingExports.map(
-        ({ bindingName, exportName }) => `${bindingName} as ${exportName}`,
-      ),
+      ...bindingExports.map(({ exportName }) => exportName),
       `${snapshotName} as ${snapshotExportName}`,
     ];
-    const suffix = `\nexport {\n  ${exports.join(',\n  ')}\n};`;
+    const suffix = `\n${exportDeclarations.join('')}export {\n  ${exports.join(',\n  ')}\n};`;
 
     const source = `${prelude}\n${rewritten}${suffix}`;
     if (source.length > MAX_TRANSFORMED_SOURCE_CHARS) {
@@ -657,7 +749,7 @@ export async function prepareNodeReplCell(
       snapshotExportName,
     };
   } finally {
-    tree.delete();
+    tree?.delete();
   }
 }
 

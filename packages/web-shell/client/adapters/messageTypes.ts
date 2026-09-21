@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonBackgroundTurn,
+  DaemonSessionArtifactInput,
+  DaemonInputAnnotation,
+} from '@qwen-code/sdk/daemon';
 
 export interface AttachmentPreviewRequest {
   name: string;
@@ -52,6 +56,8 @@ export interface DaemonMessageToolCall {
   toolName: string;
   args?: Record<string, unknown>;
   executionMode?: 'foreground' | 'background';
+  subagentSessionReady?: boolean;
+  backgroundResultPending?: boolean;
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
   title?: string;
@@ -61,8 +67,11 @@ export interface DaemonMessageToolCall {
   kind?: DaemonMessageToolKind;
   startTime?: number;
   endTime?: number;
+  wasCancelled?: boolean;
   subContent?: string;
   subTools?: DaemonMessageToolCall[];
+  /** Transcript blocks folded into this tool presentation. */
+  sourceBlockIds?: string[];
 }
 
 export interface DaemonMessageTodoItem {
@@ -78,6 +87,17 @@ export interface DaemonMessageTodoItem {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  backgroundTurn?: DaemonBackgroundTurn;
+  /**
+   * Admitted prompt this message belongs to, copied from the daemon-stamped
+   * `promptId` of the transcript blocks it was built from.
+   *
+   * Unlike a block id (a per-projection ordinal), this survives a reload: the
+   * live stream stamps it on assistant blocks, and a replay stamps it on the
+   * user block, which is the same value the turn's persisted record carries.
+   * Undefined for locally appended messages the daemon has not echoed yet.
+   */
+  promptId?: string;
   /**
    * Wall-clock epoch milliseconds when the backing transcript block was first
    * observed, populated from `serverTimestamp ?? clientReceivedAt`. Surfaced
@@ -85,13 +105,20 @@ export interface DaemonMessageMeta {
    * that have no backing block.
    */
   timestamp?: number;
+  /** Stable transcript blocks folded into this rendered message. */
+  sourceBlockIds?: string[];
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {
   id: string;
   role: 'user';
   content: string;
-  images?: Array<{ data: string; mimeType: string }>;
+  images?: Array<{
+    data: string;
+    mimeType: string;
+    /** Present when the image is a session attachment; keeps it re-fetchable. */
+    attachmentId?: string;
+  }>;
   files?: Array<{
     name: string;
     mimeType: string;
@@ -104,6 +131,7 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
 }
 
 export interface DaemonAssistantMessage extends DaemonMessageMeta {
+  reportedArtifacts?: DaemonSessionArtifactInput[];
   id: string;
   role: 'assistant';
   content: string;

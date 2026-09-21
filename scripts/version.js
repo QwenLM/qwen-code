@@ -40,14 +40,22 @@ if (!versionType) {
 }
 
 // 2. Bump the version in the root and all workspace package.json files.
-run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
+// --no-workspaces-update stops npm from reifying node_modules after each bump:
+// the tree is pnpm's, and an npm reify would silently rewrite it into npm's own
+// layout. pnpm-lock.yaml needs no refresh either: .pnpmfile.mjs rewrites every
+// internal dependency to workspace:*, so a version bump leaves it unchanged.
+run(
+  `npm version ${versionType} --no-git-tag-version --allow-same-version --no-workspaces-update`,
+);
 
 // 3. Get all workspaces and filter out the one we don't want to version.
-// We intend to maintain sdk, mobile-mcp, and node-repl versions independently.
+// We intend to maintain sdk, mobile-mcp, node-repl, and qwen-live versions
+// independently.
 const workspacesToExclude = [
   '@qwen-code/sdk',
   '@qwen-code/mobile-mcp',
   '@qwen-code/node-repl-mcp',
+  '@qwen-code/qwen-live',
 ];
 const workspaceNames = JSON.parse(
   execSync('npm pkg get name --workspaces --json').toString(),
@@ -59,7 +67,7 @@ const workspacesToVersion = allWorkspaces.filter(
 
 for (const workspaceName of workspacesToVersion) {
   run(
-    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
+    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version --no-workspaces-update`,
   );
 }
 
@@ -67,7 +75,19 @@ for (const workspaceName of workspacesToVersion) {
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
 
-// 5. Update the sandboxImageUri in the root package.json
+// 5. Keep the published Mem0 Extension manifest aligned with its package.
+const mem0ManifestPath = resolve(
+  process.cwd(),
+  'integrations/external-context-mem0/qwen-extension.json',
+);
+const mem0Manifest = readJson(mem0ManifestPath);
+mem0Manifest.version = newVersion;
+writeJson(mem0ManifestPath, mem0Manifest);
+run(
+  'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json',
+);
+
+// 6. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);
 if (rootPackageJson.config?.sandboxImageUri) {
   rootPackageJson.config.sandboxImageUri =
@@ -76,7 +96,7 @@ if (rootPackageJson.config?.sandboxImageUri) {
   writeJson(rootPackageJsonPath, rootPackageJson);
 }
 
-// 6. Update the sandboxImageUri in the cli package.json
+// 7. Update the sandboxImageUri in the cli package.json
 const cliPackageJsonPath = resolve(process.cwd(), 'packages/cli/package.json');
 const cliPackageJson = readJson(cliPackageJsonPath);
 if (cliPackageJson.config?.sandboxImageUri) {
@@ -88,7 +108,7 @@ if (cliPackageJson.config?.sandboxImageUri) {
   writeJson(cliPackageJsonPath, cliPackageJson);
 }
 
-// 7. Pin channel adapters' semver dependency on @qwen-code/channel-base to
+// 8. Pin channel adapters' semver dependency on @qwen-code/channel-base to
 // the exact new version. A caret range like ^0.21.0 does not match a
 // prerelease bump (e.g. 0.21.1-preview.0), so npm would replace the workspace
 // link with the stale registry package and the release build would compile
@@ -108,17 +128,10 @@ for (const entry of readdirSync(channelsDir)) {
   }
 }
 
-// 8. Refresh node_modules and package-lock.json against the pinned exact
-// versions so the adapters resolve channel-base to the workspace link again.
-// --ignore-scripts prevents the root `prepare` lifecycle from triggering a
-// redundant full build that fails with TS5055 when dist/ already exists from
-// the initial `npm ci` install.
-run('npm install --ignore-scripts');
-
-// 9. The per-workspace `npm version` reifies above nested a stale registry
-// copy of channel-base under each adapter while ranges briefly mismatched.
-// The install above cleans both lockfiles but can leave that directory on
-// disk, where it shadows the workspace link during tsc. Remove it.
+// 9. An npm reify can nest a stale registry copy of channel-base under an
+// adapter while ranges briefly mismatch, where it shadows the workspace link
+// during tsc. Nothing above reifies any more, but a tree an earlier npm install
+// left behind can still carry that directory, so remove it.
 for (const entry of readdirSync(channelsDir)) {
   rmSync(join(channelsDir, entry, 'node_modules', '@qwen-code'), {
     recursive: true,

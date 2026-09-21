@@ -7,11 +7,12 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
-import { CheckIcon, CopyIcon } from 'lucide-react';
+import { CheckIcon, CopyIcon, SearchIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonGitLog,
@@ -23,11 +24,141 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import { timeAgo } from '../../utils/timeAgo';
+import {
+  layoutCommitGraph,
+  type CommitGraphRow,
+} from '../../utils/commitGraph';
 import { DialogShell } from './DialogShell';
 import styles from './GitLogDialog.module.css';
 
 const PAGE_SIZE = 50;
+const SEARCH_DEBOUNCE_MS = 300;
+
+const LANE_WIDTH = 12;
+/** Lanes past this share the last column so a busy graph cannot crowd out the subject. */
+const MAX_LANES = 20;
+const LANE_COLORS = [
+  '#2f81f7',
+  '#e3742f',
+  '#3fb950',
+  '#a371f7',
+  '#f778ba',
+  '#39c5cf',
+  '#d29922',
+  '#8b949e',
+];
+
+function laneX(column: number): number {
+  return Math.min(column, MAX_LANES - 1) * LANE_WIDTH + LANE_WIDTH / 2;
+}
+
+function laneColor(color: number): string {
+  return LANE_COLORS[color % LANE_COLORS.length];
+}
+
+/** Node and connecting curves for one commit row; stretched to the row height. */
+function CommitGraphCell({
+  row,
+  width,
+  isMerge,
+}: {
+  row: CommitGraphRow;
+  width: number;
+  isMerge: boolean;
+}) {
+  const x = laneX(row.column);
+  const paths: ReactNode[] = [];
+  row.through.forEach((line) => {
+    const lx = laneX(line.column);
+    paths.push(
+      <path
+        key={`t${line.column}`}
+        d={`M${lx},0 V100`}
+        stroke={laneColor(line.color)}
+      />,
+    );
+  });
+  row.incoming.forEach((line) => {
+    const lx = laneX(line.column);
+    paths.push(
+      <path
+        key={`i${line.column}`}
+        d={lx === x ? `M${x},0 V50` : `M${lx},0 C${lx},50 ${x},0 ${x},50`}
+        stroke={laneColor(line.color)}
+      />,
+    );
+  });
+  row.outgoing.forEach((line) => {
+    const lx = laneX(line.column);
+    paths.push(
+      <path
+        key={`o${line.column}`}
+        d={lx === x ? `M${x},50 V100` : `M${x},50 C${x},100 ${lx},50 ${lx},100`}
+        stroke={laneColor(line.color)}
+      />,
+    );
+  });
+  const color = laneColor(row.color);
+  return (
+    <span
+      className={styles.graph}
+      style={{ width }}
+      aria-hidden="true"
+      data-testid="commit-graph"
+      data-column={row.column}
+    >
+      <svg
+        viewBox={`0 0 ${width} 100`}
+        preserveAspectRatio="none"
+        className={styles.graphSvg}
+      >
+        {paths}
+      </svg>
+      <span
+        className={`${styles.graphNode}${isMerge ? ` ${styles.graphNodeMerge}` : ''}`}
+        style={{
+          left: x,
+          borderColor: color,
+          background: isMerge ? undefined : color,
+        }}
+      />
+    </span>
+  );
+}
+
+/** Lanes that continue below a row, drawn straight through its expanded detail. */
+function CommitGraphTail({
+  row,
+  width,
+}: {
+  row: CommitGraphRow;
+  width: number;
+}) {
+  return (
+    <span
+      className={styles.graph}
+      style={{ width }}
+      aria-hidden="true"
+      data-testid="commit-graph-tail"
+    >
+      <svg
+        viewBox={`0 0 ${width} 100`}
+        preserveAspectRatio="none"
+        className={styles.graphSvg}
+      >
+        {row.after.map((line) => (
+          <path
+            key={line.column}
+            d={`M${laneX(line.column)},0 V100`}
+            stroke={laneColor(line.color)}
+          />
+        ))}
+      </svg>
+    </span>
+  );
+}
 
 function parseRefs(refs: string): { label: string; isHead: boolean }[] {
   if (!refs) return [];
@@ -48,11 +179,15 @@ function CommitRow({
   workspaceCwd,
   gitCwd,
   now,
+  graph,
+  graphWidth,
 }: {
   entry: DaemonGitLogEntry;
   workspaceCwd: string;
   gitCwd?: string;
   now: number;
+  graph?: CommitGraphRow;
+  graphWidth: number;
 }) {
   const { client } = useWorkspace();
   const { language, t } = useI18n();
@@ -60,14 +195,13 @@ function CommitRow({
   const [detail, setDetail] = useState<DaemonGitCommitDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash(1500);
   const cancelledRef = useRef(false);
 
   const copySha = () => {
     void writeClipboardText(entry.sha)
       .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+        flashCopied();
       })
       .catch(warnClipboardWriteFailure);
   };
@@ -110,19 +244,15 @@ function CommitRow({
   if (open) {
     if (loading) {
       detailBody = (
-        <div className={styles.commitDetail}>
-          <span className={styles.fileBinary}>{t('gitLog.loading')}</span>
-        </div>
+        <span className={styles.fileBinary}>{t('gitLog.loading')}</span>
       );
-    } else if (error) {
+    } else if (error || (detail && !detail.available)) {
       detailBody = (
-        <div className={styles.commitDetail}>
-          <span className={styles.detailError}>{t('gitLog.detailError')}</span>
-        </div>
+        <span className={styles.detailError}>{t('gitLog.detailError')}</span>
       );
-    } else if (detail && detail.available) {
+    } else if (detail) {
       detailBody = (
-        <div className={styles.commitDetail}>
+        <>
           {detail.body && (
             <pre className={styles.commitBody}>{detail.body}</pre>
           )}
@@ -155,13 +285,7 @@ function CommitRow({
               )}
             </div>
           )}
-        </div>
-      );
-    } else if (detail && !detail.available) {
-      detailBody = (
-        <div className={styles.commitDetail}>
-          <span className={styles.detailError}>{t('gitLog.detailError')}</span>
-        </div>
+        </>
       );
     }
   }
@@ -169,6 +293,9 @@ function CommitRow({
   return (
     <div className={styles.commitRow}>
       <div className={styles.commitHeader}>
+        {graph && (
+          <CommitGraphCell row={graph} width={graphWidth} isMerge={isMerge} />
+        )}
         <button
           type="button"
           className={styles.commitToggle}
@@ -205,7 +332,12 @@ function CommitRow({
           {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
         </button>
       </div>
-      {detailBody}
+      {detailBody !== undefined && (
+        <div className={styles.detailRow}>
+          {graph && <CommitGraphTail row={graph} width={graphWidth} />}
+          <div className={styles.commitDetail}>{detailBody}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -227,6 +359,9 @@ export function GitLogContent({
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState(false);
   const [now, setNow] = useState(Date.now() / 1000);
+  const [allBranches, setAllBranches] = useState(false);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
   const nextSkipRef = useRef(0);
 
   useEffect(() => {
@@ -235,14 +370,30 @@ export function GitLogContent({
   }, []);
 
   useEffect(() => {
+    const trimmed = search.trim();
+    if (trimmed === query) return;
+    const id = setTimeout(() => setQuery(trimmed), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [search, query]);
+
+  const fetchPage = useCallback(
+    (skip: number) =>
+      client
+        .workspaceByCwd(workspaceCwd)
+        .workspaceGitLog(PAGE_SIZE, skip, gitCwd, undefined, {
+          all: allBranches,
+          search: query || undefined,
+        }),
+    [client, workspaceCwd, gitCwd, allBranches, query],
+  );
+
+  useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(false);
     setLoadMoreError(false);
     nextSkipRef.current = 0;
-    client
-      .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, 0, gitCwd)
+    fetchPage(0)
       .then((result) => {
         if (!cancelled) {
           nextSkipRef.current = result.entries.length;
@@ -258,14 +409,12 @@ export function GitLogContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd]);
+  }, [fetchPage]);
 
   const loadMore = useCallback(() => {
     if (!log || loadingMore) return;
     setLoadingMore(true);
-    client
-      .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, nextSkipRef.current, gitCwd)
+    fetchPage(nextSkipRef.current)
       .then((result) => {
         nextSkipRef.current += result.entries.length;
         setLog((prev) => {
@@ -287,7 +436,7 @@ export function GitLogContent({
       .finally(() => {
         setLoadingMore(false);
       });
-  }, [client, workspaceCwd, gitCwd, log, loadingMore]);
+  }, [fetchPage, log, loadingMore]);
 
   const subtitle = log?.available
     ? t('gitLog.subtitle', { count: log.entries.length })
@@ -297,6 +446,18 @@ export function GitLogContent({
     onSubtitleChange?.(subtitle);
   }, [onSubtitleChange, subtitle]);
 
+  // Search results are not contiguous history, so lanes would mislead.
+  const graph = useMemo(
+    () => (log && !query ? layoutCommitGraph(log.entries) : undefined),
+    [log, query],
+  );
+  const graphWidth = graph
+    ? Math.min(
+        graph.reduce((max, row) => Math.max(max, row.width), 1),
+        MAX_LANES,
+      ) * LANE_WIDTH
+    : 0;
+
   let body: ReactNode;
   if (loading) {
     body = <div className={styles.placeholder}>{t('gitLog.loading')}</div>;
@@ -305,18 +466,24 @@ export function GitLogContent({
   } else if (!log || !log.available) {
     body = <div className={styles.placeholder}>{t('gitLog.unavailable')}</div>;
   } else if (log.entries.length === 0) {
-    body = <div className={styles.placeholder}>{t('gitLog.empty')}</div>;
+    body = (
+      <div className={styles.placeholder}>
+        {t(query ? 'gitLog.noMatches' : 'gitLog.empty')}
+      </div>
+    );
   } else {
     body = (
       <>
         <div className={styles.commitList}>
-          {log.entries.map((entry) => (
+          {log.entries.map((entry, index) => (
             <CommitRow
               key={entry.sha}
               entry={entry}
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
               now={now}
+              graph={graph?.[index]}
+              graphWidth={graphWidth}
             />
           ))}
         </div>
@@ -340,7 +507,33 @@ export function GitLogContent({
     );
   }
 
-  return <div className={styles.content}>{body}</div>;
+  return (
+    <div className={styles.content}>
+      <div className={styles.toolbar}>
+        <label className={styles.search}>
+          <SearchIcon size={13} />
+          <input
+            className={styles.searchInput}
+            type="search"
+            placeholder={t('gitLog.search')}
+            aria-label={t('gitLog.search')}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          className={`${styles.toggle}${allBranches ? ` ${styles.toggleOn}` : ''}`}
+          aria-pressed={allBranches}
+          data-testid="git-log-all-branches"
+          onClick={() => setAllBranches((v) => !v)}
+        >
+          {t('gitLog.allBranches')}
+        </button>
+      </div>
+      {body}
+    </div>
+  );
 }
 
 export function GitLogDialog({

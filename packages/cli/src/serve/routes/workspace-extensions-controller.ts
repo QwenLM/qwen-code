@@ -104,6 +104,16 @@ export type ExtensionMutationEvent = {
   updated?: boolean;
   reason?: string;
   states?: Record<string, string>;
+  resourceStates?: {
+    skills: Array<{
+      name: string;
+      defaultEnabled: boolean;
+      workspaceEnabled: boolean | null;
+      effectiveEnabled: boolean;
+      disabledReason?: 'hard' | 'default' | 'inactive_extension';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>;
+  };
   results?: Array<
     | {
         name: string;
@@ -256,6 +266,7 @@ export interface ExtensionsController {
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -471,6 +482,7 @@ export function createExtensionsController(
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -627,16 +639,23 @@ export function createExtensionsController(
               async (release) => {
                 assertGenerationOpen?.();
                 return await task((generation) => {
-                  reconciliationReservation ??=
-                    options.reserveRuntimeReconciliation?.();
+                  // sendOperation passes reserveRuntimeReconciliation even on
+                  // skipRefresh routes; an operation that will not reconcile
+                  // never runs a reservation, so it must not take one.
+                  if (!options.skipRefresh) {
+                    reconciliationReservation ??=
+                      options.reserveRuntimeReconciliation?.();
+                  }
                   committedGeneration = generation;
                   release();
                 });
               },
             );
             if (committedGeneration === undefined) {
-              reconciliationReservation ??=
-                options.reserveRuntimeReconciliation?.();
+              if (!options.skipRefresh) {
+                reconciliationReservation ??=
+                  options.reserveRuntimeReconciliation?.();
+              }
               committedGeneration = result.generation;
             }
             for (const warning of result.warnings ?? []) {
@@ -702,6 +721,9 @@ export function createExtensionsController(
                         result:
                           await runtime.bridge.refreshExtensionsForAllSessions(
                             bridgeMutationEvent(event),
+                            ...(options.skillsOnly
+                              ? [{ skillsOnly: true }]
+                              : []),
                           ),
                         elapsedMs: Date.now() - startedAt,
                       };
@@ -791,6 +813,7 @@ export function createExtensionsController(
               try {
                 const result = await bridge.refreshExtensionsForAllSessions(
                   bridgeMutationEvent(event),
+                  ...(options.skillsOnly ? [{ skillsOnly: true }] : []),
                 );
                 return { result, elapsedMs: Date.now() - startedAt };
               } finally {

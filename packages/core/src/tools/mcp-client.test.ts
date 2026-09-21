@@ -2949,6 +2949,115 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(await response.text()).toBe('');
       });
 
+      it('treats 404 from optional GET SSE stream as unsupported', async () => {
+        const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+          // Streamable HTTP servers with no GET route at all reject the optional
+          // standalone GET/SSE notification stream with 404 — e.g. the official
+          // MCP SDK's documented stateless StreamableHTTPServerTransport pattern
+          // behind Express, where 404 is Express's own default fallthrough for
+          // the unhandled GET (#8784). (Note: context7 returns a raw 405, which
+          // the SDK tolerates natively — the earlier claim that it returned 404
+          // was retracted in the issue as a reporter-side misconfiguration.)
+          new Response('not found', { status: 404 }),
+        );
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'no-get-route',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(405);
+        expect(response.statusText).toBe('Method Not Allowed');
+        expect(await response.text()).toBe('');
+      });
+
+      it('does not rewrite non-SSE GET 404 responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('not found', { status: 404 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'plain-get-404',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        });
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).toBe('not found');
+      });
+
+      it('does not rewrite POST 404 responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('not found', { status: 404 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'post-404',
+          fetchFn,
+        );
+
+        // The SDK's real POST requests set this exact Accept header
+        // (streamableHttp.ts's transport always sends
+        // 'application/json, text/event-stream'), so the method check is
+        // the only thing standing between a genuine tool-call 404 and being
+        // silently rewritten into a synthetic 405 — the Accept header alone
+        // does not disambiguate POST from the optional GET/SSE probe.
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+          },
+        });
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).toBe('not found');
+      });
+
+      it('bounds the fallback body excerpt read when the 404 body stalls', async () => {
+        // A server that answers the optional GET/SSE probe with 404 headers and
+        // then never sends a body chunk must not park the diagnostics read
+        // forever: the MCP dispatcher runs with `headersTimeout: 0,
+        // bodyTimeout: 0` and nothing above this wrapper bounds the body.
+        vi.useFakeTimers();
+        try {
+          const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+            new Response(
+              new ReadableStream({
+                // Headers are already delivered; the body never yields.
+                pull: () => new Promise<void>(() => {}),
+              }),
+              { status: 404 },
+            ),
+          );
+          const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+            'stalled-404-body',
+            fetchFn,
+          );
+
+          const pending = fetchWithFallback('http://test-server/mcp', {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          });
+          await vi.advanceTimersByTimeAsync(2_000);
+          const response = await pending;
+
+          expect(response.status).toBe(405);
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.not.stringContaining('Response body:'),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('omits response body diagnostics when the fallback body is empty', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()
@@ -3188,6 +3297,65 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(transportEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
       // Third-party credentials the server may legitimately need are preserved.
       expect(transportEnv['GH_TOKEN']).toBe('gh-abc');
+    });
+
+    it('strips the AppImage Python environment from stdio children only under the desktop shell (#11718)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_CODE_DESKTOP: '1',
+        PYTHONHOME: '/tmp/.mount_qwen/usr/',
+        PYTHONPATH: '/tmp/.mount_qwen/usr/share/pyshared/',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport('test-server', { command: 'test-command' }, false);
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      expect(transportEnv['PYTHONHOME']).toBeUndefined();
+      expect(transportEnv['PYTHONPATH']).toBeUndefined();
+    });
+
+    it('keeps an explicit PYTHONHOME from the server config under the desktop shell (#11718)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_CODE_DESKTOP: '1',
+        PYTHONHOME: '/tmp/.mount_qwen/usr/',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { PYTHONHOME: '/home/user/py313' },
+        },
+        false,
+      );
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      // An explicit per-server override still wins — the strip only covers
+      // the inherited (AppImage) value, not an operator's deliberate setting.
+      expect(transportEnv['PYTHONHOME']).toBe('/home/user/py313');
+    });
+
+    it('leaves a user-provided PYTHONHOME untouched outside the desktop shell (#11718)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        PYTHONHOME: '/home/user/py313',
+      };
+      delete process.env['QWEN_CODE_DESKTOP'];
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport('test-server', { command: 'test-command' }, false);
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      expect(transportEnv['PYTHONHOME']).toBe('/home/user/py313');
     });
 
     it('should normalize PATH-like env keys on Windows for stdio transport', async () => {

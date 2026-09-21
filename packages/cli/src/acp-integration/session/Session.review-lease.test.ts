@@ -95,6 +95,7 @@ describe('Session review-worktree lease sweep', () => {
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       finishManagedAutoMemoryRecall: vi.fn(),
+      captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };
 
@@ -108,7 +109,9 @@ describe('Session review-worktree lease sweep', () => {
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
@@ -131,6 +134,9 @@ describe('Session review-worktree lease sweep', () => {
         recordSlashCommand: vi.fn(),
         rewindRecording: vi.fn(),
         setTitleRecordedCallback: vi.fn(),
+      }),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
@@ -168,8 +174,16 @@ describe('Session review-worktree lease sweep', () => {
         clearStatusChangeCallback: vi.fn(),
         hasRunningEntries: vi.fn().mockReturnValue(false),
       }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        setCompletionCallback: vi.fn(),
+        setSnapshotPersistedCallback: vi.fn(),
+        setApprovalRequestCallback: vi.fn(),
+      }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
       // The Session constructor and Session.prompt both reach for the
       // canonical Goal runtime. A real Config throws this exact error when
       // Goal persistence is off, and both call sites are written to fall

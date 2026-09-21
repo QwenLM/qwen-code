@@ -510,6 +510,22 @@ describe('isShellCommandReadOnlyAST', () => {
 // =========================================================================
 
 describe('classifyShellCommandSafety', () => {
+  // Budget for `process.cpuUsage()`, which is process-wide: it sums user +
+  // system across every thread for the window, so V8's background GC and JIT
+  // threads and the parser runtime's own threads are charged to it alongside
+  // the work under test. Measured against the built package on an idle
+  // machine, that reports 2.1-3.1x the wall time of the same commands -- 2.1x
+  // even when they run sequentially, so the inflation is the accounting, not
+  // the `Promise.all` fan-out below. The 1000 this replaces was a wall-clock
+  // number carried over unchanged when the metric changed, which put it below
+  // the floor of what a healthy run reports: ~270 ms here, 1232-1361 ms on
+  // GitHub-hosted runners.
+  //
+  // These tests guard against catastrophic backtracking on 10k-repetition
+  // adversarial inputs, which costs orders of magnitude rather than a small
+  // multiple, so the headroom below does not blunt them.
+  const maxClassificationCpuMs = 4000;
+
   it.each([
     'ls -la',
     'git status --short',
@@ -908,20 +924,23 @@ describe('classifyShellCommandSafety', () => {
     expect(await classifyShellCommandSafety(command)).toBe('unknown');
   });
 
-  it('classifies deeply nested redirected substitutions without repeated traversal', async () => {
+  it('classifies deeply nested redirected substitutions within the CPU budget', async () => {
     const commands = ['git status', 'git status'];
     for (let depth = 0; depth < 20; depth++) {
       commands[0] = `echo $(${commands[0]}) < /dev/null`;
       commands[1] = `< <(${commands[1]}) cat`;
     }
-    const startedAt = performance.now();
+    const startedCpuUsage = process.cpuUsage();
     await expect(
       Promise.all(commands.map(classifyShellCommandSafety)),
     ).resolves.toEqual(['unknown', 'unknown']);
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
   });
 
-  it('classifies adversarial rule inputs in bounded time', async () => {
+  it('classifies adversarial rule inputs within the CPU budget', async () => {
     const backslashes = '\\'.repeat(10_000);
     const repeatedSed = 'p;'.repeat(10_000);
     const repeatedPrint = 'print value; '.repeat(10_000);
@@ -935,7 +954,7 @@ describe('classifyShellCommandSafety', () => {
       `find . ${repeatedFindExec}`,
       `git status ${unmatchedBraces}`,
     ];
-    const startedAt = performance.now();
+    const startedCpuUsage = process.cpuUsage();
     await expect(
       Promise.all(commands.map(classifyShellCommandSafety)),
     ).resolves.toEqual([
@@ -946,7 +965,10 @@ describe('classifyShellCommandSafety', () => {
       'unknown',
       'read-only',
     ]);
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
   });
 });
 

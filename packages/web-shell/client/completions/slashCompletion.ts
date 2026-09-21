@@ -242,9 +242,7 @@ function getSubcommandArgumentHint(
 ): string | undefined {
   if (!argumentHint) return undefined;
   const match = argumentHint.match(
-    new RegExp(
-      `(?:^|\\||\\[)\\s*${escapeRegExp(name)}(?:\\s+([^|\\]]+))?`,
-    ),
+    new RegExp(`(?:^|\\||\\[)\\s*${escapeRegExp(name)}(?:\\s+([^|\\]]+))?`),
   );
   const suffix = match?.[1]?.trim();
   return suffix || undefined;
@@ -486,6 +484,7 @@ export function getSlashCommandCompletionResult(
   language: WebShellLanguage = 'en',
   translate: Translate = (key) => key,
   categoryOrder: CommandDisplayCategoryOrder = DEFAULT_COMMAND_CATEGORY_ORDER,
+  includeEmpty = false,
 ): SlashCommandCompletionResult | null {
   const {
     lineStart,
@@ -525,6 +524,7 @@ export function getSlashCommandCompletionResult(
       return null;
     }
 
+    const isSkillList = cmdName === 'skills' && completedParts.length === 0;
     const nodes = resolveSubcommands(
       cmdName,
       completedParts,
@@ -533,18 +533,17 @@ export function getSlashCommandCompletionResult(
       cmd?.subcommands,
       cmd?.argumentHint,
     );
-    if (!nodes) return null;
+    if (!nodes && !(includeEmpty && isSkillList)) return null;
 
     const lp = currentTyping.toLowerCase();
     const prefix = `/${cmdName} ${
       completedParts.length > 0 ? completedParts.join(' ') + ' ' : ''
     }`;
-    const filteredNodes = nodes
+    const filteredNodes = (nodes ?? [])
       .filter((n) => !currentTyping || n.name.toLowerCase().includes(lp))
       .sort((a, b) =>
         currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
       );
-    const isSkillList = cmdName === 'skills' && completedParts.length === 0;
     const items = filteredNodes
       .slice(0, COMPLETION_ITEM_LIMIT)
       .map((node): SlashCommandCompletionItem => {
@@ -553,9 +552,7 @@ export function getSlashCommandCompletionResult(
           id: command,
           label: node.name,
           detail: node.description || undefined,
-          ...(node.argumentHint
-            ? { argumentHint: node.argumentHint }
-            : {}),
+          ...(node.argumentHint ? { argumentHint: node.argumentHint } : {}),
           apply: `${command} `,
           ...(isSkillList ? { type: 'skill' as const } : {}),
           ...(!node.children?.length && !node.argumentHint
@@ -564,7 +561,7 @@ export function getSlashCommandCompletionResult(
         };
       });
 
-    if (items.length === 0) return null;
+    if (items.length === 0 && !(includeEmpty && isSkillList)) return null;
     return {
       kind: 'subcommand',
       from: lineStart,
@@ -616,14 +613,13 @@ export function getSlashCommandCompletionResult(
         ...(showCommandInfo && command.description
           ? { type: 'command-info' as const }
           : {}),
-        ...(command.autoSubmit &&
-        !hasSubcommandPicker(command, language)
+        ...(command.autoSubmit && !hasSubcommandPicker(command, language)
           ? { autoSubmit: true }
           : {}),
       };
     });
 
-  if (items.length === 0) return null;
+  if (items.length === 0 && !includeEmpty) return null;
   return {
     kind: 'command',
     from: lineStart,
@@ -715,9 +711,7 @@ export function slashCompletionSource(
           detail: n.description || undefined,
           ...(n.argumentHint ? { argumentHint: n.argumentHint } : {}),
           apply: `${command} `,
-          ...(n.children?.length || n.argumentHint
-            ? {}
-            : { autoSubmit: true }),
+          ...(n.children?.length || n.argumentHint ? {} : { autoSubmit: true }),
         };
       });
 

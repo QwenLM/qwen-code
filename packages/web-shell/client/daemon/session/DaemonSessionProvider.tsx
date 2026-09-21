@@ -23,6 +23,7 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSION_OPTIONS_CAPABILITY,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
@@ -37,6 +38,7 @@ import {
   type DaemonApprovalMode,
   type DaemonEvent,
   type DaemonSseConnectReason,
+  type DaemonStandaloneSessionOptions,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
@@ -46,10 +48,12 @@ import {
   type DaemonUnrecognizedDiagnostic,
 } from '@qwen-code/sdk/daemon';
 import {
+  advanceSessionRecoveryGeneration,
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
   getPromptSettledKey,
   getWorkspaceModelsAfterSessionClear,
+  hasLocallySubmittedPrompt,
   resolveSessionRestoreTimeouts,
 } from './actions.js';
 import {
@@ -64,19 +68,27 @@ import {
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
-import { extractHttpStatus, isRecord } from './httpErrors.js';
+import {
+  extractHttpStatus,
+  isRecord,
+  isAcpChildCapacityError,
+} from './httpErrors.js';
+import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
   isDaemonErrorExplicitlyNonRetryable,
+  isSessionWriterBlockedCode,
   resolveLiveSessionWorkspaceCwd,
   resolveProviderSessionContext,
   restoreSessionContextMatches,
   sessionContextKey,
 } from './session-context.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
+import { loadReadyWorkspaceSkills } from '../workspace/load-ready-skills.js';
 import {
   getCurrentMode,
+  getPlanExecutionMode,
   getSessionDisplayName,
   getReplayTokenUsage,
   getTokenCountFromUsage,
@@ -120,6 +132,7 @@ import {
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
+  DaemonActivePromptState,
   DaemonConnectionState,
   DaemonPromptStatus,
   DaemonSessionActions,
@@ -128,10 +141,24 @@ import type {
   DaemonSessionOwnerGuard,
   DaemonSessionProviderProps,
   DaemonProductSessionContext,
+  DaemonPromptSettledEvent,
+  DaemonPromptSettledListener,
+  DaemonPromptSettlementSubscribe,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
+import {
+  getTurnNotificationContent,
+  useTurnNotificationBinding,
+} from './turn-notification-context.js';
+import { SESSION_TURN_NAVIGATION_FEATURE } from '../../constants/sessions.js';
+import {
+  createDaemonTurnNavigationStore,
+  type DaemonTurnNavigationSnapshot,
+  type DaemonTurnNavigationStore,
+  type DaemonHistoryNavigationStore,
+} from './turn-navigation-store.js';
 
 export type {
   DaemonCommandInfo,
@@ -144,6 +171,9 @@ export type {
   DaemonNoticeOperation,
   DaemonNoticeSeverity,
   DaemonPromptImage,
+  DaemonPromptSettledEvent,
+  DaemonPromptSettledListener,
+  DaemonPromptSettlementOutcome,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
@@ -156,6 +186,7 @@ export type {
   DaemonWorkspaceEventSignals,
   SendPromptOptions,
 } from './types.js';
+export type { DaemonTurnNavigationSnapshot } from './turn-navigation-store.js';
 
 export interface DaemonTranscriptHistory {
   hasMore: boolean;
@@ -181,7 +212,6 @@ interface LiveJournalRepairEpisode {
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
   nextOrdinal: number;
-  retainedBytes: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
   unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
@@ -202,6 +232,8 @@ const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
+const WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE =
+  'workspace_skills_config_runtime';
 function resolveStandaloneApprovalMode(
   value: string | undefined,
 ): DaemonApprovalMode | undefined {
@@ -393,11 +425,16 @@ function materializeTranscriptHistory(
       break;
     }
   }
-  let pageBytes = 0;
-  for (const block of pageBlockList) {
-    pageBytes += estimateDaemonTranscriptBlockBytes(block);
-  }
-  const pageBlocks = pageBlockList.length;
+  const mergedBlocks = mergeTranscriptHistoryBlocks(
+    current.blocks,
+    pageBlockList,
+  );
+  const pageBytes =
+    mergedBlocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    ) - current.retainedBytes;
+  const pageBlocks = mergedBlocks.length - current.blocks.length;
   // `impossible` must be evaluated across BOTH dimensions, regardless of
   // which branch rejects: a page that alone fills the whole block window can
   // never be admitted (an anchored window always retains at least one block),
@@ -436,7 +473,6 @@ function materializeTranscriptHistory(
     materialization: {
       blocks: pageBlockList,
       nextOrdinal: history.nextOrdinal,
-      retainedBytes: pageBytes,
       toolBlockByCallId: history.toolBlockByCallId,
       permissionBlockByRequestId: history.permissionBlockByRequestId,
       // History pages can carry frames recorded by newer daemon versions, exactly
@@ -445,6 +481,44 @@ function materializeTranscriptHistory(
       unrecognizedDiagnostics: history.unrecognizedDiagnostics,
     },
   };
+}
+
+function mergeTranscriptHistoryBlocks(
+  current: readonly DaemonTranscriptBlock[],
+  history: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock[] {
+  const cancellations = new Map(
+    history
+      .filter((block) => block.kind === 'prompt_cancelled' && block.promptId)
+      .map((block) => [block.promptId, block]),
+  );
+  const displayedCancelledPromptIds = new Set<string>();
+  const updated = current.map((block) => {
+    if (block.kind !== 'prompt_cancelled' || !block.promptId) return block;
+    displayedCancelledPromptIds.add(block.promptId);
+    const persisted = cancellations.get(block.promptId);
+    if (
+      persisted?.kind !== 'prompt_cancelled' ||
+      persisted.elapsedMs === undefined
+    ) {
+      return block;
+    }
+    return {
+      ...block,
+      elapsedMs: persisted.elapsedMs,
+      serverTimestamp: persisted.serverTimestamp,
+      sourceRecordIds: persisted.sourceRecordIds,
+    };
+  });
+  return [
+    ...history.filter(
+      (block) =>
+        block.kind !== 'prompt_cancelled' ||
+        !block.promptId ||
+        !displayedCancelledPromptIds.has(block.promptId),
+    ),
+    ...updated,
+  ];
 }
 
 function applyTranscriptHistory(
@@ -495,10 +569,14 @@ function applyTranscriptHistory(
     }
     permissionBlockByRequestId[requestId] = blockId;
   }
+  const blocks = mergeTranscriptHistoryBlocks(current.blocks, history.blocks);
   return {
     ...current,
-    blocks: [...history.blocks, ...current.blocks],
-    retainedBytes: current.retainedBytes + history.retainedBytes,
+    blocks,
+    retainedBytes: blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    ),
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId,
     trimmedToolNotificationByCallId,
@@ -544,8 +622,20 @@ function projectSubagentToolUpdate(
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const taskStatus = status ?? event.status;
+  const settled =
+    taskStatus === 'completed' ||
+    taskStatus === 'failed' ||
+    taskStatus === 'cancelled';
   const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
+  const skills = Array.isArray(rawOutput?.['skills'])
+    ? rawOutput['skills']
+        .slice(0, 32)
+        .flatMap((skill) =>
+          boundedString(skill, 120) ? [boundedString(skill, 120)!] : [],
+        )
+    : [];
   const projectedInput = rawInput
     ? {
         ...(subagentType ? { subagent_type: subagentType } : {}),
@@ -569,30 +659,37 @@ function projectSubagentToolUpdate(
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
+        ...(typeof rawOutput['subagentSessionReady'] === 'boolean'
+          ? { subagentSessionReady: rawOutput['subagentSessionReady'] }
+          : {}),
         ...(terminateReason ? { terminateReason } : {}),
-        ...(typeof rawOutput['tokenCount'] === 'number'
+        ...(skills.length > 0 ? { skills } : {}),
+        ...(settled && typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
           : {}),
         ...(executionSummary
           ? {
               executionSummary: {
+                ...(settled
+                  ? Object.fromEntries(
+                      [
+                        'inputTokens',
+                        'outputTokens',
+                        'thoughtTokens',
+                        'cachedTokens',
+                        'totalTokens',
+                      ]
+                        .filter(
+                          (key) => typeof executionSummary[key] === 'number',
+                        )
+                        .map((key) => [key, executionSummary[key]]),
+                    )
+                  : {}),
                 ...(typeof executionSummary['totalToolCalls'] === 'number'
                   ? { totalToolCalls: executionSummary['totalToolCalls'] }
                   : {}),
                 ...(typeof executionSummary['totalDurationMs'] === 'number'
                   ? { totalDurationMs: executionSummary['totalDurationMs'] }
-                  : {}),
-                ...(typeof executionSummary['outputTokens'] === 'number'
-                  ? { outputTokens: executionSummary['outputTokens'] }
-                  : {}),
-                ...(typeof executionSummary['inputTokens'] === 'number'
-                  ? { inputTokens: executionSummary['inputTokens'] }
-                  : {}),
-                ...(typeof executionSummary['cachedTokens'] === 'number'
-                  ? { cachedTokens: executionSummary['cachedTokens'] }
-                  : {}),
-                ...(typeof executionSummary['totalTokens'] === 'number'
-                  ? { totalTokens: executionSummary['totalTokens'] }
                   : {}),
               },
             }
@@ -616,11 +713,7 @@ function projectSubagentToolUpdate(
 function projectMainTranscriptEvents(events: DaemonUiEvent[]): DaemonUiEvent[] {
   const projected: DaemonUiEvent[] = [];
   for (const event of events) {
-    if (
-      'parentToolCallId' in event &&
-      event.parentToolCallId &&
-      event.type !== 'assistant.usage'
-    ) {
+    if ('parentToolCallId' in event && event.parentToolCallId) {
       continue;
     }
     projected.push(
@@ -645,9 +738,15 @@ const DaemonActionsContext = createContext<DaemonSessionActions | undefined>(
 const DaemonTranscriptHistoryContext = createContext<
   DaemonTranscriptHistory | undefined
 >(undefined);
+const DaemonTurnNavigationContext = createContext<
+  DaemonHistoryNavigationStore | undefined
+>(undefined);
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
 );
+const DaemonPromptSettlementContext = createContext<
+  DaemonPromptSettlementSubscribe | undefined
+>(undefined);
 interface SessionNoticesValue {
   notices: readonly DaemonSessionNotice[];
   dismissNotice(id: string): void;
@@ -709,6 +808,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
+  sourcesVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -735,6 +835,28 @@ function useStableProductSessionContext(
   return stableRef.current.context;
 }
 
+type LocallyBoundPromptIds = Map<string, Set<string>>;
+
+function bindPrompt(
+  bound: LocallyBoundPromptIds,
+  sessionId: string,
+  promptId: string,
+): void {
+  const promptIds = bound.get(sessionId) ?? new Set<string>();
+  promptIds.add(promptId);
+  bound.set(sessionId, promptIds);
+}
+
+function unbindPrompt(
+  bound: LocallyBoundPromptIds,
+  sessionId: string,
+  promptId: string,
+): void {
+  const promptIds = bound.get(sessionId);
+  promptIds?.delete(promptId);
+  if (promptIds?.size === 0) bound.delete(sessionId);
+}
+
 export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const {
     baseUrl,
@@ -743,6 +865,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     sessionContext,
     sessionId,
     clientId,
+    sessionSourceType,
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
@@ -751,6 +874,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     subagentTranscriptMode = 'full',
     suppressOwnUserEcho = true,
     includeRawEvent = false,
+    prefetchGitBranch = true,
+    prefetchSkills = true,
     autoConnect = true,
     autoReconnect = true,
     restartEventStreamOnPrompt = false,
@@ -806,6 +931,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     initialRestoreSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  // Restore-time attribution is read inside the reconnect/restore effect;
+  // mirror it so a host prop change never re-triggers a session load.
+  const sessionSourceTypeRef = useRef(sessionSourceType);
+  sessionSourceTypeRef.current = sessionSourceType;
   const resolvedSessionContextRef = useRef(resolvedSessionContext);
   resolvedSessionContextRef.current = resolvedSessionContext;
   const sessionContextResolutionErrorRef = useRef(
@@ -822,11 +951,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const sessionConfigGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
   );
+  const sessionRecoveryGenerationRef = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
   const transcriptHistoryRef = useRef<{
     sessionId?: string;
     beforeRecordId?: string;
     cursor?: string;
     hasMore: boolean;
+    persistedReachable?: boolean;
     loading: boolean;
     capacityReached: boolean;
     paginationError: boolean;
@@ -878,6 +1011,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // (`evictedOldest === false`) drops the newest blocks and leaves
           // the oldest anchor intact, so it must not trigger re-anchoring.
           if (detail.evictedOldest !== false) {
+            history.persistedReachable = true;
             if (detail.oldestRetainedRecordId !== undefined) {
               history.beforeRecordId = detail.oldestRetainedRecordId;
               history.cursor = undefined;
@@ -1012,6 +1146,36 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }),
     [maxBlocks, maxRetainedBytes, subagentTranscriptMode],
   );
+  const turnNavigationStore = useMemo(
+    () =>
+      createDaemonTurnNavigationStore({
+        captureLiveBoundary: () => {
+          const history = transcriptHistoryRef.current;
+          const owner = sessionRef.current;
+          const generation = paginationGenerationRef.current;
+          const beforeRecordId = history.beforeRecordId;
+          const repair = liveJournalRepairRef.current;
+          return {
+            beforeRecordId,
+            reachable:
+              !!owner &&
+              owner.sessionId === history.sessionId &&
+              !!beforeRecordId &&
+              !repair &&
+              !history.loading &&
+              (history.persistedReachable ?? history.hasMore),
+            isCurrent: () =>
+              sessionRef.current === owner &&
+              transcriptHistoryRef.current === history &&
+              history.beforeRecordId === beforeRecordId &&
+              !history.loading &&
+              paginationGenerationRef.current === generation &&
+              liveJournalRepairRef.current === repair,
+          };
+        },
+      }),
+    [],
+  );
   const eventStreamRef = useRef<
     | {
         sessionId: string;
@@ -1023,6 +1187,46 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
   const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
+  const locallyBoundPromptIdsRef = useRef<LocallyBoundPromptIds>(new Map());
+  // Session whose locally bound prompts may have lost their terminal event
+  // across an epoch reset. The fresh load decides whether they are still live.
+  const epochResetSessionIdRef = useRef<string | undefined>(undefined);
+  const promptSettlementListenersRef = useRef<Set<DaemonPromptSettledListener>>(
+    new Set(),
+  );
+  const publishedPromptSettlementsRef = useRef(new Set<string>());
+  const subscribeToPromptSettlement =
+    useCallback<DaemonPromptSettlementSubscribe>((listener) => {
+      promptSettlementListenersRef.current.add(listener);
+      return () => promptSettlementListenersRef.current.delete(listener);
+    }, []);
+  const publishPromptSettlement = useCallback(
+    (event: DaemonPromptSettledEvent) => {
+      const key = getPromptSettledKey(event.sessionId, event.promptId);
+      unbindPrompt(
+        locallyBoundPromptIdsRef.current,
+        event.sessionId,
+        event.promptId,
+      );
+      if (publishedPromptSettlementsRef.current.has(key)) return;
+      publishedPromptSettlementsRef.current.add(key);
+      const listeners = [...promptSettlementListenersRef.current];
+      queueMicrotask(() => {
+        for (const listener of listeners) {
+          if (!promptSettlementListenersRef.current.has(listener)) continue;
+          try {
+            listener(event);
+          } catch (error) {
+            console.error(
+              '[DaemonSessionProvider] prompt settlement listener failed',
+              error,
+            );
+          }
+        }
+      });
+    },
+    [],
+  );
   const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
     undefined,
   );
@@ -1037,6 +1241,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
+  // Daemon-authoritative "a prompt is in flight" state for the connected
+  // session, pushed in by the host from the workspace live-state poll via
+  // `actions.setDaemonActivePrompt`. The owner lets a signal published during
+  // session loading wait for that exact session without leaking to another.
+  const daemonActivePromptRef = useRef<DaemonActivePromptState | undefined>(
+    undefined,
+  );
   const heartbeatSupportedRef = useRef(false);
   const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
     consecutiveFailures: 0,
@@ -1084,6 +1295,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
+    capabilities: workspace?.capabilities,
     status: sessionContextResolutionError
       ? 'error'
       : autoConnect
@@ -1098,6 +1310,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       ? { error: sessionContextResolutionError }
       : {}),
   });
+  const turnNotifications = useTurnNotificationBinding(
+    resolvedBaseUrl,
+    connection,
+  );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const initialClientIdDependencyRef = useRef(clientId);
@@ -1165,7 +1381,154 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
+
+  useEffect(() => {
+    let observed = store.getBlockChangeSummary?.();
+    const observe = () => {
+      const next = store.getBlockChangeSummary?.();
+      if (
+        observed &&
+        next &&
+        observed.source === next.source &&
+        observed.tailAppendBarrierRevision === next.tailAppendBarrierRevision
+      ) {
+        observed = next;
+        return;
+      }
+      observed = next;
+      turnNavigationStore.observeLiveBlocks(store.getSnapshot().blocks);
+    };
+    turnNavigationStore.observeLiveBlocks(store.getSnapshot().blocks);
+    return store.subscribe(observe);
+  }, [store, turnNavigationStore]);
+
+  const materializeNavigationTranscriptEvents = useCallback(
+    (
+      events: readonly DaemonEvent[],
+      nextBlockOrdinal: number,
+      excludedRecordIds: ReadonlySet<string>,
+    ) => {
+      const activeSession = sessionRef.current;
+      if (!activeSession) {
+        throw new Error('Session changed before transcript materialization');
+      }
+      const isolatedStore = createDaemonTranscriptStore({
+        nextOrdinal: nextBlockOrdinal,
+        maxBlocks: Number.MAX_SAFE_INTEGER,
+        maxRetainedBytes: Number.MAX_SAFE_INTEGER,
+        retainSubagentBlocks: subagentTranscriptModeRef.current === 'full',
+      });
+      const replayOpts = {
+        ...eventOptionsRef.current,
+        suppressOwnUserEcho: false,
+      };
+      const uiEvents: DaemonUiEvent[] = [];
+      const encounteredRecordIds = new Set<string>();
+      const appendFreshEvent = (event: DaemonUiEvent) => {
+        for (const recordId of event.sourceRecordIds ?? []) {
+          encounteredRecordIds.add(recordId);
+        }
+        if (
+          !event.sourceRecordIds?.some((recordId) =>
+            excludedRecordIds.has(recordId),
+          )
+        ) {
+          uiEvents.push(event);
+        }
+      };
+      for (const event of events) {
+        try {
+          const normalized = filterDaemonUiEventsForTranscript(
+            event,
+            normalizeAndFilterEvent(
+              event,
+              activeSession.clientId,
+              replayOpts,
+              setConnection,
+              { updateConnection: false, suppressLog: true },
+            ),
+            addNotice,
+            dismissNotice,
+            { hideHistoryTruncation: true, suppressSideEffects: true },
+          );
+          const projected =
+            subagentTranscriptModeRef.current === 'summary'
+              ? projectMainTranscriptEvents(normalized)
+              : normalized;
+          for (const uiEvent of projected) appendFreshEvent(uiEvent);
+          if (event.type === 'turn_complete') {
+            const stopReason =
+              (event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
+              'end_turn';
+            appendFreshEvent(assistantDoneFromTurnEvent(event, stopReason));
+          } else if (event.type === 'turn_error') {
+            appendFreshEvent(assistantDoneFromTurnEvent(event, 'error'));
+          }
+        } catch (error) {
+          console.warn(
+            '[DaemonSessionProvider] Skipped malformed navigation history event',
+            error,
+          );
+        }
+      }
+      isolatedStore.dispatch(uiEvents);
+      const state = isolatedStore.getSnapshot();
+      return {
+        blocks: state.blocks,
+        nextBlockOrdinal: state.nextOrdinal,
+        encounteredRecordIds: [...encounteredRecordIds],
+      };
+    },
+    [addNotice, dismissNotice],
+  );
+
+  const turnNavigationSupported =
+    knownCapabilities?.features.includes(SESSION_TURN_NAVIGATION_FEATURE) ??
+    false;
+  useEffect(() => {
+    const activeSession = sessionRef.current;
+    const connectedSession =
+      connection.status === 'connected' &&
+      activeSession?.sessionId === connection.sessionId
+        ? activeSession
+        : undefined;
+    turnNavigationStore.configure({
+      sessionId: connection.sessionId,
+      supported: turnNavigationSupported,
+      ...(connectedSession
+        ? {
+            client: {
+              owner: connectedSession,
+              getTurnIndexPage: (options) =>
+                connectedSession.getTurnIndexPage(options),
+              getTranscriptPage: (options) =>
+                connectedSession.getTranscriptPage({
+                  ...options,
+                  ...(subagentTranscriptModeRef.current === 'summary'
+                    ? { compactedReplayMode: 'summary' as const }
+                    : {}),
+                }),
+              materializeTranscriptEvents:
+                materializeNavigationTranscriptEvents,
+            },
+          }
+        : {}),
+    });
+  }, [
+    connection.sessionId,
+    connection.status,
+    materializeNavigationTranscriptEvents,
+    turnNavigationStore,
+    turnNavigationSupported,
+  ]);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
+  const settleCurrentSessionRestoredPromptRef = useRef<() => boolean>(
+    () => false,
+  );
+  // Apply the buffered transcript batch from outside the connect closure. The
+  // action layer must settle against a committed store, not one that is still
+  // 16ms behind (#9487).
+  const flushCurrentTranscriptRef = useRef<() => void>(() => {});
   const mountedRef = useRef(false);
 
   useEffect(() => {
@@ -1178,10 +1541,32 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     };
   }, []);
 
+  const runtimeStoppedOwnerRef = useRef<string | undefined>(undefined);
   const sessionEffectContext = restoreSessionContext ?? resolvedSessionContext;
 
   useEffect(() => {
     if (!autoConnect) return undefined;
+    const runtimeStopOwner = JSON.stringify([
+      resolvedBaseUrl,
+      sessionContextKey(sessionEffectContext),
+      restoreSessionId,
+      restoreSessionNonce,
+      attachSessionNonce,
+      newSessionNonce,
+    ]);
+    if (runtimeStoppedOwnerRef.current === runtimeStopOwner) return undefined;
+    runtimeStoppedOwnerRef.current = undefined;
+    if (
+      connectionRef.current.runtimeStopped ||
+      connectionRef.current.capacityRecovery
+    ) {
+      setConnectionSynchronous((current) => ({
+        ...current,
+        runtimeStopped: false,
+        runtimeStopPersistenceUnconfirmed: false,
+        capacityRecovery: undefined,
+      }));
+    }
     if (sessionContextResolutionError) {
       setConnectionSynchronous((current) => ({
         ...current,
@@ -1278,6 +1663,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       cancelTranscriptFlush();
       runTranscriptFlush(true);
     };
+    flushCurrentTranscriptRef.current = flushTranscriptSync;
     const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
       flushTranscriptSync();
       store.dispatch(events);
@@ -1329,6 +1715,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     tryLiveJournalRepairRef.current = tryLiveJournalRepair;
 
     const run = async () => {
+      // Let StrictMode discard its first effect before starting a session load.
+      if (!runnerSession) {
+        await Promise.resolve();
+        if (disposed) return;
+      }
       const client =
         workspaceClientRef.current ??
         new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
@@ -1347,6 +1738,43 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let standaloneCreateAttempted = false;
       let productContextFailure = false;
       let hasCurrentSessionActivePrompt = () => false;
+      const getDaemonActivePrompt = (
+        target: { workspaceCwd?: string; sessionId?: string } | undefined,
+      ): boolean | undefined => {
+        const state = daemonActivePromptRef.current;
+        return state?.sessionId !== undefined &&
+          target !== undefined &&
+          state?.workspaceCwd === target.workspaceCwd &&
+          state.sessionId === target.sessionId
+          ? state.active
+          : undefined;
+      };
+      // The one gate every non-terminal path asks before settling the pane to
+      // idle. A settle is safe only when no prompt this browser is tracking is
+      // still running AND the daemon is not reporting the turn in flight;
+      // otherwise a transport hiccup or a quiet stretch inside a long tool call
+      // reads as "turn finished" (#9487). Terminal events (turn_complete,
+      // turn_error, prompt.cancelled) and lifecycle transitions do not ask —
+      // they settle unconditionally, which is what makes them terminal.
+      const maySettleToIdle = (
+        target = session ?? sessionRef.current ?? connectionRef.current,
+      ) => {
+        if (
+          hasCurrentSessionActivePrompt() ||
+          connectionRef.current.backgroundTurn
+        )
+          return false;
+        if (getDaemonActivePrompt(target) === true) {
+          // The counterpart to the settle breadcrumb in the action layer:
+          // "the pane has said working for 40 minutes" is otherwise
+          // indistinguishable from a genuinely long silent tool call.
+          console.debug(
+            '[DaemonSessionProvider] settle skipped: daemon reports the prompt in flight',
+          );
+          return false;
+        }
+        return true;
+      };
       if (
         !restoreSessionId &&
         !reconnectSessionId &&
@@ -1363,6 +1791,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       // user's delete. Other session_closed reasons (idle_timeout,
       // last_client_detached) fall through to normal reconnect.
       let userDeletedSession = false;
+      let workspaceRuntimeStopped = false;
+      let stopPersistenceUnconfirmed = false;
 
       while (!disposed && !abort.signal.aborted) {
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
@@ -1510,6 +1940,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const canReadPrimaryAcpStatus =
               canPreheatPrimaryWorkspace &&
               capabilityFeatures.includes(WORKSPACE_ACP_STATUS_FEATURE);
+            const canUseSkillsConfigRuntime =
+              workspaceScoped &&
+              effectWorkspaceCwd !== undefined &&
+              capabilityFeatures.includes(
+                WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE,
+              );
+            const skillsRuntimeClient =
+              canUseSkillsConfigRuntime && effectWorkspaceCwd
+                ? client.workspaceByCwd(effectWorkspaceCwd)
+                : undefined;
             if (
               (shouldDeferInitialSessionCreation ||
                 manualSessionClearRef.current) &&
@@ -1518,8 +1958,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !shouldCreateFreshSession
             ) {
               if (!workspaceScoped) {
+                let standaloneOptions:
+                  | DaemonStandaloneSessionOptions
+                  | undefined;
+                if (
+                  effectSessionContext?.kind === 'standalone' &&
+                  capabilityFeatures.includes(
+                    STANDALONE_SESSION_OPTIONS_CAPABILITY,
+                  )
+                ) {
+                  try {
+                    standaloneOptions =
+                      await client.getStandaloneSessionOptions();
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] standalone session options failed in deferred connect:',
+                      error,
+                    );
+                  }
+                }
+                if (disposed || abort.signal.aborted) return;
+                const providerModelStatus =
+                  mapProviderStatus(standaloneOptions);
+                // The options request can outlive a first-prompt create: the
+                // composer does not block while this branch is still
+                // connecting, so the session may already be attached by the
+                // time the response lands. Never publish over it.
                 setConnection((current) =>
-                  current.status === 'error'
+                  current.status === 'error' || current.sessionId
                     ? current
                     : {
                         ...clearNonWorkspaceSessionState(current),
@@ -1531,10 +1997,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         gitStatus: undefined,
                         commands: undefined,
                         skills: undefined,
-                        models: undefined,
-                        currentModel: undefined,
-                        currentMode: undefined,
-                        contextWindow: undefined,
+                        models: standaloneOptions
+                          ? providerModelStatus.models
+                          : undefined,
+                        currentModel: providerModelStatus.currentModel,
+                        currentMode: providerModelStatus.currentMode,
+                        contextWindow: providerModelStatus.contextWindow,
                         providers: undefined,
                         capabilities: caps,
                         error: undefined,
@@ -1552,13 +2020,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
                   client.workspaceProviders(),
-                  client.workspaceSkills(),
+                  prefetchSkills
+                    ? skillsRuntimeClient
+                      ? skillsRuntimeClient.workspaceConfigSkills()
+                      : client.workspaceSkills()
+                    : Promise.resolve(undefined),
+                  prefetchSkills &&
+                  !canUseSkillsConfigRuntime &&
                   canReadPrimaryAcpStatus
                     ? client.workspaceAcpStatus()
                     : Promise.resolve(undefined),
-                  effectWorkspaceCwd
-                    ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
-                    : client.workspaceGit(),
+                  prefetchGitBranch
+                    ? effectWorkspaceCwd
+                      ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
+                      : client.workspaceGit()
+                    : Promise.resolve(undefined),
                 ]);
               if (providerResult.status === 'rejected') {
                 console.warn(
@@ -1595,9 +2071,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : undefined,
               );
               const preserveClearedSessionCommands =
-                skillsResult.status === 'rejected' ||
-                (manualSessionClearRef.current &&
-                  deferredSkillCommands.length === 0);
+                connectionRef.current.workspaceCwd === effectWorkspaceCwd &&
+                (skillsResult.status === 'rejected' ||
+                  (manualSessionClearRef.current &&
+                    deferredSkillCommands.length === 0));
               setConnection((current) => ({
                 ...current,
                 status: 'connected',
@@ -1605,9 +2082,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 workspaceCwd: effectWorkspaceCwd,
                 standaloneSession: undefined,
                 gitBranch:
-                  gitResult.status === 'fulfilled'
-                    ? (gitResult.value.branch ?? undefined)
-                    : undefined,
+                  !prefetchGitBranch &&
+                  current.workspaceCwd === effectWorkspaceCwd
+                    ? current.gitBranch
+                    : gitResult.status === 'fulfilled'
+                      ? (gitResult.value?.branch ?? undefined)
+                      : undefined,
                 models: providerModelStatus.models,
                 currentModel: providerModelStatus.currentModel,
                 currentMode: providerModelStatus.currentMode,
@@ -1616,12 +2096,44 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 capabilities: caps,
                 commands: preserveClearedSessionCommands
                   ? current.commands
-                  : deferredSkillCommands,
+                  : !prefetchSkills || skillsResult.status === 'rejected'
+                    ? undefined
+                    : deferredSkillCommands,
                 skills: preserveClearedSessionCommands
                   ? current.skills
-                  : deferredSkills,
+                  : !prefetchSkills || skillsResult.status === 'rejected'
+                    ? undefined
+                    : deferredSkills,
               }));
-              if (
+              if (prefetchSkills && skillsRuntimeClient) {
+                void (async () => {
+                  try {
+                    const runtime = await skillsRuntimeClient.ensureRuntime();
+                    const refreshed = await loadReadyWorkspaceSkills(
+                      skillsRuntimeClient,
+                      runtime,
+                      () =>
+                        disposed ||
+                        abort.signal.aborted ||
+                        connectionRef.current.sessionId !== undefined,
+                    );
+                    if (!refreshed) return;
+                    const { commands, skills: refreshedSkills } =
+                      mapWorkspaceSkills(refreshed);
+                    setConnection((current) =>
+                      current.sessionId
+                        ? current
+                        : { ...current, commands, skills: refreshedSkills },
+                    );
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] workspace Skills runtime preparation failed:',
+                      error,
+                    );
+                  }
+                })();
+              } else if (
+                prefetchSkills &&
                 canPreheatPrimaryWorkspace &&
                 !(
                   acpStatusResult.status === 'fulfilled' &&
@@ -1706,9 +2218,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const restoreRequest = {
               timeoutMs: restoreRequestTimeoutMs,
+              // Workspace restores only: the standalone request type omits
+              // source attribution, and the daemon applies it solely when the
+              // restored session has none persisted (legacy upgrade path).
+              ...(effectSessionContext?.kind !== 'standalone' &&
+              sessionSourceTypeRef.current !== undefined
+                ? { sourceType: sessionSourceTypeRef.current }
+                : {}),
               ...(!shouldResumeRequestedSession &&
               subagentTranscriptModeRef.current === 'summary'
-                ? { liveReplayMode: 'summary' as const }
+                ? {
+                    liveReplayMode: 'summary' as const,
+                    compactedReplayMode: 'summary' as const,
+                  }
                 : {}),
               ...(historyPaginationSupported &&
               (!restoreSessionId || restoreMode === 'load') &&
@@ -1936,13 +2458,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+              // Do not reset daemonActivePromptRef here: the bridge may have
+              // already published authority for the target while it was
+              // loading. Owner matching below prevents the previous session's
+              // value from leaking into the new one (#9487).
               needsStoreReset = true;
             } else if (previousSessionId !== undefined) {
               const replaySnapshotEventCount =
                 nextSession.replaySnapshot.compactedReplay.length +
                 nextSession.replaySnapshot.liveJournal.length;
               if (replaySnapshotEventCount > 0) {
-                setPromptStatus('idle');
+                // Rebuilding the transcript store is not a turn boundary. The
+                // episode-start updater below can only preserve a state this
+                // reset has not already flattened, so an observer pane whose
+                // ring-evicted reload carries a replay snapshot would lose the
+                // indicator for the rest of the turn (#9487).
+                if (maySettleToIdle(nextSession)) setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 needsStoreReset = true;
               } else {
@@ -1988,8 +2519,32 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     kind: 'workspace' as const,
                     cwd: activeSession.workspaceCwd,
                   };
+          turnNotifications.remember(
+            activeSession,
+            activeProductSessionContext,
+          );
+          turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
+          if (runnerSession !== activeSession) {
+            setConnectionSynchronous((current) => ({
+              ...current,
+              backgroundTurn:
+                current.sessionId === activeSession.sessionId &&
+                current.finishedBackgroundTurnId ===
+                  activeSession.backgroundTurn?.turnId
+                  ? undefined
+                  : activeSession.backgroundTurn,
+              backgroundTurnObservedAt: performance.now(),
+              finishedBackgroundTurnId:
+                current.sessionId === activeSession.sessionId
+                  ? activeSession.backgroundTurn
+                    ? current.finishedBackgroundTurnId
+                    : (current.backgroundTurn?.turnId ??
+                      current.finishedBackgroundTurnId)
+                  : undefined,
+            }));
+          }
           runnerSession = activeSession;
           // Prompt activity is session state returned by /load. Surface it
           // immediately so a refreshed page shows the running state without
@@ -2001,6 +2556,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // controller/promise to put in `activePromptsRef`. Keep that restored
           // live state separately so `session.replay_complete` (history caught
           // up) does not get mistaken for `turn_complete` (prompt finished).
+          const daemonActivePrompt = getDaemonActivePrompt(activeSession);
+          if (daemonActivePrompt === false) {
+            settledRestoredActivePromptSessionsRef.current.add(activeSession);
+          }
           const restoredActivePromptSettled =
             settledRestoredActivePromptSessionsRef.current.has(activeSession);
           let restoredActivePrompt =
@@ -2011,16 +2570,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // Once a terminal event consumes it, keep it consumed across SSE
             // reconnects for the same client; later prompts from this page are
             // still tracked independently in activePromptsRef.
+            if (!restoredActivePrompt) return false;
             settledRestoredActivePromptSessionsRef.current.add(activeSession);
             restoredActivePrompt = false;
+            return true;
           };
           const hasSessionActivePrompt = () =>
             restoredActivePrompt ||
-            activePromptsRef.current.has(activeSession.sessionId) ||
-            activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
+            hasLocallySubmittedPrompt(
+              activePromptsRef.current,
+              activeSession.sessionId,
+            );
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
-          setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
+          settleCurrentSessionRestoredPromptRef.current =
+            settleRestoredActivePrompt;
+          setPromptStatus((current) =>
+            hasSessionActivePrompt()
+              ? 'streaming'
+              : // A Last-Event-ID resume on the same session is not a turn
+                // boundary. `hasSessionActivePrompt()` only knows about
+                // prompts this browser submitted plus the one-shot /load
+                // snapshot, so for an observer pane it reads false mid-turn
+                // and would reset a running turn to idle. Keep whatever the
+                // stream already established while the daemon still reports
+                // the prompt in flight (#9487).
+                daemonActivePrompt === true && current !== 'idle'
+                ? current
+                : 'idle',
+          );
 
           const pendingLoad = pendingSessionLoadRef.current;
           const pendingLoadToResolve =
@@ -2103,6 +2681,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? { beforeRecordId: firstPersistedRecordId }
                 : {}),
               hasMore: historyHasMore,
+              persistedReachable: historyHasMore,
               loading: false,
               capacityReached: false,
               paginationError: false,
@@ -2145,6 +2724,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const markerIndex = replayTarget
               ? sourceEvents.indexOf(replayTarget.marker)
               : -1;
+            const notificationReplayEvents: DaemonEvent[] = [];
             const eventGroups: Array<{
               transcript: DaemonUiEvent[];
               sideEffects: DaemonUiEvent[];
@@ -2201,6 +2781,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     assistantDoneFromTurnEvent(replayEvent, 'error'),
                   );
                 }
+                notificationReplayEvents.push(replayEvent);
                 eventGroups.push({
                   transcript: groupEvents,
                   sideEffects:
@@ -2387,14 +2968,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const sideEffectEvents = eventGroups.flatMap(
               (group) => group.sideEffects,
             );
-            if (activeWorkspaceScoped && sideEffectEvents.length > 0) {
-              bumpWorkspaceEventSignals(
+            if (sideEffectEvents.length > 0) {
+              bumpSessionEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
-                activeSession.workspaceCwd,
+                activeWorkspaceScoped ? activeSession.workspaceCwd : undefined,
+                false,
               );
             }
             if (replayExceededCapacity) {
+              transcriptHistoryRef.current.persistedReachable = true;
               if (replayTrimmed) {
                 if (replayTrimmedAnchor !== undefined) {
                   transcriptHistoryRef.current.beforeRecordId =
@@ -2451,8 +3034,41 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 store,
                 setPromptStatus,
                 passiveAssistantDoneTimerRef,
-                { requireBoundPromptId: true },
+                {
+                  requireBoundPromptId: true,
+                  transcriptAlreadyApplied: true,
+                },
               );
+              // A terminal that arrives through replay is never re-delivered
+              // live: the snapshot is released below and SSE resumes from
+              // `lastEventId`. Publish here or a host keyed on
+              // `onAssistantTurnSettled` waits forever for a turn it can
+              // already see finished. The admission key survives active
+              // controller cleanup during reconnect and session switches,
+              // while keeping ordinary history loading silent.
+              const replaySettlement = promptSettledFromTurnEvent(
+                activeSession.sessionId,
+                replayEvent,
+              );
+              if (
+                replaySettlement &&
+                locallyBoundPromptIdsRef.current
+                  .get(replaySettlement.sessionId)
+                  ?.has(replaySettlement.promptId)
+              ) {
+                publishPromptSettlement(replaySettlement);
+              }
+            }
+            if (sessionRef.current === activeSession) {
+              for (const event of notificationReplayEvents) {
+                turnNotifications.observe(activeSession, event, true, () =>
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    getSessionDisplayName(activeSession.state),
+                  ),
+                );
+              }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
             // Release the raw snapshot only after the injection above
@@ -2463,6 +3079,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // so dropping it unpins busy-session snapshots that can reach
             // tens of MiB after adaptive journal growth.
             activeSession.consumeReplaySnapshot();
+          }
+          if (epochResetSessionIdRef.current === activeSession.sessionId) {
+            epochResetSessionIdRef.current = undefined;
+            if (!hasSessionActivePrompt()) {
+              locallyBoundPromptIdsRef.current.delete(activeSession.sessionId);
+            }
           }
           setConnection((current) => ({
             ...current,
@@ -2475,6 +3097,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             workspaceCwd: activeWorkspaceScoped
               ? activeProductSessionContext.cwd
               : undefined,
+            gitBranch:
+              activeWorkspaceScoped &&
+              current.workspaceCwd === activeProductSessionContext.cwd
+                ? current.gitBranch
+                : undefined,
             standaloneSession:
               activeProductSessionContext.kind === 'standalone'
                 ? getStandaloneConnectionState(activeSession.session)
@@ -2536,13 +3163,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               : undefined;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
-            : activeWorkspaceScoped
+            : activeWorkspaceScoped && prefetchGitBranch
               ? activeSession.workspaceCwd
                 ? client
                     .workspaceByCwd(activeSession.workspaceCwd)
                     .workspaceGit()
                 : client.workspaceGit()
               : Promise.resolve(undefined);
+          const readRecovery =
+            !canReuseSessionMetadata ||
+            !!connectionRef.current.context?.recovery;
+          const recoveryGeneration = readRecovery
+            ? advanceSessionRecoveryGeneration(
+                sessionRecoveryGenerationRef.current,
+                activeSession,
+              )
+            : undefined;
           const metadataPromise = Promise.allSettled([
             canReuseSessionMetadata || !activeWorkspaceScoped
               ? Promise.resolve(undefined)
@@ -2550,9 +3186,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             canReuseSessionMetadata
               ? Promise.resolve(undefined)
               : activeSession.supportedCommands(),
-            canReuseSessionMetadata
-              ? Promise.resolve(undefined)
-              : activeSession.context(),
+            readRecovery ? activeSession.context() : Promise.resolve(undefined),
             gitPromise,
           ]);
           // Hydrate Goal ownership independently so unrelated metadata cannot
@@ -2662,8 +3296,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ?.contextWindow ??
             providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
-          const currentMode =
-            getCurrentMode(context) ?? providerModelStatus.currentMode;
+          const currentMode = getCurrentMode(context);
 
           setConnection((current) => {
             if (
@@ -2678,6 +3311,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               configGeneration % 2 === 0 &&
               (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
                 configGeneration;
+            const recoverySnapshotCurrent =
+              context?.sessionId === activeSession.sessionId &&
+              recoveryGeneration !== undefined &&
+              sessionRecoveryGenerationRef.current.get(activeSession) ===
+                recoveryGeneration;
+            const nextContext =
+              configSnapshotCurrent && context
+                ? context
+                : (current.context ??
+                  (context?.recovery
+                    ? {
+                        v: context.v,
+                        sessionId: context.sessionId,
+                        workspaceCwd: context.workspaceCwd,
+                        state: {},
+                      }
+                    : undefined));
             return {
               ...current,
               status: 'connected',
@@ -2709,13 +3359,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               currentModel: configSnapshotCurrent
                 ? (sessionCurrentModel ?? current.currentModel)
                 : current.currentModel,
-              currentMode: currentMode ?? current.currentMode,
+              currentMode: configSnapshotCurrent
+                ? (currentMode ??
+                  current.currentMode ??
+                  providerModelStatus.currentMode)
+                : current.currentMode,
+              planExecutionMode:
+                configSnapshotCurrent && currentMode !== undefined
+                  ? getPlanExecutionMode(context)
+                  : current.planExecutionMode,
               reasoning:
                 configSnapshotCurrent && context !== undefined
-                  ? mapSessionContextReasoning(
-                      context,
-                      current.reasoning?.effort,
-                    )
+                  ? mapSessionContextReasoning(context)
                   : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
@@ -2724,12 +3379,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,
               providers: activeWorkspaceScoped
-                ? (providers ?? current.providers)
+                ? configSnapshotCurrent
+                  ? (providers ?? current.providers)
+                  : current.providers
                 : undefined,
               supportedCommands: supportedCommands ?? current.supportedCommands,
-              context: configSnapshotCurrent
-                ? (context ?? current.context)
-                : current.context,
+              context: nextContext
+                ? {
+                    ...nextContext,
+                    recovery: recoverySnapshotCurrent
+                      ? context?.recovery
+                      : ((current.context?.sessionId === activeSession.sessionId
+                          ? current.context.recovery
+                          : undefined) ??
+                        (context?.recovery
+                          ? { ...context.recovery, canContinue: false }
+                          : undefined)),
+                  }
+                : undefined,
               // Reconcile rather than reference-compare: the load response and
               // any frame that arrived during the load window share a revision
               // domain, and routing through `selectGoalState` is what registers
@@ -2746,7 +3413,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   )
                 : (current.goalState ?? goalStateFallback),
               gitBranch:
-                activeWorkspaceScoped && gitResult.status === 'fulfilled'
+                activeWorkspaceScoped &&
+                prefetchGitBranch &&
+                gitResult.status === 'fulfilled'
                   ? gitBranch
                   : activeWorkspaceScoped
                     ? current.gitBranch
@@ -2806,6 +3475,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const active = activePromptsRef.current.get(
               activeSession.sessionId,
             );
+            if (locallyBoundPromptIdsRef.current.has(activeSession.sessionId)) {
+              epochResetSessionIdRef.current = activeSession.sessionId;
+            }
             active?.controller.abort();
             activePromptsRef.current.delete(activeSession.sessionId);
             if (restoredActivePrompt) {
@@ -2822,6 +3494,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
+            settleCurrentSessionRestoredPromptRef.current = () => false;
             setConnection((current) => ({
               ...current,
               status: 'connecting',
@@ -2848,6 +3521,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             abort.signal.removeEventListener('abort', abortEventStream);
           const sseConnectReason = nextSseConnectReason;
           nextSseConnectReason = undefined;
+          const recoveryEventCursor = activeSession.lastEventId ?? 0;
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
@@ -2871,6 +3545,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             try {
+              turnNavigationStore.handleSessionEvent(event.type);
               const followupSuggestion =
                 parseSidechannelFollowupSuggestion(event);
               if (followupSuggestion) {
@@ -2885,6 +3560,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
+                if (
+                  event.type === 'pending_prompt_completed' &&
+                  isRecord(event.data) &&
+                  event.data['state'] === 'removed' &&
+                  typeof event.data['promptId'] === 'string'
+                ) {
+                  turnNavigationStore.recordPromptRemoved(
+                    event.data['promptId'],
+                  );
+                }
                 publishPendingPromptEvent(event);
                 if (sessionRef.current !== activeSession) break;
                 if (event.type === 'pending_prompt_started') {
@@ -2892,6 +3577,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('waiting');
                 }
               }
+              const backgroundTerminal =
+                connectionRef.current.backgroundTurn !== undefined &&
+                eventPromptId(event) ===
+                  connectionRef.current.backgroundTurn.turnId;
+              const localPrompt = activePromptsRef.current.get(
+                activeSession.sessionId,
+              );
+              const ignoreStaleTerminal =
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                connectionRef.current.backgroundTurn &&
+                eventPromptId(event) !==
+                  connectionRef.current.backgroundTurn.turnId &&
+                (!localPrompt ||
+                  (localPrompt.promptId !== undefined &&
+                    eventPromptId(event) !== localPrompt.promptId));
               const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
                 activeSession.clientId,
@@ -2907,6 +3608,83 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              if (
+                (context?.recovery ||
+                  connectionRef.current.context?.recovery) &&
+                (event.id === undefined || event.id > recoveryEventCursor)
+              ) {
+                if (
+                  event.type === 'pending_prompt_started' ||
+                  hasActiveGenerationSignal(uiEvents) ||
+                  uiEvents.some((item) => item.type === 'user.text.delta')
+                ) {
+                  advanceSessionRecoveryGeneration(
+                    sessionRecoveryGenerationRef.current,
+                    activeSession,
+                  );
+                  setConnection((current) =>
+                    sessionRef.current === activeSession &&
+                    current.context?.recovery?.canContinue
+                      ? {
+                          ...current,
+                          context: {
+                            ...current.context,
+                            recovery: {
+                              ...current.context.recovery,
+                              canContinue: false,
+                            },
+                          },
+                        }
+                      : current,
+                  );
+                }
+                if (
+                  event.type === 'turn_complete' ||
+                  event.type === 'turn_error' ||
+                  uiEvents.some((item) => item.type === 'prompt.cancelled')
+                ) {
+                  const generation = advanceSessionRecoveryGeneration(
+                    sessionRecoveryGenerationRef.current,
+                    activeSession,
+                  );
+                  void activeSession.context().then(
+                    (updated) => {
+                      if (
+                        disposed ||
+                        abort.signal.aborted ||
+                        eventStreamController.signal.aborted ||
+                        eventStreamRef.current !== eventStream ||
+                        sessionRef.current !== activeSession ||
+                        generation !==
+                          sessionRecoveryGenerationRef.current.get(
+                            activeSession,
+                          ) ||
+                        updated.sessionId !== activeSession.sessionId
+                      ) {
+                        return;
+                      }
+                      setConnection((current) =>
+                        current.context &&
+                        eventStreamRef.current === eventStream &&
+                        sessionRef.current === activeSession &&
+                        generation ===
+                          sessionRecoveryGenerationRef.current.get(
+                            activeSession,
+                          )
+                          ? {
+                              ...current,
+                              context: {
+                                ...current.context,
+                                recovery: updated.recovery,
+                              },
+                            }
+                          : current,
+                      );
+                    },
+                    () => {},
+                  );
+                }
+              }
               const transcriptUiEvents =
                 subagentTranscriptModeRef.current === 'summary'
                   ? projectMainTranscriptEvents(uiEvents)
@@ -2921,13 +3699,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   break;
                 }
               }
-              if (activeWorkspaceScoped) {
-                bumpWorkspaceEventSignals(
-                  uiEvents,
-                  setWorkspaceEventSignals,
-                  activeProductSessionContext.cwd,
-                );
-              }
+              bumpSessionEventSignals(
+                uiEvents,
+                setWorkspaceEventSignals,
+                activeWorkspaceScoped
+                  ? activeProductSessionContext.cwd
+                  : undefined,
+              );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
@@ -2942,24 +3720,43 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // settle (and the restored-prompt / observer branches below)
               // dispatch. Guarded to turn terminals so steady streaming keeps
               // batching.
+              const pendingRepair = liveJournalRepairRef.current;
+              const repairTargetsTerminal =
+                pendingRepair?.sessionId === activeSession.sessionId &&
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                eventPromptId(event) === pendingRepair.target.promptId;
               if (
                 event.type === 'turn_complete' ||
                 event.type === 'turn_error'
               ) {
                 flushTranscriptSync();
               }
-              const activePromptSettled = settleActivePromptFromTurnEvent(
-                activePromptsRef.current,
-                settledPromptsRef.current,
-                activeSession.sessionId,
-                event,
-                store,
-                setPromptStatus,
-                passiveAssistantDoneTimerRef,
-              );
+              // An old background terminal must not claim a local prompt
+              // whose HTTP admission has not returned its ID yet.
+              const activePromptSettled =
+                !backgroundTerminal &&
+                !ignoreStaleTerminal &&
+                settleActivePromptFromTurnEvent(
+                  activePromptsRef.current,
+                  settledPromptsRef.current,
+                  activeSession.sessionId,
+                  event,
+                  store,
+                  setPromptStatus,
+                  passiveAssistantDoneTimerRef,
+                );
               let restoredPromptSettled = false;
               if (
                 !activePromptSettled &&
+                !ignoreStaleTerminal &&
+                // A background execution's own terminal is not authoritative
+                // for a restored FOREGROUND prompt; the live-state authority
+                // still releases a background-only session on its next poll.
+                !(
+                  backgroundTerminal &&
+                  getDaemonActivePrompt(activeSession) === true
+                ) &&
                 restoredActivePrompt &&
                 (event.type === 'turn_complete' || event.type === 'turn_error')
               ) {
@@ -3015,6 +3812,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
                 if (
+                  event.type === 'prompt_cancelled' &&
                   uiEvent.type === 'prompt.cancelled' &&
                   (restoredActivePrompt ||
                     uiEvent.originatorClientId !== activeSession.clientId)
@@ -3049,7 +3847,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       type: 'assistant.done',
                       reason: 'replay_complete',
                     });
-                    setPromptStatus('idle');
+                    // "History caught up" is not "turn finished". Finishing the
+                    // replayed streaming block above is right either way, but
+                    // an observer pane reconnecting mid-turn would otherwise
+                    // settle here and — inside a long silent tool call there is
+                    // no next event to revive it — stay settled (#9487).
+                    if (maySettleToIdle()) {
+                      setPromptStatus('idle');
+                    }
                   }
                 }
               }
@@ -3073,7 +3878,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   );
                 }
               }
-              if (isObserver && event.type === 'turn_complete') {
+              if (
+                isObserver &&
+                !ignoreStaleTerminal &&
+                event.type === 'turn_complete'
+              ) {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 const stopReason =
                   (event.data as DaemonTurnCompleteData | undefined)
@@ -3082,7 +3891,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   assistantDoneFromTurnEvent(event, stopReason),
                 );
                 setPromptStatus('idle');
-              } else if (isObserver && event.type === 'turn_error') {
+              } else if (
+                isObserver &&
+                !ignoreStaleTerminal &&
+                event.type === 'turn_error'
+              ) {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 dispatchTranscriptNow(
                   assistantDoneFromTurnEvent(event, 'error'),
@@ -3094,16 +3907,46 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   passiveAssistantDoneTimerRef,
                   'passive_observer',
                   3000,
-                  () => setPromptStatus('idle'),
+                  () => {
+                    // Silence is not a terminal signal: one tool call
+                    // routinely runs far longer than this window without
+                    // emitting an event, and dropping the pane's loading
+                    // state there is exactly the mid-turn indicator loss in
+                    // #9487. The stale streaming block is still finished
+                    // above; settle the prompt state only when the daemon
+                    // does not contradict it.
+                    if (!maySettleToIdle()) return;
+                    setPromptStatus('idle');
+                  },
                 );
               }
-              const pendingRepair = liveJournalRepairRef.current;
+              if (sessionRef.current === activeSession) {
+                turnNotifications.observe(activeSession, event, false, () =>
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    connectionRef.current.sessionId === activeSession.sessionId
+                      ? connectionRef.current.displayName
+                      : getSessionDisplayName(activeSession.state),
+                  ),
+                );
+              }
               if (
-                pendingRepair?.sessionId === activeSession.sessionId &&
-                (event.type === 'turn_complete' ||
-                  event.type === 'turn_error') &&
-                eventPromptId(event) === pendingRepair.target.promptId
+                event.type === 'turn_complete' ||
+                event.type === 'turn_error'
               ) {
+                // `turn_error` adds its terminal error block after the earlier
+                // pre-settlement flush. Commit that projection before hosts run.
+                flushTranscriptSync();
+                const settlement = promptSettledFromTurnEvent(
+                  activeSession.sessionId,
+                  event,
+                );
+                if (settlement && !repairTargetsTerminal) {
+                  publishPromptSettlement(settlement);
+                }
+              }
+              if (repairTargetsTerminal && pendingRepair) {
                 pendingRepair.terminalSeen = true;
                 queueMicrotask(tryLiveJournalRepair);
               } else if (pendingRepair?.terminalSeen) {
@@ -3123,7 +3966,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   // Resync asks us to rebuild transcript state, but it is not a
                   // prompt terminal signal. Keep loading alive for local/restored
                   // prompts until turn_complete, turn_error, or prompt_cancelled.
-                  if (!hasSessionActivePrompt()) {
+                  if (maySettleToIdle()) {
                     setPromptStatus('idle');
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
@@ -3145,6 +3988,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   session = undefined;
                   sessionRef.current = undefined;
                   hasCurrentSessionActivePromptRef.current = () => false;
+                  settleCurrentSessionRestoredPromptRef.current = () => false;
                   setConnection((current) => ({
                     ...current,
                     status: 'connecting',
@@ -3170,6 +4014,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   'client_close'
               ) {
                 userDeletedSession = true;
+                const closedData = event.data as Record<string, unknown>;
+                workspaceRuntimeStopped =
+                  closedData.cause === 'workspace_runtime_stop';
+                stopPersistenceUnconfirmed =
+                  closedData.persistenceUnconfirmed === true;
                 const closedSessionId = activeSession.sessionId;
                 const active = activePromptsRef.current.get(closedSessionId);
                 active?.controller.abort();
@@ -3212,6 +4061,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           flushTranscriptSync();
           const restartRequested = eventStream.restartRequested;
           clearEventStream();
+          if (workspaceRuntimeStopped) {
+            runtimeStoppedOwnerRef.current = runtimeStopOwner;
+            dispatchTranscriptNow({
+              type: 'assistant.done',
+              reason: 'cancelled',
+            });
+            setPromptStatus('idle');
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            hasCurrentSessionActivePromptRef.current = () => false;
+            settleCurrentSessionRestoredPromptRef.current = () => false;
+            setConnectionSynchronous((current) => ({
+              ...current,
+              status: 'disconnected',
+              runtimeStopped: true,
+              runtimeStopPersistenceUnconfirmed: stopPersistenceUnconfirmed,
+              loadingTranscript: false,
+              catchingUp: false,
+              backgroundTurn: undefined,
+              goalState: undefined,
+              error: undefined,
+              errorStatus: undefined,
+            }));
+            return;
+          }
           if (restartRequested) {
             nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
@@ -3238,6 +4111,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: undefined,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: undefined,
+              backgroundTurnObservedAt: undefined,
               goalState: undefined,
               error: undefined,
               errorStatus: undefined,
@@ -3249,6 +4125,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
+            settleCurrentSessionRestoredPromptRef.current = () => false;
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
@@ -3257,13 +4134,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
-              if (!hasSessionActivePrompt()) {
+              clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+              if (maySettleToIdle()) {
                 // A transport close is only a safe "done" signal for passive
                 // observers. When a local/restored prompt is still active, the
                 // daemon may continue running while we reconnect via
                 // Last-Event-ID, so keep the prompt in streaming state until a
-                // real turn_complete/turn_error/prompt_cancelled arrives.
-                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                // real turn_complete/turn_error/prompt_cancelled arrives. The
+                // daemon's live prompt state is the same authority: while it
+                // reports the turn in flight, a dropped stream (proxy idle
+                // timeout mid silent tool gap) must not settle the pane — the
+                // resume finds no new events inside the gap to revive it
+                // (#9487).
                 setPromptStatus('idle');
                 dispatchTranscriptNow({
                   type: 'assistant.done',
@@ -3304,8 +4186,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // events the SSE client already yielded (lastSeenEventId has advanced
           // past them).
           flushTranscriptSync();
-          const message =
-            error instanceof Error ? error.message : String(error);
+          const capacityRejected = isAcpChildCapacityError(error);
+          const message = capacityRejected
+            ? getTranslator('en')('daemon.capacity.exhausted')
+            : error instanceof Error
+              ? error.message
+              : String(error);
           const errorStatus = extractHttpStatus(error);
           if (
             activeSessionContextRef.current?.kind === 'standalone' &&
@@ -3371,6 +4257,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             (pendingLoad === undefined ||
               pendingLoad.sessionId === restoreSessionId);
           if (
+            !capacityRejected &&
             autoReconnect &&
             loadingRequestedSession &&
             ((restoreRetryDelayMs !== undefined && pendingLoadMatches) ||
@@ -3400,19 +4287,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             continue;
           }
-          const failedSessionId = session?.sessionId;
+          const failedSessionId =
+            session?.sessionId ??
+            reconnectSessionId ??
+            epochResetSessionIdRef.current;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
+            locallyBoundPromptIdsRef.current.delete(failedSessionId);
+            if (epochResetSessionIdRef.current === failedSessionId) {
+              epochResetSessionIdRef.current = undefined;
+            }
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
           }
           // Retriable transport failures are not prompt terminal events. Keep
           // restored/local prompts in streaming state until the daemon sends
-          // turn_complete, turn_error, or prompt_cancelled.
-          if (isAuthFailure || isTerminal || !hasCurrentSessionActivePrompt()) {
-            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+          // turn_complete, turn_error, or prompt_cancelled — and likewise an
+          // observed turn the daemon still reports in flight: the reconnect
+          // resumes into the same silent gap with no events to revive a
+          // settled indicator (#9487).
+          clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+          if (isAuthFailure || isTerminal || maySettleToIdle()) {
             setPromptStatus('idle');
           }
           if (
@@ -3434,6 +4331,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad.reject(error);
           }
           if (
+            capacityRejected ||
+            (session === undefined &&
+              activeSessionContextRef.current?.kind === 'standalone' &&
+              isSessionWriterBlockedCode(getDaemonErrorCode(error))) ||
             productContextFailure ||
             error instanceof DaemonCapabilityMissingError ||
             (session === undefined &&
@@ -3441,9 +4342,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               activeSessionContextRef.current !== undefined &&
               isDaemonErrorExplicitlyNonRetryable(error))
           ) {
+            const recoverySessionId = restoreSessionId ?? reconnectSessionId;
             setConnection((current) => ({
               ...current,
               status: 'error',
+              capacityRecovery:
+                capacityRejected && recoverySessionId
+                  ? {
+                      error,
+                      sessionId: recoverySessionId,
+                      sessionContext: activeSessionContextRef.current,
+                      mode: restoreMode === 'load' ? 'load' : 'resume',
+                    }
+                  : undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
                 errorStatus,
@@ -3479,6 +4390,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 context: undefined,
                 reasoning: undefined,
                 models: getWorkspaceModelsAfterSessionClear(current),
+                backgroundTurn: undefined,
+                finishedBackgroundTurnId: undefined,
+                backgroundTurnObservedAt: undefined,
                 goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
@@ -3508,6 +4422,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: undefined,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: undefined,
+              backgroundTurnObservedAt: undefined,
               goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
@@ -3664,6 +4581,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         hasCurrentSessionActivePromptRef.current = () => false;
+        settleCurrentSessionRestoredPromptRef.current = () => false;
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
@@ -3702,6 +4620,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     autoConnect,
     autoReconnect,
+    prefetchGitBranch,
+    prefetchSkills,
+    turnNotifications,
     resolvedBaseUrl,
     resolvedToken,
     sessionEffectContext,
@@ -3712,6 +4633,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxBlocks,
     maxRetainedBytes,
     store,
+    turnNavigationStore,
     restoreSessionId,
     restoreSessionContext,
     restoreMode,
@@ -3723,6 +4645,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     clearNotices,
     addNotice,
     dismissNotice,
+    publishPromptSettlement,
     setConnectionSynchronous,
   ]);
 
@@ -3826,6 +4749,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus,
               );
             }
+            locallyBoundPromptIdsRef.current.delete(deadSessionId);
             const active = activePromptsRef.current.get(deadSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(deadSessionId);
@@ -3857,6 +4781,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         context: undefined,
                         reasoning: undefined,
                         models: getWorkspaceModelsAfterSessionClear(current),
+                        backgroundTurn: undefined,
+                        finishedBackgroundTurnId: undefined,
+                        backgroundTurnObservedAt: undefined,
                         goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,
@@ -3878,6 +4805,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     heartbeatIntervalMs,
   ]);
 
+  const settleAdmittedPrompt = useCallback(
+    (owner: DaemonSessionClient, promptId: string) => {
+      const active = activePromptsRef.current.get(owner.sessionId);
+      if (active?.promptId !== promptId) return;
+      const terminal = active.replayedTurnEvents?.get(promptId);
+      delete active.replayedTurnEvents;
+      if (terminal) {
+        settleActivePromptFromTurnEvent(
+          activePromptsRef.current,
+          settledPromptsRef.current,
+          owner.sessionId,
+          terminal,
+          store,
+          setPromptStatus,
+          passiveAssistantDoneTimerRef,
+          { requireBoundPromptId: true, transcriptAlreadyApplied: true },
+        );
+        turnNotifications.observe(owner, terminal, true);
+      }
+    },
+    [store, turnNotifications],
+  );
+
   const actions = useMemo<DaemonSessionActions>(
     () =>
       createDaemonSessionActions({
@@ -3888,14 +4838,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         sessionConfigGeneration: sessionConfigGenerationRef.current,
+        sessionRecoveryGeneration: sessionRecoveryGenerationRef.current,
         heartbeatSupportedRef,
         manualSessionClearRef,
         skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
+        daemonActivePromptRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
+        settleRestoredActivePrompt: () =>
+          settleCurrentSessionRestoredPromptRef.current(),
+        flushTranscript: () => flushCurrentTranscriptRef.current(),
+        getEventDetailMode: () => subagentTranscriptModeRef.current,
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
+          settleCurrentSessionRestoredPromptRef.current = () => false;
         },
         restartEventStream: (sessionId: string) => {
           const eventStream = eventStreamRef.current;
@@ -3959,6 +4916,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             client,
             request,
             requestClientId,
+          ).then((owner) =>
+            turnNotifications.remember(owner, {
+              kind: 'workspace',
+              cwd: owner.workspaceCwd,
+            }),
           );
         },
         createDetachedStandaloneSession: (overrides) => {
@@ -3972,15 +4934,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             overrides?.approvalMode ??
               createSessionRequestRef.current?.approvalMode,
           );
+          const modelServiceId =
+            overrides?.modelServiceId ??
+            createSessionRequestRef.current?.modelServiceId;
           return DaemonSessionClient.createStandalone(client, {
-            ...(createSessionRequestRef.current?.modelServiceId !== undefined
-              ? {
-                  modelServiceId:
-                    createSessionRequestRef.current.modelServiceId,
-                }
-              : {}),
+            ...(modelServiceId !== undefined ? { modelServiceId } : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
-          });
+          }).then((owner) =>
+            turnNotifications.remember(owner, { kind: 'standalone' }),
+          );
         },
         getDefaultSessionContext: () => {
           const error = sessionContextResolutionErrorRef.current;
@@ -4003,6 +4965,42 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current?.controller?.abort();
           liveJournalRepairRef.current = undefined;
         },
+        onPromptAdmitted: (owner, admission) => {
+          bindPrompt(
+            locallyBoundPromptIdsRef.current,
+            owner.sessionId,
+            admission.promptId,
+          );
+          if (sessionRef.current === owner)
+            turnNotifications.admit(owner, admission.promptId, admission.label);
+          if (
+            sessionRef.current === owner &&
+            turnNavigationStore.getSnapshot().sessionId === owner.sessionId
+          ) {
+            turnNavigationStore.recordPromptAdmitted(admission);
+          }
+          settleAdmittedPrompt(owner, admission.promptId);
+        },
+        onContinuationAdmitted: (owner, promptId) => {
+          turnNotifications.admit(owner, promptId);
+          settleAdmittedPrompt(owner, promptId);
+        },
+        onPromptRemoved: (owner, promptId, sessionId) => {
+          unbindPrompt(
+            locallyBoundPromptIdsRef.current,
+            sessionId ?? owner.sessionId,
+            promptId,
+          );
+          if (sessionId === undefined && sessionRef.current === owner)
+            turnNotifications.remove(owner, promptId);
+          if (
+            sessionId === undefined &&
+            sessionRef.current === owner &&
+            turnNavigationStore.getSnapshot().sessionId === owner.sessionId
+          ) {
+            turnNavigationStore.recordPromptRemoved(promptId);
+          }
+        },
       }),
     [
       addNotice,
@@ -4010,7 +5008,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       resolvedBaseUrl,
       resolvedToken,
       restartEventStreamOnPrompt,
+      settleAdmittedPrompt,
+      turnNotifications,
       store,
+      turnNavigationStore,
     ],
   );
   repairReloadRef.current = actions.reloadSession;
@@ -4063,6 +5064,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let terminalFailure = false;
       try {
         const page = await activeSession.getTranscriptPage({
+          ...(subagentTranscriptModeRef.current === 'summary'
+            ? { compactedReplayMode: 'summary' as const }
+            : {}),
           ...(history.cursor !== undefined
             ? { cursor: history.cursor }
             : history.beforeRecordId !== undefined
@@ -4208,6 +5212,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           nextBeforeRecordId === undefined ? page.nextCursor : undefined;
         history.beforeRecordId = nextBeforeRecordId;
         history.hasMore = page.hasMore && hasCapacity;
+        history.persistedReachable = page.hasMore;
         history.loading = false;
         setTranscriptHistoryState({
           hasMore: history.hasMore,
@@ -4354,9 +5359,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   const ownerGuardValue = useMemo<DaemonSessionOwnerGuard>(
     () => ({
-      capture: () => {
+      capture: (options) => {
         const session = sessionRef.current;
-        return { isCurrent: () => sessionRef.current === session };
+        const includeRecovery = options?.includeRecovery === true;
+        const recoveryGeneration = session
+          ? sessionRecoveryGenerationRef.current.get(session)
+          : undefined;
+        return {
+          isCurrent: () =>
+            sessionRef.current === session &&
+            (!includeRecovery ||
+              (session !== undefined &&
+                sessionRecoveryGenerationRef.current.get(session) ===
+                  recoveryGeneration)),
+        };
       },
     }),
     [],
@@ -4364,29 +5380,77 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   return (
     <DaemonStoreContext.Provider value={store}>
-      <DaemonConnectionContext.Provider value={connection}>
-        <DaemonPromptStatusContext.Provider value={promptStatus}>
-          <DaemonSessionNoticesContext.Provider value={noticesValue}>
-            <DaemonWorkspaceEventSignalsContext.Provider
-              value={workspaceEventSignals}
-            >
-              <DaemonActionsContext.Provider value={actions}>
-                <DaemonSessionOwnerGuardContext.Provider
-                  value={ownerGuardValue}
-                >
-                  <DaemonTranscriptHistoryContext.Provider
-                    value={transcriptHistoryValue}
+      <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
+        <DaemonConnectionContext.Provider value={connection}>
+          <DaemonPromptStatusContext.Provider value={promptStatus}>
+            <DaemonSessionNoticesContext.Provider value={noticesValue}>
+              <DaemonWorkspaceEventSignalsContext.Provider
+                value={workspaceEventSignals}
+              >
+                <DaemonActionsContext.Provider value={actions}>
+                  <DaemonSessionOwnerGuardContext.Provider
+                    value={ownerGuardValue}
                   >
-                    {children}
-                  </DaemonTranscriptHistoryContext.Provider>
-                </DaemonSessionOwnerGuardContext.Provider>
-              </DaemonActionsContext.Provider>
-            </DaemonWorkspaceEventSignalsContext.Provider>
-          </DaemonSessionNoticesContext.Provider>
-        </DaemonPromptStatusContext.Provider>
-      </DaemonConnectionContext.Provider>
+                    <DaemonTranscriptHistoryContext.Provider
+                      value={transcriptHistoryValue}
+                    >
+                      <DaemonPromptSettlementContext.Provider
+                        value={subscribeToPromptSettlement}
+                      >
+                        {children}
+                      </DaemonPromptSettlementContext.Provider>
+                    </DaemonTranscriptHistoryContext.Provider>
+                  </DaemonSessionOwnerGuardContext.Provider>
+                </DaemonActionsContext.Provider>
+              </DaemonWorkspaceEventSignalsContext.Provider>
+            </DaemonSessionNoticesContext.Provider>
+          </DaemonPromptStatusContext.Provider>
+        </DaemonConnectionContext.Provider>
+      </DaemonTurnNavigationContext.Provider>
     </DaemonStoreContext.Provider>
   );
+}
+
+function promptSettledFromTurnEvent(
+  sessionId: string,
+  event: DaemonEvent,
+): DaemonPromptSettledEvent | undefined {
+  if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
+    return undefined;
+  }
+  const promptId = eventPromptId(event);
+  if (!promptId) return undefined;
+  if (event.type === 'turn_error') {
+    const data = isRecord(event.data) ? event.data : {};
+    return {
+      sessionId,
+      promptId,
+      outcome: 'failed',
+      error: {
+        // Same defaults `matchTurnEvent` applies when it turns this frame into
+        // the submitter's `DaemonHttpError`, so the rejected promise and the
+        // published settlement report one failure identically. A codeless
+        // `turn_error` is the common shape — the bridge omits `code` whenever
+        // `extractErrorCode` finds none.
+        message: getString(data, 'message') ?? 'Prompt failed',
+        code: getString(data, 'code') ?? 'turn_error',
+      },
+    };
+  }
+  const stopReason =
+    (event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
+    'end_turn';
+  return {
+    sessionId,
+    promptId,
+    outcome:
+      stopReason === 'cancelled'
+        ? 'cancelled'
+        : stopReason === 'error'
+          ? 'failed'
+          : 'completed',
+    stopReason,
+  };
 }
 
 /**
@@ -4404,7 +5468,10 @@ function settleActivePromptFromTurnEvent(
   store: DaemonTranscriptStore,
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>,
   passiveAssistantDoneTimerRef: TimerRef,
-  opts: { requireBoundPromptId?: boolean } = {},
+  opts: {
+    requireBoundPromptId?: boolean;
+    transcriptAlreadyApplied?: boolean;
+  } = {},
 ): boolean {
   if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
     return false;
@@ -4414,19 +5481,40 @@ function settleActivePromptFromTurnEvent(
   if (!promptId) return false;
   const active = activePrompts.get(sessionId);
   if (!active) return false;
-  if (opts.requireBoundPromptId && active.promptId === undefined) {
+  if (
+    active.promptId === undefined &&
+    (opts.requireBoundPromptId || active.replayedTurnEvents)
+  ) {
+    // Keep continuation terminals until the ACK identifies their owner; a
+    // later queued turn can finish before that ACK too.
+    active.replayedTurnEvents?.set(promptId, event);
+    if (!opts.requireBoundPromptId) {
+      store.dispatch(
+        assistantDoneFromTurnEvent(
+          event,
+          event.type === 'turn_error'
+            ? 'error'
+            : ((event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
+                'end_turn'),
+        ),
+      );
+    }
     return false;
   }
   if (active.promptId !== undefined && active.promptId !== promptId) {
     return false;
   }
 
-  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+  if (!opts.transcriptAlreadyApplied) {
+    clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+  }
   try {
     const result = matchTurnEvent(event, promptId);
     if (!result) return false;
-    store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
-    setPromptStatus('idle');
+    if (!opts.transcriptAlreadyApplied) {
+      store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
+      setPromptStatus('idle');
+    }
     if (active.resolve) {
       activePrompts.delete(sessionId);
       active.resolve(result);
@@ -4438,8 +5526,10 @@ function settleActivePromptFromTurnEvent(
       });
     }
   } catch (error) {
-    store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
-    setPromptStatus('idle');
+    if (!opts.transcriptAlreadyApplied) {
+      store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
+      setPromptStatus('idle');
+    }
     if (active.reject) {
       activePrompts.delete(sessionId);
       active.reject(error);
@@ -4478,7 +5568,10 @@ function normalizeAndFilterEvent(
   });
   const goalStatusEvent = normalizeGoalStatusEvent(event);
   if (isPromptLifecycleTurnEvent(event)) {
-    return goalStatusEvent ? [goalStatusEvent] : [];
+    const cancellation = normalized.filter(
+      (item) => item.type === 'prompt.cancelled',
+    );
+    return goalStatusEvent ? [...cancellation, goalStatusEvent] : cancellation;
   }
   return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
 }
@@ -4676,6 +5769,29 @@ export function useDaemonTranscriptHistory(): DaemonTranscriptHistory {
   return history;
 }
 
+export function useDaemonTurnNavigationStore(): DaemonTurnNavigationStore {
+  return useDaemonHistoryNavigationStore();
+}
+
+export function useDaemonHistoryNavigationStore(): DaemonHistoryNavigationStore {
+  const store = useContext(DaemonTurnNavigationContext);
+  if (!store) {
+    throw new Error(
+      'useDaemonTurnNavigationStore must be used within DaemonSessionProvider',
+    );
+  }
+  return store;
+}
+
+export function useDaemonTurnNavigationState(): DaemonTurnNavigationSnapshot {
+  const store = useDaemonTurnNavigationStore();
+  return useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+    store.getSnapshot,
+  );
+}
+
 export function useDaemonTranscriptState(): DaemonTranscriptState {
   const store = useDaemonTranscriptStore();
   return useSyncExternalStore(
@@ -4760,6 +5876,23 @@ export function useDaemonPromptStatus(): DaemonPromptStatus {
   return promptStatus;
 }
 
+export function useDaemonPromptSettled(
+  listener: DaemonPromptSettledListener | undefined,
+): void {
+  const subscribe = useContext(DaemonPromptSettlementContext);
+  const listenerRef = useRef(listener);
+  listenerRef.current = listener;
+  useEffect(
+    () => subscribe?.((event) => listenerRef.current?.(event)),
+    [subscribe],
+  );
+  if (listener !== undefined && !subscribe) {
+    throw new Error(
+      'useDaemonPromptSettled must be used within DaemonSessionProvider',
+    );
+  }
+}
+
 export function useDaemonConnection(): DaemonConnectionState {
   const connection = useContext(DaemonConnectionContext);
   if (!connection) {
@@ -4810,25 +5943,20 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   if (!isRecord(meta)) return null;
   const status = normalizeGoalStatus(meta['goalStatus']);
   if (status) {
-    return createGoalStatusUiEvent(event, status);
+    return createGoalStatusUiEvent(
+      event,
+      restoreCanonicalGoalStatusKind(status, meta['goalState']),
+    );
   }
 
-  const terminal = normalizeGoalTerminal(meta['goalTerminal']);
-  if (terminal) {
-    return createGoalStatusUiEvent(event, terminal);
-  }
-
-  const loop = meta['stopHookLoop'];
-  if (!isRecord(loop)) return null;
-  const goal = loop['goal'];
-  if (!isRecord(goal)) return null;
-  const condition = getString(goal, 'condition');
-  if (!condition) return null;
-
-  // Suppress per-iteration "checking" events from the transcript to avoid
-  // flooding with one card per stop-hook turn. The active goal state is
-  // already visible in the status bar; only terminal events and the initial
-  // "set" event are shown as transcript cards.
+  // Per-iteration "checking" events are deliberately not turned into
+  // transcript cards: one card per stop-hook turn floods the transcript, and
+  // the active goal state is already visible in the status bar. Which kinds do
+  // become cards is decided by `normalizeGoalStatus` below, not here -- it
+  // admits `paused`, `cleared` and `usage_limited` as well as the terminal
+  // kinds, and dropping any of them regresses the bug recorded beside its
+  // `paused` entry. This return is only the fallthrough for an event that
+  // carried no card.
   return null;
 }
 
@@ -4848,6 +5976,22 @@ function createGoalStatusUiEvent(
   };
 }
 
+function restoreCanonicalGoalStatusKind(
+  status: Record<string, unknown>,
+  goalState: unknown,
+): Record<string, unknown> {
+  // V2 updates pair a legacy card with canonical state. Keep the legacy wire
+  // value stable for older clients while restoring its precise Web Shell label.
+  if (status['kind'] !== 'aborted' || !isRecord(goalState)) return status;
+  const goal = goalState['goal'];
+  if (!isRecord(goal)) return status;
+  const canonicalStatus = goal['status'];
+  if (canonicalStatus !== 'blocked' && canonicalStatus !== 'usage_limited') {
+    return status;
+  }
+  return { ...status, kind: canonicalStatus };
+}
+
 function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const kind = getString(value, 'kind');
@@ -4857,6 +6001,7 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'achieved' &&
     kind !== 'failed' &&
     kind !== 'aborted' &&
+    kind !== 'usage_limited' &&
     // Rejecting 'paused' made every surface keep showing a paused goal as
     // actively running: the card never rendered and the active-goal
     // derivation fell back to the previous 'set' card.
@@ -4880,26 +6025,6 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
   };
 }
 
-function normalizeGoalTerminal(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
-  const kind = getString(value, 'kind');
-  if (kind !== 'achieved' && kind !== 'failed' && kind !== 'aborted') {
-    return null;
-  }
-  const condition = getString(value, 'condition');
-  if (!condition) return null;
-  const iterations = getNumber(value, 'iterations');
-  const durationMs = getNumber(value, 'durationMs');
-  const lastReason = getString(value, 'lastReason');
-  return {
-    kind,
-    condition,
-    ...(iterations !== undefined ? { iterations } : {}),
-    ...(durationMs !== undefined ? { durationMs } : {}),
-    ...(lastReason ? { lastReason } : {}),
-  };
-}
-
 function getString(
   value: Record<string, unknown>,
   key: string,
@@ -4916,10 +6041,11 @@ function getNumber(
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
 }
 
-function bumpWorkspaceEventSignals(
+function bumpSessionEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
-  workspaceCwd: string,
+  workspaceCwd?: string,
+  includeArtifactEvents = true,
 ): void {
   let memory = 0;
   let agents = 0;
@@ -4932,6 +6058,7 @@ function bumpWorkspaceEventSignals(
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
+  let sources = 0;
   let lastExtensionChange:
     | DaemonWorkspaceEventSignals['lastExtensionChange']
     | undefined;
@@ -4939,6 +6066,15 @@ function bumpWorkspaceEventSignals(
   let auth = 0;
 
   for (const event of events) {
+    if (event.type === 'session.source.changed') {
+      if (includeArtifactEvents) sources += 1;
+      continue;
+    }
+    if (event.type === 'session.artifact.changed') {
+      if (includeArtifactEvents) artifacts += 1;
+      continue;
+    }
+    if (!workspaceCwd) continue;
     switch (event.type) {
       case 'workspace.memory.changed':
         memory += 1;
@@ -4978,9 +6114,6 @@ function bumpWorkspaceEventSignals(
           failed: event.failed,
         };
         break;
-      case 'session.artifact.changed':
-        artifacts += 1;
-        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -5004,6 +6137,7 @@ function bumpWorkspaceEventSignals(
       mcp +
       extensions +
       artifacts +
+      sources +
       init +
       auth ===
       0 &&
@@ -5012,7 +6146,9 @@ function bumpWorkspaceEventSignals(
     return;
 
   setSignals((current) => {
-    const existing = current.skillMutationsByCwd?.[workspaceCwd] ?? [];
+    const existing = workspaceCwd
+      ? (current.skillMutationsByCwd?.[workspaceCwd] ?? [])
+      : [];
     const existingIds = new Set(existing.map((mutation) => mutation.id));
     const newSkillMutations = skillMutations.filter(
       (mutation) => !existingIds.has(mutation.id),
@@ -5025,6 +6161,7 @@ function bumpWorkspaceEventSignals(
         mcp +
         extensions +
         artifacts +
+        sources +
         init +
         auth ===
         0 &&
@@ -5041,12 +6178,13 @@ function bumpWorkspaceEventSignals(
       mcpVersion: current.mcpVersion + mcp,
       extensionsVersion: current.extensionsVersion + extensions,
       artifactsVersion: current.artifactsVersion + artifacts,
+      sourcesVersion: (current.sourcesVersion ?? 0) + sources,
       ...(newSkillMutations.length > 0
         ? { lastSkillMutation: newSkillMutations.at(-1) }
         : current.lastSkillMutation
           ? { lastSkillMutation: current.lastSkillMutation }
           : {}),
-      ...(newSkillMutations.length > 0
+      ...(newSkillMutations.length > 0 && workspaceCwd
         ? {
             skillMutationsByCwd: {
               ...current.skillMutationsByCwd,

@@ -344,8 +344,10 @@ The SDK uses a thread pool for managing concurrent operations with the following
 - **Keep-Alive Time**: 60 seconds
 - **Queue Capacity**: 300 tasks (using LinkedBlockingQueue)
 - **Thread Naming**: "qwen_code_cli-pool-{number}"
-- **Daemon Threads**: false
+- **Daemon Threads**: true
 - **Rejected Execution Handler**: CallerRunsPolicy
+
+Tasks still running or queued in the default pool are abandoned when the JVM exits. Callers that require completion must wait for those tasks explicitly.
 
 ## Error Handling
 
