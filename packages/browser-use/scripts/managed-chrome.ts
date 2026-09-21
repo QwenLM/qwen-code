@@ -14,7 +14,7 @@ import { promisify } from 'node:util';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { chromium } from 'playwright-core';
 import {
-  CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   CHROME_NATIVE_HOST_NAME,
 } from '../src/bridge/protocol.js';
 
@@ -80,7 +80,11 @@ export async function launchManagedChrome(
         description: 'Qwen Browser Use managed Chrome',
         path: launcher,
         type: 'stdio',
-        allowed_origins: ['chrome-extension://' + CHROME_EXTENSION_ID + '/'],
+        // Every id the bridge trusts, so a store-keyed build loaded here
+        // reaches the Host instead of failing as an unknown origin.
+        allowed_origins: CHROME_EXTENSION_IDS.map(
+          (id) => 'chrome-extension://' + id + '/',
+        ),
       }),
     );
   } catch (error) {

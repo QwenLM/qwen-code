@@ -7,7 +7,13 @@
 // @vitest-environment node
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -75,6 +81,31 @@ describe.skipIf(!zipAvailable())('packageExtension', () => {
           ),
         ),
       ).toEqual(manifest);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a missing source without touching the staged build', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-miss-'));
+    const staged = path.join(root, 'store-extension');
+    try {
+      mkdirSync(staged, { recursive: true });
+      writeFileSync(path.join(staged, 'keep.js'), 'previous build');
+
+      await expect(
+        packageExtension({
+          source: path.join(root, 'never-built'),
+          archive: path.join(root, 'extension.zip'),
+          store: true,
+          staged,
+        }),
+      ).rejects.toThrow(/Nothing to package: .*never-built/);
+
+      // The previous build survives: the failure must not be destructive.
+      expect(readFileSync(path.join(staged, 'keep.js'), 'utf8')).toBe(
+        'previous build',
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

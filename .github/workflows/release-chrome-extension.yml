@@ -129,7 +129,7 @@ jobs:
           release_version=$(node -p "JSON.parse(process.argv[1]).version_name" "${manifest}")
 
           # The store rejects an upload whose manifest pins an extension id.
-          if node -p "JSON.parse(process.argv[1]).key ?? ''" "${manifest}" | grep -q .; then
+          if [[ "$(node -p '"key" in JSON.parse(process.argv[1])' "${manifest}")" == 'true' ]]; then
             echo "::error::The packaged manifest still carries a key; the store would reject it."
             exit 1
           fi
@@ -186,12 +186,18 @@ jobs:
 
           # --fail would discard the body, and the store explains a refusal
           # there: an expired refresh token, an item that cannot be updated.
+          # N3: the store's own workflows retry; a 5xx here after a successful
+          # upload would otherwise fail the release with the package already in.
           call() {
-            local status
+            local what=$1 status
+            shift
             status=$(curl --silent --show-error --output response.json \
-              --write-out '%{http_code}' "$@") || return 1
+              --retry 5 --retry-delay 10 --retry-all-errors --retry-max-time 300 \
+              --max-time 600 --write-out '%{http_code}' "$@") || return 1
             if [[ "${status}" != 2?? ]]; then
-              echo "::error::HTTP ${status} from the Chrome Web Store:"
+              # Naming the endpoint matters: an expired refresh token fails at
+              # Google's OAuth service, not at the store's dashboard.
+              echo "::error::HTTP ${status} from ${what}:"
               cat response.json
               return 1
             fi
@@ -202,7 +208,8 @@ jobs:
 
           # The refresh token is long-lived; the access token it mints lasts an
           # hour, which covers an upload and a publish.
-          call --data-urlencode "client_id=${CLIENT_ID}" \
+          call 'Google OAuth (refresh token)' \
+            --data-urlencode "client_id=${CLIENT_ID}" \
             --data-urlencode "client_secret=${CLIENT_SECRET}" \
             --data-urlencode "refresh_token=${REFRESH_TOKEN}" \
             --data-urlencode 'grant_type=refresh_token' \
@@ -214,7 +221,8 @@ jobs:
           fi
           echo "::add-mask::${token}"
 
-          call --request PUT \
+          call 'the Chrome Web Store upload API' \
+            --request PUT \
             --header "Authorization: Bearer ${token}" \
             --header 'x-goog-api-version: 2' \
             --upload-file 'chrome-extension-store.zip' \
@@ -237,7 +245,8 @@ jobs:
           RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
         run: |-
           status_code=$(curl --silent --show-error --output response.json \
-            --write-out '%{http_code}' \
+            --retry 5 --retry-delay 10 --retry-all-errors --retry-max-time 300 \
+            --max-time 600 --write-out '%{http_code}' \
             --request POST \
             --header "Authorization: Bearer ${QWEN_CHROME_TOKEN}" \
             --header 'x-goog-api-version: 2' \

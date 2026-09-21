@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { cp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,13 @@ const packageRoot = path.resolve(
  * its own path rather than writing into the package's build tree.
  */
 async function stageStoreBuild(source, staged) {
+  // Checked before the staging directory is removed: this script is the only
+  // one here that does not follow EXTENSION_OUT_DIR, so a caller that redirects
+  // the build leaves `source` missing. Failing first turns that into a named
+  // error instead of deleting the previous build on the way to an ENOENT.
+  if (!existsSync(source)) {
+    throw new Error('Nothing to package: ' + source + ' does not exist');
+  }
   await rm(staged, { recursive: true, force: true });
   await cp(source, staged, { recursive: true });
   const manifestPath = path.join(staged, 'manifest.json');
