@@ -11,7 +11,7 @@ import { connect, createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
-  CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   defaultChromeBridgeSocketPath,
   type BridgeHello,
 } from '../protocol.js';
@@ -344,12 +344,22 @@ process.stdin.on('data', (chunk: Buffer) => {
       if (hello === undefined && starting === undefined) {
         if (
           message.type !== 'hello' ||
-          message.extensionId !== CHROME_EXTENSION_ID ||
+          !CHROME_EXTENSION_IDS.includes(message.extensionId as string) ||
           typeof message.protocolVersion !== 'number' ||
           typeof message.extensionInstanceId !== 'string' ||
           message.extensionInstanceId.length === 0 ||
           message.extensionInstanceId.length > 128
         ) {
+          // stdout is the Native Messaging channel and the extension discards
+          // the disconnect reason, so stderr is the only place this rejection
+          // can be read; Chrome writes it to the extension's error log.
+          process.stderr.write(
+            'Qwen Browser Use Host: refusing a hello from extension ' +
+              JSON.stringify(message.extensionId) +
+              ' with protocol ' +
+              JSON.stringify(message.protocolVersion) +
+              '\n',
+          );
           void shutdown(1);
           return;
         }
