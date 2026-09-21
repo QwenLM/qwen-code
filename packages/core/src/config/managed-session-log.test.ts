@@ -24,6 +24,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
 } from '../services/session-transcript-reader.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
+import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
 import { parseHarnessCheckpointV1 } from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   MANAGED_SESSION_COMMIT_SUBTYPE,
@@ -123,6 +124,14 @@ function checkpointPayloads(
           'payload'
         ] as Record<string, unknown>,
     );
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
 }
 
 async function readCheckpoint(
@@ -496,6 +505,80 @@ describe('managed session log activation', () => {
       expect(fixture.config.getLlmClient()).toBe(llmClient);
       expect(startNewSession).not.toHaveBeenCalled();
       expect(closeSessionWriter).not.toHaveBeenCalled();
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
+  it('waits for queued records before replacing the Harness activation', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('first turn');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+      recorder.recordTurnResult({
+        promptId: 'turn-1',
+        state: 'completed',
+        endedAt: Date.now(),
+        stopReason: 'end_turn',
+      });
+      await recorder.flush();
+
+      const managedSession = (
+        fixture.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession;
+      if (!managedSession) throw new Error('Managed session was not opened.');
+
+      const recordPublishStarted = deferred();
+      const releaseRecordPublish = deferred();
+      const replacementStarted = deferred();
+      const originalPublish = managedSession.resources.publish.bind(
+        managedSession.resources,
+      );
+      vi.spyOn(managedSession.resources, 'publish').mockImplementation(
+        async (kind, body) => {
+          const ref = await originalPublish(kind, body);
+          if (kind === 'managed-message') {
+            const record = JSON.parse(body.toString('utf8')) as ChatRecord;
+            const text = record.message?.parts
+              ?.map((part) => part.text ?? '')
+              .join('');
+            if (text === 'second turn') {
+              recordPublishStarted.resolve();
+              await releaseRecordPublish.promise;
+            }
+          }
+          return ref;
+        },
+      );
+      const originalReplace =
+        managedSession.replaceActivation.bind(managedSession);
+      const replaceActivation = vi
+        .spyOn(managedSession, 'replaceActivation')
+        .mockImplementation(async () => {
+          replacementStarted.resolve();
+          return originalReplace();
+        });
+
+      recorder.recordUserMessage('second turn');
+      await recordPublishStarted.promise;
+      const ensureRunnable = fixture.config.ensureManagedHarnessRunnable();
+      const replacedWhileRecordWasPending = await Promise.race([
+        replacementStarted.promise.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
+      ]);
+      releaseRecordPublish.resolve();
+      const [ensureResult, flushResult] = await Promise.allSettled([
+        ensureRunnable,
+        recorder.flush(),
+      ]);
+
+      expect(replacedWhileRecordWasPending).toBe(false);
+      expect(ensureResult.status).toBe('fulfilled');
+      expect(flushResult.status).toBe('fulfilled');
+      expect(replaceActivation).toHaveBeenCalledOnce();
+      await expect(recorder.assertCanStartTurn()).resolves.toBeUndefined();
 
       await fixture.config.closeSessionWriter();
     });

@@ -4993,33 +4993,37 @@ export class Config {
   async ensureManagedHarnessRunnable(): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
-    this.dropDetachedManagedHarness();
-    const handle = this.managedHarness;
-    let replacedHost = false;
-    if (handle !== undefined) {
-      const latest = session.authority.latestCheckpoint;
-      const authorization = await session.authority.harnessRunAuthorization();
-      if (
-        latest?.boundary === HARNESS_TURN_COMPLETE_BOUNDARY &&
-        authorization.status === 'runnable' &&
-        handle.activation.activationId ===
-          authorization.checkpoint.identity.activationId
-      ) {
-        await handle.detach();
-        await session.replaceActivation();
-        this.managedHarness = undefined;
-        replacedHost = true;
+    const recorder = this.chatRecordingService;
+    if (recorder === undefined) throw new SessionWriterUnavailableError();
+    await recorder.runWithWriteBarrier(async () => {
+      this.dropDetachedManagedHarness();
+      const handle = this.managedHarness;
+      let replacedHost = false;
+      if (handle !== undefined) {
+        const latest = session.authority.latestCheckpoint;
+        const authorization = await session.authority.harnessRunAuthorization();
+        if (
+          latest?.boundary === HARNESS_TURN_COMPLETE_BOUNDARY &&
+          authorization.status === 'runnable' &&
+          handle.activation.activationId ===
+            authorization.checkpoint.identity.activationId
+        ) {
+          await handle.detach();
+          await session.replaceActivation();
+          this.managedHarness = undefined;
+          replacedHost = true;
+        }
       }
-    }
-    const live = this.liveManagedHarness();
-    if (live === undefined) return;
-    await live.ensureRunnable();
-    if (replacedHost && this.llmClient.isInitialized()) {
-      const records = await session.sink.project();
-      await this.llmClient.rebuildChatFromDurableHistory(
-        buildApiHistoryFromConversation({ messages: records }),
-      );
-    }
+      const live = this.liveManagedHarness();
+      if (live === undefined) return;
+      await live.ensureRunnable();
+      if (replacedHost && this.llmClient.isInitialized()) {
+        const records = await session.sink.project();
+        await this.llmClient.rebuildChatFromDurableHistory(
+          buildApiHistoryFromConversation({ messages: records }),
+        );
+      }
+    });
   }
 
   /**
