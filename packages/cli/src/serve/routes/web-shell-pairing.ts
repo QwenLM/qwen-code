@@ -13,6 +13,7 @@ import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import {
   canonicalHost,
   formatHostForAuthority,
+  isIpv4MappedLoopback,
   isLoopbackBind,
   isWildcardBind,
 } from '../loopback-binds.js';
@@ -39,11 +40,16 @@ export function registerWebShellPairingRoutes(
   // The loopback half canonicalizes the operator's spelling (`127.1`) the way
   // Node's bind does, so a short-spelled loopback listener keeps the Local
   // Control remediation path instead of minting invitations that only the
-  // operator's own machine could redeem. `isLoopbackBind` itself stays
-  // spelling-exact: the boot-time token check and the Host allowlist depend
-  // on the raw value.
+  // operator's own machine could redeem. The IPv4-mapped loopback spelling
+  // (`::ffff:127.0.0.1`) binds the same loopback-only socket; its WHATWG
+  // serialization matches neither `LOOPBACK_BINDS` nor the dotted-quad shape,
+  // so it classifies through `isIpv4MappedLoopback`. `isLoopbackBind` itself
+  // stays spelling-exact: the boot-time token check and the Host allowlist
+  // depend on the raw value.
+  const boundHost = canonicalHost(hostname);
   const available = (req: Request) =>
-    !isLoopbackBind(canonicalHost(hostname)) &&
+    !isLoopbackBind(boundHost) &&
+    !isIpv4MappedLoopback(boundHost) &&
     listenerIdentityOf(req).kind === 'primary' &&
     !credentials.isOpen({ kind: 'primary' });
 

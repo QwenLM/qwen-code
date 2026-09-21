@@ -6,6 +6,7 @@
 
 import express from 'express';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -204,8 +205,12 @@ describe('Web Shell pairing', () => {
       active: true,
       encrypted: false,
       expiresInMs: 60_000,
-      qrText: expect.any(String),
     });
+    // An empty qrText hides the QR panel entirely and leaves the operator
+    // with no code to scan; the route initializes it to '' before the
+    // qrcode callback assigns it.
+    expect(typeof issued.body.qrText).toBe('string');
+    expect(issued.body.qrText.length).toBeGreaterThan(0);
     expect(issued.body.url).not.toContain('runtime-secret');
     expect(issued.headers['cache-control']).toBe('no-store');
     const code = codeOf(issued);
@@ -268,7 +273,7 @@ describe('Web Shell pairing', () => {
     expect((await exchange(codeOf(issued))).status).toBe(200);
   });
 
-  it.each(['127.0.0.1', '127.1', '127.0.1'])(
+  it.each(['127.0.0.1', '127.1', '127.0.1', '::ffff:127.0.0.1'])(
     'keeps loopback on the existing Local Control path for %s',
     async (hostname) => {
       const { app } = setup(hostname);
@@ -336,6 +341,33 @@ describe('Web Shell pairing', () => {
       );
     },
   );
+
+  it('answers an empty network choice when a wildcard bind has no LAN candidate', async () => {
+    const { app } = setup();
+    const response = await request(app)
+      .post('/web-shell/pairing')
+      .set('Host', '127.0.0.1:4170')
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(response.status).toBe(200);
+    // The client's no-network copy and its re-poll gate key on exactly this
+    // shape.
+    expect(response.body).toEqual({ active: true, interfaces: [] });
+  });
+
+  it('redeems an invitation only at the substituted bound origin', async () => {
+    const { app, exchange } = setup('192.168.1.5');
+    const issued = await request(app)
+      .post('/web-shell/pairing')
+      .set('Host', '127.0.0.1:4170')
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(issued.status).toBe(200);
+    expect(new URL(issued.body.url).origin).toBe('http://192.168.1.5:4170');
+    const code = codeOf(issued);
+    // The stored origin is the substituted one: redemption dialed back at
+    // the loopback address fails, and only the bound address redeems.
+    expect((await exchange(code, '127.0.0.1:4170')).status).toBe(401);
+    expect((await exchange(code, '192.168.1.5:4170')).status).toBe(200);
+  });
 
   it('auto-selects the only LAN candidate on a wildcard bind', async () => {
     vi.mocked(listLanCandidates).mockReturnValue([
@@ -410,5 +442,90 @@ describe('Web Shell pairing', () => {
       expect(credentials.addWebShellToken(`device-${index}`)).toBe(true);
     expect((await exchange(codeOf(await issue()))).status).toBe(409);
     expect(credentials.verify('device-0', { kind: 'primary' })).toBe(true);
+  });
+});
+
+describe('Web Shell pairing over TLS', () => {
+  // Long-lived self-signed cert (CN=localhost, SAN IP:127.0.0.1), used only
+  // to put a real TLSSocket under the route — `req.protocol` must come from
+  // the socket, not a forwarded header. Not a real secret; the same fixture
+  // as server/self-origin.test.ts.
+  const TLS_CERT = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUfuVC8Ulq3HIg+1tf36JrjAa6dr4wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDYzMDAyMjIxOVoYDzIxMjYw
+NjA2MDIyMjE5WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCnEk5caJsr2ShJwi4bkAMr1/IzzueiUFbnnqs3XpaB
+ANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2MVHoDMH3zx4V36VcXUaeR+/wZbFRN
+94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATGJZkzmGT8+M5CqDCW4isHlpGvbn0T
+SdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wTAOIM8e8HC1VTMw1OhXDAus6ro7z+
+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7kmYwT9J1Gyw9cQQj8vcipyLq6q3Hz
+iMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIYshAYRsKNAgMBAAGjbzBtMB0GA1Ud
+DgQWBBSM8bvfq77vXg5fsuhYGXsLuKjqxzAfBgNVHSMEGDAWgBSM8bvfq77vXg5f
+suhYGXsLuKjqxzAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGHBH8AAAGCCWxv
+Y2FsaG9zdDANBgkqhkiG9w0BAQsFAAOCAQEAGUBgaBYEO119e28j61PTijfhw7mV
+Q8AxlUjlv+HHx+IAPR+E8w7jiS97oxvFSIkmbV+FAQOWwTE+oNvrL5qSFlG7cI60
+wj+Jxwxr+/SShV5Jm7JlynAGxOvOZ1mfxzyGrlm5cg4hoRvcoWAtB/qtiIyFIz/s
+fDAdZiFXRoTaZnpyPWA6iydf3mc0ZOastHib+mlFb+aedKz9by/f2Z1CY6RfckEj
+20c9Mar85RYkVtVTIWNSwItASmQVBaoXsXK33y4C0P1NmPoYBzyPSXsOlmIZXui5
+WYj2mrPe2DL5gCeNUxMhmzgv0bgoYiksHmdyNjRmO5AQlcdjX/7CHg0zEQ==
+-----END CERTIFICATE-----
+`;
+  const TLS_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCnEk5caJsr2ShJ
+wi4bkAMr1/IzzueiUFbnnqs3XpaBANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2M
+VHoDMH3zx4V36VcXUaeR+/wZbFRN94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATG
+JZkzmGT8+M5CqDCW4isHlpGvbn0TSdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wT
+AOIM8e8HC1VTMw1OhXDAus6ro7z+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7k
+mYwT9J1Gyw9cQQj8vcipyLq6q3HziMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIY
+shAYRsKNAgMBAAECggEAQW/tG0qphEog+orAznDgnRqOtfYTScLX1w6RlzVIE60H
+p3HPs/1B7HOHNyWxZtCPbxVI47NAAwfCbyVjSL6EhqgeQbI2N173GDmvKzH/7y3D
+3GraM+L4tZOSw80KVTdpzqSObInk6IMuu4FceRX2cBLvjrIbne1l1yoFU8Yd3SCM
+t8J46vMys7Rh4yR0iOl1hFeLYj8KolTdp6uNYTxaHMt363G7/TcJYRqjrLkpBpXJ
+dJiP58a3WulvVKVHBjZYVmHLlkvla7LQ9tPRsk0gUQfzNpLzl6oBacrNrRv1F7Oe
+keYqt+Kpy9HhZIHt57ahwKmjhjrfIUpyQadF/me0rQKBgQDVbLV6VngGjMSCPQOQ
+VZcAMFZ+y1fgaHeVZwuFeRlCEHBDDmw5eWdUdUQNIRckpqf0IlU39aP/cLgjNZ0W
+nmxfUwhdgEMam2aHZ/8eqrOl0HTa+F5PWz8NPLKsQ970vPb1XCsoEtDVXEsMqK+s
+4h+zjRzy6lLy2cWvYZrDr/KwywKBgQDIZmitKO0MIJOWeqwI3MQvbBXCz9aEIG+3
+0ISQreD/7Z/IEcwrMpDD+z1sOj9OUO2GFflECdhtqo416cv3uo8LLABxuzsYOgug
+ZPgW9oPKVRLfqc43/n0JMtIvS+Na/7C/nCNwcZZZU91V+VG4+1rexINQybnCRbQw
+cBZLcX8nBwKBgQDMdZhl2vChVbnsCwee/l/qjmROk/9bvLjTKCSheaH46Eaj9u03
+IlcbUjwfV9QUCJReDYYWVf0GebXuBS64vIyVxbX93SJsGvPeRILjniT8dPd9zvKK
+k5+TztJctaiiTWVJKUMu4NevjvtW5UNnHDnCiS1yiYltnbMEkTzyu1yEgQKBgAYk
+pYbRX1rk0MFnJ0jqQ5VUkeIz7taEDAiterLYsbIGvcQrT3/vf+KSHBLqQjCLaIyY
+tdhxGNJbzRo3/YmtjV8BTU4vOCOI+/xBvB0wF2AndXmnweuTgI+8oBbVE7YhanCl
+P6zdvocke/97shailemISqI6XNhovJpThUtwwj4XAoGATwSvzX0VLRpoWwDl30oi
+hxyfpb0iCzGik49j/oL+ZB5C8F8AdBpza8eTXJAeAVP7L5nvWffMgvcXs5sGMF7e
+ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
+1Qm2tDpPnmCd1BedIYWCnHA=
+-----END PRIVATE KEY-----
+`;
+
+  it('reports issued pairings as encrypted over a TLS socket', async () => {
+    const { app } = setup();
+    const server = createHttpsServer({ cert: TLS_CERT, key: TLS_KEY }, app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    // The fixture is self-signed; the client half of the handshake must not
+    // anchor it while the server half keeps real TLSSocket semantics.
+    const previous = process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    try {
+      const issued = await request(server)
+        .post('/web-shell/pairing')
+        .set('Host', authority)
+        .set('Origin', `https://${authority}`)
+        .set('Authorization', 'Bearer runtime-secret');
+      expect(issued.status).toBe(200);
+      // A TLS operator told "unencrypted" learns to ignore the warning that
+      // matters on the plain-HTTP daemon next door.
+      expect(issued.body.encrypted).toBe(true);
+      expect(issued.body.url).toContain('https://');
+    } finally {
+      if (previous === undefined)
+        delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+      else process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = previous;
+      server.close();
+    }
   });
 });

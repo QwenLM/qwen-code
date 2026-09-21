@@ -305,12 +305,17 @@ export function StandaloneAuth({
           // A boot credential rejected after a failed pairing exchange points
           // at the rescan recovery, not the terminal-token copy a phone user
           // cannot act on; a rejected hand-typed token keeps the token copy.
+          // An empty submit on the rescan screen keeps the rescan copy too:
+          // "enter the daemon token" would drop the one instruction the phone
+          // user can act on, and no later state change would restore it.
           setStatus(
             candidate
               ? pairingFailed && candidate === initialCandidateRef.current
                 ? copyRef.current.pairingFailed
                 : copyRef.current.invalidToken
-              : copyRef.current.enterToken,
+              : pairingFailed
+                ? copyRef.current.pairingFailed
+                : copyRef.current.enterToken,
           );
         } else if (response.status === 403) {
           setBusy(false);

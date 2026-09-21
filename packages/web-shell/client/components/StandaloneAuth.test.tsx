@@ -74,6 +74,12 @@ it('shows a recoverable pairing failure without probing or caching the invitatio
   expect(container.textContent).toContain('请扫描新的二维码');
   expect(fetch).not.toHaveBeenCalled();
   expect(tokenInput()).not.toBeNull();
+  // Entering a token is the pending step on the rescan screen: the field owns
+  // focus, and the button offers a first Connect — not a Retry of a probe
+  // that never ran — and is enabled although no probe is in flight.
+  expect(document.activeElement).toBe(tokenInput());
+  expect(submitButton().textContent).toBe('连接');
+  expect(submitButton().disabled).toBe(false);
 
   // Recovery is the point of the `attempt === 0` escape hatch: a manual
   // Connect after a failed pairing must issue the probe.
@@ -82,6 +88,65 @@ it('shows a recoverable pairing failure without probing or caching the invitatio
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
   expect(container.textContent).toContain('Connected');
+});
+
+it('keeps the rescan copy when an empty submit is rejected after a failed pairing', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+  expect(container.textContent).toContain('Scan a fresh QR code');
+
+  await act(submitForm);
+
+  // The empty submit's 401 must not swap the rescan instruction for the
+  // terminal-token copy a phone user cannot act on.
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain('Scan a fresh QR code');
+  expect(container.textContent).not.toContain(
+    'Enter the bearer token from the daemon terminal.',
+  );
+});
+
+it('keeps the token copy when a hand-typed token is rejected after a failed pairing', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'typo-token');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+
+  // A rejected hand-typed credential is a token problem, not a QR problem:
+  // the rescan copy belongs to the boot credential the screen started with,
+  // and the rejected value stays editable.
+  expect(container.textContent).toContain('Invalid or expired token');
+  expect(container.textContent).not.toContain('Pairing failed');
+  expect(tokenInput().value).toBe('typo-token');
 });
 
 // The untrusted-target warning is the stronger state: an attacker-supplied

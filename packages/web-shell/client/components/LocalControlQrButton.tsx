@@ -47,6 +47,7 @@ export function LocalControlQrButton({
     if (!open) return;
     let ignore = false;
     let refreshTimer: ReturnType<typeof setTimeout>;
+    let emptyReplies = 0;
     setStatus(undefined);
     setError('');
     const refresh = async () => {
@@ -102,8 +103,15 @@ export function LocalControlQrButton({
           // interface flapping down/up); poll again rather than sticking on
           // the empty choice until the popover is reopened. A populated
           // choice list advances only through `setAddress`, so re-polling it
-          // would just spend mutation-tier requests.
-          refreshTimer = setTimeout(() => void refresh(), 5000);
+          // would just spend mutation-tier requests. The cadence widens
+          // after the first empty replies: each poll is a mutation-tier POST
+          // on a per-IP bucket the operator can tighten, and an idle popover
+          // holding this terminal empty state must not drain it.
+          emptyReplies += 1;
+          refreshTimer = setTimeout(
+            () => void refresh(),
+            emptyReplies < 3 ? 5000 : 30_000,
+          );
         }
       } catch (failure) {
         if (ignore) return;

@@ -96,6 +96,26 @@ export function isWildcardBind(hostname: string): boolean {
   );
 }
 
+/**
+ * Is this canonical host the IPv4-mapped loopback (`::ffff:127.0.0.0/8`)?
+ * Node binds `--hostname ::ffff:127.0.0.1` as a loopback-only socket, but the
+ * WHATWG serialization packs the embedded IPv4 into two hex groups
+ * (`[::ffff:7f00:1]`), which matches neither `LOOPBACK_BINDS` nor the
+ * dotted-quad `isIpv4Loopback` shape. Like `isWildcardBind`, this compares
+ * the `canonicalHost` serialization, never the operator's raw spelling.
+ */
+export function isIpv4MappedLoopback(canonical: string): boolean {
+  const inner =
+    canonical.startsWith('[') && canonical.endsWith(']')
+      ? canonical.slice(1, -1)
+      : canonical;
+  const match = /^::ffff:([\da-f]{1,4}):([\da-f]{1,4})$/.exec(inner);
+  if (!match) return false;
+  // The embedded IPv4 lives in the two trailing groups; its first byte —
+  // the high byte of the first group — is 127 for the whole loopback range.
+  return Number.parseInt(match[1], 16) >> 8 === 0x7f;
+}
+
 export function formatHostForAuthority(hostname: string): string {
   const normalized = hostname.toLowerCase();
   if (normalized.startsWith('[') && normalized.endsWith(']')) {

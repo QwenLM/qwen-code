@@ -11871,6 +11871,30 @@ describe('ACP WebSocket transport security', () => {
     expect(legit.code).toBe(101);
   });
 
+  it('applies the loopback Host allowlist on a token-less non-loopback bind', async () => {
+    // A token-less daemon never classifies as an authenticated remote bind:
+    // the upgrade carries no credential at all, so the rebound Host/Origin
+    // pair must fail the loopback Host allowlist rather than pass an
+    // "Origin agrees with Host" check.
+    await startServer({ hostname: '0.0.0.0' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
+  it('applies the loopback Host allowlist on a token-less specific non-loopback bind', async () => {
+    await startServer({ hostname: '192.168.1.100' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
   it('rejects WS upgrade with cross-origin Origin header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');

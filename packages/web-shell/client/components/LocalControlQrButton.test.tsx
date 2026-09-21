@@ -350,6 +350,12 @@ describe('LocalControlQrButton', () => {
     await act(async () => vi.advanceTimersByTimeAsync(5000));
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain('No local network address');
+
+    // The cadence widens after the first empty replies: a fixed 5 s loop
+    // would spend ~24 more mutation-tier POSTs over the next two minutes on
+    // this terminal state; the bounded loop spends four.
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(fetch).toHaveBeenCalledTimes(6);
   });
 
   it('does not re-poll while the operator is choosing a network', async () => {
@@ -375,6 +381,100 @@ describe('LocalControlQrButton', () => {
     // The choice list only advances through `setAddress`, so an idle popover
     // must not keep spending mutation-tier POSTs on an unchanged screen.
     await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fall back to Local Control on a non-404 pairing failure', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({ error: 'daemon busy' }, false, 500),
+    );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    // Only a 404 means "this daemon predates pairing"; any other failure is
+    // an error to show, not a reason to probe the legacy endpoint.
+    expect(container.textContent).toContain('daemon busy');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenLastCalledWith(
+      new URL('http://127.0.0.1:8080/web-shell/pairing'),
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('re-polls pairing from the error-state Retry button', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        localControlResponse({ error: 'offline' }, false, 500),
+      )
+      .mockResolvedValue(
+        localControlResponse({
+          active: true,
+          url: 'http://qwen.test/#pairing=recovered',
+          qrText: 'RECOVERED-QR',
+          expiresInMs: 60_000,
+        }),
+      );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain('offline');
+
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Retry');
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry!.click();
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('RECOVERED-QR');
+    expect(container.textContent).not.toContain('offline');
+  });
+
+  it('ignores a pairing response that lands after the popover closes', async () => {
+    vi.useFakeTimers();
+    let settle: ((response: Response) => void) | undefined;
+    vi.mocked(fetch).mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    const close = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Close test popover');
+    if (!close) throw new Error('close button not found');
+    act(() => close.click());
+
+    settle?.(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=late',
+        qrText: 'LATE-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(180_000));
+
+    // The late response must not render into the closed popover, and its
+    // refresh timer must not outlive it either.
+    expect(container.textContent).not.toContain('LATE-QR');
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
