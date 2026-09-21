@@ -1,5 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
+  "private": true,
   "version": "0.24.3",
   "description": "Qwen Code Core",
   "repository": {

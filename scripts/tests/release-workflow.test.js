@@ -24,6 +24,7 @@ import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { PUBLISHED_PACKAGES } from '../assert-release-version.mjs';
+import { RELEASE_WORKSPACES } from '../release-packages.mjs';
 import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -439,7 +440,7 @@ describe('release workflow', () => {
         'fetch-depth': 1,
         'persist-credentials': false,
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -503,44 +504,31 @@ describe('release workflow', () => {
     expect(swept).toBeGreaterThan(10);
   });
 
-  it('keeps the publish allowlist and the guard package set in step', () => {
-    // The push-time guard only probes what `PUBLISHED_PACKAGES` lists. A
-    // channel added to the publish loop but not to that array ships without
-    // ever being probed, so a retry of a partial release reports
-    // "unreleased" and force-pushes over the tip the shipped package anchors
-    // to. Before this, the only tie was a comment pointing at publish steps
-    // that no longer exist in release.yml.
-    const loop = releaseStepScript.match(/for channel in ([^;]+); do/);
-    expect(loop, 'publish-packages channel loop').not.toBeNull();
-    const published = loop[1].trim().split(/\s+/).sort();
-    const guarded = PUBLISHED_PACKAGES.filter((name) =>
-      name.startsWith('@qwen-code/channel-'),
-    )
-      .map((name) => name.replace('@qwen-code/channel-', ''))
-      .filter((name) => name !== 'base')
-      .sort();
-    expect(published).toEqual(guarded);
-
-    // Non-channel packages are literal calls, so verify those against the
-    // guard too. Resolve their names from package.json to avoid a second map.
-    const publishStep = releaseStepScript.slice(
-      releaseStepScript.indexOf('\n  publish-packages)'),
-      releaseStepScript.indexOf('\n  verify-archives)'),
-    );
-    const literalTargets = [
-      ...publishStep.matchAll(/publish_package '([^']+)'/g),
-    ].map(([, directory]) => directory);
-    expect(literalTargets.length).toBeGreaterThan(1);
-    const guardedNames = new Set(PUBLISHED_PACKAGES);
-    for (const directory of literalTargets) {
-      // `dist` is the root package's bundle output rather than a workspace
-      // directory, and does not exist in a source checkout.
-      const manifest =
-        directory === 'dist' ? 'package.json' : `${directory}/package.json`;
-      const { name } = JSON.parse(readFileSync(manifest, 'utf8'));
-      expect(guardedNames.has(name), `${directory} publishes ${name}`).toBe(
-        true,
+  it('uses workflow-pinned manifests for publishing and the version guard', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'release-selection-'));
+    try {
+      // A release-ref cwd must not change the workflow's trusted selection.
+      writeFileSync(join(directory, 'package.json'), '{"workspaces":[]}');
+      const result = spawnSync(
+        process.execPath,
+        [join(process.cwd(), 'scripts/release-packages.mjs')],
+        {
+          cwd: directory,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PUBLISH_AUDIO_CAPTURE: 'true',
+            PUBLISH_EXTERNAL_CONTEXT_MEM0: 'true',
+          },
+        },
       );
+      expect(result.status, result.stderr).toBe(0);
+      expect([
+        '@qwen-code/qwen-code',
+        ...result.stdout.trim().split('\n'),
+      ]).toEqual(PUBLISHED_PACKAGES);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
@@ -597,41 +585,29 @@ describe('release workflow', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
-    'continues publishing after already-published packages',
-    () => {
+  it.skipIf(process.platform === 'win32').each([
+    { dryRun: 'false', optional: 'false', failure: '0', cliPublished: '1' },
+    { dryRun: 'false', optional: 'true', failure: '0', cliPublished: '0' },
+    { dryRun: 'true', optional: 'true', failure: '0', cliPublished: '0' },
+    { dryRun: 'false', optional: 'true', failure: '7', cliPublished: '1' },
+  ])(
+    'publishes the selected workspaces and CLI safely: %j',
+    ({ dryRun, optional, failure, cliPublished }) => {
       const directory = mkdtempSync(join(tmpdir(), 'release-publish-'));
       const bin = join(directory, 'bin');
       const publishLog = join(directory, 'published');
-      const channels = [
-        'dingtalk',
-        'dws',
-        'feishu',
-        'github',
-        'qqbot',
-        'telegram',
-        'wecom',
-        'weixin',
-      ];
       mkdirSync(bin);
-      for (const path of [
-        'dist',
-        'packages/web-shell',
-        'packages/channels/base',
-        ...channels.map((channel) => `packages/channels/${channel}`),
-      ]) {
-        mkdirSync(join(directory, path), { recursive: true });
-      }
-      writeFileSync(join(bin, 'node'), '#!/bin/sh\nbasename "$PWD"\n', {
+      mkdirSync(join(directory, 'dist'));
+      writeFileSync(
+        join(directory, 'dist/package.json'),
+        JSON.stringify({ name: '@qwen-code/qwen-code' }),
+      );
+      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit "$CLI_PUBLISHED"\n', {
         mode: 0o755,
       });
       writeFileSync(
-        join(bin, 'npm'),
-        '#!/bin/sh\n' +
-          'if [ "$1" = view ]; then\n' +
-          '  case "$PWD" in */channels/base) exit 1 ;; */channels/*) exit 0 ;; *) exit 1 ;; esac\n' +
-          'fi\n' +
-          'if [ "$1" = publish ]; then printf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"; fi\n',
+        join(bin, 'corepack'),
+        '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
         { mode: 0o755 },
       );
       try {
@@ -644,38 +620,51 @@ describe('release workflow', () => {
             env: {
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
-              IS_DRY_RUN: 'false',
-              NPM_TAG: 'latest',
-              PUBLISH_AUDIO_CAPTURE: 'false',
-              PUBLISH_EXTERNAL_CONTEXT_MEM0: 'false',
+              IS_DRY_RUN: dryRun,
+              NPM_TAG: 'preview',
+              PUBLISH_AUDIO_CAPTURE: optional,
+              PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
+              PUBLISH_FAILURE: failure,
+              CLI_PUBLISHED: cliPublished,
               PUBLISH_LOG: publishLog,
               RELEASE_VERSION: '1.2.3',
             },
           },
         );
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(Number(failure));
         const canonicalDirectory = realpathSync(directory);
         const publishCalls = readFileSync(publishLog, 'utf8')
           .trim()
           .split('\n')
           .map((line) => line.split('\t'));
+        const publishesCli =
+          failure === '0' && (dryRun === 'true' || cliPublished !== '0');
         expect(publishCalls.map(([cwd]) => cwd)).toEqual([
-          join(canonicalDirectory, 'dist'),
-          join(canonicalDirectory, 'packages/channels/base'),
-          join(canonicalDirectory, 'packages/web-shell'),
+          canonicalDirectory,
+          ...(publishesCli ? [join(canonicalDirectory, 'dist')] : []),
         ]);
-        // The dist-tag is the reason NPM_TAG is set in this child env at all.
-        // Without it `npm publish` defaults to `latest`, so the 21:00 UTC
-        // nightly would take over the tag every end-user install and the ECS
-        // fleet updater resolve through. `--access public` is here for the
-        // same reason: one array feeds all thirteen published packages.
+        const selected = publishCalls[0][1]
+          .split(' ')
+          .filter((arg) => arg.startsWith('--filter='))
+          .map((arg) => arg.slice('--filter='.length));
+        expect(selected).toEqual(
+          RELEASE_WORKSPACES.filter(
+            (name) =>
+              optional === 'true' ||
+              ![
+                '@qwen-code/audio-capture',
+                '@qwen-code/external-context-mem0',
+              ].includes(name),
+          ),
+        );
+        expect(publishCalls[0][1]).toContain('pnpm -r publish');
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
-          expect(args, cwd).toContain('--tag=latest');
+          expect(args, cwd).toContain('--tag=preview');
+          expect(args, cwd).toContain('--provenance');
+          expect(args.includes('--dry-run'), cwd).toBe(dryRun === 'true');
         }
-        expect(result.stdout).toContain(
-          'Every channel package was already published; nothing shipped',
-        );
+        expect(publishCalls[0][1].includes('--force')).toBe(dryRun === 'true');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -2290,13 +2279,6 @@ describe('release workflow', () => {
     expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toContain(
       "github.repository == 'QwenLM/qwen-code'",
     );
-    expect(releaseStepScript).toContain(
-      'if [[ "${PUBLISH_AUDIO_CAPTURE}" == "true" ]]; then',
-    );
-    expect(releaseStepScript).toContain('integrations/external-context-mem0');
-    expect(
-      releaseStepScript.indexOf('integrations/external-context-mem0'),
-    ).toBeLessThan(releaseStepScript.indexOf('packages/audio-capture'));
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
