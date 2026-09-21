@@ -1064,6 +1064,18 @@ describe('bundled review skill', () => {
     expect(at('review fix-delta --snapshot')).toBeLessThan(
       at('Apply each finding to the working tree'),
     );
+    // Two things answer to "fix audit" once #10136 is on the branch: the
+    // PR re-review's narrowed ROUND (read off `incremental.posture`) and this
+    // step's one AGENT over the applied hunks. The step says which one it is,
+    // and why the two never meet in one run — a reader that took the agent
+    // for the round would apply the round's convergence carve-out to a
+    // local `--fix` review.
+    expect(step).toContain(
+      'It is not the **fix-audit round** Step 1 routes on when it chooses the topology',
+    );
+    expect(step).toContain(
+      'its target is a pull request, where `fix.effective` is false',
+    );
     expect(
       at('--outcomes .qwen/tmp/qwen-review-{target}-outcomes.json'),
     ).toBeLessThan(at('review fix-delta \\\n  --since'));
