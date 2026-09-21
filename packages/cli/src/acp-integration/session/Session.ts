@@ -12,9 +12,9 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { FinishReason } from '@google/genai';
 import type {
   Content,
+  FinishReason,
   FunctionCall,
   GenerateContentResponseUsageMetadata,
   Part,
@@ -1625,6 +1625,17 @@ interface AgentResponseCapture {
 }
 
 /**
+ * `'MAX_TOKENS'` as a `FinishReason` without importing the Google GenAI SDK as
+ * a runtime value. The ACP agent entry point's static import closure is
+ * checked by the repo's bundle policy and must not reach `@google/genai`, so
+ * this mirrors the same cast the shared compat module already uses
+ * (`packages/core/src/core/genai-compat.ts`: `MAX_TOKENS: 'MAX_TOKENS' as
+ * GenAiFinishReason`) rather than importing that module across the package
+ * boundary.
+ */
+const FINISH_REASON_MAX_TOKENS = 'MAX_TOKENS' as FinishReason;
+
+/**
  * True when the turn's final observed provider finish reason is still an
  * unresolved output-length truncation. Bounded output recovery
  * (`MAX_OUTPUT_RECOVERY_ATTEMPTS` in `llm-chat.ts`) already tried and
@@ -1637,7 +1648,7 @@ interface AgentResponseCapture {
 function isUnresolvedOutputTruncation(
   responseCapture: AgentResponseCapture | undefined,
 ): boolean {
-  return responseCapture?.lastFinishReason === FinishReason.MAX_TOKENS;
+  return responseCapture?.lastFinishReason === FINISH_REASON_MAX_TOKENS;
 }
 
 interface ChannelDeliveryResponseBlock {
