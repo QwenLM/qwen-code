@@ -42,6 +42,9 @@ const NODE_REPL_DESCRIPTION = [
   'you can build up state incrementally. Top-level await is supported; the',
   'default execution limit is 10 minutes. A call yields with a cell ID when',
   'work is still running; use node_repl_wait or node_repl_cancel with that ID.',
+  'Omit yield_time_ms for ordinary calls to use the 10-second wait. Shorter',
+  'yields do not make a cell faster and can require an extra wait call; use',
+  'them only when you need to regain control before the cell completes.',
   '',
   'Output: plain expression results are NOT returned — use nodeRepl.write(value)',
   'for explicit text and nodeRepl.emitImage(png|jpeg|webp) for images; console.*',
@@ -57,8 +60,10 @@ const NODE_REPL_DESCRIPTION = [
   'native addons — note this require() is not subject to the process denial or',
   'the module-root containment that the import path enforces.',
   '',
-  'Timeout and cancellation stop only the active cell and retain the kernel.',
-  'An explicit reset or a real process crash discards bindings. For rerunnable',
+  'Timeout and cancellation normally stop only the active cell and retain the',
+  'kernel. If it does not stop within 5 seconds, it is terminated and bindings',
+  'are lost. Verify external state before retrying actions. An explicit reset',
+  'or a real process crash also discards bindings. For rerunnable',
   'declarations prefer assignment, var, a fresh name, or block scope.',
 ].join('\n');
 
@@ -74,9 +79,11 @@ const NODE_REPL_RUNTIME_RULES = [
   'Return only decision-relevant output with nodeRepl.write(string) and images',
   'with nodeRepl.emitImage(...). A running cell returns an ID; use',
   'node_repl_wait to continue waiting or node_repl_cancel to abort it. Timeout',
-  'and cancellation retain the kernel and existing bindings but do not commit',
+  'and cancellation normally retain the kernel and existing bindings but do not commit',
   'new bindings from that cell. Pass nodeRepl.signal to cancellable async APIs',
-  'so cancellation waits for their terminal result. Reset and a real process',
+  'so cancellation waits for their terminal result. If the kernel does not stop',
+  'within 5 seconds, it is terminated and bindings are lost; verify external',
+  'state before retrying actions. Reset and a real process',
   'crash discard state. Runtime errors retain completed statement state;',
   'cancellation does not roll back effects already performed before it.',
 ].join('\n');
@@ -202,7 +209,7 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
           .max(MAX_YIELD_TIME_MS)
           .optional()
           .describe(
-            `Wait before yielding a running cell ID (default ${DEFAULT_YIELD_TIME_MS}ms).`,
+            `Wait before yielding a running cell ID (default ${DEFAULT_YIELD_TIME_MS}ms). Omit for ordinary calls; a shorter wait does not speed up execution.`,
           ),
         title: z
           .string()
@@ -328,8 +335,9 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
     {
       title: 'Cancel Node REPL cell',
       description:
-        'Cancel the active cell while retaining the persistent kernel and ' +
-        'bindings committed by earlier cells.',
+        'Cancel the active cell. Normally retains the kernel and earlier ' +
+        'bindings; if it does not stop within 5 seconds, terminate it and ' +
+        'discard bindings. Verify external state before retrying actions.',
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,

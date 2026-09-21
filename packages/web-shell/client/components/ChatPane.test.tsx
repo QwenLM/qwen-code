@@ -81,7 +81,9 @@ const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
+const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  loadSession,
   sendPrompt,
   submitPermission,
   respondToPermission,
@@ -553,7 +555,10 @@ describe('ChatPane', () => {
         return cleanup;
       },
     );
-    render({ registerContextUsageControls });
+    render({ registerContextUsageControls, onOpenContextUsage: vi.fn() });
+    expect(latestChatEditorProps.contextUsageControls).toBe(
+      registerContextUsageControls.mock.calls.at(-1)![0],
+    );
     expect(registerContextUsageControls).toHaveBeenLastCalledWith(
       expect.objectContaining({
         sessionId: connectionState.sessionId,
@@ -3042,6 +3047,35 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
   });
 
+  it('opens composer details with the pane session and actions without adding a snapshot', () => {
+    const onOpenContextUsage = vi.fn();
+    render({ onOpenContextUsage });
+    act(() => latestChatEditorProps.onOpenContextUsage());
+    expect(onOpenContextUsage).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+      daemonActions,
+    );
+    expect(appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    const opener = latestChatEditorProps.onOpenContextUsage;
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBe(opener);
+    connectionState.status = 'error';
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls.canCompress).toBe(false);
+  });
+
+  it('keeps embedded side-task context read-only without a detail recovery path', () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    render({ embedded: true });
+    expect(latestChatEditorProps.onShowContextUsage).toBeTypeOf('function');
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
+  });
+
   it('shows context usage for this pane session', async () => {
     render();
 
@@ -3653,4 +3687,61 @@ describe('ChatPane continuation errors', () => {
       }
     },
   );
+});
+
+it('requires an explicit resume for a stopped pane', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  connectionState.sessionId = 'stopped';
+  connectionState.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+  loadSession.mockClear();
+  render();
+  expect(testid('workspace-runtime-stopped')).not.toBeNull();
+  expect(loadSession).not.toHaveBeenCalled();
+  await act(async () => {
+    [...container!.querySelectorAll('button')]
+      .find((node) => node.textContent === 'Resume conversation')!
+      .click();
+  });
+  expect(loadSession).toHaveBeenCalledWith('stopped', {
+    sessionContext: { kind: 'workspace', cwd: '/workspace' },
+  });
+});
+
+it('fences pane submits while the runtime is stopped and says why', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  // The parked state retains sessionId, so the status-based submit guard
+  // alone does not catch this.
+  connectionState.sessionId = 'stopped';
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  await act(async () => {
+    testid('pane-submit')!.click();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+});
+
+it('does not submit a deferred /plan prompt after the runtime stops', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  render();
+  act(() => {
+    latestOnSubmit!('/plan explain the migration');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  // The runtime stops while the plan-mode switch is still in flight; the
+  // deferred continuation must re-check the fence before submitting.
+  connectionState = {
+    ...connectionState,
+    runtimeStopped: true,
+    status: 'disconnected',
+  };
+  rerender();
+  await act(async () => prepared.resolve({ mode: 'plan' }));
+  expect(sendPrompt).not.toHaveBeenCalled();
 });

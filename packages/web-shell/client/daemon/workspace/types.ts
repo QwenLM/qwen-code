@@ -358,9 +358,8 @@ export interface DaemonAddWorkspaceResult {
 }
 
 /**
- * One session's active `/goal`. Goals live in the owning session's memory and
- * only advance while it is resident, so this list covers exactly the goals that
- * are actually running — a session that isn't loaded contributes nothing.
+ * One resident session's incomplete `/goal`, read from its persisted Goal
+ * runtime. Paused and blocked goals are included; unloaded sessions are not.
  */
 export interface DaemonGoal {
   /** The session driving this goal; its transcript is the goal's history. */
@@ -368,10 +367,10 @@ export interface DaemonGoal {
   /** The session's label, or null — the UI falls back to the id. */
   displayName: string | null;
   condition: string;
-  /** Judge turns completed; 0 before the first stop-hook evaluation. */
+  /** Canonical Goal turns completed so far. */
   iterations: number;
   setAt: number;
-  /** The judge's verdict on the most recent turn, when it has run. */
+  /** Why the Goal last stopped, or the verifier's most recent reason. */
   lastReason?: string;
   /**
    * The owning session is mid-turn. For a goal session that is almost always
@@ -559,7 +558,15 @@ export interface DaemonWorkspaceActions {
 
   // Memory
   loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
-  readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
+  /**
+   * `opts.maxBytes` is how a caller accepts partial content: without a window
+   * argument the daemon refuses any file above its own read cap instead of
+   * silently handing back a truncated file.
+   */
+  readWorkspaceFile(
+    filePath: string,
+    opts?: { maxBytes?: number },
+  ): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 
   generateContent(

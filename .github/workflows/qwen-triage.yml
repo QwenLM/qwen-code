@@ -729,6 +729,9 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort in `settings`
+          # below (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
+          # renders "", which the CLI ignores — the provider default.
           # Pin the action's unconditional global reinstall to the version
           # this job already runs. Left at `latest`, the action installs with
           # --prefer-offline and resolves the dist-tag from the runner's
@@ -788,6 +791,9 @@ jobs:
           # are also checked against the write_file path rules.
           settings: |-
             {
+              "model": {
+                "reasoningEffort": "${{ vars.QWEN_TRIAGE_EFFORT }}"
+              },
               "tools": {
                 "core": [
                   "run_shell_command",
@@ -1326,23 +1332,27 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
-      - name: 'Clear stale npm cache'
+      - name: 'Clear stale pnpm store'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+        run: 'rm -rf "$RUNNER_TEMP/pnpm-store"'
 
-      - name: 'Restore npm cache'
-        id: 'npm-cache'
+      - name: 'Restore pnpm store'
+        id: 'pnpm-store'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/npm-cache'
-          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
-          restore-keys: 'npm-ci-'
+          path: '${{ runner.temp }}/pnpm-store'
+          key: "pnpm-store-triage-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: 'pnpm-store-triage-'
 
-      - name: 'Report npm cache hit'
+      - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+        run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
+      - name: 'Bootstrap pnpm'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'runuser -u node -- corepack pnpm --version'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -1355,17 +1365,17 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          # Make the npm cache readable+writable by the build user so
-          # `npm ci --prefer-offline --cache …` can use it without
-          # touching the Actions cache API (whose credentials were
+          # Make the pnpm store readable+writable by the build user so
+          # `pnpm install --prefer-offline --store-dir …` can use it
+          # without touching the Actions cache API (whose credentials were
           # stripped above).
-          mkdir -p "$RUNNER_TEMP/npm-cache"
-          chown -R node:node "$RUNNER_TEMP/npm-cache"
+          mkdir -p "$RUNNER_TEMP/pnpm-store"
+          chown -R node:node "$RUNNER_TEMP/pnpm-store"
           prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
 
           set +e
           {
-            # Retried once for the same reason as the verify lane: npm can
+            # Retried once for the same reason as the verify lane: an install can
             # exec a dependency's binary before its own write is closed and
             # take an ETXTBSY that has nothing to do with the PR, and this
             # lane blames the PR for any install failure. Unconditional, so
@@ -1373,19 +1383,22 @@ jobs:
             # build stays single-shot: compile errors are deterministic.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
+              printf '%s\n' '$ corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false \
-                --cache "$RUNNER_TEMP/npm-cache"
+                corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only \
+                --store-dir "$RUNNER_TEMP/pnpm-store"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
               fi
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status}; retrying once."
+              # pnpm install, unlike npm ci, keeps an existing node_modules;
+              # clear it so the retry cannot inherit a half-written file.
+              find . -name node_modules -type d -prune -exec rm -rf {} +
               install_attempt=$((install_attempt + 1))
             done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -1401,7 +1414,7 @@ jobs:
           if [ "${install_status:-0}" -ne 0 ]; then
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
-            echo "::error::npm ci failed; reporting a tmux fail verdict instead of an infrastructure failure."
+            echo "::error::pnpm install failed; reporting a tmux fail verdict instead of an infrastructure failure."
             exit 0
           fi
           if [ "${build_status:-0}" -ne 0 ]; then
@@ -1433,7 +1446,7 @@ jobs:
             exit 1
           fi
 
-          # `npm ci`/`npm run build` ran the PR's lifecycle scripts as `node`
+          # `pnpm install`/`npm run build` ran the PR's lifecycle scripts as `node`
           # in the previous step. A detached postinstall child can outlive that
           # step and the one-shot sweep below — re-planting a `*-tmux-*`
           # artifact dir after the sweep runs, or tampering with the agent's
@@ -1469,7 +1482,7 @@ jobs:
             exit 1
           fi
 
-          # `npm ci`/`npm run build` just ran the PR's lifecycle scripts, which
+          # `pnpm install`/`npm run build` just ran the PR's lifecycle scripts, which
           # can plant a `tmp/<name>-tmux-<ts>/` directory holding a report.md
           # and a transcript. The collector below globs `*-tmux-*` and the
           # publisher takes the first match, so a planted dir can supply the
@@ -2042,7 +2055,7 @@ jobs:
             PREPARE_ATTEMPTS=''
             case "$PREPARE_FAILURE_PHASE" in
               install)
-                PREPARE_COMMAND='npm ci'
+                PREPARE_COMMAND='pnpm install'
                 # Retried once in the prepare step; see the verify lane.
                 PREPARE_ATTEMPTS=' twice in a row'
                 ;;
@@ -2443,9 +2456,9 @@ jobs:
               # the registry name as npmjs, so
               # `https://registry.npmjs.org.evil.com/pkg.tgz` would pass —
               # and the tarball's own postinstall never appears in the diff.
-              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/' | head -1 || true)"
+              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http|(tarball|repo):[[:space:]]*[^[:alnum:]]?https?://' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/|(tarball|repo):[[:space:]]*[^[:alnum:]]?https://registry\.npmjs\.org/' | head -1 || true)"
               [ -n "$hit" ] && add_reason 'a dependency resolves outside registry.npmjs.org'
-              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$' "$diff_file" | head -1 || true)"
+              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$' "$diff_file" | head -1 || true)"
               [ -n "$hit" ] && add_reason 'the diff modifies package-manager configuration'
               hit="$(grep -E '^\+' "$diff_file" | grep -Ev '"(integrity|resolved)"' | awk '{ for (i = 1; i <= NF; i++) if (length($i) >= 600) { print; exit } }' || true)"
               [ -n "$hit" ] && add_reason 'the diff adds long opaque single-line content'
@@ -2590,7 +2603,11 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
-          apt-get install -y --no-install-recommends util-linux
+          # zip pairs with the base image's unzip so the install-script archive
+          # suite runs instead of throwing at collection: its CI-host guard
+          # hard-fails when CI=true and either binary is missing, and
+          # node:22-bookworm ships unzip but not zip.
+          apt-get install -y --no-install-recommends util-linux zip
 
           # Run the global install from RUNNER_TEMP: the persistent workspace
           # still holds the PREVIOUS run's checked-out tree at this point, and
@@ -2878,7 +2895,7 @@ jobs:
       # The flakiness gate (#9125) re-runs the PR's changed test files and
       # compares outcomes across identical rounds. The file list is recorded
       # HERE — before the workspace is handed to the build user — because
-      # after `npm ci` a PR lifecycle script owns .git and could rewrite the
+      # after `pnpm install` a PR lifecycle script owns .git and could rewrite the
       # diff to hide a test file from the gate. The list lives root-owned in
       # RUNNER_TEMP, so the gate later runs exactly what was recorded. This
       # pin is honesty, not a security boundary: the gate's verdict can only
@@ -3099,23 +3116,23 @@ jobs:
           rm -f "$GATE_HOME/files-all"
           echo "Recorded $(tr -cd '\0' < "$GATE_HOME/files" | wc -c) changed test file(s) for the flakiness gate."
 
-      - name: 'Clear stale npm cache'
+      - name: 'Clear stale pnpm store'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+        run: 'rm -rf "$RUNNER_TEMP/pnpm-store"'
 
-      - name: 'Restore npm cache'
-        id: 'npm-cache'
+      - name: 'Restore pnpm store'
+        id: 'pnpm-store'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/npm-cache'
-          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
-          restore-keys: 'npm-ci-'
+          path: '${{ runner.temp }}/pnpm-store'
+          key: "pnpm-store-triage-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: 'pnpm-store-triage-'
 
-      - name: 'Report npm cache hit'
+      - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+        run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -3135,23 +3152,23 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          # Make the npm cache readable+writable by the build user so
-          # `npm ci --prefer-offline --cache …` can use it without
-          # touching the Actions cache API (whose credentials were
+          # Make the pnpm store readable+writable by the build user so
+          # `pnpm install --prefer-offline --store-dir …` can use it
+          # without touching the Actions cache API (whose credentials were
           # stripped above).
-          mkdir -p "$RUNNER_TEMP/npm-cache"
-          chown -R node:node "$RUNNER_TEMP/npm-cache"
+          mkdir -p "$RUNNER_TEMP/pnpm-store"
+          chown -R node:node "$RUNNER_TEMP/pnpm-store"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
 
           set +e
           {
-            # `npm ci` can die on a race that has nothing to do with the PR:
-            # npm writes a dependency's binary and that package's install
-            # script execs it before the write is closed, so Linux answers
-            # ETXTBSY. Observed on esbuild in run 30319209722, which turned
-            # it into a `fail` verdict against a PR that never touched the
-            # dependency. One clean retry absorbs that class — `npm ci`
-            # removes node_modules before installing, so the second attempt
+            # The install can die on a race that has nothing to do with the
+            # PR: a dependency's binary is written and that package's
+            # install script execs it before the write is closed, so Linux
+            # answers ETXTBSY. Observed on esbuild under npm in run
+            # 30319209722, which turned it into a `fail` verdict against a PR
+            # that never touched the dependency. One clean retry absorbs that
+            # class — node_modules is cleared before the second attempt, so it
             # cannot inherit the half-written file.
             #
             # Unconditional by design. Gating the retry on the log would
@@ -3164,19 +3181,22 @@ jobs:
             # would only double the cost of an honest failure.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
+              printf '%s\n' '$ corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false \
-                --cache "$RUNNER_TEMP/npm-cache"
+                corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only \
+                --store-dir "$RUNNER_TEMP/pnpm-store"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
               fi
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status}; retrying once."
+              # pnpm install, unlike npm ci, keeps an existing node_modules;
+              # clear it so the retry cannot inherit a half-written file.
+              find . -name node_modules -type d -prune -exec rm -rf {} +
               install_attempt=$((install_attempt + 1))
             done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -3212,10 +3232,10 @@ jobs:
           if [ "${install_status:-0}" -ne 0 ]; then
             if registry_unreachable; then
               echo "verdict=infra-error" >> "$GITHUB_OUTPUT"
-              echo "::error::npm ci failed (exit ${install_status}) and the registry is unreachable from this runner; reporting infrastructure."
+              echo "::error::pnpm install failed (exit ${install_status}) and the registry is unreachable from this runner; reporting infrastructure."
             else
               echo "verdict=fail" >> "$GITHUB_OUTPUT"
-              echo "::error::npm ci failed (exit ${install_status})."
+              echo "::error::pnpm install failed (exit ${install_status})."
             fi
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
             exit 0
@@ -3750,7 +3770,7 @@ jobs:
               # reset leaves file i seeing what files 1..i-1 left THIS
               # round — residue, staged mutations, HOME state — and round
               # 1 must sample the same restored tree as rounds 2..N (PR
-              # lifecycle scripts, npm ci/build run as node, may have
+              # lifecycle scripts, pnpm install/build run as node, may have
               # mutated the tree since the list was recorded).
               reset_round_state
               reset_rc=$?
@@ -4006,7 +4026,7 @@ jobs:
           fi
 
           # ── Re-establish the trust boundary after the PR's own code ran ──
-          # `npm ci`/`npm run build` executed PR-authored lifecycle scripts as
+          # `pnpm install`/`npm run build` executed PR-authored lifecycle scripts as
           # `node`. Everything below undoes what those could have left behind,
           # in order, BEFORE the agent starts.
 
@@ -4080,7 +4100,7 @@ jobs:
           mkdir -p "$AGENT_HOME"
           chown node:node "$AGENT_HOME"
 
-          # 5. Same for the upload staging dir: it is flushed before npm ci,
+          # 5. Same for the upload staging dir: it is flushed before pnpm install,
           #    but the lifecycle scripts that ran since could have planted
           #    files there too, and everything in it is uploaded verbatim.
           #    Recreate it empty (prepare.log is re-copied below if present).
@@ -5681,7 +5701,7 @@ jobs:
             PREPARE_ATTEMPTS_ZH=''
             case "$PREPARE_FAILURE_PHASE" in
               install)
-                PREPARE_COMMAND='npm ci'
+                PREPARE_COMMAND='pnpm install'
                 # The prepare step retries the install once, so reaching
                 # this phase means two consecutive failures. Say so: the
                 # sentence below blames the PR for it, and "failed twice in
@@ -5698,7 +5718,7 @@ jobs:
                 echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
                 ;;
             esac
-            # infra-error can now arise from exactly one condition: npm ci
+            # infra-error can now arise from exactly one condition: pnpm install
             # failed AND the registry was unreachable from the runner (the
             # log-pattern classifier is gone, and build failures are always
             # `fail`). The copy must name that condition and nothing else —
