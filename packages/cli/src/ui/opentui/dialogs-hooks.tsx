@@ -24,6 +24,7 @@ import {
 import {
   buildHooksListing,
   type HooksListing,
+  type HooksListingDisabledReason,
   type HooksListingRow,
 } from '@qwen-code/qwen-code-core/hooks/hooks-listing.js';
 import { isLegacyMillisecondHookTimeout } from '@qwen-code/qwen-code-core/hooks/hook-timeout.js';
@@ -175,6 +176,34 @@ function literalLabel(hookType: HookType): string {
   }
 }
 
+/** The Status value for a row: enabled, or disabled with the reason. */
+export function hookStatusText(row: HooksListingRow): string {
+  if (row.enabled) return t('enabled');
+  return row.disabledReason
+    ? disabledReasonText(row.disabledReason)
+    : t('disabled');
+}
+
+function disabledReasonText(reason: HooksListingDisabledReason): string {
+  switch (reason) {
+    case 'bareMode':
+      return t('disabled (bare mode)');
+    case 'safeMode':
+      return t('disabled (safe mode)');
+    case 'allHooksDisabled':
+      return t('disabled (disableAllHooks)');
+    case 'untrusted':
+      return t('disabled (folder not trusted)');
+    case 'registryDisabled':
+      return t('disabled (turned off for this session)');
+    default: {
+      const exhaustive: never = reason;
+      void exhaustive;
+      return t('disabled');
+    }
+  }
+}
+
 export function hookDetailFields(
   row: HooksListingRow,
 ): Array<[label: string, value: string]> {
@@ -184,7 +213,7 @@ export function hookDetailFields(
   }
   fields.push([t('Type:'), row.hookType]);
   fields.push([t('Source:'), formatSourceLabel(row.source)]);
-  fields.push([t('Status:'), row.enabled ? t('enabled') : t('disabled')]);
+  fields.push([t('Status:'), hookStatusText(row)]);
   if (row.name) fields.push([t('Name:'), row.name]);
   if (row.description) fields.push([t('Desc:'), row.description]);
   if (row.commandText !== undefined) {
@@ -546,7 +575,13 @@ export function OpenTuiHooksDialog({
         </text>
         <text fg={C.dim}>{` · ${countText}`}</text>
       </box>
-      {notice ? <text fg={C.dim}>{notice}</text> : null}
+      {notice
+        ? notice.split('\n').map((line, index) => (
+            <text key={`notice-${index}`} fg={C.dim}>
+              {line}
+            </text>
+          ))
+        : null}
       {banner ? (
         <box marginTop={1}>
           <text fg={C.yellow}>{banner}</text>

@@ -25,6 +25,7 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   applyProviderInstallPlanToFile,
   snapshotSettingsForRollback,
+  resolveProviderSettings,
   restoreSettingsSnapshot,
   writeCodingPlanConfig,
   readQwenSettingsForVSCode,
@@ -32,6 +33,8 @@ import {
 } from '../../services/settingsWriter.js';
 import {
   buildInstallPlan,
+  getModelsForProviderProtocol,
+  type ProviderProtocolConfig,
   parseInsightMessage,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
@@ -40,6 +43,7 @@ import {
   QwenDaemonProcess,
   type QwenDaemonListenerHandle,
 } from '../../services/qwenDaemonProcess.js';
+import { isLoopbackHostname } from '../../services/daemonIdeConnection.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -1231,13 +1235,33 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+      const resolvedSnapshot = rollbackSnapshot
+        ? resolveProviderSettings(rollbackSnapshot)
+        : null;
+      const existingProviders = resolvedSnapshot?.['modelProviders'] as
         | ModelProvidersConfig
         | undefined;
+      const protocol = inputs.protocol ?? providerConfig.protocol;
+      const existingModelsForProtocol = getModelsForProviderProtocol(
+        existingProviders,
+        protocol,
+        resolvedSnapshot?.['providerProtocol'] as
+          | ProviderProtocolConfig
+          | undefined,
+      );
+      const saved = resolvedSnapshot as {
+        model?: { name?: string; baseUrl?: string };
+        security?: { auth?: { selectedType?: string } };
+      } | null;
       const plan = buildInstallPlan(
         providerConfig,
         inputs,
-        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+        existingModelsForProtocol,
+        {
+          authType: saved?.security?.auth?.selectedType,
+          id: saved?.model?.name,
+          baseUrl: saved?.model?.baseUrl,
+        },
       );
       await applyProviderInstallPlanToFile(plan);
 
@@ -1690,6 +1714,45 @@ export class WebViewProvider {
   }
 
   /**
+   * Translate the daemon URL into one the webview can actually reach.
+   *
+   * The daemon binds the loopback of the machine hosting this extension
+   * process. In a remote window (SSH, Dev Container, WSL) that machine is not
+   * the one rendering the webview, so the raw address points the shell at the
+   * client's own loopback and every request fails with a connection refusal.
+   * `asExternalUri` asks VS Code to forward the port and returns the address
+   * on the client side. A local window needs no translation, and the result is
+   * never cached: a restarted extension host forwards to a fresh port.
+   *
+   * Only the webview-facing payload goes through this: the extension host is
+   * co-located with the daemon and must keep the loopback URL, which is also
+   * all `validateDaemonBaseUrl()` accepts.
+   */
+  private async resolveWebviewDaemonBaseUrl(baseUrl: string): Promise<string> {
+    if (!vscode.env.remoteName) return baseUrl;
+    const externalUri = await vscode.env.asExternalUri(
+      vscode.Uri.parse(baseUrl),
+    );
+    const externalUrl = externalUri.toString();
+    const hostname = new URL(externalUrl).hostname;
+    if (hostname.startsWith('[')) {
+      throw new Error(
+        `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", but the webview cannot connect to an IPv6 literal under its content security policy.`,
+      );
+    }
+    // This URL shares its payload with the daemon's bearer token. A
+    // browser-based remote resolves to a relay origin rather than a forwarded
+    // loopback one, and the webview CSP would then be the only thing keeping
+    // that token away from a third-party host — so refuse here instead.
+    if (!isLoopbackHostname(hostname)) {
+      throw new Error(
+        `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", which is not a forwarded loopback address.`,
+      );
+    }
+    return externalUrl;
+  }
+
+  /**
    * Handle common webview message types shared across all host contexts
    * (sidebar, new panel, restored panel). Returns true if the message was
    * fully handled and the caller should skip further processing.
@@ -1835,10 +1898,14 @@ export class WebViewProvider {
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;
+        const webviewBaseUrl = await this.resolveWebviewDaemonBaseUrl(
+          runtime.baseUrl,
+        );
         await webview.postMessage({
           type: 'webShellBootstrap',
           data: {
             ...runtime,
+            baseUrl: webviewBaseUrl,
             clientId: this.daemonClientId,
             workspaceCwd: canonicalWorkspaceCwd,
             // The daemon matches workspaces by canonical path, but every

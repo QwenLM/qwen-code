@@ -232,6 +232,7 @@ describe('gitEnv (R12 env isolation)', () => {
       GIT_CONFIG_PARAMETERS: "'foo=bar'",
       GIT_OBJECT_DIRECTORY: '/tmp/objects',
       GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/alt',
+      GIT_ALLOW_PROTOCOL: 'https:ssh:ext',
     });
     expect(env['PATH']).toBe('/usr/bin');
     expect(env['LC_ALL']).toBe('C');
@@ -250,6 +251,22 @@ describe('gitEnv (R12 env isolation)', () => {
     ]) {
       expect(env[key]).toBeUndefined();
     }
+    // GIT_ALLOW_PROTOCOL is normalized, not deleted: the helper-executing
+    // entries are stripped while a restrictive inherited list keeps its
+    // deny-by-default force over config-file policy.
+    expect(env['GIT_ALLOW_PROTOCOL']).toBe('https:ssh');
+  });
+
+  it('normalizes an inherited GIT_ALLOW_PROTOCOL instead of deleting it', () => {
+    expect(
+      gitEnv({ GIT_ALLOW_PROTOCOL: 'https:ssh' })['GIT_ALLOW_PROTOCOL'],
+    ).toBe('https:ssh');
+    // A helper-only list filters to empty, which stays SET: an empty list
+    // is deny-all, while undefined would hand the decision to config.
+    expect(gitEnv({ GIT_ALLOW_PROTOCOL: 'ext:fd' })['GIT_ALLOW_PROTOCOL']).toBe(
+      '',
+    );
+    expect(gitEnv({})['GIT_ALLOW_PROTOCOL']).toBeUndefined();
   });
 
   it('keeps repository discovery on the cwd even with a hostile GIT_DIR', async () => {
@@ -738,9 +755,9 @@ describe('gitPush', () => {
     git(dir, 'tag', 'v1.0');
     git(dir, 'checkout', '-q', 'v1.0');
 
-    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
-      /detached HEAD/,
-    );
+    await expect(
+      gitPush(dir, { setUpstream: true }, hermeticEnv()),
+    ).rejects.toThrow(/detached HEAD/);
   });
 
   it('preserves an existing upstream instead of rewriting it', async () => {
@@ -759,7 +776,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     // Tracking must still point at upstream, not origin.
     const tracking = git(
@@ -783,7 +800,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -806,7 +823,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '--amend', '-m', 'amended');
 
-    await gitPush(dir, { force: true });
+    await gitPush(dir, { force: true }, hermeticEnv());
 
     const remoteLog = git(remote, 'log', '--oneline', '-1');
     expect(remoteLog).toContain('amended');
@@ -825,7 +842,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -852,7 +869,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const tracking = git(
       dir,

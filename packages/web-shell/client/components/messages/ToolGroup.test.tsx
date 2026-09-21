@@ -578,26 +578,52 @@ describe('tool group summary logic', () => {
     expect((content as HTMLElement | null)?.style.display).toBe('');
   });
 
-  it('renders fallbackText for a compacted MCP App without mounting the iframe', () => {
-    const container = renderToolLine(
-      makeTool({
-        toolName: 'mcp__demo__show_dashboard',
-        rawOutput: {
-          type: 'mcp_app',
-          serverName: 'demo',
-          resourceUri: 'ui://demo/dashboard',
-          html: '',
-          toolResult: {},
-          toolArguments: {},
-          fallbackText: 'Dashboard ready',
-        },
-      }),
-    );
+  it.each([
+    { scenario: 'compacted', fallbackText: 'Dashboard ready' },
+    {
+      scenario: 'failed to load',
+      fallbackText:
+        "Warning: MCP App 'ui://demo/dashboard' from 'demo' could not be displayed: resource read timed out (limit: 10000 ms)\n\nDashboard ready",
+    },
+  ])(
+    'renders a $scenario MCP App fallback without an iframe',
+    ({ fallbackText }) => {
+      const container = renderToolGroup(
+        [
+          makeTool({
+            toolName: 'mcp__demo__show_dashboard',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'Dashboard ready' },
+              },
+            ],
+            rawOutput: {
+              type: 'mcp_app',
+              serverName: 'demo',
+              resourceUri: 'ui://demo/dashboard',
+              html: '',
+              toolResult: {},
+              toolArguments: {},
+              fallbackText,
+            },
+          }),
+        ],
+        {},
+        undefined,
+        false,
+        undefined,
+        undefined,
+        'en',
+        undefined,
+        'http://localhost:5173',
+      );
 
-    expect(container.textContent).toContain('Dashboard ready');
-    expect(container.querySelector('iframe')).toBeNull();
-    expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
-  });
+      expect(container.textContent).toContain(fallbackText);
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+    },
+  );
 
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
@@ -1132,7 +1158,9 @@ describe('tool row rendering', () => {
     expect(errorIcon?.getAttribute('role')).toBe('img');
     expect(errorIcon?.getAttribute('aria-label')).toBe('Failed');
     expect(errorIcon?.querySelector('svg')).not.toBeNull();
-    expect(container.textContent).not.toContain('Failed');
+    expect(
+      container.querySelector('[class*="lineMain"]')?.textContent,
+    ).not.toContain('Failed');
   });
 
   it('shows an error icon instead of the failed label on expanded tool rows', () => {
@@ -1154,7 +1182,7 @@ describe('tool row rendering', () => {
     expect(errorIcon?.textContent).not.toContain('Failed');
   });
 
-  it('shows an error icon in the expanded single-tool card title', () => {
+  it('shows a failure label in the expanded shell card', () => {
     const container = renderToolGroup([
       makeTool({
         toolName: 'Shell',
@@ -1166,13 +1194,13 @@ describe('tool row rendering', () => {
     const summary = container.querySelector('button') as HTMLButtonElement;
     act(() => summary.click());
 
-    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    const titleRow = container.querySelector('[class*="shellHeading"]');
     expect(titleRow).not.toBeNull();
-    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
-    expect(titleRow?.textContent).not.toContain('Failed');
+    expect(titleRow?.textContent).toContain('Failed');
+    expect(titleRow?.querySelector('.lucide-circle-x')).not.toBeNull();
   });
 
-  it('renders no status icon in the expanded completed tool card title', () => {
+  it('shows completion without claiming success for unstructured shell output', () => {
     const container = renderToolGroup([
       makeTool({
         toolName: 'Shell',
@@ -1184,9 +1212,10 @@ describe('tool row rendering', () => {
     const summary = container.querySelector('button') as HTMLButtonElement;
     act(() => summary.click());
 
-    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    const titleRow = container.querySelector('[class*="shellHeading"]');
     expect(titleRow).not.toBeNull();
-    expect(titleRow?.querySelector('[class*="iconError"]')).toBeNull();
+    expect(titleRow?.textContent).toContain('Completed');
+    expect(titleRow?.textContent).not.toContain('Succeeded');
   });
 
   it('shows an error icon in the expanded failed todo card title', () => {
@@ -2106,7 +2135,7 @@ describe('tool row rendering', () => {
     expect(header.textContent).toContain('packages/web-shell/client');
   });
 
-  it('uses the shell tool name for expanded cards from action summaries', () => {
+  it('keeps the shell title with a separate output section in expanded cards', () => {
     const container = renderToolLine(
       makeTool({
         toolName: 'run_shell_command',
@@ -2132,9 +2161,15 @@ describe('tool row rendering', () => {
     act(() => header.click());
 
     const cardTitle = container.querySelector(
-      '[class*="expandedCardTitleRow"] [class*="expandedCardTitle"]',
+      '[data-shell-command-card] [class*="expandedCardTitle"]',
     );
     expect(cardTitle?.textContent).toBe('Shell');
+    expect(
+      container.querySelector('[data-shell-command-card] summary')?.textContent,
+    ).toBe('Command');
+    expect(container.querySelectorAll('pre')[0]?.textContent).toBe(
+      'dataworks-infra workspace list',
+    );
   });
 
   it('shows complete skill content in the expanded card body', () => {

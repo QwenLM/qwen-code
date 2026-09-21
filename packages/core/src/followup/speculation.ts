@@ -15,6 +15,7 @@
  * 4. User types → abortSpeculation() cleans up
  */
 
+import { shellResultText } from '../utils/shell-result.js';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { LlmClient } from '../core/client.js';
@@ -141,6 +142,11 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
+  if (config.getShellExecutionSandbox?.()) {
+    throw new Error(
+      'Speculative execution is unavailable with tools.executionSandbox.',
+    );
+  }
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');
@@ -458,11 +464,11 @@ async function runSpeculativeLoop(
             artifacts: resultArtifacts,
             values: () => [
               ...toolResultPartDiagnosticValues(result.llmContent),
-              ...(typeof result.returnDisplay === 'string'
+              ...(shellResultText(result.returnDisplay) !== undefined
                 ? [
                     {
                       representation: 'display' as const,
-                      value: result.returnDisplay,
+                      value: shellResultText(result.returnDisplay)!,
                     },
                   ]
                 : []),

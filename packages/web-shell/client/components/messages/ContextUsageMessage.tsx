@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react';
 import type {
   DaemonContextMemoryDetail,
   DaemonContextSkillDetail,
@@ -266,6 +267,7 @@ export function ContextUsageMessage({
   compact?: boolean;
 }) {
   const { t } = useI18n();
+  const [collapsed, setCollapsed] = useState(false);
   const { usage } = status;
   const { breakdown, contextWindowSize } = usage;
   const hasTokenCount = usage.totalTokens > 0;
@@ -289,11 +291,26 @@ export function ContextUsageMessage({
       className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}
       role={compact ? undefined : 'group'}
       aria-label={compact ? undefined : t('contextUsage.title')}
+      data-collapsed={!compact && collapsed}
     >
       {!compact && (
         <div className={styles.header}>
           <div className={styles.title}>{t('contextUsage.title')}</div>
           <span className={styles.secondary}>{t('contextUsage.snapshot')}</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={collapsed ? t('common.expand') : t('common.collapse')}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            {collapsed ? (
+              <ChevronDownIcon aria-hidden="true" />
+            ) : (
+              <ChevronUpIcon aria-hidden="true" />
+            )}
+          </Button>
         </div>
       )}
       <div className={styles.metaLine}>
@@ -358,6 +375,15 @@ export function ContextUsageMessage({
             symbolClassName={isOverLimit ? styles.error : styles.accent}
             isOverLimit={isOverLimit}
           />
+          {/* Annotation, not a category: the cached prefix spans several categories. */}
+          {(breakdown.cachedTokens ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.cachedPrefix')}
+              tokens={breakdown.cachedTokens!}
+              symbolClassName={styles.secondary}
+            />
+          )}
           <CategoryRow
             {...categoryProps}
             label={t('contextUsage.free')}
@@ -439,11 +465,26 @@ export function ContextUsageMessage({
               />
             ) : undefined}
           </CategoryRow>
+          {(breakdown.startupContext ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.startupContext')}
+              tokens={breakdown.startupContext!}
+            />
+          )}
           {hasTokenCount && (
             <CategoryRow
               {...categoryProps}
               label={t('contextUsage.messages')}
               tokens={breakdown.messages}
+            />
+          )}
+          {hasTokenCount && (breakdown.unattributed ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.unattributed')}
+              tokens={breakdown.unattributed!}
+              symbolClassName={styles.secondary}
             />
           )}
         </div>
