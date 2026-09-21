@@ -834,10 +834,19 @@ issue code `channel_worker_exited`.
 
 Daemon-managed channel worker startup from an explicit `qwen serve --channel
 ...` remains fail-fast and takes precedence over persisted startup settings.
-A flagless boot restores `serve.channels` from the trusted primary workspace.
-Secondary workspaces do not independently restore their own `serve.channels`.
-With no explicit or primary-workspace selection, channel runtime loading stays
-lazy.
+A flagless boot restores `serve.channels` from every trusted registered
+workspace, each contributing the list in its own workspace-scope settings. The
+restored names form one selection whose owners are resolved as usual, with the
+workspace that listed a name breaking an otherwise ambiguous ownership tie.
+That boot attribution lasts as long as the daemon runs: a `PUT
+/workspace/channel` re-enabling such a name resolves it the way boot did, even
+after the selection was stopped in between. A name a non-primary workspace
+contributed is dropped, with a log identifying it, when it cannot be resolved,
+so one workspace's stale entry does not strand the others; a name the primary
+workspace listed still fails the restore as a whole, whether or not another
+workspace lists it too.
+`all` remains primary-only: it is ignored, and reported, anywhere else. With no
+explicit or configured selection, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
