@@ -656,7 +656,6 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
           npm run postinstall
-          npm run generate
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts

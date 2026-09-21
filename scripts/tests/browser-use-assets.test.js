@@ -220,14 +220,17 @@ describe('browser-use builtin resources', () => {
     );
   });
 
-  it('builds browser-use before core in the root build', () => {
-    const script = fs.readFileSync(
-      fileURLToPath(new URL('../build.js', import.meta.url)),
-      'utf8',
+  it('declares the browser-use build dependency for recursive scheduling', () => {
+    const core = JSON.parse(
+      fs.readFileSync(
+        new URL('../../packages/core/package.json', import.meta.url),
+        'utf8',
+      ),
     );
-    const browserUseIndex = script.indexOf("'packages/browser-use'");
-    expect(browserUseIndex).toBeGreaterThan(0);
-    expect(browserUseIndex).toBeLessThan(script.indexOf("'packages/core'"));
+    expect(
+      core.devDependencies?.['@qwen-code/browser-use'] ??
+        core.dependencies?.['@qwen-code/browser-use'],
+    ).toBe('file:../browser-use');
   });
 
   it('builds browser-use before core when publishing Live Host', () => {

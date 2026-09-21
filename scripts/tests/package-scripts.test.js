@@ -944,22 +944,46 @@ describe('package scripts', () => {
     expect(workflow.on.push.paths).toEqual(expectedPaths);
   });
 
-  it('builds the standalone qwen-live daemon in the root build order', () => {
+  it('includes the standalone qwen-live daemon in recursive root builds', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
       'utf8',
     );
 
-    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
-    // the workspace unit tests run from src, so this pin is what catches the
-    // root build silently dropping the package.
-    const startIndex = buildScript.indexOf('const buildOrder = [');
-    expect(startIndex).toBeGreaterThan(-1);
-    const buildOrder = buildScript.slice(
-      startIndex,
-      buildScript.indexOf('];', startIndex),
+    expect(buildScript).toContain('corepack pnpm -r');
+    expect(buildScript).not.toContain('!@qwen-code/qwen-live');
+    expect(readPackageJson().workspaces).toContain('packages/*');
+  });
+
+  it('selects the CLI dependency closure without selecting the same-named root', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
     );
-    expect(buildOrder).toContain("'packages/qwen-live',");
+    const selector = buildScript.match(/\? '--filter "([^"]+)"/)?.[1];
+    expect(selector).toBeDefined();
+    const result = spawnSync(
+      'corepack',
+      ['pnpm', '--filter', selector, 'list', '--depth', '-1', '--json'],
+      { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const paths = JSON.parse(result.stdout).map((pkg) =>
+      path.relative(root, pkg.path).replaceAll('\\', '/'),
+    );
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'packages/cli',
+        'packages/core',
+        'packages/browser-use',
+        'packages/sdk-typescript',
+        'packages/web-shell',
+        'packages/web-templates',
+      ]),
+    );
+    expect(paths).not.toContain('');
+    expect(paths).not.toContain('packages/mobile-mcp');
+    expect(paths).not.toContain('packages/vscode-ide-companion');
   });
 
   it('keeps the Mem0 Extension manifest aligned with release versions', () => {
@@ -1464,12 +1488,14 @@ describe('package scripts', () => {
     // The validation jobs reuse the anchored install step; only the anchor
     // definition plus prepare and publish appear as full textual copies.
     expect(installSteps.length).toBe(3);
+    for (const installStep of installSteps.slice(0, 2)) {
+      expect(installStep).toContain('npm run generate');
+    }
     for (const installStep of installSteps) {
       expect(installStep).toContain(
         'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
       );
       expect(installStep).toContain('npm run postinstall');
-      expect(installStep).toContain('npm run generate');
       expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
       expect(installStep).not.toContain('CI_BOT_PAT');
     }
@@ -1481,6 +1507,9 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    expect(getWorkflowStep(publishJob, 'Install Dependencies')).not.toContain(
+      'npm run generate',
+    );
     expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
       'CI_BOT_PAT',
     );

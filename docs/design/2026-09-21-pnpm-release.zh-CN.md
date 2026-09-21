@@ -27,6 +27,22 @@ workspace 发布失败就停止，不继续发布 CLI；多包发布不具备原
 保留扩展元数据、sandbox 镜像 tag 和 channel-base 精确依赖版本的同步。
 pnpm version 不会改写这些精确依赖版本。删除旧的 npm reify 遗留 node_modules 清理。
 
+## 递归构建
+
+使用 pnpm 按依赖拓扑排序的递归构建，替换手写的 workspace 顺序数组。
+独立包并发执行，由依赖声明保证 browser-use 先于 core、Web Shell 先于
+web-templates 等顺序。补充 VS Code 已存在的 CLI 源码依赖，使其编译等待
+CLI 依赖树完成。根构建继续排除 Mobile MCP。CLI-only 选择 CLI 目录及其
+传递依赖，并补充 Node REPL 和 channel plugin example，保留原构建范围。
+
+audio-capture 的默认 build 改为仅编译 TypeScript，与原根构建一致；原生
+编译保留为显式的 `build:native`，同步更新运行时修复提示。在 workspace
+构建完成后生成 settings schema。编译与 bundle 都保留各自入口的版本和
+commit 信息生成，因为这两个入口均可独立调用。通过干净构建和产物检查后
+再判断递归调度是否等价。SDK 使用与 CLI project reference 相同的 composite
+TypeScript 构建，使 CLI 复用 buildinfo，不再覆盖 SDK 打包后的声明。
+移除发布 job 在更新版本前的生成步骤；构建会在随后生成发布元数据。
+
 ## 验证与验收
 
 - 实际发布集合等于现有集合加上 #12387 恢复的 Web Shell；继续排除独立发版包。

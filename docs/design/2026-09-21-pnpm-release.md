@@ -33,6 +33,26 @@ workspaces, including private ones. Keep extension metadata, sandbox image tags,
 and exact channel-base dependency pins aligned. pnpm version does not rewrite
 those exact dependency pins. Remove the old npm-reify node_modules cleanup.
 
+## Recursive builds
+
+Replace the ordered workspace array with pnpm's recursive, topologically sorted
+build. Independent packages run concurrently; dependency declarations provide
+ordering, including browser-use before core and Web Shell before web-templates.
+Declare VS Code's existing CLI source dependency so its compilation waits for
+the CLI dependency tree. Preserve the Mobile MCP exclusion from the root build.
+CLI-only selects the CLI directory and its transitive dependencies, plus Node
+REPL and the channel plugin example, preserving the previous build coverage.
+
+Make audio-capture's default build TypeScript-only, matching the previous root
+build. Keep explicit native compilation as `build:native` and update the runtime
+repair instruction. Generate settings schema after workspace builds finish.
+Keep version/commit generation before compilation and bundling, since both are
+standalone entrypoints. Validate clean builds and package artifacts before
+claiming that recursive scheduling is equivalent. The SDK uses the same composite
+TypeScript build as the CLI's project reference, so the CLI reuses its buildinfo
+instead of overwriting bundled SDK declarations. Remove the publish job's
+pre-version-bump generation; the build generates the release metadata afterwards.
+
 ## Verification and acceptance
 
 - The effective published package set matches the existing set plus the Web
