@@ -1292,13 +1292,11 @@ export class HookRunner {
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
-      // Set-StrictMode makes undefined $VAR throw; ErrorActionPreference=Stop
-      // turns that non-terminating error into a script abort, so a later
-      // statement cannot mask the failure with exit 0.
+      // Refused bare-quoted paths route through the same blocking outcome as
+      // exit 2: the shared isBlockingHookOutput predicate already turns that
+      // into a deny in the shape each event reads.
       if (
         shellConfig.shell === 'powershell' &&
-        // Narrow by design: multi-line commands, names that merely contain an
-        // extension, and a quoted path piped as input are legitimate usages.
         /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![ \t]*["']\s*\|)(?![\s\S]*\n)/i.test(
           hookConfig.command,
         )
@@ -1307,44 +1305,33 @@ export class HookRunner {
           `PowerShell command contains a bare-quoted Windows program or script path; ` +
           `if you intend to invoke it, prefix with the call operator '& '. ` +
           `Example: & ${stripAnsiAndControl(hookConfig.command)}`;
-        debugLogger.warn(
-          `Hook configuration error (non-fatal): ${errorMessage}`,
-        );
-        // Fail open like any other hook failure. The reason rides on `error`
-        // only: it reaches the debug log and this hook's progress event, while
-        // an `output` here would take the tool-event consumers down their
-        // success path (they gate on output presence) and drop the failure
-        // marker the tool-call span carries.
+        debugLogger.warn(`Hook configuration error: ${errorMessage}`);
         resolve({
           hookConfig,
           eventName,
           success: false,
+          outcome: 'blocking',
+          output: { systemMessage: errorMessage, reason: errorMessage },
           error: new Error(errorMessage),
           duration: Date.now() - startTime,
         });
         return;
       }
-      // Propagate a failed last native command; $? is read before Test-Path resets
-      // it. The blank line stops a trailing backtick from swallowing the tail.
-      const exitCodeTail =
-        shellConfig.shell === 'powershell'
-          ? `\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
-          : '';
-      // Windows PowerShell 5.1 writes through the console code page unless the
-      // output encoding is forced, which would mangle non-ASCII before the
-      // UTF-8 decode on the read side. The statement is the shell tool's own,
-      // including its platform guard: a POSIX pwsh lane has no code page to
-      // fix and must not take new work here.
-      // LASTEXITCODE is undefined until a native command runs, and StrictMode
-      // turns a bare read of it into a terminating error; seed $null (not 0) so
-      // the author's own `$LASTEXITCODE -ne 0` check stays fail-closed.
+      // StrictMode + ErrorActionPreference=Stop: undefined $VAR and a
+      // non-terminating error terminate the script instead of masking the
+      // failure with exit 0. LASTEXITCODE is pre-set to $null so the author's
+      // own `-ne 0` check stays fail-closed (StrictMode throws on undefined).
+      const strictPrefix =
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; ";
+      // Win32 5.1 defaults the console to the OEM code page; force UTF-8 so the
+      // JSON we read back survives non-ASCII.
       const utf8Prefix =
         process.platform === 'win32'
           ? '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
           : '';
       const command =
         shellConfig.shell === 'powershell'
-          ? `${utf8Prefix}Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; ${hookConfig.command}${exitCodeTail}`
+          ? `${utf8Prefix}${strictPrefix}${hookConfig.command}`
           : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {

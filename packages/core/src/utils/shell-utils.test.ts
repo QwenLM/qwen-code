@@ -5,6 +5,7 @@
  */
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
+import path from 'node:path';
 import {
   buildShellExecWarnings,
   checkArgumentSafety,
@@ -40,6 +41,26 @@ vi.mock('os', () => ({
   platform: mockPlatform,
   homedir: mockHomedir,
 }));
+
+const mockExecFileSync = vi.hoisted(() => vi.fn());
+const mockAccessSync = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  // Default: pass through to the real call so unrelated tests keep working.
+  mockExecFileSync.mockImplementation(actual.execFileSync);
+  return {
+    ...actual,
+    execFileSync: mockExecFileSync,
+  };
+});
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  mockAccessSync.mockImplementation(actual.accessSync);
+  return {
+    ...actual,
+    accessSync: mockAccessSync,
+  };
+});
 
 const mockQuote = vi.hoisted(() => vi.fn());
 vi.mock('shell-quote', async () => {
@@ -1553,5 +1574,21 @@ describe('resolveCommandPath', () => {
       path: null,
       error: undefined,
     });
+  });
+
+  // Root cause: the probe ran in opts.cwd but its result string was validated
+  // and cached as-is, so a relative hit (PATH empty or `.` entry) was being
+  // resolved against the process cwd downstream -- probe-cwd and spawn-cwd
+  // disagreed on the file. Fix: absolutize the probe output against opts.cwd
+  // before accessSync; an absolute hit passes through unchanged.
+  it('absolutizes a relative probe hit against opts.cwd', () => {
+    mockPlatform.mockReturnValue('linux');
+    mockExecFileSync.mockReturnValueOnce('zzprobe_x\n');
+    mockAccessSync.mockImplementationOnce(() => undefined);
+    const probeCwd = path.resolve('/probe');
+    const expected = path.resolve(probeCwd, 'zzprobe_x');
+    const { path: hit } = resolveCommandPath('zzprobe_x', { cwd: probeCwd });
+    expect(hit).toBe(expected);
+    expect(mockAccessSync).toHaveBeenCalledWith(expected, expect.anything());
   });
 });

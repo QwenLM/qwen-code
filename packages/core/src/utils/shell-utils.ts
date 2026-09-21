@@ -2335,6 +2335,7 @@ export function resolveCommandPath(
 } {
   try {
     const isWin = process.platform === 'win32';
+    const probeCwd = opts?.cwd ?? process.cwd();
 
     if (isWin) {
       const checkCommand = 'where.exe';
@@ -2345,16 +2346,20 @@ export function resolveCommandPath(
         result = execFileSync(checkCommand, checkArgs, {
           encoding: 'utf8',
           shell: false,
-          // The execSync family inherits stderr, so a miss would print the finder's
-          // "could not find" line into the user's session; `e.stderr` still fills.
+          // Capture the finder's stderr so a miss does not leak into the user's session.
           stdio: ['ignore', 'pipe', 'pipe'],
-          cwd: opts?.cwd,
+          cwd: probeCwd,
         }).trim();
       } catch {
         return { path: null, error: undefined };
       }
 
-      return result ? { path: result } : { path: null };
+      if (!result) return { path: null, error: undefined };
+      const resolved = path.isAbsolute(result)
+        ? result
+        : path.resolve(probeCwd, result);
+      accessSync(resolved, fsConstants.X_OK);
+      return { path: resolved, error: undefined };
     } else {
       const shell = '/bin/sh';
       const checkArgs = ['-c', `command -v ${escapeShellArg(command, 'bash')}`];
@@ -2364,18 +2369,24 @@ export function resolveCommandPath(
         result = execFileSync(shell, checkArgs, {
           encoding: 'utf8',
           shell: false,
-          // Same reason: whatever this probe writes to stderr belongs to the
-          // lookup, not to the user's session.
+          // Capture the finder's stderr so a miss does not leak into the user's session.
           stdio: ['ignore', 'pipe', 'pipe'],
-          cwd: opts?.cwd,
+          cwd: probeCwd,
         }).trim();
       } catch {
         return { path: null, error: undefined };
       }
 
       if (!result) return { path: null, error: undefined };
-      accessSync(result, fsConstants.X_OK);
-      return { path: result, error: undefined };
+      // Absolutize against the probe cwd: `command -v` prints a relative hit
+      // whenever PATH has an empty or `.` entry, and a same-named binary in
+      // the process cwd (a cloned repo, the workspace) would otherwise be
+      // validated and cached as the resolved interpreter.
+      const resolved = path.isAbsolute(result)
+        ? result
+        : path.resolve(probeCwd, result);
+      accessSync(resolved, fsConstants.X_OK);
+      return { path: resolved, error: undefined };
     }
   } catch (error) {
     return {
