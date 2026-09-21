@@ -41,7 +41,7 @@ run(
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
 run(
-  `corepack pnpm -r ${INDEPENDENT_PACKAGES.map((name) => `--filter='!${name}'`).join(' ')} version ${newVersion} --no-git-tag-version --allow-same-version --no-git-checks`,
+  `corepack pnpm -r ${INDEPENDENT_PACKAGES.map((name) => `--filter="!${name}"`).join(' ')} version ${newVersion} --no-git-tag-version --allow-same-version --no-git-checks`,
 );
 
 // 5. Keep the published Mem0 Extension manifest aligned with its package.

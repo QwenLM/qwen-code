@@ -308,10 +308,16 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libatk-bridge2.0-0 at-spi2-core dbus-x11 patchelf libfuse2 xdg-utils xvfb
 
       - name: 'Install Qwen Code dependencies'
+        shell: 'bash'
         working-directory: '${{ runner.temp }}/qwen-code-source'
         env:
           QWEN_SKIP_PREPARE: '1'
-        run: 'npm ci --no-audit --progress=false'
+        run: |-
+          if [ -f pnpm-lock.yaml ]; then
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          else
+            npm ci --no-audit --progress=false
+          fi
 
       - name: 'Install desktop dependencies'
         working-directory: 'packages/desktop-shell'
