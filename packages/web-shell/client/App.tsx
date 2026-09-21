@@ -2241,8 +2241,12 @@ function serializeArtifactPanelTabs(
                   },
                 ]
               : [];
+          default:
+            return [];
         }
       }
+      default:
+        return [];
     }
   });
 }
@@ -6671,6 +6675,8 @@ export function App({
       if (request.kind === 'background_task') {
         if (!request.sourceSessionId) return;
         const turn = request.backgroundTurn;
+        // peer turns are cross-session messages, not tasks — skip them
+        if (turn.kind === 'peer') return;
         const tab: ArtifactPanelTab =
           turn.kind === 'workflow'
             ? {
