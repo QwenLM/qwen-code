@@ -13278,17 +13278,24 @@ export function App({
   // Suggest paths from the selected location's daemon, not necessarily the
   // currently connected one. This lets the user browse a remote daemon's
   // folders without navigating the page.
-  const suggestWorkspacePathsForLocation = useCallback(
-    async (prefix: string) => {
+  const suggestWorkspacePathsForLocation = useMemo(() => {
+    if (!hasRemoteWorkspaceLocation) {
+      return workspaceActions.suggestWorkspacePaths;
+    }
+    return async (prefix: string) => {
       const location = workspaceAddSelectedLocation;
       const currentOrigin = workspace.baseUrl || window.location.origin;
       if (location === currentOrigin) {
         return workspaceActions.suggestWorkspacePaths(prefix);
       }
       return fetchRemotePathSuggestions(location, prefix);
-    },
-    [workspaceAddSelectedLocation, workspace.baseUrl, workspaceActions],
-  );
+    };
+  }, [
+    hasRemoteWorkspaceLocation,
+    workspaceAddSelectedLocation,
+    workspace.baseUrl,
+    workspaceActions,
+  ]);
 
   const handleAddRemoteWorkspace = useCallback(
     async (cwd: string, persist: boolean, displayName?: string) => {
