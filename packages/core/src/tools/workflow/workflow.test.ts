@@ -1352,6 +1352,48 @@ await agent('scan package.json')
     expect(completion.mock.calls[0][1]).toContain('French checked');
   });
 
+  it.each(['caller', 'dialog'])(
+    'replaces running progress with cancelled state after %s cancellation',
+    async (source) => {
+      const { config, registry } = configWithRegistry();
+      config.isInteractive = () => true;
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      let rejectDispatch: ((error: Error) => void) | undefined;
+      const invocation = new WorkflowTool(config, {
+        dispatch: () =>
+          new Promise<string>((_resolve, reject) => {
+            rejectDispatch = reject;
+          }),
+      }).build({ script: "phase('audit'); return await agent('held agent');" });
+      (
+        invocation as unknown as {
+          setCompletionNotificationEnabled: (enabled: boolean) => void;
+        }
+      ).setCompletionNotificationEnabled(true);
+      const caller = new AbortController();
+      const updateOutput = vi.fn();
+      const execution = invocation.execute(caller.signal, updateOutput);
+      await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+      const runId = registry.list()[0].runId;
+      expect(updateOutput.mock.lastCall?.[0]).toContain('"status": "running"');
+      expect(updateOutput.mock.lastCall?.[0]).toContain('watch progress');
+
+      if (source === 'caller') caller.abort();
+      else registry.cancel(runId, Date.now());
+      rejectDispatch?.(new Error('Request was aborted'));
+      await execution;
+
+      const lastDisplay = updateOutput.mock.lastCall?.[0];
+      expect(lastDisplay).toContain(runId);
+      expect(lastDisplay).toContain('"status": "cancelled"');
+      expect(lastDisplay).not.toContain('"status": "running"');
+      expect(lastDisplay).not.toContain('watch progress');
+      expect(registry.get(runId)?.dispatches[0].status).toBe('cancelled');
+      expect(completion).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     { interactive: false, acp: false },
     { interactive: true, acp: true },

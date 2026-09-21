@@ -845,6 +845,7 @@ export class WorkflowRunner {
           return { ok: false, message, details };
         } finally {
           controller.abort();
+          emitUpdate();
           if (entry && isTerminalWorkflowStatus(entry.status)) {
             // Capture the telemetry projection before the first await:
             // the finally path from complete()/fail() up to here has no

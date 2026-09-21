@@ -14,6 +14,8 @@ Keep saved slash commands in the foreground. Separate completion delivery from e
 
 A completed or failed client-started run uses the existing completion callback and notification queue. Model-started foreground runs retain their tool-result return path; background runs retain their existing notification path. Cancellation produces no completion notification. Terminal-state guards prevent a run from reporting twice.
 
+The runner refreshes the tool card with its terminal state before execution settles. After Esc cancellation, the card retains its run ID and phase history with `status: "cancelled"`, replacing stale running progress. The active-progress guidance disappears once the run settles. This display refresh does not enqueue a completion notification.
+
 Foreground progress stays in the live tool card, with a run ID and guidance pointing to the card and `/workflows`. Its completion notice displays the run ID, status, a bounded result preview or error, recorded subagent failures, and explicit lines for nonempty top-level `failed`, `errors`, or `error` values reported by the script. These fields are displayed as reported data, not used to reinterpret a completed run as a runtime failure. Arbitrary application-specific result schemas remain uninterpreted.
 
 The TUI displays this foreground notice when the callback arrives, before waiting for model admission or a response. The same notification is then delivered through the existing queue and recorded in the conversation. A later question has the returned result in model context. The slash-command dispatch record may still have empty `outputHistoryItems`: the completion has its own notification record.

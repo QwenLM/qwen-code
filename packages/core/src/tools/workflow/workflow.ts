@@ -77,9 +77,10 @@ import {
 import type { ExtensionWorkflowDefinition } from '../../agents/runtime/workflow-extension.js';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import type {
-  WorkflowDispatchTraceStatus,
-  WorkflowTask,
+import {
+  isActiveWorkflowStatus,
+  type WorkflowDispatchTraceStatus,
+  type WorkflowTask,
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
 import {
@@ -993,7 +994,9 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
   }
   try {
     const guidance =
-      entry.notifyOnCompletion && !entry.isBackgrounded
+      entry.notifyOnCompletion &&
+      !entry.isBackgrounded &&
+      isActiveWorkflowStatus(entry.status)
         ? `Workflow ${entry.runId}: watch progress in this tool card or /workflows ${entry.runId}.\n`
         : '';
     return guidance + '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
