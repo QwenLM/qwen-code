@@ -345,6 +345,90 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('checks model policy before reading or uploading annotated files', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ getPromptDispatchError: denySetup });
+      const fileText = '@notes.txt';
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(fileText + ' /auth', undefined, undefined, undefined, [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:notes.txt',
+                kind: 'file',
+                value: 'notes.txt',
+              },
+            },
+          ]);
+        await Promise.resolve();
+      });
+      expect(harness.workspaceFileActions.readFileBytes).not.toHaveBeenCalled();
+      expect(sdkMock.actions.uploadAttachment).not.toHaveBeenCalled();
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('reports a failed compensating attachment delete', async () => {
+    const uploaded = deferred<{
+      type: string;
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({});
+      const fileText = '@notes.txt';
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(fileText + ' /auth', undefined, undefined, undefined, [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:notes.txt',
+                kind: 'file',
+                value: 'notes.txt',
+              },
+            },
+          ]);
+      });
+      expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+      const cleanupFailure = new Error('cleanup failed');
+      sdkMock.actions.removeAttachment.mockRejectedValue(cleanupFailure);
+      await harness.render({ getPromptDispatchError: denySetup });
+      await act(async () => {
+        uploaded.resolve({
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        });
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalledWith(
+        cleanupFailure,
+        'queue.attachmentCleanupFailed',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it.each(['/model', 'please explain /auth', '/authenticate'])(
     'keeps unrelated queued prompts enabled: %s',
     async (text) => {

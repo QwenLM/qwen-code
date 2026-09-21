@@ -395,19 +395,77 @@ it('does not send a disabled model setup command as the initial side-task prompt
   document.body.appendChild(container);
   root = createRoot(container);
   const onImageIngestionNotice = vi.fn();
+  const onInitialPromptRefused = vi.fn();
   await act(async () => {
     renderSideTask({
       initialPrompt: '/auth',
       modelManagement: { allowAdd: false },
       onImageIngestionNotice,
+      onInitialPromptRefused,
     });
     await Promise.resolve();
   });
   expect(sendPrompt).not.toHaveBeenCalled();
+  expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
   expect(onImageIngestionNotice).toHaveBeenCalledWith(
     'warning',
     'Adding models is disabled by the host.',
   );
+  // The refusal must be terminal for the tab: the parent is told to drop the
+  // stored prompt, so a later remount neither re-toasts nor replays it.
+  expect(onInitialPromptRefused).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+  );
+
+  await act(async () => root!.unmount());
+  root = createRoot(container);
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: undefined,
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it('does not replay a refused initial prompt after the host re-allows adds', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onImageIngestionNotice = vi.fn();
+  const onInitialPromptRefused = vi.fn();
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: '/auth',
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(onInitialPromptRefused).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+  );
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  await act(async () => root!.unmount());
+  root = createRoot(container);
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: undefined,
+      modelManagement: { allowAdd: true },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
 });
 
 it('threads sessionWorkflowEnabled to its chat pane', () => {

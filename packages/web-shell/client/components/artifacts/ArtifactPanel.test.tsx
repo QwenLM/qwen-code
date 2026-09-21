@@ -98,6 +98,16 @@ vi.mock('../terminal/TerminalPanel', () => ({
   ),
 }));
 
+const sideTaskPanelProps = vi.hoisted(() => ({
+  current: undefined as Record<string, unknown> | undefined,
+}));
+vi.mock('./SideTaskPanel', () => ({
+  SideTaskPanel: (props: Record<string, unknown>) => {
+    sideTaskPanelProps.current = props;
+    return <div data-testid="side-task-panel" />;
+  },
+}));
+
 const { ArtifactPanel } = await import('./ArtifactPanel');
 const { useArtifactWorkspaceTarget } = await import(
   './useArtifactWorkspaceTarget'
@@ -334,6 +344,7 @@ function scheduledTaskPanel(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  sideTaskPanelProps.current = undefined;
   // The boundary matrix spies on DOMParser.prototype per row; restore it so
   // the leak cannot skew call-count assertions in later tests.
   vi.restoreAllMocks();
@@ -2057,6 +2068,52 @@ describe('ArtifactPanel add menu', () => {
     ).find((button) => button.textContent === 'New');
     act(() => reopenedCreate?.click());
     expect(onCreateSideTask).toHaveBeenCalledOnce();
+  });
+
+  it('forwards model management policy and the refusal callback to the side task panel', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const modelManagement = { allowAdd: false, allowDelete: false };
+    const onSideTaskInitialPromptRefused = vi.fn();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'side-task:1',
+                kind: 'side_task',
+                title: 'Side task',
+                parentSessionId: 'parent-session',
+                workspaceCwd: '/work/project',
+                sessionId: 'side-session-1',
+              },
+            ]}
+            activeTabId="side-task:1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            modelManagement={modelManagement}
+            onSideTaskInitialPromptRefused={onSideTaskInitialPromptRefused}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(sideTaskPanelProps.current?.modelManagement).toEqual(
+      modelManagement,
+    );
+    expect(sideTaskPanelProps.current?.onInitialPromptRefused).toBe(
+      onSideTaskInitialPromptRefused,
+    );
   });
 
   it('creates a side task directly from the empty page when there is no history', () => {

@@ -1886,6 +1886,7 @@ const EN: Messages = {
       : `${count} queued shell commands will not run.`;
   },
   'queue.queueFailed': 'Failed to queue message',
+  'queue.attachmentCleanupFailed': 'Failed to discard uploaded attachments',
   'queue.deleteFailed': 'Failed to move message out of queue',
   'queue.editFailed': 'Failed to edit queued message',
   'queue.insertFailed': 'Failed to insert queued message',
@@ -5703,6 +5704,7 @@ const ZH: Messages = {
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
+  'queue.attachmentCleanupFailed': '清理已上传附件失败',
   'queue.deleteFailed': '移出队列失败',
   'queue.editFailed': '编辑排队消息失败',
   'queue.insertFailed': '插入排队消息失败',

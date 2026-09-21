@@ -399,6 +399,7 @@ interface ArtifactPanelProps {
     title: string,
     fromFirstPrompt?: boolean,
   ) => void;
+  onSideTaskInitialPromptRefused?: (tabId: string) => void;
   onNestedRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onNestedArtifactsChange?: (
     sessionId: string,
@@ -465,6 +466,7 @@ export function ArtifactPanel({
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
+  onSideTaskInitialPromptRefused,
   onNestedRightPanelOpen,
   onNestedArtifactsChange,
   onOpenNestedSubagent,
@@ -1201,6 +1203,7 @@ export function ArtifactPanel({
             }
             onCreated={onSideTaskCreated ?? ignoreSideTaskCreated}
             onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
+            onInitialPromptRefused={onSideTaskInitialPromptRefused}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}

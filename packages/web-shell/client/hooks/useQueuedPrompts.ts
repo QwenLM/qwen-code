@@ -3101,7 +3101,7 @@ export function useQueuedPrompts({
         let uploadedAttachmentReferences: DaemonSessionAttachmentReference[] =
           [];
         const removeUploadedAttachments = async () => {
-          await Promise.allSettled(
+          const removals = await Promise.allSettled(
             uploadedAttachmentReferences.map((reference) =>
               sessionActions.removeAttachment(reference.attachmentId, {
                 sessionId: targetSessionId,
@@ -3109,53 +3109,75 @@ export function useQueuedPrompts({
             ),
           );
           uploadedAttachmentReferences = [];
+          // A failed compensating delete leaves the refused prompt's bytes
+          // in the session attachment store; surface it instead of dropping.
+          const failedRemoval = removals.find(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          );
+          if (failedRemoval) {
+            reportError(
+              failedRemoval.reason,
+              t('queue.attachmentCleanupFailed'),
+            );
+          }
         };
-        void Promise.allSettled([
-          ...imageList.map(
-            async (image) =>
-              await sessionActions.uploadAttachment(
-                {
-                  data: image.data,
-                  mimeType: image.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...fileList.map(
-            async (file) =>
-              await sessionActions.uploadAttachment(
-                {
-                  name: file.name,
-                  data: file.data,
-                  text: file.text,
-                  mimeType: file.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...annotatedFileList.map(async (file, index) => {
-            const filePath = annotated!.paths[index]!;
-            const data = await readWorkspaceFileAsBlob(
-              (path, options) =>
-                workspaceFileActions!.readFileBytes(path, options),
-              filePath,
-              file.media_type,
-              {
-                statFile: (path) => workspaceFileActions!.stat(path),
-                isCancelled: () => abort.signal.aborted,
-                maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
-              },
+        // Check the caller policy before paying for reads and uploads; the
+        // SDK wrapper still re-checks the latest policy at dispatch time.
+        void Promise.resolve()
+          .then(() => {
+            const blocked = dispatchPolicyRef.current?.(
+              annotated?.displayText ?? trimmed,
             );
-            return await sessionActions.uploadAttachment(
-              {
-                name: file.name,
-                data,
-                mimeType: file.media_type,
-              },
-              { signal: abort.signal, sessionId: targetSessionId },
-            );
-          }),
-        ])
+            if (blocked !== undefined)
+              throw new PromptDispatchBlockedError(blocked);
+            return Promise.allSettled([
+              ...imageList.map(
+                async (image) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      data: image.data,
+                      mimeType: image.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...fileList.map(
+                async (file) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      name: file.name,
+                      data: file.data,
+                      text: file.text,
+                      mimeType: file.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...annotatedFileList.map(async (file, index) => {
+                const filePath = annotated!.paths[index]!;
+                const data = await readWorkspaceFileAsBlob(
+                  (path, options) =>
+                    workspaceFileActions!.readFileBytes(path, options),
+                  filePath,
+                  file.media_type,
+                  {
+                    statFile: (path) => workspaceFileActions!.stat(path),
+                    isCancelled: () => abort.signal.aborted,
+                    maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
+                  },
+                );
+                return await sessionActions.uploadAttachment(
+                  {
+                    name: file.name,
+                    data,
+                    mimeType: file.media_type,
+                  },
+                  { signal: abort.signal, sessionId: targetSessionId },
+                );
+              }),
+            ]);
+          })
           .then(async (results) => {
             uploadedAttachmentReferences = results.flatMap((result) =>
               result.status === 'fulfilled' ? [result.value] : [],

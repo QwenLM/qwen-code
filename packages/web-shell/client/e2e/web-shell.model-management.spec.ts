@@ -91,7 +91,10 @@ async function evidence(page: Page, name: string) {
     process.env['QWEN_MODEL_MANAGEMENT_EVIDENCE'] === '1' &&
     (name === 'default-model-controls' || name === 'disabled-model-controls')
   ) {
-    const assets = resolve('../../docs/design/assets');
+    // Stays inside the git-ignored tree: refreshing the tracked
+    // docs/design/assets PNGs is a deliberate copy from here, never a test
+    // side effect.
+    const assets = resolve(directory, 'assets');
     await mkdir(assets, { recursive: true });
     await page.getByTestId('model-management').screenshot({
       path: resolve(
@@ -119,10 +122,10 @@ test('default host retains add and delete controls', async ({
 });
 for (const allowAdd of [true, false]) {
   for (const allowDelete of [true, false]) {
-    test(`host controls add=${allowAdd} delete=${allowDelete}`, async ({
+    test(`host controls add=${allowAdd} delete=${allowDelete} @smoke`, async ({
       page,
     }, testInfo) => {
-      const daemon = await openHarness(page, testInfo, {
+      await openHarness(page, testInfo, {
         allowAdd,
         allowDelete,
       });
@@ -142,20 +145,15 @@ for (const allowAdd of [true, false]) {
           exact: true,
         }),
       ).toBeVisible();
-      expect(
-        daemon.requests.filter(
-          ({ method, path }) =>
-            (method === 'POST' && path.endsWith('/auth/provider')) ||
-            (method === 'DELETE' && path.endsWith('/models')),
-        ),
-      ).toHaveLength(0);
       if (!allowAdd && !allowDelete)
         await evidence(page, 'disabled-model-controls');
     });
   }
 }
 for (const allowAdd of [true, false]) {
-  test(`auth command respects add=${allowAdd}`, async ({ page }, testInfo) => {
+  test(`auth command respects add=${allowAdd} @smoke`, async ({
+    page,
+  }, testInfo) => {
     const daemon = await openHarness(page, testInfo, { allowAdd });
     await fillComposer(page, '/');
     const menu = page.locator('[data-web-shell-slash-menu]');
@@ -171,11 +169,12 @@ for (const allowAdd of [true, false]) {
         page.getByText('Adding models is disabled by the host.'),
       ).toBeVisible();
       await expect(dialog).toHaveCount(0);
+      // /prompt is the only refusal-relevant route the mock daemon records;
+      // the /auth/provider half was decorative, so the request-level install
+      // guarantee is carried by AuthMessage.dom.test.tsx instead.
       expect(
         daemon.requests.filter(
-          ({ method, path }) =>
-            method === 'POST' &&
-            (path.endsWith('/auth/provider') || path.endsWith('/prompt')),
+          ({ method, path }) => method === 'POST' && path.endsWith('/prompt'),
         ),
       ).toHaveLength(0);
       await evidence(page, 'disabled-auth-command');
@@ -185,7 +184,7 @@ for (const allowAdd of [true, false]) {
 test('closing add permission dismisses an open provider dialog', async ({
   page,
 }, testInfo) => {
-  const daemon = await openHarness(page, testInfo);
+  await openHarness(page, testInfo);
   await submitLocalCommand(page, '/auth');
   const dialog = page.getByRole('dialog', { name: 'Connect a Provider' });
   await expect(dialog).toBeVisible();
@@ -197,9 +196,6 @@ test('closing add permission dismisses an open provider dialog', async ({
     ),
   );
   await expect(dialog).toHaveCount(0);
-  expect(
-    daemon.requests.filter(({ path }) => path.endsWith('/auth/provider')),
-  ).toHaveLength(0);
 });
 
 test('disabled model management preserves model switching', async ({
@@ -221,7 +217,7 @@ test('disabled model management preserves model switching', async ({
 test('closing deletion permission clears pending confirmation', async ({
   page,
 }, testInfo) => {
-  const daemon = await openHarness(page, testInfo);
+  await openHarness(page, testInfo);
   await openModels(page);
   await page
     .getByRole('button', { name: 'Delete Managed Test Model', exact: true })
@@ -252,9 +248,4 @@ test('closing deletion permission clears pending confirmation', async ({
     }),
   ).toBeVisible();
   await expect(confirm).toHaveCount(0);
-  expect(
-    daemon.requests.filter(
-      ({ method, path }) => method === 'DELETE' && path.endsWith('/models'),
-    ),
-  ).toHaveLength(0);
 });

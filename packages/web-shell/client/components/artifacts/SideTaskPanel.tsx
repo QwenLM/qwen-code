@@ -52,6 +52,8 @@ interface SideTaskPanelProps {
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /** Policy refused the stored initial prompt; the parent drops it from the tab. */
+  onInitialPromptRefused?: (tabId: string) => void;
 }
 
 const FIRST_PROMPT_RENAME_ATTEMPTS = 3;
@@ -73,6 +75,7 @@ export function SideTaskPanel({
   sessionWorkflowEnabled,
   modelManagement,
   onImageIngestionNotice,
+  onInitialPromptRefused,
 }: SideTaskPanelProps) {
   if (!sessionId) {
     return (
@@ -112,6 +115,7 @@ export function SideTaskPanel({
         sessionWorkflowEnabled={sessionWorkflowEnabled}
         modelManagement={modelManagement}
         onImageIngestionNotice={onImageIngestionNotice}
+        onInitialPromptRefused={onInitialPromptRefused}
       />
     </DaemonSessionProvider>
   );
@@ -217,6 +221,7 @@ function SideTaskSession({
   sessionWorkflowEnabled,
   modelManagement,
   onImageIngestionNotice,
+  onInitialPromptRefused,
 }: Omit<
   SideTaskPanelProps,
   'sessionId' | 'parentSessionId' | 'createSession' | 'onCreated'
@@ -314,6 +319,7 @@ function SideTaskSession({
       isModelSetupCommand(prompt)
     ) {
       onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+      onInitialPromptRefused?.(tabId);
       return;
     }
     actions
@@ -339,11 +345,13 @@ function SideTaskSession({
     initialPrompt,
     modelManagement,
     onImageIngestionNotice,
+    onInitialPromptRefused,
     nameFromFirstPrompt,
     onError,
     restoredEmptySession,
     sessionCatalogController,
     t,
+    tabId,
   ]);
 
   if (!connection.sessionId) {

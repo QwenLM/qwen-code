@@ -17,12 +17,20 @@ describe('model management policy', () => {
       allowDelete: false,
     });
   });
-  it.each(['/auth', ' /AUTH ', '/auth custom', '/auth\ncustom'])(
-    'recognizes setup command %s',
-    (text) => {
-      expect(isModelSetupCommand(text)).toBe(true);
-    },
-  );
+  it.each([
+    '/auth',
+    ' /AUTH ',
+    '/auth custom',
+    '/auth\ncustom',
+    // The daemon resolves these to /auth: its altNames, and whitespace it
+    // tolerates between the slash and the token.
+    '/login',
+    '/connect',
+    '/ auth',
+    '/\tauth',
+  ])('recognizes setup command %s', (text) => {
+    expect(isModelSetupCommand(text)).toBe(true);
+  });
   it.each([
     '/authenticate',
     '/auth/path',

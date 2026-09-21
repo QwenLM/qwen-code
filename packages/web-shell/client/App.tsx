@@ -5108,6 +5108,27 @@ export function App({
     },
     [],
   );
+  // A policy-refused initial prompt must die with the refusal: drop it from the
+  // live tabs AND the per-session bucket mirror, or switching away and back
+  // re-arms the toast and a later policy relaxation replays the command.
+  const handleSideTaskInitialPromptRefused = useCallback((tabId: string) => {
+    setArtifactPanelTabs((tabs) =>
+      tabs.map((tab) =>
+        tab.id === tabId && tab.kind === 'side_task'
+          ? { ...tab, initialPrompt: undefined }
+          : tab,
+      ),
+    );
+    for (const state of artifactPanelStateBySessionRef.current.values()) {
+      if (!state.tabs.some((tab) => tab.id === tabId)) continue;
+      state.tabs = state.tabs.map((tab) =>
+        tab.id === tabId && tab.kind === 'side_task'
+          ? { ...tab, initialPrompt: undefined }
+          : tab,
+      );
+      break;
+    }
+  }, []);
   const openSideTask = useCallback(
     (sideTask: SideTaskListItem) => {
       const parentSessionId = connection.sessionId;
@@ -14748,6 +14769,13 @@ export function App({
         pushToast('error', t('userMessage.editBusy'));
         return false;
       }
+      if (
+        !modelManagementRef.current.allowAdd &&
+        isModelSetupCommand(trimmed)
+      ) {
+        pushToast('info', t('settings.models.addDisabled'));
+        return false;
+      }
       const sessionId = connectionRef.current.sessionId;
       if (
         unknownPromptAdmissionRef.current?.payloadAvailable &&
@@ -18254,6 +18282,7 @@ export function App({
     onCreateSideTaskSession: createSideTaskSession,
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,
+    onSideTaskInitialPromptRefused: handleSideTaskInitialPromptRefused,
     onNestedRightPanelOpen: handleTurnOutputOpen,
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,

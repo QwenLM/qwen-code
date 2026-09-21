@@ -40,6 +40,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 import type { WebShellSettingsOptions } from './settings';
+import type { WebShellModelManagementOptions } from './modelManagement';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
 import type { TurnOutputOpenRequest } from './components/artifacts/TurnOutputs';
@@ -767,6 +768,7 @@ const {
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
         sessionWorkflowEnabled?: boolean;
+        modelManagement?: WebShellModelManagementOptions;
       } | null,
       latestSettingsInitialCategory: undefined as string | undefined,
       latestSettingsPresentation: undefined as
@@ -16680,6 +16682,27 @@ describe('App session callbacks', () => {
           { id: 'u0', kind: 'user', text: 'original' },
         ]);
         expect(testState.prompt).toBe('hello');
+      },
+    );
+
+    it.each(['/auth', '/login', '/connect', '/ auth'])(
+      'refuses a host-disabled model setup edit (%s) before rewinding',
+      async (text) => {
+        renderApp({
+          language: 'en',
+          modelManagement: { allowAdd: false, allowDelete: false },
+        });
+        await flush();
+        let accepted;
+        await act(async () => {
+          accepted = await submit(text);
+        });
+        expect(accepted).toBe(false);
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        expect(
+          testState.latestMessageListProps?.failedPromptMessageId,
+        ).toBeUndefined();
       },
     );
 
@@ -33836,6 +33859,22 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('forwards the model management policy to split panes', async () => {
+    const { container } = renderApp({
+      modelManagement: { allowAdd: false, allowDelete: false },
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+    });
+    expect(testState.latestSplitViewProps?.modelManagement).toEqual({
+      allowAdd: false,
+      allowDelete: false,
+    });
+  });
+
   it.each([false, true])(
     'does not rerender App for other split sessions (outer pending: %s)',
     async (outerPending) => {
@@ -35248,21 +35287,33 @@ describe('App session callbacks', () => {
     }
   });
 
-  it.each([undefined, 's1'])(
-    'blocks host-disabled model setup in welcome/session %s before callbacks and forwarding',
-    async (sessionId) => {
+  it.each([
+    { sessionId: undefined, text: '/auth' },
+    { sessionId: 's1', text: '/auth' },
+    // The daemon resolves altNames and tolerates whitespace after the slash;
+    // the interception must match that or these slip through to the daemon.
+    { sessionId: undefined, text: '/login' },
+    { sessionId: 's1', text: '/login' },
+    { sessionId: undefined, text: '/connect' },
+    { sessionId: 's1', text: '/connect' },
+    { sessionId: undefined, text: '/ auth' },
+    { sessionId: 's1', text: '/ auth' },
+  ])(
+    'blocks host-disabled model setup in welcome/session (session $sessionId, input "$text") before callbacks and forwarding',
+    async ({ sessionId, text }) => {
       mockConnection.sessionId = sessionId;
       const onSlashCommand = vi.fn(() => false);
+      // No hiddenSlashCommands pre-filter here: the allowAdd clause itself
+      // must be what removes /auth from the suggestion list.
       const { container } = renderApp({
         modelManagement: { allowAdd: false, allowDelete: false },
-        hiddenSlashCommands: ['auth'],
         onSlashCommand,
       });
       await flush();
       expect(testState.latestChatEditorProps?.commands).not.toEqual(
         expect.arrayContaining([expect.objectContaining({ name: 'auth' })]),
       );
-      testState.prompt = '/auth';
+      testState.prompt = text;
       await clickSubmit(container);
       await flush();
       expect(onSlashCommand).not.toHaveBeenCalled();
