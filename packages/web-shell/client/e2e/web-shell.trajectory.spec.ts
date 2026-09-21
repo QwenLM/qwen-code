@@ -146,8 +146,16 @@ test.describe('trajectory panel', () => {
       'aria-rowcount',
       String(TURNS * ROWS_PER_TURN),
     );
-    // The tail is where the panel opens, so the newest turn's numbers are the
-    // ones on screen.
+    // The tail is where the panel opens: the newest turn is the one the reader
+    // just watched run. Asserted on the real row rather than on a scroll
+    // offset, because a stale offset leaves rows mounted below the viewport.
+    const lastRow = mountedRows(page).last();
+    await expect(lastRow).toHaveAttribute(
+      'aria-rowindex',
+      String(TURNS * ROWS_PER_TURN),
+    );
+    await expect(lastRow).toBeInViewport();
+
     const lastRequest = page
       .locator('[data-testid="trajectory-row-request"]')
       .last();

@@ -45,6 +45,10 @@ const originalBoxes = new Map<string, PropertyDescriptor | undefined>();
 // storage is what lets the restore be asserted at all.
 const scrollTops = new WeakMap<HTMLElement, number>();
 let originalScrollTop: PropertyDescriptor | undefined;
+// Same reason as `scrollTop`: jsdom reports zero content height, which would
+// make "opened at the bottom" and "never scrolled" the same observation.
+const SCROLL_HEIGHT = 4000;
+let originalScrollHeight: PropertyDescriptor | undefined;
 
 beforeAll(() => {
   originalScrollTop = Object.getOwnPropertyDescriptor(
@@ -59,6 +63,14 @@ beforeAll(() => {
     set(this: HTMLElement, value: number) {
       scrollTops.set(this, value);
     },
+  });
+  originalScrollHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'scrollHeight',
+  );
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get: () => SCROLL_HEIGHT,
   });
   for (const prop of BOX_PROPS) {
     originalBoxes.set(
@@ -82,6 +94,17 @@ afterAll(() => {
   } else {
     delete (HTMLElement.prototype as unknown as Record<string, unknown>)[
       'scrollTop'
+    ];
+  }
+  if (originalScrollHeight) {
+    Object.defineProperty(
+      HTMLElement.prototype,
+      'scrollHeight',
+      originalScrollHeight,
+    );
+  } else {
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>)[
+      'scrollHeight'
     ];
   }
   for (const [prop, descriptor] of originalBoxes) {
@@ -449,6 +472,15 @@ describe('TrajectoryPanel', () => {
     expect(grid.getAttribute('aria-activedescendant')).toBe(
       clicked.closest('[role="row"]')!.id,
     );
+  });
+
+  it('opens on the newest turn rather than the oldest', async () => {
+    const container = await render(async () => page(REAL_EVENTS));
+    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+
+    // The newest turn is the one the reader just watched run, so the tail is
+    // what the panel has to be showing when it appears.
+    expect(scroll.scrollTop).toBe(SCROLL_HEIGHT);
   });
 
   it('puts the reader back where they were when the box is resized', async () => {
