@@ -9862,6 +9862,69 @@ describe('Session', () => {
 
         expect(result.stopReason).toBe('end_turn');
       });
+
+      it('does not leak a truncated attempt into a later attempt that ends with no finish reason at all', async () => {
+        // Reviewer-flagged gap: `lastFinishReason` is reused across every
+        // attempt within one turn (the same AgentResponseCapture object is
+        // threaded through each tool-call round). If it were only ever
+        // overwritten -- never reset -- a MAX_TOKENS from an earlier round
+        // would survive into a later round whose own final segment never
+        // yields a finishReason at all (e.g. an empty stream after the tool
+        // result is sent back), wrongly reporting max_tokens for what the
+        // provider actually ended normally. `beginChannelDeliveryResponseBlock`
+        // resets it at the start of every attempt, so this must read back
+        // as end_turn.
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'tool ok',
+          returnDisplay: 'tool ok',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'demo_tool',
+          kind: core.Kind.Execute,
+          build: vi.fn().mockReturnValue({
+            params: {},
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('demo_tool'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'partial fixture reply' }],
+                      },
+                      finishReason: 'MAX_TOKENS',
+                    },
+                  ],
+                  functionCalls: [
+                    { id: 'call-1', name: 'demo_tool', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          // The second attempt's stream ends without ever yielding a
+          // candidate -- so `candidate.finishReason` is never touched at
+          // all this round, unlike a chunk that carries an explicit STOP.
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'reply briefly' }],
+        });
+
+        expect(execute).toHaveBeenCalled();
+        expect(result.stopReason).toBe('end_turn');
+      });
     });
 
     describe('turn result recording', () => {
