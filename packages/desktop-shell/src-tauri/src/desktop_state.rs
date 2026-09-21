@@ -106,12 +106,17 @@ impl SettingsStore {
         if settings_persistence_disabled() {
             return Ok(());
         }
-        let serialized = self.with_settings_mut(|settings| {
+        // Serialize *and* replace the file while holding the lock: the flusher
+        // thread, the exit-path save and `set_workspace` all reach `update`, so
+        // releasing the guard before the rename lets two writers land their
+        // snapshots in the opposite order and persist the older settings over
+        // the newer one.
+        self.with_settings_mut(|settings| {
             update(settings);
-            serde_json::to_string_pretty(&*settings)
-                .map_err(|error| format!("Failed to serialize desktop settings: {error}"))
-        })?;
-        write_atomic(&self.path, format!("{serialized}\n").as_bytes())
+            let serialized = serde_json::to_string_pretty(&*settings)
+                .map_err(|error| format!("Failed to serialize desktop settings: {error}"))?;
+            write_atomic(&self.path, format!("{serialized}\n").as_bytes())
+        })
     }
 
     fn with_settings<T>(&self, read: impl FnOnce(&DesktopSettings) -> T) -> T {

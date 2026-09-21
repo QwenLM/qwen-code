@@ -944,6 +944,9 @@ function testZoomHotkeyScript() {
     main,
   )?.[1];
   assert.ok(script, 'main.rs must keep the zoom shortcut script.');
+  // Simulating the constant proves nothing if the webview never receives it, so
+  // pin the injection the same way the titlebar script is pinned above.
+  assert.match(main, /initialization_script\(ZOOM_HOTKEY_SCRIPT\)/);
 
   const listeners = [];
   const invoked = [];
@@ -1016,12 +1019,46 @@ function testZoomHotkeyScript() {
   }
   assert.equal(invoked.length, owned);
 
-  // A trackpad pinch reaches the page as a ctrlKey wheel event.
+  // A trackpad pinch reaches the page as a ctrlKey wheel event, in both
+  // directions: one discrete notch stays exactly one zoom step.
   assert.equal(dispatch('wheel', { ctrlKey: true, deltaY: -120 }), true);
   assert.equal(invoked.at(-1).command, 'change_zoom');
   assert.equal(invoked.at(-1).args.action, 'in');
+  assert.equal(dispatch('wheel', { ctrlKey: true, deltaY: 120 }), true);
+  assert.equal(invoked.at(-1).args.action, 'out');
+  // ctrl+shift+wheel is the horizontal-scroll gesture, not a pinch.
+  assert.equal(
+    dispatch('wheel', { ctrlKey: true, shiftKey: true, deltaY: -120 }),
+    false,
+    'ctrl+shift+wheel must reach the page instead of zooming.',
+  );
   assert.equal(dispatch('wheel', { deltaY: -120 }), false);
-  assert.equal(invoked.length, owned + 1);
+  assert.equal(invoked.length, owned + 2);
+
+  // A real pinch arrives as a burst of small deltas. Steps must follow the
+  // accumulated movement, not the event count, or a gentle pinch sweeps the
+  // factor to the clamp and the flusher persists it.
+  const burst = invoked.length;
+  for (let event = 0; event < 30; event += 1) {
+    dispatch('wheel', { ctrlKey: true, deltaY: -2 });
+  }
+  assert.ok(
+    invoked.length - burst <= 2,
+    `A 30-event pinch burst must not emit one zoom step per event, got ${
+      invoked.length - burst
+    }.`,
+  );
+  assert.equal(invoked.at(-1).args.action, 'in');
+
+  // No vertical movement means nothing to zoom: the event, and the horizontal
+  // scroll it belongs to, must pass through unowned.
+  const afterBurst = invoked.length;
+  assert.equal(dispatch('wheel', { ctrlKey: true, deltaY: 0 }), false);
+  assert.equal(
+    dispatch('wheel', { ctrlKey: true, deltaX: 50, deltaY: 0 }),
+    false,
+  );
+  assert.equal(invoked.length, afterBurst);
 }
 
 function testResolveLogRoot() {

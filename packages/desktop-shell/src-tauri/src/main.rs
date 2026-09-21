@@ -64,13 +64,27 @@ const ZOOM_HOTKEY_SCRIPT: &str = r#"
     },
     true,
   );
-  // A trackpad pinch reaches the page as a ctrlKey wheel event.
+  // A trackpad pinch reaches the page as a burst of ctrlKey wheel events whose
+  // per-event deltaY is small, while a mouse notch arrives as a single large
+  // one. Accumulate the deltas so one zoom step corresponds to one notch worth
+  // of movement instead of one step per event: a gentle pinch would otherwise
+  // sweep the factor to the clamp and persist it.
+  const WHEEL_ZOOM_THRESHOLD = 60;
+  let wheelDelta = 0;
   window.addEventListener(
     'wheel',
     (event) => {
-      if (!event.ctrlKey || event.shiftKey) return;
+      if (!event.ctrlKey || event.shiftKey) {
+        wheelDelta = 0;
+        return;
+      }
+      // A horizontal swipe carries no deltaY: leave it and its scroll alone.
+      if (event.deltaY === 0) return;
+      wheelDelta += event.deltaY;
       event.preventDefault();
-      send(event.deltaY < 0 ? 'in' : 'out');
+      if (Math.abs(wheelDelta) < WHEEL_ZOOM_THRESHOLD) return;
+      send(wheelDelta < 0 ? 'in' : 'out');
+      wheelDelta = 0;
     },
     { capture: true, passive: false },
   );
