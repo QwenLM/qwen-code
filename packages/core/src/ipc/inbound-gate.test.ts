@@ -891,9 +891,10 @@ describe('receipts', () => {
     expect(delivered).toEqual([parked]);
   });
 
-  it('releases nothing when the host cannot answer during a re-judge', () => {
-    // The same question on the other release path: a mode change frees a
-    // parked message, and the pin check throws while it is being let out.
+  it('releases nothing when the host cannot name the addressee', () => {
+    // The same question on the other release path: a mode change would
+    // free a parked message, but the host cannot say which session it is
+    // for. Nothing is released on an addressee nobody named.
     let owns: (id: string) => string | undefined = (id) => id;
     let mode: ApprovalMode = ApprovalMode.DEFAULT;
     const delivered: PeerUserFrame[] = [];
@@ -916,7 +917,10 @@ describe('receipts', () => {
     expect(gate.reevaluate('approval-mode-changed')).toBe(0);
     expect(delivered).toEqual([]);
     expect(gate.getHeld()).toHaveLength(1);
-    expect(statuses).toEqual(['held', 'held']);
+    // The message keeps the receipt it already has: it was never let out,
+    // so there is nothing new to tell its sender.
+    expect(statuses).toEqual(['held']);
+    expect(gate.getHeld()[0]?.cause).toBe('policy-unreadable');
   });
 
   it('judges a parked frame against the sessions a host still holds', () => {
@@ -2567,17 +2571,19 @@ describe('a gate for a process hosting several sessions', () => {
     });
   });
 
-  it('judges a frame by the id it carries when the host cannot answer', () => {
+  it('parks a message whose addressee the host could not name', () => {
     // A resolver that throws mid-teardown must not take `admit` down with
-    // it: a message is in hand and a verdict has to come out. The id the
-    // sender used is the only name left to judge by.
+    // it — a message is in hand and a verdict has to come out — but the
+    // verdict cannot be a guess. Asking the readers about the id on the
+    // frame would judge the message by whatever settings answer to that
+    // spelling, which is not the same thing as the session it was for.
     const asked: Array<string | undefined> = [];
     const gate = new InboundGate({
       admission: unmeteredAdmission(),
-      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: (id) => {
         asked.push(id);
-        return 'hold';
+        return undefined;
       },
       resolveSessionId: () => {
         throw new Error('the session map is being torn down');
@@ -2585,10 +2591,34 @@ describe('a gate for a process hosting several sessions', () => {
       deliver: () => {},
     });
 
+    // Parity would have delivered this, had there been a session to
+    // compare against.
     expect(
-      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'session-a' })),
+      gate.admit(frame({ fromMode: 'bypass', toSessionId: 'session-a' })),
     ).toBe('held');
-    expect(asked).toEqual(['session-a']);
+    expect(gate.getHeld()[0]?.cause).toBe('policy-unreadable');
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses what it cannot name when it cannot present a hold', () => {
+    // The honest end of the same path for a host with no reviewer: the
+    // sender is told this receiver will not take it, rather than being
+    // told a person will look at it.
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      presentsHolds: false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      resolveSessionId: () => {
+        throw new Error('the session map is being torn down');
+      },
+      deliver: () => {},
+    });
+
+    expect(
+      gate.admit(frame({ fromMode: 'bypass', toSessionId: 'session-a' })),
+    ).toBe('refused');
+    expect(gate.getHeld()).toEqual([]);
   });
 
   /** A host of several sessions whose repeat window is actually on. */
@@ -2756,33 +2786,64 @@ describe('a gate for a process hosting several sessions', () => {
     expect(asked).toEqual(['chat-a', 'chat-b', 'chat-c']);
   });
 
-  it('gives two spellings of one name a single hold allowance', () => {
-    // The host resolves the names it knows to one, which is what lets the
-    // two ids a session answers to share an allowance. It is not obliged
-    // to fold every id shape — the real host leaves internal and legacy
-    // ids spelled as they came — so the gate keeps its own fold on the
-    // keys it derives, which is the defence it had before a resolver
+  it('gives two spellings of a name nobody claims one hold allowance', () => {
+    // A name the host did not give back is nobody's, and the id on the
+    // frame is all the gate has to key on. Two spellings of it must not
+    // open two allowances — the defence the gate had before a resolver
     // existed.
-    const delivered: PeerUserFrame[] = [];
     const gate = new InboundGate({
       admission: unmeteredAdmission(),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => 'hold',
-      // A host that does not fold: it answers to whatever spelling it is
-      // handed, as `normalizeSessionIdForLookup` does for a legacy id.
-      resolveSessionId: (id) => id,
-      deliver: (candidate) => delivered.push(candidate),
+      resolveSessionId: (id) => (id === 'chat-a' ? id : undefined),
+      deliver: () => {},
     });
 
     for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
       expect(
-        gate.admit(frame({ fromMode: 'prompting', toSessionId: 'legacy-id' })),
+        gate.admit(frame({ fromMode: 'prompting', toSessionId: 'ghost' })),
       ).toBe('held');
     }
-    // The same session, spelled differently. One session, one allowance.
     expect(
-      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'LEGACY-ID' })),
+      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'GHOST' })),
     ).toBe('dropped');
+  });
+
+  it('keeps two sessions apart when the host tells them apart by case', () => {
+    // The host's answer is canonical: it is the one name that host keeps
+    // the session under. Folding it further would merge sessions the host
+    // distinguishes on purpose — an Arena agent id keeps the case of its
+    // `-agent-` suffix — and the second session would then have a line it
+    // never received treated as a repeat.
+    const delivered: PeerUserFrame[] = [];
+    const gate = new InboundGate({
+      admission: new PeerAdmission({
+        limits: {
+          bucketCapacity: 1e6,
+          refillPerSecond: 1e6,
+          globalBucketCapacity: 1e6,
+          globalRefillPerSecond: 1e6,
+          dedupWindowMs: 30_000,
+        },
+      }),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      // Two real sessions, told apart by the case of the suffix.
+      resolveSessionId: (id) =>
+        id === 'run-agent-Foo' || id === 'run-agent-foo' ? id : undefined,
+      deliver: (candidate) => delivered.push(candidate),
+    });
+    const line = (toSessionId: string, msgId: string) => ({
+      ...buildUserFrame({ content: 'stand by' }),
+      msgId,
+      fromMode: 'bypass' as const,
+      toSessionId,
+    });
+
+    expect(gate.admit(line('run-agent-Foo', 'm1'))).toBe('accept');
+    // A different session, which has not heard that line.
+    expect(gate.admit(line('run-agent-foo', 'm2'))).toBe('accept');
+    expect(delivered).toHaveLength(2);
   });
 
   it('keeps a session as its own repeat baseline across an interleaving', () => {

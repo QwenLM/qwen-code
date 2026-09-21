@@ -308,6 +308,13 @@ interface PacedTarget {
    * window without charging the sender's bucket, so the mirror skips the
    * charge for one too; charging would drift the mirror below the real
    * bucket until it refuses sends the receiver would have taken.
+   *
+   * A target here is one address. A receiver hosting several sessions
+   * measures repeats per addressed session, so it takes a line this
+   * mirror would call a repeat when it is addressed to a different
+   * session of the same host — the mirror is conservative in that
+   * direction, which costs a send it could have made rather than making
+   * one it should not.
    */
   bodies: PacedBody[];
   /**

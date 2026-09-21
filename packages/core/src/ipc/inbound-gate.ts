@@ -258,24 +258,37 @@ export function peerSenderKey(
  */
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
+/**
+ * What the host said a frame's addressee is.
+ *
+ * Empty when there was nobody to ask or the host does not hold that
+ * session; `unreadable` when its resolver threw, which is not the same
+ * thing — an answer that did not arrive is not an answer of "no".
+ */
+interface AddresseeLookup {
+  resolved?: string;
+  unreadable?: boolean;
+}
+
 export interface HeldMessage {
   frame: PeerUserFrame;
   cause: HoldCause;
   /** For the setting-driven causes: which scope set the policy, if known. */
   policyScope?: PolicyScope;
   /**
-   * The addressee admission recorded this body under, captured when the
-   * message was parked.
+   * The name the host gave for this message's addressee when it was
+   * parked, if it gave one.
    *
    * Asking again when the message is finally settled can give a different
-   * answer: the host's resolver may have forgotten the name by then, and
-   * the gate falls back to the id on the frame. A rollback keyed
-   * differently from the record it means to undo is a silent no-op, and
-   * the stale baseline then answers the sender's honest retry with
-   * `duplicate` — a verdict whose premise is that the far side has the
-   * message, which in that case nobody does.
+   * answer: the host's resolver may have forgotten the name by then — a
+   * `/clear` takes the published id away — and the gate then falls back
+   * to the id on the frame. A rollback keyed differently from the record
+   * it means to undo is a silent no-op, and the stale baseline answers
+   * the sender's honest retry with `duplicate`, a verdict whose premise
+   * is that the far side has the message, which in that case nobody does.
+   * The hold allowance and the hold lifetime move the same way.
    */
-  dedupScope?: string;
+  addresseeAtHold?: string;
   heldAt: number;
   /**
    * Monotonic counterpart of `heldAt`, from `performance.now()`.
@@ -320,12 +333,17 @@ export interface HeldMessage {
  * `resolveSessionId` returned, so the two spellings a session can answer
  * to arrive as one name. It is not always: a message parked for a session
  * that has since left is re-judged with the id it carries, because the
- * resolver no longer knows that name — and so is one whose resolver
- * threw. **Every reader must tolerate a name it does not know**, and
- * answer rather than throw where it can. A reader that does throw is
- * caught here: the policy reads as unreadable, the mode as unknown, the
- * scope as absent and the lifetime as the default, all of which park the
- * message rather than deliver it.
+ * resolver no longer knows that name. **Every reader must tolerate a name
+ * it does not know**, and answer rather than throw where it can. A reader
+ * that does throw is caught here: the policy reads as unreadable, the
+ * mode as unknown, the scope as absent and the lifetime as the default,
+ * none of which deliver the message — it is parked, or refused outright
+ * by a host that has nowhere to park it (`presentsHolds`).
+ *
+ * A resolver that throws is different: the gate then has no addressee at
+ * all, so it does not ask the readers and holds the message as
+ * `policy-unreadable` rather than judging it by the spelling on the
+ * frame, which may answer to another session entirely.
  */
 export interface InboundGateOptions {
   /**
@@ -595,12 +613,23 @@ export class InboundGate {
   resolvePolicy(
     frame?: Pick<PeerUserFrame, 'fromMode' | 'toSessionId'>,
     origin?: PeerOrigin,
+    lookup: AddresseeLookup = this.lookUpAddressee(frame),
   ): PolicyDecision {
+    // A resolver that threw leaves the gate without an addressee, and
+    // there is no honest way to judge a message for a session nobody
+    // named: asking the readers about the id on the frame would judge it
+    // by whatever settings happen to answer to that spelling. Holding is
+    // the verdict for "this could not be decided" — and a host that
+    // cannot present a hold turns it into a refusal, which is equally
+    // honest about what happened.
+    if (lookup.unreadable) {
+      return { policy: 'hold', cause: 'policy-unreadable' };
+    }
     // Every reader below is asked about the session the host keeps this
     // frame's addressee under, not the spelling the sender happened to
     // use, so two spellings of one session are judged by one set of
     // settings.
-    const addressed = this.addressee(frame);
+    const addressed = this.addresseeNameOf(frame, lookup);
     // The setting is read from user configuration, so it can be missing,
     // misspelled, or backed by a getter that throws mid-teardown. None of
     // those are "the user asked for accept".
@@ -726,6 +755,13 @@ export class InboundGate {
     // trusting the timer to have fired.
     this.expireOverdue();
 
+    // Asked once, for the whole of this admission. `admit` is
+    // synchronous, but the host reads live state and a reader it calls
+    // could move the session map underneath a second lookup — and then
+    // the record admission wrote and the key the gate parks under would
+    // no longer name the same session.
+    const lookup = this.lookUpAddressee(frame);
+
     // Metered before the id lookups below, not after: those two answer a
     // re-sent id with a receipt each, so a peer looping on one id would
     // draw one outbound connection per message — and receipts share a
@@ -738,7 +774,7 @@ export class InboundGate {
       messageId: frame.msgId,
       // "The same thing again" is a question about one conversation. A
       // gate answering for one session has one, and passes nothing here.
-      dedupScope: this.dedupScope(frame),
+      dedupScope: this.dedupScope(frame, lookup),
       // A hook reporting the same line twice, or a user repeating
       // themselves to a controller, is not the model-driven repetition
       // the duplicate check exists to stop. Both are still rate limited.
@@ -782,7 +818,7 @@ export class InboundGate {
       return 'held';
     }
 
-    const decision = this.resolvePolicy(frame, origin);
+    const decision = this.resolvePolicy(frame, origin, lookup);
     // A host with no way to put a parked message in front of anyone turns
     // every hold into a refusal. Parking one there would leave it waiting
     // on a decision nobody can be asked for, until it expires — and the
@@ -850,10 +886,12 @@ export class InboundGate {
       return 'accept';
     }
 
-    const heldKey = this.heldSessionKey(frame);
+    const heldKey = this.answersForSeveralSessions
+      ? this.addresseeKeyOf(frame, lookup)
+      : '';
     let heldForSession = 0;
     for (const entry of this.held) {
-      if (this.heldSessionKey(entry.frame) === heldKey) heldForSession += 1;
+      if (this.heldKey(entry) === heldKey) heldForSession += 1;
     }
     if (heldForSession >= MAX_HELD_MESSAGES) {
       // The newcomer is turned away rather than a parked message evicted.
@@ -870,12 +908,13 @@ export class InboundGate {
 
     const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
     const scope = decision.policy === 'hold' ? decision.scope : undefined;
-    const heldDedupScope = this.dedupScope(frame);
     this.held.push({
       frame,
       cause,
       ...(scope === undefined ? {} : { policyScope: scope }),
-      ...(heldDedupScope === undefined ? {} : { dedupScope: heldDedupScope }),
+      ...(lookup.resolved === undefined
+        ? {}
+        : { addresseeAtHold: lookup.resolved }),
       heldAt: Date.now(),
       monotonicAt: performance.now(),
       ...(origin.selfSent ? { selfSent: true } : {}),
@@ -952,7 +991,11 @@ export class InboundGate {
       // A person saw this one, so the far *model* still did not: a
       // verbatim retry deserves the same review rather than a `duplicate`
       // asserting the content is already over there.
-      this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
+      this.forgetAdmittedBody(
+        entry.frame,
+        originOf(entry),
+        this.heldDedupScope(entry),
+      );
       this.recordSettled(entry.frame.msgId, 'denied');
       void this.report(entry.frame, 'denied');
     }
@@ -1010,7 +1053,11 @@ export class InboundGate {
         // 'denied', not 'refused': this message was admitted and parked,
         // and what settles it now is the user switching the setting —
         // a decision, made after the fact, by a person.
-        this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
+        this.forgetAdmittedBody(
+          entry.frame,
+          originOf(entry),
+          this.heldDedupScope(entry),
+        );
         this.recordSettled(entry.frame.msgId, 'denied');
         void this.report(entry.frame, 'denied');
       } else {
@@ -1088,7 +1135,11 @@ export class InboundGate {
       `shutdown: expiring ${settling.length} held peer message(s)`,
     );
     const receipts = settling.map((entry) => {
-      this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
+      this.forgetAdmittedBody(
+        entry.frame,
+        originOf(entry),
+        this.heldDedupScope(entry),
+      );
       return this.report(entry.frame, 'expired');
     });
     this.notifyHeldChange();
@@ -1128,23 +1179,66 @@ export class InboundGate {
    * to come out of here — `admit` has a message in hand — and the honest
    * fallback is the name the sender used.
    */
-  private addressee(
+  private lookUpAddressee(
     frame: Pick<PeerUserFrame, 'toSessionId'> | undefined,
-  ): string | undefined {
+  ): AddresseeLookup {
     const resolveSessionId = this.options.resolveSessionId;
     if (!resolveSessionId || frame?.toSessionId === undefined) {
-      return frame?.toSessionId;
+      return {};
     }
     try {
-      return resolveSessionId(frame.toSessionId) ?? frame.toSessionId;
+      const resolved = resolveSessionId(frame.toSessionId);
+      return resolved === undefined ? {} : { resolved };
     } catch (error) {
       debugLogger.debug(
-        `the session-name resolver threw (judging by the id on the frame): ${
+        `the session-name resolver threw; the addressee is unreadable: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return frame.toSessionId;
+      return { unreadable: true };
     }
+  }
+
+  /**
+   * The name a settings reader is asked about.
+   *
+   * The host's answer when it gave one. Otherwise the id on the frame,
+   * which is all there is: a message parked for a session that has since
+   * left is re-judged after the host stopped recognizing its name, and
+   * the readers have to answer for it one last time so the sweep can
+   * settle it.
+   */
+  private addresseeNameOf(
+    frame: Pick<PeerUserFrame, 'toSessionId'> | undefined,
+    lookup: AddresseeLookup,
+  ): string | undefined {
+    return lookup.resolved ?? frame?.toSessionId;
+  }
+
+  /**
+   * The key the gate derives from an addressee: which hold allowance it
+   * counts against, and which conversation the repeat check measures it
+   * against.
+   *
+   * The host's answer is used verbatim, because it is already canonical:
+   * it is the one name that host keeps the session under, so two ids it
+   * recognizes arrive as one key, and two sessions it tells apart keep
+   * two. Folding it further would merge sessions the host distinguishes
+   * on purpose — Arena keeps the case of its `-agent-` suffix, so
+   * `…-agent-Foo` and `…-agent-foo` are two sessions, and one key for
+   * both would let a line sent to the second be judged a repeat of the
+   * line sent to the first.
+   *
+   * Only a name the host did not give is folded, and only for case. There
+   * the id on the frame is all there is, nobody has claimed it, and two
+   * spellings of it must not open two allowances — the defence the gate
+   * had before a resolver existed.
+   */
+  private addresseeKeyOf(
+    frame: Pick<PeerUserFrame, 'toSessionId'> | undefined,
+    lookup: AddresseeLookup,
+  ): string {
+    return lookup.resolved ?? frame?.toSessionId?.toLowerCase() ?? '';
   }
 
   /**
@@ -1155,45 +1249,48 @@ export class InboundGate {
    * difference. Read by `admit` and by every rollback, so the two cannot
    * key the same record differently.
    */
-  private dedupScope(frame: PeerUserFrame): string | undefined {
+  private dedupScope(
+    frame: PeerUserFrame,
+    lookup: AddresseeLookup = this.lookUpAddressee(frame),
+  ): string | undefined {
     if (!this.answersForSeveralSessions) return undefined;
-    return this.addresseeKey(frame);
+    return this.addresseeKeyOf(frame, lookup);
   }
 
   /**
-   * The addressee, folded to one spelling, for the keys the gate derives
-   * from it: the hold bucket and the repeat window.
+  /**
+   * Everything a parked message needs about its addressee, from the
+   * answer the host gave when it was parked.
    *
-   * The host resolves the names it knows to one, which is what lets the
-   * two ids a session answers to share an allowance. It is not obliged to
-   * fold every id shape it is handed, though — the one real host folds
-   * caller-supplied ids and leaves internal and legacy ones spelled as
-   * they came — and a name it does not recognize comes back here as the
-   * sender wrote it. So the gate keeps its own fold, which is the defence
-   * it had before a resolver existed: two spellings of one session must
-   * not buy two allowances. Case is all it can fold; anything more is the
-   * host's to know.
-   *
-   * Only for keys. A settings reader is asked about the name the host
-   * gave back, not this one, because that is the name the host can look
-   * up.
+   * Asking again would not mean the same message. The host can stop
+   * recognizing a name while a message waits under it — a `/clear` takes
+   * the published id away — and the gate would then count the message
+   * against a different allowance, roll it back under a different key,
+   * and read a lifetime for a session nobody named. The entry carries
+   * what it was parked with so all three keep meaning the session it was
+   * parked for.
    */
-  private addresseeKey(frame: PeerUserFrame): string {
-    return this.addressee(frame)?.toLowerCase() ?? '';
+  private heldLookup(entry: HeldMessage): AddresseeLookup {
+    return entry.addresseeAtHold === undefined
+      ? {}
+      : { resolved: entry.addresseeAtHold };
   }
 
-  /**
-   * The session a held message counts against for the hold cap.
-   *
-   * One bucket unless this gate answers for several sessions: a session
-   * receives frames both pinned to it and unpinned, and counting those
-   * apart would hand one session two allowances. Two spellings of one
-   * session share a bucket — the host resolves the ones it knows to one
-   * name, and `addresseeKey` folds the case of whatever comes back.
-   */
-  private heldSessionKey(frame: PeerUserFrame): string {
+  /** The name a settings reader is asked about, for a parked message. */
+  private heldAddressee(entry: HeldMessage): string | undefined {
+    return this.addresseeNameOf(entry.frame, this.heldLookup(entry));
+  }
+
+  /** The hold allowance a parked message counts against. */
+  private heldKey(entry: HeldMessage): string {
     if (!this.answersForSeveralSessions) return '';
-    return this.addresseeKey(frame);
+    return this.addresseeKeyOf(entry.frame, this.heldLookup(entry));
+  }
+
+  /** The repeat record a parked message's rollback has to undo. */
+  private heldDedupScope(entry: HeldMessage): string | undefined {
+    if (!this.answersForSeveralSessions) return undefined;
+    return this.heldKey(entry);
   }
 
   /**
@@ -1202,7 +1299,11 @@ export class InboundGate {
    * from the duplicate window, and its sender told.
    */
   private settleMisaddressed(entry: HeldMessage): void {
-    this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
+    this.forgetAdmittedBody(
+      entry.frame,
+      originOf(entry),
+      this.heldDedupScope(entry),
+    );
     this.recordSettled(entry.frame.msgId, 'misaddressed');
     void this.report(entry.frame, 'misaddressed');
   }
@@ -1402,7 +1503,7 @@ export class InboundGate {
     // one is a lookup.
     const expired: Array<{ entry: HeldMessage; expiryMs: number }> = [];
     for (const entry of this.held) {
-      const expiryMs = this.getHeldExpiryMs(this.addressee(entry.frame));
+      const expiryMs = this.getHeldExpiryMs(this.heldAddressee(entry));
       if (expiryMs !== null && this.ageOf(entry) >= expiryMs) {
         expired.push({ entry, expiryMs });
       } else {
@@ -1420,7 +1521,11 @@ export class InboundGate {
             entry.frame.toSessionId ?? 'unpinned'
           } holds for ${expiryMs} ms)`,
       );
-      this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
+      this.forgetAdmittedBody(
+        entry.frame,
+        originOf(entry),
+        this.heldDedupScope(entry),
+      );
       this.recordSettled(entry.frame.msgId, 'expired');
       void this.report(entry.frame, 'expired');
     }
@@ -1451,7 +1556,7 @@ export class InboundGate {
     // is not necessarily the next to expire.
     let remaining: number | null = null;
     for (const entry of this.held) {
-      const expiryMs = this.getHeldExpiryMs(this.addressee(entry.frame));
+      const expiryMs = this.getHeldExpiryMs(this.heldAddressee(entry));
       if (expiryMs === null) continue;
       const left = expiryMs - this.ageOf(entry);
       if (remaining === null || left < remaining) remaining = left;

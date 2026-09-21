@@ -193,9 +193,9 @@ interface SenderMeter {
    * Bodies admitted inside the dedup window, in arrival order.
    *
    * The gate can roll back admitted messages in any order, so one previous
-   * slot is not enough. The latest record is the duplicate baseline; older
-   * records remain only long enough to become the baseline if a later
-   * undelivered message is removed.
+   * slot is not enough. The latest record *for an addressee* is that
+   * addressee's duplicate baseline; older records remain only long enough
+   * to become the baseline if a later undelivered message is removed.
    */
   bodies: AdmittedBody[];
 }
@@ -375,9 +375,10 @@ export class PeerAdmission {
    * retry then meets the repeat check it would have met had this message
    * never arrived.
    *
-   * Removes only this message's record. A later admitted message remains
-   * the duplicate baseline, and the body admitted before this one keeps
-   * the protection it earned if it becomes the latest remaining record.
+   * Removes only this message's record, under the addressee it was
+   * recorded for. A later admitted message to that addressee remains its
+   * duplicate baseline, and the body admitted before this one keeps the
+   * protection it earned if it becomes the latest remaining record.
    *
    * The token stays spent. It is the only bound on how often a peer can
    * make the receiver attempt, and fail, a delivery.

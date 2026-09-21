@@ -355,7 +355,12 @@ export const peersCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: formatHeldList(held, (entry) =>
-          peerMessaging.getHeldExpiryMs(entry.frame.toSessionId),
+          // The name the gate will act on, not the spelling the sender
+          // used: a countdown read for a different name is a countdown
+          // for a different session's setting.
+          peerMessaging.getHeldExpiryMs(
+            entry.addresseeAtHold ?? entry.frame.toSessionId,
+          ),
         ),
       };
     }

@@ -140,6 +140,10 @@ would mostly contribute stale records.
 **Outbound only.** A hosted session can send and receives its own
 receipts; what it cannot do is take a message in. That is the next step,
 and the protocol page says so rather than leaving a reader to discover it.
+The gate it will use judges each message by the name `resolveSessionId`
+gives for the addressee, and keys the hold allowance and the repeat
+window on that name — so a session answering to two ids gets one
+allowance, and two sessions a host tells apart keep two.
 
 **`kind` is still a self-report.** `serve` comes from the environment
 marker the daemon sets on its children, which a process could set for
