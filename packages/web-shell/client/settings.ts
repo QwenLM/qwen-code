@@ -132,17 +132,3 @@ export function isSettingExcluded(
   if (includeItems === undefined) return false;
   return !ids.some((id) => includeItems.includes(id));
 }
-
-export function isItemExcluded(
-  id: WebShellSettingItemId,
-  options?: WebShellSettingsOptions,
-): boolean {
-  return !isItemVisible(id, options);
-}
-
-export function isSettingExcluded(
-  key: string,
-  options?: WebShellSettingsOptions,
-): boolean {
-  return !isSettingVisible(key, options);
-}
