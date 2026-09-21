@@ -311,12 +311,7 @@ jobs:
         working-directory: '${{ runner.temp }}/qwen-code-source'
         env:
           QWEN_SKIP_PREPARE: '1'
-        run: |-
-          if [ -f pnpm-lock.yaml ]; then
-            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
-          else
-            npm ci --no-audit --progress=false
-          fi
+        run: 'npm ci --no-audit --progress=false'
 
       - name: 'Install desktop dependencies'
         working-directory: 'packages/desktop-shell'
