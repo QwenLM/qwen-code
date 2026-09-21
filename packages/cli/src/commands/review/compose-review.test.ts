@@ -5987,6 +5987,14 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).toContain(
       '启动 prompt 为它指定了 diff 中的行，但它从未打开',
     );
+    // The Chinese half names the agent the same quoted, truncated way. With
+    // no `subjectZh` it falls back to the PUBLIC subject, never to the raw
+    // label: that is launch-prompt prose, and printed bare its `@mentions`
+    // and links go live on the PR page.
+    expect(r.body).toContain(
+      '未审查：`"This PR narrows the daemon-marker check from a truthy test…"`',
+    );
+    expect(r.body).not.toContain('未审查：This PR narrows');
   });
 
   it('keeps long agent labels distinct when their first word matches', () => {
@@ -6719,6 +6727,409 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
   });
 });
 
+describe('a record for a chunk the plan does not carry', () => {
+  // A record launched as `chunk 9 of 12` over a plan carrying chunks 1 and 2,
+  // both read. Its disclosures arrive as `chunk 9`, and the body collapses
+  // `chunk <id>` subjects into the author's units AGAINST THIS PLAN — so it
+  // told the author that 1 of their diff's 2 sections went unreviewed,
+  // beside a coverage report counting both as read.
+  const PHRASE = 'an agent launched for a chunk this plan does not carry';
+  const onDiff = (): string =>
+    'You are reviewing chunk 9 of 12.\n' +
+    `read_file(file_path="${DIFF}", offset=800, limit=100)`;
+
+  // `coveredPlan()` lays its own transcripts down, so it runs only when the
+  // test did not build a plan of its own.
+  const compose = (over: Record<string, unknown> = {}) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+      planPath: (over['planPath'] as string | undefined) ?? coveredPlan(),
+    });
+
+  // The arms of the coverage walk that disclose a chunk agent each name it
+  // `chunk <id>`, and they all reach the body through the one collapse — so
+  // each is driven here. `launch` runs before the plan is written; `stale`
+  // after, for the two arms that need a prompt record an earlier capture at
+  // this plan path left behind (`goodPrompt(9)` as its `chunk-9.txt`).
+  interface Arm {
+    launch: () => void;
+    stale?: boolean;
+    reason: RegExp;
+  }
+  const arms: Array<[string, Arm]> = [
+    [
+      'ran on a prompt nothing built',
+      {
+        launch: () =>
+          transcript('stale9', onDiff(), {
+            toolCalls: 1,
+            range: [800, 100],
+            text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+          }),
+        reason: /ran on a prompt the run wrote itself/,
+      },
+    ],
+    [
+      'made no tool call',
+      {
+        launch: () => transcript('stale9', onDiff()),
+        reason: /made no tool call/,
+      },
+    ],
+    [
+      'was launched blind',
+      {
+        launch: () =>
+          transcript('stale9', 'The changes are in chunk 9 of 12.', {
+            toolCalls: 1,
+          }),
+        reason: /never named the diff|could not have read/,
+      },
+    ],
+    [
+      'never opened the diff it was pointed at',
+      {
+        launch: () =>
+          transcript('stale9', goodPrompt(9), {
+            toolCalls: 1,
+            toolPath: join(dir, 'elsewhere.ts'),
+          }),
+        stale: true,
+        reason: /pointed at diff lines it never opened/,
+      },
+    ],
+    [
+      'was launched on a rewrite of a leftover prompt',
+      {
+        launch: () =>
+          // Reworded INSIDE the built text: a launch that merely appends to
+          // it still contains it verbatim, and is no rewrite.
+          transcript('stale9', goodPrompt(9).replace('reviewing', 'skimming'), {
+            toolCalls: 1,
+            range: [800, 100],
+            opens: [],
+          }),
+        stale: true,
+        reason: /not the one the CLI built/,
+      },
+    ],
+  ];
+
+  it.each(arms)(
+    'is not counted as a section of this diff when it %s',
+    (_arm, { launch, stale, reason }) => {
+      launch();
+      const p = coveredPlan();
+      if (stale) recordBuilt(p, 9);
+      const r = compose({ planPath: p });
+      expect(r.body).toMatch(reason);
+      expect(r.body).not.toContain("of the diff's 2 sections");
+      expect(r.body).not.toContain('the entire diff');
+      expect(r.body).toContain(PHRASE);
+      // The CLI does not mint the run's chunk id into the PR page.
+      expect(r.body).not.toContain('chunk 9');
+      // Still disclosed, and still capping.
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      expect(r.event).not.toBe('APPROVE');
+    },
+  );
+
+  const DECLARED =
+    'Not reviewed: a line of the diff that no read can reach — reported by ' +
+    'an agent launched for a chunk this plan does not carry.';
+
+  it('still says a line could not be read, in the scenario this PR is about', () => {
+    // No prompt was ever built for a chunk 9, so the record is ALSO a
+    // rewritten launch — and the body keeps one reason per subject, the first.
+    // Disclosed under the same subject, the declaration lost to it: the gate
+    // held, and the PR page no longer said any line went unread.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose();
+    expect(r.body).toContain(DECLARED);
+    expect(r.body).toMatch(/ran on a prompt the run wrote itself/);
+    // The cap main raised for it, by the name main raised it under.
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('still withholds the Approve over a stale declarer nothing else discloses', () => {
+    // Launched verbatim from a prompt an earlier capture left behind, so it
+    // is no rewritten launch — the declaration is its only disclosure. It
+    // read this diff and reported a line it could not reach; chunk 2's
+    // credit does not show anyone did. Counted as a phantom section, main
+    // capped this run; dropped with the phantom, it approved.
+    transcript('stale9', goodPrompt(9), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = coveredPlan();
+    recordBuilt(p, 9);
+    const r = compose({ planPath: p });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.cappedBy).toEqual(['uncoverable-chunk']);
+    // Everything an `uncoverable` entry moves, this moves: the reading is in
+    // doubt, so no incremental anchor is certified, and the opener says gaps
+    // were disclosed. Here the declaration is the ONLY thing that can.
+    expect(r.scopeUnproven).toBe(true);
+    expect(r.body).toContain('Partially reviewed');
+    expect(r.body).toContain(DECLARED);
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    expect(r.body).not.toContain('chunk 9');
+  });
+
+  it('says it once when the caller relays the same declaration', () => {
+    // The skill tells the orchestrator to carry every `Uncoverable:` return
+    // into the verdict, so the relay is the compliant path, not a corner.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body.split(DECLARED)).toHaveLength(2);
+    expect(r.body).not.toContain('chunk 9');
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    // …and no subject-less sentence is left where the relayed entry was.
+    expect(r.body).not.toMatch(/Not reviewed:\s+—/);
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('says it once when the relay names the file, and keeps the richer one', () => {
+    // The form the skill's own example gives for `uncoverableChunks`. Main
+    // keeps the caller's entry and does not add the walk's bare one beside
+    // it; the same here — the file is what the author can act on.
+    transcript('stale9', goodPrompt(9), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = coveredPlan(undefined, { han: true });
+    recordBuilt(p, 9);
+    const r = compose({
+      planPath: p,
+      uncoverableChunks: ['chunk 9', 'chunk 9 (src/big.min.js)'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: chunk 9 (src/big.min.js) — a line there exceeds the read limit.',
+    );
+    expect(r.body).not.toContain('no read can reach');
+    expect(r.body).not.toContain('任何读取都无法到达');
+    expect(r.body.split('exceeds the read limit')).toHaveLength(2);
+    expect(r.cappedBy).toEqual(['uncoverable-chunk']);
+  });
+
+  it('counts the declaration sentence by chunk too, and only what is unsaid', () => {
+    // Two records share id 9 and both declare; a third declares 10; the
+    // caller relays 10 with its file. One chunk is left for the sentence.
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          toolCalls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9a', 9);
+    declares('stale9b', 9);
+    declares('stale10', 10);
+    const both = compose();
+    expect(both.body).toContain(
+      'reported by agents launched for 2 chunks this plan does not carry.',
+    );
+
+    const one = compose({ uncoverableChunks: ['chunk 10 (src/other.ts)'] });
+    expect(one.body).toContain(
+      'reported by an agent launched for a chunk this plan does not carry.',
+    );
+    expect(one.body).toContain('chunk 10 (src/other.ts) — a line there');
+  });
+
+  it('takes only `chunk <id>` and `chunk <id> <more>` for a relay of it', () => {
+    // The same prefix rule the planned ids get (`startsWith(prefix + ' ')`):
+    // `chunk 9(src/x.ts)` is the caller's prose, not a relay the CLI can
+    // vouch for, so both statements stand — as they do on main.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9(src/x.ts)'] });
+    expect(r.body).toContain('chunk 9(src/x.ts) — a line there exceeds');
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('keeps every richer relay, and stands down only for the ids they name', () => {
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          toolCalls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9', 9);
+    declares('stale10', 10);
+    // Both ids relayed with their files, one of them twice over: every
+    // entry is kept, and no sentence of the CLI's is left to say.
+    const r = compose({
+      uncoverableChunks: [
+        'chunk 10 (src/b.min.js)',
+        'chunk 9 (src/x.min.js)',
+        'chunk 9 (src/y.min.js)',
+      ],
+    });
+    expect(r.body).toContain(
+      'chunk 10 (src/b.min.js), chunk 9 (src/x.min.js), chunk 9 (src/y.min.js) — a line there',
+    );
+    expect(r.body).not.toContain('no read can reach');
+  });
+
+  it('does not take a trailing space for a richer relay', () => {
+    // `chunk 9 ` names no file: kept as the caller's words, it would leave
+    // "a line THERE" pointing at a chunk this plan does not have.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9 '] });
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('leaves the caller\u2019s own prose exactly as main rendered it', () => {
+    // Planned-only input: nothing here is this change's to touch, repeats
+    // included.
+    const r = compose({
+      uncoverableChunks: ['chunk 2 (src/b.ts)', 'chunk 2 (src/b.ts)'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: chunk 2 (src/b.ts), chunk 2 (src/b.ts) — a line there exceeds the read limit.',
+    );
+  });
+
+  it('does not swallow a relayed id that is not the one declared', () => {
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 10', 'chunk 10'] });
+    // The caller's only statement about chunk 10 — kept, and said once.
+    expect(r.body).toContain('chunk 10 — a line there exceeds the read limit');
+    expect(r.body).not.toContain('chunk 10, chunk 10');
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('does not swallow a relayed id the walk did NOT find declared', () => {
+    // An idle record for the same id discloses something else entirely; the
+    // caller's entry is then the only statement of an unreadable line.
+    transcript('stale9', onDiff());
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body).toContain('chunk 9 — a line there exceeds the read limit');
+    expect(r.body).toContain(PHRASE);
+  });
+
+  it('says the declaration in Chinese too', () => {
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain(
+      '未审查：diff 中有一行超出单次读取上限、任何读取都无法到达——由一个被指派到当前 plan 中不存在的 chunk 的 agent 报告。',
+    );
+  });
+
+  it('counts several of them in the phrase, by chunk, in both languages', () => {
+    // Not `an agent … (×2)`, which is how other repeated subjects render —
+    // and by chunk, not by record: disclosures are kept one per subject, so
+    // records that share an id arrive here as one.
+    transcript('stale9', onDiff());
+    transcript(
+      'stale10',
+      'You are reviewing chunk 10 of 12.\n' +
+        `read_file(file_path="${DIFF}", offset=900, limit=100)`,
+    );
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain(
+      'agents launched for 2 chunks this plan does not carry',
+    );
+    expect(r.body).toContain(
+      '被指派到当前 plan 中不存在的 2 个 chunk 的 agent',
+    );
+    expect(r.body).not.toContain('×2');
+  });
+
+  it('still collapses a planned chunk into the units the author reads', () => {
+    // The control: only an id the plan does not carry leaves the collapse.
+    // Chunk 2's one agent made no tool call, so the same arm fires for an id
+    // the plan DOES carry.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2));
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+    const r = compose({ planPath: p });
+    expect(r.body).toMatch(/made no tool call/);
+    expect(r.body).toMatch(
+      /the diff section covering|of the diff's 2 sections/,
+    );
+    expect(r.body).not.toContain(PHRASE);
+  });
+
+  it('renders a caller-relayed bare id the plan lacks as the caller wrote it', () => {
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    expect(r.body).toContain('chunk 9');
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('keeps counting a caller-relayed bare id when there is no plan to ask', () => {
+    // With no chunk table nothing can be called foreign to it: the entry
+    // renders through the counting fallback exactly as it always has.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      uncoverableChunks: ['chunk 5'],
+    });
+    expect(r.body).toContain('1 section of the diff');
+    expect(r.body).not.toContain('chunk 5');
+  });
+
+  it('names it in Chinese too, for an author who writes Chinese', () => {
+    transcript('stale9', onDiff());
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain('一个被指派到当前 plan 中不存在的 chunk 的 agent');
+    expect(r.body).not.toContain('diff 2 个片段中的 1 个');
+  });
+
+  it('still counts a caller-relayed bare id the plan does carry', () => {
+    const r = compose({ uncoverableChunks: ['chunk 2'] });
+    expect(r.body).not.toContain('chunk 2');
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+});
+
 describe('the coverage-failure arms keep their own messages', () => {
   const compose = (p: string) =>
     composeReview({
@@ -6733,7 +7144,8 @@ describe('the coverage-failure arms keep their own messages', () => {
     // Outcomes that do not partition the plan are a defect in coverage.ts.
     // Folded into the generic arm, an operator handed "the plan could not be
     // used" goes to re-capture a diff that was never the problem.
-    const p = coveredPlan();
+    // A Chinese-writing author's plan, so the zh half of the arm renders too.
+    const p = coveredPlan(undefined, { han: true });
     const spy = vi
       .spyOn(coverageModule, 'coverageFromTranscripts')
       .mockImplementation(() => {
@@ -6746,6 +7158,8 @@ describe('the coverage-failure arms keep their own messages', () => {
       expect(r.body).toContain('the coverage check contradicted its own plan');
       expect(r.body).toContain('chunk 2 is both covered and missing');
       expect(r.body).not.toContain('the plan could not be used');
+      expect(r.body).toContain('覆盖率检查与其自身的 plan 相矛盾');
+      expect(r.body).not.toContain('plan 无法使用');
       // Fail-closed, like its two siblings: a run that cannot show what it
       // read has not shown it read anything.
       expect(r.cappedBy).toContain('unreviewed-dimension');
@@ -6757,7 +7171,7 @@ describe('the coverage-failure arms keep their own messages', () => {
 
   it('keeps the unusable-plan message for an unusable plan', () => {
     // The control: the new arm must not have taken the generic one's input.
-    const p = coveredPlan();
+    const p = coveredPlan(undefined, { han: true });
     const spy = vi
       .spyOn(coverageModule, 'coverageFromTranscripts')
       .mockImplementation(() => {
@@ -6767,6 +7181,9 @@ describe('the coverage-failure arms keep their own messages', () => {
       const r = compose(p);
       expect(r.body).toContain('the plan could not be used');
       expect(r.body).not.toContain('contradicted its own plan');
+      // …in the Chinese half as well.
+      expect(r.body).toContain('plan 无法使用');
+      expect(r.body).not.toContain('覆盖率检查与其自身的 plan 相矛盾');
     } finally {
       spy.mockRestore();
     }

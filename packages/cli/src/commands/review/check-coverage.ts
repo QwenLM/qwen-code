@@ -242,10 +242,30 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `that made no call still returned confident, specific text.`,
     );
   }
-  if (report.uncoverableChunks.length > 0) {
+  // One failure, whichever list holds it: an agent declared a line no read
+  // can reach. A declarer whose chunk id this plan does not carry is named as
+  // an agent rather than listed as a chunk — the plan has no such chunk —
+  // and owes the same ruling.
+  if (
+    report.uncoverableChunks.length > 0 ||
+    report.unplannedDeclarations.length > 0
+  ) {
+    const declared: string[] = [];
+    if (report.uncoverableChunks.length > 0) {
+      declared.push(
+        `${report.uncoverableChunks.length} chunk(s) were declared ` +
+          `uncoverable — ${report.uncoverableChunks.join(', ')}`,
+      );
+    }
+    if (report.unplannedDeclarations.length > 0) {
+      declared.push(
+        `agents launched for ${report.unplannedDeclarations.length} chunk(s) ` +
+          `this plan does not carry declared a line uncoverable — ` +
+          report.unplannedDeclarations.join(', '),
+      );
+    }
     writeStderrLine(
-      `ERROR: ${report.uncoverableChunks.length} chunk(s) were declared ` +
-        `uncoverable — ${report.uncoverableChunks.join(', ')}. A diff with a ` +
+      `ERROR: ${declared.join('; ')}. A diff with a ` +
         `line no read can reach was not reviewed; the verdict may not approve on ` +
         `its strength. Report them to the user as an unreviewed gap.`,
     );

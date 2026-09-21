@@ -190,6 +190,27 @@ export interface CoverageFromTranscripts {
   /** Chunk ids an agent declared unreachable. */
   uncoverableChunks: number[];
   /**
+   * Chunk ids an agent declared unreachable that this plan does NOT carry —
+   * a record launched as `chunk 9 of 12` over a plan of two.
+   *
+   * The other half of what `uncoverableChunks` used to hold: the two are
+   * split by one test, under the same supersession guard, so their union is
+   * exactly the set main computed and `ok` is what it was. Kept out of
+   * `uncoverableChunks` because the id is not a chunk of this plan — listed
+   * there it was counted as a section of the diff, in the summary's
+   * denominator and in the posted body. Kept in the report, and in `ok`,
+   * because the declaration may still be evidence about this diff: a
+   * record passes the plan's mtime fence when its transcript was written
+   * after the plan, and a planned chunk is credited to any agent pointed at
+   * its lines that opened the diff at all, which does not show that agent
+   * reached the line this one could not.
+   *
+   * Ids, not records, like the list beside it: a chunk agent's label IS its
+   * chunk id, so two declarers of one id are one entry here as they were
+   * one entry there.
+   */
+  unplannedDeclarations: number[];
+  /**
    * `Budget gap: <the check>` lines parsed from agent returns — the fixed
    * disclosure format the tool-budget brief mandates when an agent's soft
    * ceiling stopped a check it wanted. Detection is deterministic (this
@@ -521,6 +542,7 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const unplannedDeclared = new Set<number>();
   const driftedLaunches: string[] = [];
   // Used by the verbatim-drift rescue in both the chunk loop and the roster
   // walk, and by the roster's matching seed below.
@@ -874,18 +896,18 @@ export function coverageFromTranscripts(
       // relaunches an agent that re-declares, forever. `gapsSuperseded`
       // below excludes same-shape records for exactly this reason.
       //
-      // And only for a chunk this plan carries. `chunk` is read out of the
-      // launch prompt's text, so a record written against another chunking
-      // of this diff — `chunk 9 of 12` on a plan that now has two — declared
-      // an id nothing here plans, and admitting it reported a chunk that
-      // does not exist as not reviewed: `uncoverableChunks: [9]` beside
-      // `plannedChunks` 1 and 2. The record is still disclosed — no prompt
-      // was built for that chunk, so it is already in `rewrittenPrompts`.
+      // And as a CHUNK only when this plan carries it. `chunk` is read out of
+      // the launch prompt's text, so a record written against another
+      // chunking of this diff — `chunk 9 of 12` on a plan that now has two —
+      // declared an id nothing here plans, and admitting it reported a chunk
+      // that does not exist as not reviewed: `uncoverableChunks: [9]` beside
+      // `plannedChunks` 1 and 2. Same guard, other list — see
+      // `unplannedDeclarations` for why it still fails the gate.
       if (
-        plan.chunks.some((c) => c.id === chunk) &&
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
       ) {
-        uncoverable.add(chunk);
+        if (plan.chunks.some((c) => c.id === chunk)) uncoverable.add(chunk);
+        else unplannedDeclared.add(chunk);
       }
       continue;
     }
@@ -1216,6 +1238,7 @@ export function coverageFromTranscripts(
       // no read can reach was not reviewed, and the verdict may not be Approve on
       // its strength. `compose-review` already caps on it; the report must agree.
       uncoverable.size === 0 &&
+      unplannedDeclared.size === 0 &&
       missingChunks.length === 0,
     agents: records.length,
     recoveredAgents,
@@ -1230,6 +1253,7 @@ export function coverageFromTranscripts(
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
+    unplannedDeclarations: [...unplannedDeclared].sort((a, b) => a - b),
     budgetGaps,
     coveredChunks: [...covered].sort((a, b) => a - b),
     plannedChunks: plan.chunks.map((c) => ({

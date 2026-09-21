@@ -1801,10 +1801,141 @@ describe('coverage — the outcomes partition the plan', () => {
     expect(r.coveredChunks).toEqual([1, 2]);
     expect(r.missingChunks).toEqual([]);
     expect(r.uncoverableChunks).toEqual([]);
-    // Dropped from the outcome, not from the report: no prompt was built for
-    // a chunk 9, so the record is still named where it was before.
+    // Out of the chunk outcomes, not out of the report: the declaration is
+    // still evidence about this diff, so its id is kept — in a list of its
+    // own, not among this plan's chunks — and still fails the gate, exactly
+    // as it did before.
+    expect(r.unplannedDeclarations).toEqual([9]);
+    // …beside the disclosure it always had: no prompt was built for a chunk 9.
     expect(r.rewrittenPrompts.join(' ')).toContain('chunk 9');
     expect(r.ok).toBe(false);
+  });
+
+  it('keeps a stale declarer failing the gate when nothing else discloses it', () => {
+    // Nothing clears the prompt-record dir, and it hangs off the plan path:
+    // a re-capture at the same path leaves the old chunking's `chunk-9.txt`
+    // beside the new plan. A record delivered verbatim from it is no
+    // rewritten launch, so the declaration is the ONLY thing that names it.
+    // It read THIS diff — it names this diff file and ran after this plan was
+    // written — and chunk 2 is credited on a presumption that does not show
+    // its agent reached the line. Dropped with the phantom chunk, this run
+    // was `ok: true` and an Approve.
+    const stale =
+      'You are reviewing chunk 9 of 12.\n' +
+      `read_file(file_path="${chunkBrief(9)}")\n` +
+      `read_file(file_path="${DIFF}", offset=800, limit=100)`;
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    transcript('stale9', stale, {
+      calls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = plan();
+    built(p, 9, stale);
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.unplannedDeclarations).toEqual([9]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('stands an unplanned declaration down under the same guard as a planned one', () => {
+    // The split is one test under ONE guard, so the two lists together are
+    // exactly the set main computed and `ok` is what it was. A second record
+    // for the same id — launched verbatim, returned, read the diff, declared
+    // nothing — stands the declaration down for a planned chunk, and must for
+    // this one too: without it this run failed a gate main passed.
+    const stale =
+      'You are reviewing chunk 9 of 12.\n' +
+      `read_file(file_path="${chunkBrief(9)}")\n` +
+      `read_file(file_path="${DIFF}", offset=800, limit=100)`;
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    transcript('stale9', stale, {
+      calls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    transcript('again9', stale, { calls: 1, range: [800, 100] });
+    const p = plan();
+    built(p, 9, stale);
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.unplannedDeclarations).toEqual([]);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('says so on stderr inside the declared-uncoverable failure, and refuses', () => {
+    // Not a ninth kind of failure: the skill rules eight, and this is the
+    // eighth — an agent declared a line no read can reach — named as an agent
+    // because the plan has no such chunk to list.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    staleDeclarer();
+
+    const { lines, exitCode } = stderrOfCheckCoverage(plan());
+    const line = lines.find((l) => l.includes('declared a line uncoverable'));
+    expect(line).toMatch(
+      /^ERROR: agents launched for 1 chunk\(s\) this plan does not carry declared a line uncoverable — 9\. A diff with a line no read can reach/,
+    );
+    expect(line).toContain('the verdict may not approve on its strength');
+    expect(line).toContain('Report them to the user as an unreviewed gap.');
+    // The plan has no chunk 9, so none is listed as a chunk.
+    expect(lines.some((l) => l.includes('chunk(s) were declared'))).toBe(false);
+    expect(exitCode).toBe(3);
+  });
+
+  it('lists them by chunk id, once each, beside the planned ones', () => {
+    // Ids, like the list beside it — main's was a set, so two declarers of
+    // one id were one entry there and are one entry here.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 2,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    staleDeclarer();
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          calls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9again', 9);
+    declares('stale10', 10);
+
+    const p = plan();
+    expect(coverageFromTranscripts(p, ENV).unplannedDeclarations).toEqual([
+      9, 10,
+    ]);
+    const { lines } = stderrOfCheckCoverage(p);
+    const line = lines.find((l) => l.includes('declared a line uncoverable'));
+    expect(line).toMatch(
+      /^ERROR: 1 chunk\(s\) were declared uncoverable — 2; agents launched for 2 chunk\(s\) this plan does not carry declared a line uncoverable — 9, 10\. /,
+    );
+  });
+
+  it('keeps the planned wording of that failure exactly as it was', () => {
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 2,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const { lines } = stderrOfCheckCoverage(plan());
+    expect(lines).toContain(
+      'ERROR: 1 chunk(s) were declared uncoverable — 2. A diff with a ' +
+        'line no read can reach was not reviewed; the verdict may not approve on ' +
+        'its strength. Report them to the user as an unreviewed gap.',
+    );
   });
 
   it('still admits the declaration of a chunk the plan does carry', () => {
@@ -1821,7 +1952,7 @@ describe('coverage — the outcomes partition the plan', () => {
     expect(r.missingChunks).toEqual([]);
   });
 
-  it('prints the plan\u2019s chunk count as the denominator', () => {
+  it('prints 2/2, not 2/3, over a two-chunk plan with a stale declarer', () => {
     // Summed from the three outcome lists, the stale declarer above made this
     // line read `2/3 chunk(s) reviewed` over a two-chunk plan.
     transcript('a1', good(1), { calls: 2 });
@@ -1845,6 +1976,22 @@ describe('coverage — the outcomes partition the plan', () => {
     expect(lines.find((l) => l.startsWith('Coverage:'))).toMatch(
       /^Coverage: 1\/2 chunk\(s\) reviewed\./,
     );
+  });
+
+  it('leaves any other fault of the coverage walk to surface as itself', () => {
+    // The control for the arm below: only a partition failure is reported in
+    // those words. Widened to any error, an unusable plan read as a defect
+    // in the coverage check.
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new Error('coverage: plan.json has no chunks[]');
+      });
+    try {
+      expect(() => stderrOfCheckCoverage(plan())).toThrow(/has no chunks\[\]/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('refuses in its own words when the outcomes contradict the plan', () => {
@@ -1875,6 +2022,20 @@ describe('assertChunkPartition', () => {
     uncoverable: number[] = [],
   ) => ({ covered, missing, uncoverable });
 
+  /**
+   * The refusal, as the class its callers switch on: every branch must throw
+   * `ChunkPartitionError`, or that branch reaches them as an unusable plan.
+   */
+  const refusal = (run: () => void): string => {
+    try {
+      run();
+    } catch (err) {
+      expect(err).toBeInstanceOf(ChunkPartitionError);
+      return (err as Error).message;
+    }
+    throw new Error('expected a refusal, and nothing was thrown');
+  };
+
   it('accepts every planned chunk having exactly one outcome', () => {
     expect(() =>
       assertChunkPartition([1, 2, 3], outcomes([1], [2], [3])),
@@ -1883,35 +2044,29 @@ describe('assertChunkPartition', () => {
   });
 
   it('refuses a planned chunk with no outcome', () => {
-    expect(() => assertChunkPartition([1, 2], outcomes([1]))).toThrow(
+    expect(refusal(() => assertChunkPartition([1, 2], outcomes([1])))).toMatch(
       /chunk 2 has no outcome/,
     );
   });
 
   it('refuses an outcome for a chunk the plan does not carry', () => {
-    expect(() =>
-      assertChunkPartition([1, 2], outcomes([1, 2], [], [9])),
-    ).toThrow(/chunk 9 is uncoverable but the plan does not carry it/);
+    expect(
+      refusal(() => assertChunkPartition([1, 2], outcomes([1, 2], [], [9]))),
+    ).toMatch(/chunk 9 is uncoverable but the plan does not carry it/);
   });
 
   it('refuses a chunk with two outcomes', () => {
-    expect(() => assertChunkPartition([1, 2], outcomes([1, 2], [2]))).toThrow(
-      /chunk 2 is both covered and missing/,
-    );
+    expect(
+      refusal(() => assertChunkPartition([1, 2], outcomes([1, 2], [2]))),
+    ).toMatch(/chunk 2 is both covered and missing/);
   });
 
   it('refuses a chunk listed twice under one outcome', () => {
     // A duplicate inside one list is what the old summed denominator counted
     // twice without any two lists disagreeing.
-    expect(() => assertChunkPartition([1, 2], outcomes([1, 1, 2]))).toThrow(
-      /chunk 1 is listed twice as covered/,
-    );
-  });
-
-  it('throws its own class, so a caller can tell it from an unusable plan', () => {
-    expect(() => assertChunkPartition([1], outcomes([]))).toThrow(
-      ChunkPartitionError,
-    );
+    expect(
+      refusal(() => assertChunkPartition([1, 2], outcomes([1, 1, 2]))),
+    ).toMatch(/chunk 1 is listed twice as covered/);
   });
 });
 
