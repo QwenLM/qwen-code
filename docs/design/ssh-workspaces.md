@@ -111,14 +111,14 @@ must remain local.
 The remote host needs Python 3, a POSIX shell and the tools required by the
 project. File tools accept UTF-8 text; binary previews/uploads use the byte API.
 Whole text reads and remote writes are limited to 16 MiB, with the existing smaller Web Shell text read/write limits retained. SSH binary uploads also have a 16 MiB limit; larger uploads fail with HTTP 413. Large text reads use line/limit windows. Byte reads seek directly to the requested offset, including in files larger than 16 MiB, and omit a full-file hash for partial windows. Search respects `.gitignore` and `.qwenignore` in
-Git repositories; non-Git projects containing ignore files fail explicitly.
+Git repositories, together with the effective `context.fileFiltering.customIgnoreFiles` (default `.agentignore` and `.aiignore`). An explicit empty custom list retains `.qwenignore`. Non-Git projects containing these ignore files fail explicitly, including configured relative ignore-file paths.
 Search reports incomplete results when entries are unreadable, a file exceeds the text scan cap, Git warns of skipped entries or a checked-out submodule is omitted. Submodule content can be inspected through the SSH shell. Dubious Git ownership is an explicit error and never changes Git trust configuration. Git inspection includes status and working-tree diffs. Above 500 changed files, the overview returns counts without file details, matching the local fast path. Large untracked previews retain the
 1,000,000-byte/400-line limits and report truncation; their line counts cover the bounded
 preview. Run other Git commands in the SSH terminal
 or through the agent shell tool.
 
 Background shell jobs, local shortcut commands that operate on the project,
-worktrees, hooks, skills, MCP/LSP, subagents, workflows, automatic memory and artifact
+worktrees, hooks, skills, MCP/LSP, subagents, workflows, channels, automatic memory and artifact
 discovery are unavailable for SSH sessions. Session history, model selection
-and approvals remain local. This version uses one SSH process per operation;
+and approvals remain local. Compound shell approvals persist per-command rules and retain shell-substitution warnings alongside the SSH warning. SSH workspaces are excluded from channel startup restoration and channel ownership selection. This version uses one SSH process per operation;
 it does not install a remote agent or synchronize a local project copy. Writes clean up temporary files after ordinary failures; abrupt remote process termination can leave a temporary file and cannot promise cleanup.

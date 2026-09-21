@@ -57,7 +57,7 @@ function relativeGitPath(value: unknown): string | undefined {
 function isSshPassthroughRoute(req: Request): boolean {
   switch (req.method) {
     case 'GET':
-      return /^\/(?:file(?:\/bytes)?|stat|list|glob|trust|voice|runtime\/status|permissions|settings|providers|tools|sessions(?:\/(?:search|live-state))?|session-info|session-groups|session\/[^/]+\/(?:export|archive\/export|transcript|turn-index))$/.test(
+      return /^\/(?:acp|file(?:\/bytes)?|stat|list|glob|trust|voice|runtime\/status|permissions|settings|providers|tools|sessions(?:\/(?:search|live-state))?|session-info|session-groups|session\/[^/]+\/(?:export|archive\/export|transcript|turn-index))$/.test(
         req.path,
       );
     case 'POST':
@@ -69,7 +69,7 @@ function isSshPassthroughRoute(req: Request): boolean {
         req.path,
       );
     case 'DELETE':
-      return /^\/session-groups\/[^/]+$/.test(req.path);
+      return /^\/(?:acp|session-groups\/[^/]+)$/.test(req.path);
     default:
       return false;
   }

@@ -150,6 +150,34 @@ describe('SSH workspace transport', () => {
     });
   });
 
+  it.each([
+    [undefined, ['.qwenignore', '.agentignore', '.aiignore']],
+    [[], ['.qwenignore']],
+    [
+      ['.config/ignore', '../outside'],
+      ['.qwenignore', '.config/ignore'],
+    ],
+  ])(
+    'forwards effective ignore files for search: %j',
+    async (custom, expected) => {
+      client.dispose();
+      client = new SshWorkspaceClient(
+        { host: 'host', directory: '/work' },
+        custom,
+      );
+      const pending = client.request('glob', { pattern: '**/*' });
+      expect(
+        JSON.parse(child.stdin.read()?.toString() as string),
+      ).toMatchObject({
+        params: { ignoreFiles: expected },
+      });
+      finish(
+        JSON.stringify({ ok: true, result: { paths: [], truncated: false } }),
+      );
+      await expect(pending).resolves.toEqual({ paths: [], truncated: false });
+    },
+  );
+
   it('decodes filesystem results and streams shell stdout and stderr separately', async () => {
     const pending = client.request<{ directory: string }>('probe', {});
     finish(JSON.stringify({ ok: true, result: { directory: '/work' } }));

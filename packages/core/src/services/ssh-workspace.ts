@@ -9,6 +9,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { isIP } from 'node:net';
 import { posix } from 'node:path';
 import { SSH_WORKSPACE_SCRIPT } from './ssh-workspace-script.js';
+import { getQwenIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
 
 export interface SshWorkspace {
   host: string;
@@ -195,9 +196,11 @@ export class SshWorkspaceClient {
   readonly workspace: SshWorkspace;
   private readonly pending = new Set<() => void>();
   private disposed = false;
+  private readonly ignoreFiles: string[];
 
-  constructor(workspace: SshWorkspace) {
+  constructor(workspace: SshWorkspace, customIgnoreFiles?: readonly string[]) {
     validateWorkspace(workspace);
+    this.ignoreFiles = getQwenIgnoreFileNames(customIgnoreFiles);
     this.workspace = Object.freeze({
       ...workspace,
       directory: posix.normalize(workspace.directory),
@@ -215,7 +218,13 @@ export class SshWorkspaceClient {
         'Use execute() for shell commands.',
       );
     }
-    const result = await this.run(operation, params, { signal });
+    const result = await this.run(
+      operation,
+      ['list', 'glob', 'grep'].includes(operation)
+        ? { ...params, ignoreFiles: this.ignoreFiles }
+        : params,
+      { signal },
+    );
     if (result.exitCode !== 0) {
       throw new SshWorkspaceError(
         'remote_failed',

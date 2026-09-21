@@ -26,7 +26,7 @@ import {
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
-import { parseAnsi, hasAnsi } from '../../utils/ansi';
+import { ShellToolOutput } from './tools/ShellToolOutput';
 import {
   extractTodosFromToolCall,
   isTodoWriteToolName,
@@ -279,35 +279,6 @@ const READ_LANGUAGE_ALIASES: Record<string, string> = {
   tsx: 'tsx',
   yml: 'yaml',
 };
-
-function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
-  const output = useMemo(() => extractText(tool) || '', [tool]);
-  const ansiSegments = useMemo(
-    () => (hasAnsi(output) ? parseAnsi(output) : null),
-    [output],
-  );
-
-  return (
-    <div className={styles.expandedBash}>
-      <pre className={styles.expandedOutput}>
-        {ansiSegments
-          ? ansiSegments.map((seg, i) => (
-              <span
-                key={i}
-                style={{
-                  color: seg.color,
-                  fontWeight: seg.bold ? 'bold' : undefined,
-                  opacity: seg.dim ? 0.6 : undefined,
-                }}
-              >
-                {seg.text}
-              </span>
-            ))
-          : output}
-      </pre>
-    </div>
-  );
-}
 
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   const content = useMemo(() => extractText(tool) || '', [tool]);
@@ -1398,7 +1369,7 @@ export const ToolLine = memo(function ToolLine({
 
   const fullDescription = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const summaryShell = summaryOnly && isShellToolName(tool.toolName);
+  const summaryShell = isShellToolName(tool.toolName);
   const description = summaryShell
     ? getToolSummaryDescription(tool, workspaceCwd)
     : fullDescription;
@@ -1644,6 +1615,8 @@ export const ToolLine = memo(function ToolLine({
                 detail={expandedCardDetail}
                 result={result}
               />
+            ) : isShell ? (
+              <ShellToolOutput tool={tool} />
             ) : isRead ? (
               <ToolExpandedCard
                 title={displayName}
@@ -1659,7 +1632,6 @@ export const ToolLine = memo(function ToolLine({
                 status={tool.status}
                 action={filePreviewAction}
               >
-                {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
                 {(name === 'write_file' || name === 'writefile') && (
                   <ExpandedEditContent tool={tool} />
                 )}

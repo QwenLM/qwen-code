@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { request, dispose } = vi.hoisted(() => ({
   request: vi.fn(),
@@ -121,6 +122,98 @@ describe('SSH workspace filesystem boundary', () => {
       kind: 'file_too_large',
     });
     expect((await fs.readText(p, { maxBytes: 5 })).content).toBe('xxxxx');
+  });
+
+  it('audits local read and write validation failures at the public boundary', async () => {
+    const fs = setup();
+    const p = await fs.resolve('a', 'write');
+    request.mockResolvedValue({
+      content: 'one one',
+      sizeBytes: 7,
+      hash: 'sha256:whole',
+    });
+    const cases = [
+      {
+        run: () => fs.readText(p, { cursor: 'invalid' }),
+        kind: 'parse_error',
+        intent: 'read',
+      },
+      {
+        run: () => fs.readText(p, { line: 0 }),
+        kind: 'parse_error',
+        intent: 'read',
+      },
+      {
+        run: () => fs.readText(p, { maxBytes: MAX_READ_BYTES + 1 }),
+        kind: 'file_too_large',
+        intent: 'read',
+      },
+      {
+        run: () => fs.edit(p, 'absent', 'new'),
+        kind: 'text_not_found',
+        intent: 'edit',
+      },
+      {
+        run: () => fs.edit(p, 'one', 'new', { expectedHash: 'sha256:stale' }),
+        kind: 'hash_mismatch',
+        intent: 'edit',
+      },
+      {
+        run: () => fs.edit(p, 'one', 'new', { expectedHash: 'sha256:whole' }),
+        kind: 'ambiguous_text_match',
+        intent: 'edit',
+      },
+      {
+        run: () =>
+          fs.writeTextAtomic(p, 'new', {
+            mode: 'create',
+            encoding: 'utf-16le',
+          }),
+        kind: 'parse_error',
+        intent: 'write',
+      },
+    ];
+    for (const entry of cases) {
+      emit.mockClear();
+      await expect(entry.run()).rejects.toMatchObject({ kind: entry.kind });
+      const failures = emit.mock.calls
+        .map(([event]) => event)
+        .filter((event) => event.type === 'fs.denied');
+      expect(failures).toEqual([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            errorKind: entry.kind,
+            intent: entry.intent,
+            pathHash: createHash('sha256').update(p).digest('hex').slice(0, 16),
+          }),
+        }),
+      ]);
+    }
+  });
+
+  it('audits a nested edit failure once using the same path as its read', async () => {
+    const fs = setup();
+    const p = await fs.resolve('a', 'write');
+    request.mockResolvedValueOnce({
+      content: 'one',
+      sizeBytes: 3,
+      hash: 'sha256:whole',
+    });
+    request.mockRejectedValueOnce(
+      new SshWorkspaceError('hash_mismatch', 'changed'),
+    );
+    await expect(
+      fs.editAtomic(p, 'one', 'new', { expectedHash: 'sha256:whole' }),
+    ).rejects.toMatchObject({
+      kind: 'hash_mismatch',
+    });
+    const events = emit.mock.calls.map(([event]) => event);
+    const failures = events.filter((event) => event.type === 'fs.denied');
+    expect(failures).toHaveLength(1);
+    expect(failures[0].data).toMatchObject({
+      pathHash: events.find((event) => event.type === 'fs.access').data
+        .pathHash,
+    });
   });
 
   it('returns byte window metadata without a misleading full-file hash', async () => {

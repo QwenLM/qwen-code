@@ -42,6 +42,7 @@ export function createSshWorkspaceFileSystemFactory(options: {
   cwd: string;
   connection: SshWorkspace;
   trusted: boolean;
+  customIgnoreFiles?: readonly string[];
   generationGuard?: { assertOpen(): void };
   emit: (event: BridgeEvent) => void;
 }): WorkspaceFileSystemFactory {
@@ -101,7 +102,10 @@ export function createSshWorkspaceFileSystemFactory(options: {
         operation: string,
         params: Record<string, unknown>,
       ): Promise<T> => {
-        const client = new SshWorkspaceClient(options.connection);
+        const client = new SshWorkspaceClient(
+          options.connection,
+          options.customIgnoreFiles,
+        );
         const started = Date.now();
         const input =
           typeof params['path'] === 'string'
@@ -168,13 +172,6 @@ export function createSshWorkspaceFileSystemFactory(options: {
                 failure = new FsError('io_error', error.message);
             }
           }
-          if (failure instanceof FsError)
-            audit.recordDenied(ctx, {
-              intent,
-              input,
-              errorKind: failure.kind,
-              message: failure.message,
-            });
           throw failure;
         } finally {
           client.dispose();
@@ -460,6 +457,53 @@ export function createSshWorkspaceFileSystemFactory(options: {
           });
         },
       };
+      const denied = new WeakSet<FsError>();
+      const withAudit =
+        <Args extends [string, ...unknown[]], Result>(
+          intent: Intent,
+          action: (...args: Args) => Promise<Result>,
+        ) =>
+        async (...args: Args): Promise<Result> => {
+          try {
+            return await action(...args);
+          } catch (error) {
+            if (error instanceof FsError && !denied.has(error)) {
+              denied.add(error);
+              audit.recordDenied(ctx, {
+                intent,
+                input: args[0],
+                errorKind: error.kind,
+                hint: error.hint,
+                message: error.message,
+                ...(intent === 'glob' ? { pattern: args[0] } : {}),
+              });
+            }
+            throw error;
+          }
+        };
+      fileSystem.stat = withAudit('stat', fileSystem.stat);
+      fileSystem.readText = withAudit('read', fileSystem.readText);
+      fileSystem.readBytes = withAudit('read', fileSystem.readBytes);
+      fileSystem.readBytesWindow = withAudit(
+        'read',
+        fileSystem.readBytesWindow,
+      );
+      fileSystem.list = withAudit('list', fileSystem.list);
+      fileSystem.glob = withAudit('glob', fileSystem.glob);
+      fileSystem.writeTextAtomic = withAudit(
+        'write',
+        fileSystem.writeTextAtomic,
+      );
+      fileSystem.writeTextOverwrite = withAudit(
+        'write',
+        fileSystem.writeTextOverwrite,
+      );
+      fileSystem.edit = withAudit('edit', fileSystem.edit);
+      fileSystem.writeBytesAtomic = withAudit(
+        'write',
+        fileSystem.writeBytesAtomic,
+      );
+      fileSystem.mkdir = withAudit('write', fileSystem.mkdir);
       return fileSystem;
     },
   };

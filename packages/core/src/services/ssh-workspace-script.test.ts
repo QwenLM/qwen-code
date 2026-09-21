@@ -254,6 +254,51 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     expect(existsSync(join(root, 'fsmonitor-ran'))).toBe(false);
   });
 
+  it.each([
+    '.agentignore',
+    '.aiignore',
+    '.cursorignore',
+    '.config/ignore',
+    './.cursorignore',
+    '.config/./ignore',
+  ])(
+    'applies %s to tracked and untracked search results and listings',
+    (ignoreFile) => {
+      execFileSync('git', ['init', '-q', root]);
+      mkdirSync(join(root, '.config'));
+      writeFileSync(join(root, '.qwenignore'), 'first.txt\n');
+      writeFileSync(join(root, ignoreFile), '!first.txt\nsecond.txt\n');
+      for (const name of ['first.txt', 'second.txt', 'visible.txt'])
+        writeFileSync(join(root, name), 'needle\n');
+      execFileSync('git', ['-C', root, 'add', '-f', 'first.txt']);
+      const options = ['.agentignore', '.aiignore'].includes(ignoreFile)
+        ? {}
+        : { ignoreFiles: ['.qwenignore', ignoreFile] };
+      expect(request('glob', { pattern: '**/*.txt', ...options })).toEqual({
+        ok: true,
+        result: { paths: [join(root, 'visible.txt')], truncated: false },
+      });
+      expect(
+        request('grep', { pattern: 'needle', glob: '*.txt', ...options }),
+      ).toEqual({
+        ok: true,
+        result: { text: 'visible.txt:1:needle', truncated: false },
+      });
+      const listed = request('list', { ...options }).result as Array<{
+        name: string;
+      }>;
+      expect(listed.map((entry) => entry.name)).not.toContain('first.txt');
+      expect(listed.map((entry) => entry.name)).not.toContain('second.txt');
+      rmSync(join(root, '.git'), { recursive: true });
+      rmSync(join(root, '.qwenignore'));
+      for (const operation of ['glob', 'grep'])
+        expect(request(operation, { pattern: '*', ...options })).toMatchObject({
+          ok: false,
+          error: { code: 'unsupported_ignore' },
+        });
+    },
+  );
+
   it('collects bounded Git untracked statistics in one request without following links', () => {
     writeFileSync(join(root, 'text'), 'one\ntwo\n');
     writeFileSync(join(root, 'binary'), Buffer.from([0, 1, 2]));

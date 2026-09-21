@@ -5,7 +5,12 @@
  */
 
 import path from 'node:path';
-import { getCommandRoots } from '../utils/shell-utils.js';
+import {
+  buildShellExecWarnings,
+  getCommandRoots,
+  splitCommands,
+} from '../utils/shell-utils.js';
+import { extractCommandRules } from '../utils/shellAstParser.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { createPatchSmart } from '../tools/diffOptions.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -82,9 +87,10 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
     private readonly settings: {
       outputThreshold?: number;
       shellDefaultTimeoutMs?: number;
+      customIgnoreFiles?: readonly string[];
     } = {},
   ) {
-    this.client = new SshWorkspaceClient(workspace);
+    this.client = new SshWorkspaceClient(workspace, settings.customIgnoreFiles);
     const timeout = settings.shellDefaultTimeoutMs;
     this.shellDefaultTimeoutMs =
       timeout !== undefined &&
@@ -358,12 +364,26 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
     }
     if (toolName === ToolNames.SHELL) {
       const command = stringParam(params, 'command');
+      const rules = await Promise.all(
+        splitCommands(command).map(async (part) => {
+          try {
+            const extracted = await extractCommandRules(part);
+            return extracted.length ? extracted : [part];
+          } catch {
+            return [part];
+          }
+        }),
+      );
       return {
         type: 'exec',
         title: `Run on ${this.workspace.host}: ${String(params['directory'])}`,
         command,
-        rootCommand: getCommandRoots(command).join(', '),
+        rootCommand: [...new Set(getCommandRoots(command))].join(', '),
+        permissionRules: [...new Set(rules.flat())].map(
+          (rule) => `Bash(${rule})`,
+        ),
         warnings: [
+          ...(buildShellExecWarnings(command, command) ?? []),
           'This command runs on the SSH host. If the connection is interrupted, the remote command may continue running.',
         ],
       };

@@ -583,6 +583,27 @@ describe('SshExecutionEnvironment', () => {
     });
   });
 
+  it('offers reusable per-command rules and retains both shell and SSH warnings', async () => {
+    const { id } = await prepare(ToolNames.SHELL, {
+      command: 'npm install && npm run build',
+    });
+    expect(await environment.confirmation(id, signal)).toMatchObject({
+      rootCommand: 'npm',
+      permissionRules: ['Bash(npm install)', 'Bash(npm run *)'],
+    });
+    const substitution = await prepare(ToolNames.SHELL, {
+      command: 'echo $(whoami)',
+    });
+    expect(
+      await environment.confirmation(substitution.id, signal),
+    ).toMatchObject({
+      warnings: expect.arrayContaining([
+        expect.stringContaining('command substitution'),
+        expect.stringContaining('SSH host'),
+      ]),
+    });
+  });
+
   it('invalidates every prior read when no paths are supplied', async () => {
     await read();
     await environment.invalidateReadCache();

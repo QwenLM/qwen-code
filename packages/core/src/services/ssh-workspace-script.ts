@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getQwenIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
+
 // Sent as a Python -c argument; requests arrive on stdin, never in shell text.
 export const SSH_WORKSPACE_SCRIPT = String.raw`
 import base64, errno, fcntl, fnmatch, hashlib, json, os, re, selectors, stat, subprocess, sys, time, uuid
@@ -157,7 +159,7 @@ def git_output(args):
         process.stdout.close()
         process.stderr.close()
 
-def search_files(include_ignored):
+def search_files(include_ignored, ignore_files):
     if not include_ignored:
         try:
             code, output, diagnostic = git_output(['rev-parse', '--is-inside-work-tree'])
@@ -169,7 +171,7 @@ def search_files(include_ignored):
                 fail('search_failed', 'Cannot enumerate remote Git files.')
             paths = list(dict.fromkeys(part.decode('utf-8') for part in output.split(b'\0') if part))
             ignored, incomplete = set(), bool(diagnostic)
-            for exclude in ['--exclude-standard', '--exclude-per-directory=.qwenignore']:
+            for exclude in ['--exclude-standard'] + ['--exclude-per-directory=' + name for name in ignore_files]:
                 code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--ignored', exclude])
                 if code:
                     fail('search_failed', 'Cannot enumerate remote ignored files.')
@@ -177,22 +179,23 @@ def search_files(include_ignored):
                 ignored.update(part.decode('utf-8') for part in output.split(b'\0') if part)
             if len(paths) > MAX_ENTRIES:
                 fail('too_large', 'Remote workspace exceeds the search file limit.')
-            included = set()
-            batch, batch_bytes = [], 0
-            for candidate in paths + [None]:
-                spec = None if candidate is None else ':(literal)' + candidate
-                size = 0 if spec is None else len(spec.encode('utf-8')) + 1
-                if batch and (spec is None or batch_bytes + size > 65536):
-                    code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--others', '--exclude-per-directory=.qwenignore', '--'] + batch)
-                    if code:
-                        fail('search_failed', 'Cannot apply remote Qwen ignore rules.')
-                    included.update(part.decode('utf-8') for part in output.split(b'\0') if part)
-                    incomplete = incomplete or bool(diagnostic)
-                    batch, batch_bytes = [], 0
-                if spec is not None:
-                    batch.append(spec)
-                    batch_bytes += size
-            paths = [path for path in paths if path in included]
+            for ignore_file in ignore_files:
+                included = set()
+                batch, batch_bytes = [], 0
+                for candidate in paths + [None]:
+                    spec = None if candidate is None else ':(literal)' + candidate
+                    size = 0 if spec is None else len(spec.encode('utf-8')) + 1
+                    if batch and (spec is None or batch_bytes + size > 65536):
+                        code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--others', '--exclude-per-directory=' + ignore_file, '--'] + batch)
+                        if code:
+                            fail('search_failed', 'Cannot apply remote Qwen ignore rules.')
+                        included.update(part.decode('utf-8') for part in output.split(b'\0') if part)
+                        incomplete = incomplete or bool(diagnostic)
+                        batch, batch_bytes = [], 0
+                    if spec is not None:
+                        batch.append(spec)
+                        batch_bytes += size
+                paths = [path for path in paths if path in included]
             return [normalized(path) for path in paths if path not in ignored and '.git' not in path.split('/')], incomplete
         if not (code == 0 and output.strip() == b'false') and b'not a git repository' not in diagnostic:
             fail('search_failed', 'Cannot determine remote Git ignore rules.')
@@ -204,7 +207,8 @@ def search_files(include_ignored):
         names = list_names(fd)
         if len(names) + len(result) > MAX_ENTRIES:
             fail('too_large', 'Remote workspace exceeds the search file limit.')
-        if not include_ignored and any(name in names for name in ['.gitignore', '.ignore', '.qwenignore']):
+        relative_names = [os.path.relpath(os.path.join(directory, name), root) for name in names]
+        if not include_ignored and any(relative == ignore or relative.endswith('/' + ignore) for relative in relative_names for ignore in ['.gitignore', '.ignore'] + ignore_files):
             fail('unsupported_ignore', 'Ignore files outside a Git repository are not supported for SSH search.')
         for name in sorted(names):
             if name == '.git':
@@ -256,6 +260,7 @@ def matches(path, pattern, basename=False, case_sensitive=True):
     return match(0, 0)
 
 def dispatch(operation, params):
+    ignore_files = [os.path.normpath(name) for name in params.get('ignoreFiles', ${JSON.stringify(getQwenIgnoreFileNames())})]
     path = params.get('path') or params.get('cwd') or '.'
     if operation == 'probe':
         target = normalized(path)
@@ -342,7 +347,7 @@ def dispatch(operation, params):
             try:
                 code, output, diagnostic = git_output(['rev-parse', '--is-inside-work-tree'])
                 if code == 0 and output.strip() == b'true':
-                    for exclude in ['--exclude-standard', '--exclude-per-directory=.qwenignore']:
+                    for exclude in ['--exclude-standard'] + ['--exclude-per-directory=' + name for name in ignore_files]:
                         code, output, diagnostic = git_output(['ls-files', '-z', '--cached', '--others', '--ignored', '--directory', exclude, '--', ':(literal)' + os.path.relpath(target, root)])
                         if code:
                             fail('search_failed', 'Cannot determine remote directory ignore rules.')
@@ -458,7 +463,7 @@ def dispatch(operation, params):
         if operation == 'grep' and include is not None:
             matches('', include, True)
         maximum = integer(params.get('limit', params.get('maxResults')), 1000, MAX_ENTRIES + 1)
-        files, incomplete = ([base], False) if stat.S_ISREG(base_info.st_mode) else search_files(params.get('includeIgnored') is True)
+        files, incomplete = ([base], False) if stat.S_ISREG(base_info.st_mode) else search_files(params.get('includeIgnored') is True, ignore_files)
         files = [file for file in files if os.path.commonpath([base, file]) == base]
         result, result_bytes, truncated = [], 0, False
         if operation == 'grep':

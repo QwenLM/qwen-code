@@ -510,6 +510,7 @@ describe.skipIf(process.platform === 'win32')(
 
     it('preserves local session storage and runtime controls while rejecting project services', async () => {
       for (const suffix of [
+        '/acp',
         '/sessions',
         '/file',
         '/file/bytes',
@@ -558,6 +559,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(
         (await supertest(app).delete(url('/session-groups/group'))).status,
       ).toBe(599);
+      expect((await supertest(app).delete(url('/acp'))).status).toBe(599);
       for (const suffix of [
         '/runtime/mcp',
         '/skills',

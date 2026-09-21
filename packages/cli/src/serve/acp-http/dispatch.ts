@@ -1617,6 +1617,9 @@ export class AcpDispatcher {
             workspaceCwd: this.boundWorkspace,
             methods: advertisedQwenVendorMethods(
               this.sessionShellCommandEnabled,
+            ).filter(
+              (method) =>
+                !this.fsFactory?.sshWorkspace || SSH_METHODS.has(method),
             ),
           },
           imageCapability: IMAGE_CAPABILITY,

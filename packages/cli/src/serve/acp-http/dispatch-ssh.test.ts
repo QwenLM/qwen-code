@@ -7,6 +7,58 @@ import { describe, expect, it, vi } from 'vitest';
 import { AcpDispatcher } from './dispatch.js';
 
 describe('SSH ACP HTTP dispatch', () => {
+  it.each([false, true])(
+    'advertises only methods admitted by the SSH gate (shell=%s)',
+    async (shellEnabled) => {
+      type Deps = ConstructorParameters<typeof AcpDispatcher>;
+      const dispatcher = new AcpDispatcher(
+        {} as Deps[0],
+        '/local/anchor',
+        () => ({}),
+        {} as Deps[3],
+        {} as Deps[4],
+        {} as Deps[5],
+        {
+          sshWorkspace: { host: 'host', directory: '/srv/project' },
+        } as Deps[6],
+        undefined,
+        shellEnabled,
+      );
+      const capabilities = dispatcher.buildInitializeResult('client')[
+        'agentCapabilities'
+      ] as {
+        _meta: { qwen: { methods: string[] } };
+      };
+      const methods = capabilities._meta.qwen.methods;
+      expect(methods).toEqual(
+        expect.arrayContaining([
+          '_qwen/file/read',
+          '_qwen/file/glob',
+          '_qwen/workspace/voice',
+        ]),
+      );
+      expect(methods).not.toContain('_qwen/session/shell');
+      const sendConn = vi.fn();
+      for (const method of methods) {
+        await Promise.allSettled([
+          dispatcher.handle(
+            { sendConn, clientId: 'client' } as unknown as Parameters<
+              AcpDispatcher['handle']
+            >[0],
+            { jsonrpc: '2.0', id: 1, method, params: {} },
+          ),
+        ]);
+      }
+      expect(
+        sendConn.mock.calls.some(
+          ([frame]) =>
+            frame.error?.data?.errorKind ===
+            'ssh_workspace_operation_unsupported',
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('preserves incomplete glob results below the result cap', async () => {
     type Deps = ConstructorParameters<typeof AcpDispatcher>;
     const matches = Object.assign(['/local/anchor/visible.txt'], {

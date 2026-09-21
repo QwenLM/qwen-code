@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../../utils/shell-result.js';
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
@@ -1612,8 +1613,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(preserveProtocolPayloads && event.responseParts !== undefined
             ? { responseParts: event.responseParts }
             : {}),
-          ...(typeof event.resultDisplay === 'string'
-            ? { resultDisplay: event.resultDisplay }
+          ...(shellResultText(event.resultDisplay) !== undefined
+            ? { resultDisplay: shellResultText(event.resultDisplay)! }
             : {}),
           ...(preserveProtocolPayloads && event.boundaryArtifact
             ? { boundaryArtifact: event.boundaryArtifact }

@@ -121,6 +121,7 @@ export function resolveBridgeFsFactory(input: {
       cwd,
       connection,
       trusted: input.trusted,
+      customIgnoreFiles: input.customIgnoreFiles,
       generationGuard: input.generationGuard,
       emit: input.emit ?? createDefaultFsAuditEmit(),
     });
