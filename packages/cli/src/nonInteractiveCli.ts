@@ -492,21 +492,55 @@ export interface RunNonInteractiveOptions {
  * under the tool's canonical name (via `canonicalToolName`, as execution and
  * the interactive scheduler do) so a legacy alias — e.g. `search_file_content`
  * for `grep` — classifies with the same safety and doesn't parallelize
- * differently from the TUI. An unregistered tool resolves to `undefined`,
+ * differently from the TUI. A valid ToolCall envelope uses its hidden target's
+ * identity for the same reason. An unregistered tool resolves to `undefined`,
  * which {@link isToolCallConcurrencySafe} treats as unsafe.
  */
 function partitionHeadlessToolCalls(
   requests: ToolCallRequestInfo[],
   config: Config,
 ): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
+  return partitionByConcurrencySafety(requests, (request) => {
+    const executionRequest = getHeadlessExecutionRequest(request, config);
+    return isToolCallConcurrencySafe(
+      executionRequest.name,
+      config.getToolRegistry().getTool(canonicalToolName(executionRequest.name))
+        ?.kind,
+      executionRequest.args,
+    );
+  });
+}
+
+function getHeadlessExecutionRequest(
+  request: ToolCallRequestInfo,
+  config: Config,
+): ToolCallRequestInfo {
+  if (canonicalToolName(request.name) !== ToolNames.TOOL_CALL) {
+    return request;
+  }
+
+  const targetName = request.args['name'];
+  const targetArgs = request.args['arguments'];
+  if (
+    typeof targetName !== 'string' ||
+    typeof targetArgs !== 'object' ||
+    targetArgs === null ||
+    Array.isArray(targetArgs)
+  ) {
+    return request;
+  }
+
   const registry = config.getToolRegistry();
-  return partitionByConcurrencySafety(requests, (request) =>
-    isToolCallConcurrencySafe(
-      request.name,
-      registry.getTool(canonicalToolName(request.name))?.kind,
-      request.args,
-    ),
-  );
+  const target = registry.getTool(canonicalToolName(targetName));
+  if (!target || !registry.isDeferredAndHidden(target.name)) {
+    return request;
+  }
+
+  return {
+    ...request,
+    name: target.name,
+    args: targetArgs as Record<string, unknown>,
+  };
 }
 
 /**
@@ -560,13 +594,16 @@ export async function runNonInteractive(
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
-    const cleanupReviewWorktrees = (gitTimeout?: number) =>
+    const cleanupReviewWorktrees = (gitTimeout?: number) => {
+      // Review leases live in the tool-writable workspace in this mode.
+      if (config.getShellExecutionSandbox?.()) return;
       cleanupReviewWorktreeLeases({
         sessionId,
         promptId: prompt_id,
         repositoryRoot: config.getProjectRoot(),
         gitTimeout,
       });
+    };
     const unregisterReviewWorktreeCleanup = registerCleanup(() =>
       cleanupReviewWorktrees(1_000),
     );
@@ -1837,6 +1874,10 @@ export async function runNonInteractive(
           ToolCallResponseInfo,
           'success' | 'error' | 'cancelled'
         >();
+        const executionRequestByResponse = new Map<
+          ToolCallResponseInfo,
+          ToolCallRequestInfo
+        >();
         const structuredOutputActive =
           config.getJsonSchema() &&
           batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
@@ -2023,8 +2064,12 @@ export async function runNonInteractive(
         const launchToolCall = async (
           requestInfo: ToolCallRequestInfo,
         ): Promise<ToolCallResponseInfo> => {
+          const executionRequest = getHeadlessExecutionRequest(
+            requestInfo,
+            config,
+          );
           debugLogger.debug(
-            `[runNonInteractive] launching tool call ${requestInfo.callId} (${requestInfo.name})`,
+            `[runNonInteractive] launching tool call ${requestInfo.callId} (${executionRequest.name})`,
           );
           const inputFormat =
             typeof config.getInputFormat === 'function'
@@ -2039,14 +2084,14 @@ export async function runNonInteractive(
           // has its own complex handler (subagent messages). All other
           // tools with canUpdateOutput=true (e.g., MCP tools) get a
           // generic handler that emits progress via the adapter.
-          const isAgentTool = requestInfo.name === 'agent';
+          const isAgentTool = executionRequest.name === ToolNames.AGENT;
           const { handler: outputUpdateHandler } = isAgentTool
             ? createAgentToolProgressHandler(
                 config,
                 requestInfo.callId,
                 adapter,
               )
-            : createToolProgressHandler(requestInfo, adapter);
+            : createToolProgressHandler(executionRequest, adapter);
 
           const response = await executeToolCall(
             config,
@@ -2067,6 +2112,7 @@ export async function runNonInteractive(
               onAllToolCallsComplete: async (completedCalls) => {
                 for (const call of completedCalls) {
                   statusByResponse.set(call.response, call.status);
+                  executionRequestByResponse.set(call.response, call.request);
                 }
               },
               runtimeView,
@@ -2076,7 +2122,7 @@ export async function runNonInteractive(
             },
           );
           debugLogger.debug(
-            `[runNonInteractive] tool call ${requestInfo.callId} (${requestInfo.name}) settled${
+            `[runNonInteractive] tool call ${requestInfo.callId} (${executionRequest.name}) settled${
               response.error ? ' with error' : ''
             }`,
           );
@@ -2090,6 +2136,9 @@ export async function runNonInteractive(
           requestInfo: ToolCallRequestInfo,
           toolResponse: ToolCallResponseInfo,
         ): boolean => {
+          const executionRequest =
+            executionRequestByResponse.get(toolResponse) ??
+            getHeadlessExecutionRequest(requestInfo, config);
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
             // formatted as tool_result blocks. handleToolError detects
@@ -2097,7 +2146,7 @@ export async function runNonInteractive(
             // the LLM can decide what to do next. In text mode, we
             // still log the error.
             handleToolError(
-              requestInfo.name,
+              executionRequest.name,
               toolResponse.error,
               config,
               toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
@@ -2108,14 +2157,14 @@ export async function runNonInteractive(
             );
           }
 
-          adapter.emitToolResult(requestInfo, toolResponse);
+          adapter.emitToolResult(executionRequest, toolResponse);
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
           config
             .getLlmClient()
             .recordCompletedToolCall(
-              requestInfo.name,
-              requestInfo.args as Record<string, unknown>,
+              executionRequest.name,
+              executionRequest.args as Record<string, unknown>,
               toCompletedToolCallOutcome(
                 requestInfo.callId,
                 statusByResponse.get(toolResponse) ??
@@ -2351,11 +2400,20 @@ export async function runNonInteractive(
           const response = responseByRequest.get(request);
           return response ? [{ request, response }] : [];
         });
+        const resolvedResponses = orderedResponses.map(
+          ({ request, response }) => ({
+            request,
+            response,
+            executionRequest:
+              executionRequestByResponse.get(response) ??
+              getHeadlessExecutionRequest(request, config),
+          }),
+        );
         const finalized = await finalizeToolResponses(
           config,
-          orderedResponses.map(({ request, response }) => ({
+          resolvedResponses.map(({ request, response, executionRequest }) => ({
             callId: request.callId,
-            toolName: request.name,
+            toolName: executionRequest.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             artifacts: response.artifacts,
@@ -2370,11 +2428,12 @@ export async function runNonInteractive(
 
         const chatRecordingService = config.getChatRecordingService?.();
         const toolResponseParts: Part[] = [];
-        for (let index = 0; index < orderedResponses.length; index++) {
-          const { request, response } = orderedResponses[index];
+        for (let index = 0; index < resolvedResponses.length; index++) {
+          const { request, response, executionRequest } =
+            resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          const goalProvenance = goalToolResultProvenance(request);
+          const goalProvenance = goalToolResultProvenance(executionRequest);
           chatRecordingService?.recordToolResult?.(
             finalizedParts,
             {

@@ -792,6 +792,11 @@ describe('standalone release packaging', () => {
   });
 
   it('loads the standalone release packaging helper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    expect(releaseScript).toMatch(
+      /let pnpmLockedKeys;[\s\S]*if \(isMainModule\(\)\)/,
+    );
+
     const output = execFileSync(
       process.execPath,
       ['scripts/build-standalone-release.js', '--help'],
@@ -2612,6 +2617,9 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    expect(ossWorkflow).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(ossWorkflow).toContain('corepack pnpm install --frozen-lockfile');
+    expect(ossWorkflow).toContain('npm ci --no-audit --progress=false');
     // The sync workflow can be re-dispatched for any tag, and its steps come
     // from the default branch while the checkout and the assets come from that
     // tag, so it derives the flavor from the archives the release actually
