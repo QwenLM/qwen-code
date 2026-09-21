@@ -1164,6 +1164,31 @@ describe('fileUtils', () => {
         actualNodeFs.unlinkSync(testBinaryFilePath);
     });
 
+    it.each([undefined, '1-2'])(
+      'rejects sandbox PDF processing before invoking host helpers (pages=%s)',
+      async (pages) => {
+        actualNodeFs.writeFileSync(testPdfFilePath, '%PDF-1.4\n');
+        const config = {
+          ...mockConfig,
+          getShellExecutionSandbox: () => ({
+            workspace: tempRootDir,
+            installation: '/installation',
+            state: '/state',
+            filesystem: 'workspace-write',
+            network: 'closed',
+          }),
+        } as Config;
+        const result = await processSingleFileContent(testPdfFilePath, config, {
+          fileType: 'pdf',
+          pages,
+        });
+        expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.error).toContain('sandboxed Shell');
+        expect(execFile).not.toHaveBeenCalled();
+        expect(mockRender).not.toHaveBeenCalled();
+      },
+    );
+
     it('should read a text file successfully', async () => {
       const content = 'Line 1\\nLine 2\\nLine 3';
       actualNodeFs.writeFileSync(testTextFilePath, content);
