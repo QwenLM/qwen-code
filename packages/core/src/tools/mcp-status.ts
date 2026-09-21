@@ -8,7 +8,17 @@
  * Enum representing the connection status of an MCP server
  */
 export enum MCPServerStatus {
-  /** Server is disconnected or experiencing errors */
+  /**
+   * Server is disconnected **or experiencing errors**.
+   *
+   * This is not proof the session is dead. The SDK client reports the same
+   * status when a cancelled request's late response (or an in-flight progress
+   * notification) reaches a handler it already deleted — while the transport
+   * stays open and keeps serving protocol requests. Consumers that would tear
+   * down or rebuild the connection must verify first
+   * (`McpClient.verifyPendingTransportError`) instead of treating this status
+   * as a death certificate.
+   */
   DISCONNECTED = 'disconnected',
   /** Server is in the process of connecting */
   CONNECTING = 'connecting',
