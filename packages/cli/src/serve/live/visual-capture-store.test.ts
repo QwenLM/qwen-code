@@ -125,6 +125,27 @@ describe('LiveVisualCaptureStore', () => {
     store.dispose();
   });
 
+  it('leaves nothing behind when it is disposed mid-write', async () => {
+    const directory = join(await scratch(), 'captures');
+    const store = new LiveVisualCaptureStore(directory);
+    // A capture in flight is not yet registered for cleanup, so disposing
+    // cannot have removed it; it has to undo itself.
+    const pending = store.store(IMAGE);
+    store.dispose();
+
+    await expect(pending).rejects.toThrow('shutting down');
+    await vi.waitFor(async () => {
+      await expect(readdir(directory)).resolves.toEqual([]);
+    });
+  });
+
+  it('refuses a capture asked for after shutdown', async () => {
+    const store = new LiveVisualCaptureStore(join(await scratch(), 'captures'));
+    store.dispose();
+
+    await expect(store.store(IMAGE)).rejects.toThrow('shutting down');
+  });
+
   it('removes what it still holds when the daemon shuts down', async () => {
     const directory = join(await scratch(), 'captures');
     const store = new LiveVisualCaptureStore(directory);

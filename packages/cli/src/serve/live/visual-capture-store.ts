@@ -29,6 +29,8 @@ const STALE_CAPTURE_AGE_MS = 5 * 60_000;
  */
 const CHECKS_POSIX_MODE = process.platform !== 'win32';
 
+const SHUTTING_DOWN = 'The Live capture store is shutting down.';
+
 /**
  * What the coordinator needs of a store. It is an interface rather than the
  * class because the class keeps private state, which makes it nominally typed:
@@ -43,6 +45,7 @@ export interface LiveVisualCaptureSink {
 
 export class LiveVisualCaptureStore implements LiveVisualCaptureSink {
   private readonly cleanupTimers = new Map<NodeJS.Timeout, string>();
+  private disposed = false;
 
   constructor(
     private readonly captureDirectory = join(tmpdir(), 'qwen-live-appshot'),
@@ -53,14 +56,24 @@ export class LiveVisualCaptureStore implements LiveVisualCaptureSink {
    * only source of the file name, so a Host cannot steer the write.
    */
   async store(image: Buffer): Promise<string> {
+    if (this.disposed) throw new Error(SHUTTING_DOWN);
     await this.prepareCaptureDirectory();
     const path = join(this.captureDirectory, `${randomUUID()}.jpg`);
     await this.writePrivateCapture(path, image);
+    // A capture still being written when the daemon shuts down was not yet
+    // registered for cleanup, so `dispose()` could not have removed it. Undo it
+    // here rather than leaving it for the next run's stale sweep, which may be
+    // a long way off.
+    if (this.disposed) {
+      await unlink(path).catch(() => undefined);
+      throw new Error(SHUTTING_DOWN);
+    }
     this.scheduleCleanup(path);
     return path;
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const [timer, path] of this.cleanupTimers) {
       clearTimeout(timer);
       void unlink(path).catch(() => undefined);
