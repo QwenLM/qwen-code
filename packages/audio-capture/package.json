@@ -29,7 +29,8 @@
   "scripts": {
     "install": "node install.js",
     "prebuildify": "prebuildify --napi --strip",
-    "build": "node-gyp rebuild && tsc --build",
+    "build": "tsc --build",
+    "build:native": "node-gyp rebuild && tsc --build",
     "build:ts": "tsc --build",
     "test": "vitest run",
     "test:ci": "vitest run",
