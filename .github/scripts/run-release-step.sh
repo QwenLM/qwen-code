@@ -185,8 +185,13 @@ case "${step}" in
       # Exercise packing and lifecycle checks even for an existing version.
       publish_args+=(--dry-run --force)
     fi
-    corepack pnpm -r publish "${publish_args[@]}"
+    # The CLI first, on purpose. The recursive publish below bails on the first
+    # failure, so shipping `dist` before it keeps a workspace package that
+    # cannot publish from stranding the one package every end user installs --
+    # the same property #12387 pinned by publishing web-shell last, which the
+    # derived set otherwise leaves to pnpm's topological order.
     publish_package 'dist'
+    corepack pnpm -r publish "${publish_args[@]}"
     ;;
 
   verify-archives)

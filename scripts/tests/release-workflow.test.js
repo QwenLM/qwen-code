@@ -607,7 +607,11 @@ describe('release workflow', () => {
       });
       writeFileSync(
         join(bin, 'corepack'),
-        '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
+        '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\n' +
+          // Only the recursive workspace publish fails, so a bulk failure is
+          // observable *after* `publish_package 'dist'` has already shipped.
+          'case "$*" in *"-r publish"*) exit "$PUBLISH_FAILURE" ;; esac\n' +
+          'exit 0\n',
         { mode: 0o755 },
       );
       try {
@@ -637,13 +641,19 @@ describe('release workflow', () => {
           .trim()
           .split('\n')
           .map((line) => line.split('\t'));
-        const publishesCli =
-          failure === '0' && (dryRun === 'true' || cliPublished !== '0');
+        const publishesCli = dryRun === 'true' || cliPublished !== '0';
+        // The CLI precedes the recursive publish in every row, including the
+        // one where that publish fails: a workspace package that cannot ship
+        // must not strand `dist`.
         expect(publishCalls.map(([cwd]) => cwd)).toEqual([
-          canonicalDirectory,
           ...(publishesCli ? [join(canonicalDirectory, 'dist')] : []),
+          canonicalDirectory,
         ]);
-        const selected = publishCalls[0][1]
+        const bulk = publishCalls.find(([, args]) =>
+          args.includes('-r publish'),
+        );
+        expect(bulk, 'the recursive workspace publish ran').toBeDefined();
+        const selected = bulk[1]
           .split(' ')
           .filter((arg) => arg.startsWith('--filter='))
           .map((arg) => arg.slice('--filter='.length));
@@ -657,14 +667,13 @@ describe('release workflow', () => {
               ].includes(name),
           ),
         );
-        expect(publishCalls[0][1]).toContain('pnpm -r publish');
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
           expect(args, cwd).toContain('--tag=preview');
           expect(args, cwd).toContain('--provenance');
           expect(args.includes('--dry-run'), cwd).toBe(dryRun === 'true');
         }
-        expect(publishCalls[0][1].includes('--force')).toBe(dryRun === 'true');
+        expect(bulk[1].includes('--force')).toBe(dryRun === 'true');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
