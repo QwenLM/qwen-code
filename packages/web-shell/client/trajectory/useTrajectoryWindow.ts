@@ -44,10 +44,24 @@ export type TrajectoryPageLoader = (opts: {
   limit: number;
 }) => Promise<TrajectoryPageResult>;
 
+/**
+ * Why the last read failed. `partial` is not a message — the daemon reports it
+ * as a flag — so it is carried as a kind for the view to name, rather than as
+ * a word that would end up quoted at the reader.
+ */
+export type TrajectoryWindowFailure =
+  | { kind: 'partial' }
+  | { kind: 'unreadable'; message: string };
+
 export interface TrajectoryWindow {
   trajectory: Trajectory | undefined;
   status: 'idle' | 'loading' | 'ready' | 'error';
-  error?: string;
+  error?: TrajectoryWindowFailure;
+  /**
+   * Pages currently held. The view watches this to tell an older page landing
+   * apart from any other change that lengthens the list.
+   */
+  pageCount: number;
   /** More history exists and the window has room for it. */
   hasOlder: boolean;
   loadingOlder: boolean;
@@ -63,7 +77,7 @@ interface WindowState {
   olderCursor?: string;
   hasOlder: boolean;
   status: TrajectoryWindow['status'];
-  error?: string;
+  error?: TrajectoryWindowFailure;
   loadingOlder: boolean;
 }
 
@@ -85,9 +99,13 @@ function errorMessage(error: unknown): string {
  * truth, so folding them would show a run with records silently missing —
  * report it instead.
  */
-function pageFailure(page: TrajectoryPageResult): string | undefined {
-  if (page.replayError) return page.replayError;
-  return page.partial ? 'partial' : undefined;
+function pageFailure(
+  page: TrajectoryPageResult,
+): TrajectoryWindowFailure | undefined {
+  if (page.replayError) {
+    return { kind: 'unreadable', message: page.replayError };
+  }
+  return page.partial ? { kind: 'partial' } : undefined;
 }
 
 /**
@@ -161,7 +179,7 @@ export function useTrajectoryWindow(
         setState((previous) => ({
           ...previous,
           status: 'error',
-          error: errorMessage(error),
+          error: { kind: 'unreadable', message: errorMessage(error) },
           loadingOlder: false,
         }));
       },
@@ -209,7 +227,7 @@ export function useTrajectoryWindow(
         setState((previous) => ({
           ...previous,
           status: 'error',
-          error: errorMessage(error),
+          error: { kind: 'unreadable', message: errorMessage(error) },
           loadingOlder: false,
         }));
       },
@@ -243,6 +261,7 @@ export function useTrajectoryWindow(
   return {
     trajectory,
     status: state.status,
+    pageCount: state.pages.length,
     ...(state.error !== undefined ? { error: state.error } : {}),
     hasOlder: state.hasOlder && !atCapacity,
     loadingOlder: state.loadingOlder,

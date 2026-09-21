@@ -335,8 +335,67 @@ describe('useTrajectoryWindow', () => {
     });
 
     expect(view.latest().status).toBe('error');
-    expect(view.latest().error).toBe('Replay conversion failed for this page');
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'Replay conversion failed for this page',
+    });
     expect(view.latest().trajectory!.rows).toHaveLength(1);
+  });
+
+  it('names a partial page as a kind rather than a word', async () => {
+    const loadPage = vi.fn(async () =>
+      page([userText('half', 'rec-1')], { partial: true as const }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    // `partial` is a flag on the page, not a sentence; carrying it as a kind
+    // keeps the literal out of the message the reader is shown.
+    expect(view.latest().error).toEqual({ kind: 'partial' });
+  });
+
+  it('counts the pages it holds', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+    expect(view.latest().pageCount).toBe(1);
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+    expect(view.latest().pageCount).toBe(2);
+
+    await act(async () => {
+      view.latest().refresh();
+    });
+    expect(view.latest().pageCount).toBe(1);
+  });
+
+  it('holds its page count when an older page fails', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([], { replayError: 'unreadable page' })
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+
+    expect(view.latest().status).toBe('error');
+    expect(view.latest().pageCount).toBe(1);
   });
 
   it('reports a partial page as an error rather than folding a prefix', async () => {
@@ -358,7 +417,10 @@ describe('useTrajectoryWindow', () => {
     await act(async () => {});
 
     expect(view.latest().status).toBe('error');
-    expect(view.latest().error).toBe('daemon unreachable');
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'daemon unreachable',
+    });
   });
 
   it('does not write state after unmount', async () => {

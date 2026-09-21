@@ -38,10 +38,29 @@ const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 // as zero for every element. Without a stubbed box it would mount no rows and
 // every assertion about the table would pass vacuously.
 const VIEWPORT_HEIGHT = 900;
+const ROW_HEIGHT = 34;
 const BOX_PROPS = ['offsetHeight', 'offsetWidth'] as const;
 const originalBoxes = new Map<string, PropertyDescriptor | undefined>();
+// jsdom performs no layout, so its own `scrollTop` is pinned at 0 and the
+// prepend correction would be unobservable. Backing it with real storage is
+// what lets the scroll arithmetic be asserted at all.
+const scrollTops = new WeakMap<HTMLElement, number>();
+let originalScrollTop: PropertyDescriptor | undefined;
 
 beforeAll(() => {
+  originalScrollTop = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'scrollTop',
+  );
+  Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return scrollTops.get(this) ?? 0;
+    },
+    set(this: HTMLElement, value: number) {
+      scrollTops.set(this, value);
+    },
+  });
   for (const prop of BOX_PROPS) {
     originalBoxes.set(
       prop,
@@ -55,6 +74,17 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  if (originalScrollTop) {
+    Object.defineProperty(
+      HTMLElement.prototype,
+      'scrollTop',
+      originalScrollTop,
+    );
+  } else {
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>)[
+      'scrollTop'
+    ];
+  }
   for (const [prop, descriptor] of originalBoxes) {
     if (descriptor) {
       Object.defineProperty(HTMLElement.prototype, prop, descriptor);
@@ -443,6 +473,104 @@ describe('TrajectoryPanel', () => {
     );
 
     expect(container.textContent).toContain('memory-extractor');
+  });
+
+  it('keeps the reader on the same row when an older page lands', async () => {
+    const older = [
+      userText('older one', 'rec-0'),
+      userText('older two', 'rec--1'),
+    ];
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page(older)
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const container = await render(loadPage);
+    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+    scroll.scrollTop = 120;
+    const before = rowsOf(container).length;
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+
+    // Everything already on screen moved down by exactly the rows that were
+    // added, so the offset moves with it and the reader does not lose place.
+    const added = rowsOf(container).length - before;
+    expect(added).toBeGreaterThan(0);
+    expect(scroll.scrollTop).toBe(120 + added * ROW_HEIGHT);
+  });
+
+  it('does not move the view when a later expand follows a failed load', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([], { replayError: 'unreadable page' })
+        : page(REAL_EVENTS, { hasMore: true, nextCursor: 'older-1' }),
+    );
+    const container = await render(loadPage);
+    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+    const turn = () =>
+      container.querySelector(
+        '[data-testid="trajectory-turn"]',
+      ) as HTMLButtonElement;
+    await act(async () => turn().click());
+    expect(rowsOf(container)).toHaveLength(1);
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    scroll.scrollTop = 80;
+
+    await act(async () => turn().click());
+
+    // The failed load added no page, so the correction must not fire on the
+    // next thing that lengthens the list.
+    expect(rowsOf(container).length).toBeGreaterThan(1);
+    expect(scroll.scrollTop).toBe(80);
+  });
+
+  it('names a partial page instead of quoting the flag', async () => {
+    const container = await render(async () =>
+      page([], { partial: true as const }),
+    );
+
+    const alert = container.querySelector('[role="alert"]');
+    expect(text(alert)).toContain('Saved panel content is unavailable');
+    expect(container.textContent).not.toContain(': partial');
+  });
+
+  it('shows what an other-kind row actually says', async () => {
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'shell_output',
+            stream: 'stdout',
+            content: { type: 'text', text: 'build finished in 4s' },
+            _meta: { 'qwen.session.recordId': 'rec-2' },
+          },
+        } as unknown as DaemonEvent,
+      ]),
+    );
+
+    // A lowercase discriminator in the gutter with an empty label beside it
+    // tells the reader nothing the row itself could have said.
+    expect(container.textContent).toContain('build finished in 4s');
+    expect(container.textContent).not.toContain('shell_output');
   });
 
   it('numbers every rendered row for assistive technology', async () => {

@@ -19,7 +19,10 @@ import {
   RefreshCwIcon,
 } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { DaemonTurnUsage } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  DaemonTurnUsage,
+} from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
 import {
@@ -201,7 +204,55 @@ function labelOf(
         text: row.block.title || (row.block.toolName ?? ''),
       };
     default:
-      return { badge: row.block.kind, text: '' };
+      return otherLabel(row.block, t);
+  }
+}
+
+/**
+ * Rows the fold routes to `other`: shell output, a shell command the user ran,
+ * a permission prompt, a status or error line, a cancelled turn. Each carries
+ * text worth reading, and showing the block's discriminator instead would put
+ * a lowercase English enum in front of the reader with an empty label beside
+ * it.
+ */
+function otherLabel(
+  block: DaemonTranscriptBlock,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): RowLabel {
+  switch (block.kind) {
+    case 'shell':
+      return {
+        badge: t('trajectory.badge.shell'),
+        text: firstLine(block.text),
+      };
+    case 'user_shell':
+      return {
+        badge: t('trajectory.badge.shell'),
+        text: firstLine(block.command || block.text),
+      };
+    case 'permission':
+      return {
+        badge: t('trajectory.badge.permission'),
+        text: block.title || block.toolName || '',
+      };
+    case 'status':
+    case 'error':
+    case 'debug':
+      return {
+        badge: t('trajectory.badge.status'),
+        ...(block.kind === 'error' ? { badgeTone: styles.toneError } : {}),
+        text: firstLine(block.text),
+        faint: block.kind !== 'error',
+      };
+    case 'prompt_cancelled':
+      return {
+        badge: t('trajectory.badge.cancelled'),
+        badgeTone: styles.toneMuted,
+        text: block.reason ?? t('trajectory.cancelled'),
+        faint: true,
+      };
+    default:
+      return { badge: t('trajectory.badge.other'), text: '' };
   }
 }
 
@@ -231,6 +282,7 @@ export function TrajectoryPanel({
     hasOlder,
     loadingOlder,
     atCapacity,
+    pageCount,
     loadOlder,
     refresh,
   } = useTrajectoryWindow(loadPage, windowOptions ?? {});
@@ -240,7 +292,7 @@ export function TrajectoryPanel({
   );
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const pendingPrependRef = useRef(false);
+  const previousPagesRef = useRef(0);
   const previousCountRef = useRef(0);
   const settledOnceRef = useRef(false);
 
@@ -271,16 +323,23 @@ export function TrajectoryPanel({
   // Older pages prepend, so every row already on screen moves down by exactly
   // the number of rows added. With uniform heights that offset is arithmetic,
   // and applying it keeps the reader looking at the same row.
+  //
+  // The trigger is the window's own page count, not a flag set when the button
+  // is pressed: a load that fails leaves the held window — and therefore this
+  // effect's inputs — untouched, so a flag set on press would survive and fire
+  // on the next thing that lengthens the list, such as expanding a turn.
   useLayoutEffect(() => {
     const count = visualRows.length;
-    const previous = previousCountRef.current;
+    const previousCount = previousCountRef.current;
+    const previousPages = previousPagesRef.current;
     previousCountRef.current = count;
-    if (!pendingPrependRef.current) return;
-    pendingPrependRef.current = false;
-    const delta = count - previous;
+    previousPagesRef.current = pageCount;
+    const delta = count - previousCount;
     const element = scrollRef.current;
-    if (delta > 0 && element) element.scrollTop += delta * ROW_HEIGHT;
-  }, [visualRows]);
+    if (pageCount > previousPages && delta > 0 && element) {
+      element.scrollTop += delta * ROW_HEIGHT;
+    }
+  }, [pageCount, visualRows]);
 
   // The tail is what a reader wants first: the newest turn is the one they
   // just watched run.
@@ -291,11 +350,6 @@ export function TrajectoryPanel({
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
   }, [status, visualRows.length]);
-
-  const handleLoadOlder = useCallback(() => {
-    pendingPrependRef.current = true;
-    loadOlder();
-  }, [loadOlder]);
 
   const toggleTurn = useCallback((turnKey: string) => {
     setCollapsed((previous) => {
@@ -429,7 +483,11 @@ export function TrajectoryPanel({
 
       {error !== undefined && (
         <div className={styles.error} role="alert">
-          <span>{t('trajectory.loadFailed', { message: error })}</span>
+          <span>
+            {error.kind === 'partial'
+              ? t('rightPanel.savedContentUnavailable')
+              : t('trajectory.loadFailed', { message: error.message })}
+          </span>
           <button
             type="button"
             className={styles.headerButton}
@@ -475,7 +533,7 @@ export function TrajectoryPanel({
                   <button
                     type="button"
                     className={styles.olderButton}
-                    onClick={handleLoadOlder}
+                    onClick={loadOlder}
                     disabled={loadingOlder}
                     data-testid="trajectory-load-older"
                   >
