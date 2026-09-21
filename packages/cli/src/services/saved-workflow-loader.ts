@@ -10,8 +10,9 @@
  * extensions ship, and exposes each as a `/<name>` slash command.
  *
  * Typed in the interactive UI, the command dispatches the `workflow` tool with
- * the file's path; the script is read at execution time (by the tool), so edits
- * take effect on the next invocation. Everywhere else — headless, ACP, and the
+ * the file's path in background mode so completion reaches the conversation;
+ * the script is read at execution time, so edits take effect on the next
+ * invocation. Everywhere else — headless, ACP, and the
  * model invoking the command through the Skill tool — a `{type:'tool'}` return
  * cannot run, so the command expands to a prompt asking the model to call
  * `Workflow({ name })`.
@@ -139,6 +140,9 @@ export class SavedWorkflowLoader implements ICommandLoader {
           type: 'tool',
           toolName: ToolNames.WORKFLOW,
           toolArgs: {
+            // Client-initiated tool results do not continue the model turn;
+            // background runs deliver their result through the notification queue.
+            run_in_background: true,
             // The tool reads the file fresh at execution time (hot reload).
             // A path keeps grants written as Workflow(scriptPath:...) working;
             // a name-only session refuses paths, so it names the workflow.
