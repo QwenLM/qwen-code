@@ -142,6 +142,11 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
+  if (config.getShellExecutionSandbox?.()) {
+    throw new Error(
+      'Speculative execution is unavailable with tools.executionSandbox.',
+    );
+  }
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');

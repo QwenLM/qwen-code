@@ -20,6 +20,9 @@ import {
   voiceWebSocketProtocols,
 } from '../voice/capture-utils';
 import { LIVE_OUTPUT_SAMPLE_RATE, PcmPlayer } from './pcm-player';
+// Emitted as a same-origin asset by the app build, which the Web Shell CSP
+// (`script-src 'self'`) lets `audioWorklet.addModule()` load.
+import captureWorkletUrl from './capture-worklet.js?url';
 
 /**
  * Makes this page the Live Voice audio endpoint: it holds the daemon's single
@@ -71,6 +74,17 @@ export interface LiveInputLevel {
 
 const SILENT_INPUT: LiveInputLevel = { level: 0, at: 0, dropping: false };
 
+const CAPTURE_WORKLET_PROCESSOR = 'qwen-live-capture';
+
+/**
+ * `worklet`: microphone frames are produced, converted and measured on the
+ * audio rendering thread. `script-processor`: the deprecated main-thread
+ * node, kept as the fallback for wherever the worklet module cannot be
+ * loaded — a browser without AudioWorklet, or an embedding whose library build
+ * inlines the module as a `data:` URL the CSP refuses.
+ */
+export type LiveCaptureMode = 'worklet' | 'script-processor';
+
 export type LiveBrowserHostPhase =
   | 'idle'
   | 'connecting'
@@ -100,6 +114,8 @@ export interface UseLiveBrowserHostResult {
   phase: LiveBrowserHostPhase;
   closeReason: LiveBrowserHostCloseReason | undefined;
   errorMessage: string | undefined;
+  /** How the microphone is being captured; undefined until connected. */
+  captureMode: LiveCaptureMode | undefined;
   /**
    * Most recent microphone frame, for a meter. A ref rather than state:
    * at 64 ms frames this changes ~16 times a second, and re-rendering the
@@ -119,6 +135,7 @@ interface HostResources {
   playback?: AudioContext;
   source?: MediaStreamAudioSourceNode;
   processor?: ScriptProcessorNode;
+  worklet?: AudioWorkletNode;
   sink?: GainNode;
   player?: PcmPlayer;
 }
@@ -149,6 +166,7 @@ export function useLiveBrowserHost({
   const [phase, setPhase] = useState<LiveBrowserHostPhase>('idle');
   const [closeReason, setCloseReason] = useState<LiveBrowserHostCloseReason>();
   const [errorMessage, setErrorMessage] = useState<string>();
+  const [captureMode, setCaptureMode] = useState<LiveCaptureMode>();
 
   const phaseRef = useRef<LiveBrowserHostPhase>('idle');
   const generationRef = useRef(0);
@@ -170,6 +188,11 @@ export function useLiveBrowserHost({
     resourcesRef.current = {};
     if (resources.processor) resources.processor.onaudioprocess = null;
     resources.processor?.disconnect();
+    if (resources.worklet) {
+      resources.worklet.port.onmessage = null;
+      resources.worklet.port.close();
+      resources.worklet.disconnect();
+    }
     resources.source?.disconnect();
     resources.sink?.disconnect();
     resources.stream?.getTracks().forEach((track) => track.stop());
@@ -201,6 +224,7 @@ export function useLiveBrowserHost({
       if (generationRef.current !== generation) return;
       generationRef.current += 1;
       release();
+      setCaptureMode(undefined);
       setCloseReason(reason);
       setErrorMessage(message);
       applyPhase(next);
@@ -279,19 +303,74 @@ export function useLiveBrowserHost({
         const player = new PcmPlayer(playback);
         resourcesRef.current.player = player;
         const source = capture.createMediaStreamSource(stream);
-        const processor = capture.createScriptProcessor(
-          LIVE_INPUT_FRAME_SIZE,
-          1,
-          1,
-        );
-        // ScriptProcessorNode (not AudioWorklet): the Web Shell CSP `script-src`
-        // omits `blob:`, which blocks a Blob-URL worklet module, and
-        // ScriptProcessor needs no module load. Dictation makes the same choice.
-        // ScriptProcessor fires only while connected to a destination. A muted
+        // Either capture node only runs while it feeds a destination. A muted
         // gain node keeps the microphone out of the speakers.
         const sink = capture.createGain();
         sink.gain.value = 0;
-        Object.assign(resourcesRef.current, { source, processor, sink });
+        Object.assign(resourcesRef.current, { source, sink });
+
+        // Frames arrive from whichever capture node gets built below; the
+        // socket they go to is opened after it.
+        let onFrame: (pcm: ArrayBuffer, level: number) => void = () => {};
+        // addModule() is a network round trip, the only await between here and
+        // the socket. Nothing is built or stored until it is back and this
+        // connect is known to still be the current one: a node parked in
+        // resourcesRef by an abandoned connect would belong to the next one.
+        let workletLoaded = false;
+        try {
+          if (!capture.audioWorklet) throw new Error('AudioWorklet missing');
+          await capture.audioWorklet.addModule(captureWorkletUrl);
+          workletLoaded = true;
+        } catch {
+          // Falls back below.
+        }
+        if (!isCurrent()) return;
+
+        let captureNode: AudioNode | undefined;
+        if (workletLoaded) {
+          try {
+            const worklet = new AudioWorkletNode(
+              capture,
+              CAPTURE_WORKLET_PROCESSOR,
+              {
+                numberOfInputs: 1,
+                numberOfOutputs: 1,
+                channelCount: 1,
+                channelCountMode: 'explicit',
+                processorOptions: { frameSize: LIVE_INPUT_FRAME_SIZE },
+              },
+            );
+            worklet.port.onmessage = (
+              event: MessageEvent<{ pcm: ArrayBuffer; level: number }>,
+            ) => onFrame(event.data.pcm, event.data.level);
+            resourcesRef.current.worklet = worklet;
+            captureNode = worklet;
+          } catch {
+            // Falls back below.
+          }
+        }
+        if (!captureNode) {
+          // ScriptProcessorNode is deprecated and runs on the main thread, but
+          // it needs no module load: the Web Shell CSP has no `blob:` or
+          // `data:` in `script-src`, and a library build hands the worklet
+          // over as exactly such a URL. Dictation makes the same choice.
+          const processor = capture.createScriptProcessor(
+            LIVE_INPUT_FRAME_SIZE,
+            1,
+            1,
+          );
+          processor.onaudioprocess = (event: AudioProcessingEvent) => {
+            const { pcm, level } = floatToPcm16(
+              event.inputBuffer.getChannelData(0),
+            );
+            onFrame(pcm, level);
+          };
+          resourcesRef.current.processor = processor;
+          captureNode = processor;
+        }
+        setCaptureMode(
+          resourcesRef.current.worklet ? 'worklet' : 'script-processor',
+        );
 
         // Only now, with a working microphone, take the Host lease.
         const url = new URL(toVoiceWebSocketUrl(baseUrl, LIVE_WEB_HOST_PATH));
@@ -380,7 +459,7 @@ export function useLiveBrowserHost({
           /* a close event always follows and carries the reason */
         };
 
-        processor.onaudioprocess = (event: AudioProcessingEvent) => {
+        onFrame = (pcm, level) => {
           if (!isCurrent()) return;
           const at = performance.now();
           const status = statusRef.current;
@@ -394,9 +473,6 @@ export function useLiveBrowserHost({
             inputLevelRef.current = { level: 0, at, dropping: false };
             return;
           }
-          const { pcm, level } = floatToPcm16(
-            event.inputBuffer.getChannelData(0),
-          );
           const streaming = STREAMING_STATES.has(status.state);
           // Whether THIS frame is dropped decides what is sent; whether
           // dropping is REPORTED outlives it, or the flag would flicker.
@@ -417,8 +493,8 @@ export function useLiveBrowserHost({
           frame.set(new Uint8Array(pcm), INPUT_EPOCH_BYTES);
           ws.send(frame.buffer);
         };
-        source.connect(processor);
-        processor.connect(sink);
+        source.connect(captureNode);
+        captureNode.connect(sink);
         sink.connect(capture.destination);
       })();
     },
@@ -439,6 +515,7 @@ export function useLiveBrowserHost({
     phase,
     closeReason,
     errorMessage,
+    captureMode,
     inputLevel: inputLevelRef,
     connect,
     disconnect,

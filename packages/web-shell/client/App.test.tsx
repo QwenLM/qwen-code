@@ -3726,6 +3726,34 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  it('opens no panel for a cross-session message', async () => {
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    const panelBefore = container.querySelector(
+      'aside[aria-label="Right panel"]',
+    )?.textContent;
+
+    act(() =>
+      testState.backgroundDetails?.({
+        turnId: 'background-turn',
+        taskId: 'msg-1',
+        kind: 'peer',
+        label: 'qwen on api',
+        startedAt: 100,
+      }),
+    );
+    await flush();
+    await flush();
+
+    // A pending tab hydrates from the task registry, and a message id is
+    // not a task id: opening one would leave a tab that never loads.
+    expect(mockWorkspace.client.sessionTasks).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]')?.textContent,
+    ).toBe(panelBefore);
+  });
+
   it.each(['transcript', 'task snapshot'])(
     'loads background task details from %s when its pending panel first opens',
     async (source) => {
@@ -35162,7 +35190,7 @@ describe('App session callbacks', () => {
     }
   });
 
-  it('forwards host exclusions to the settings page and updates them at runtime', async () => {
+  it('forwards host settings filters to the settings page and updates them at runtime', async () => {
     const settings: WebShellSettingsOptions = {
       excludeItems: ['setting:fast-model', 'builtin:model-management'],
     };
@@ -35174,6 +35202,7 @@ describe('App session callbacks', () => {
     expect(testState.latestSettingsPresentation).toBe(settings);
 
     const updated: WebShellSettingsOptions = {
+      includeItems: ['setting:language', 'builtin:chat-width'],
       excludeItems: ['setting:language'],
     };
     rerender({ settings: updated });
@@ -35185,8 +35214,36 @@ describe('App session callbacks', () => {
     expect(testState.latestSettingsPresentation).toBeUndefined();
   });
 
-  it('closes settings Add Model on exclusion without restricting command auth', async () => {
-    const { container, rerender } = renderApp();
+  it('opens a settings-launched picker allowed by the allowlist across rerenders', async () => {
+    const { container, rerender } = renderApp({
+      settings: { includeItems: ['setting:fast-model'] },
+    });
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    const openFastModel = container.querySelector<HTMLButtonElement>(
+      '[data-testid="open-fast-model"]',
+    );
+    expect(openFastModel).not.toBeNull();
+    await act(async () => {
+      openFastModel?.click();
+    });
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    // A still-including presentation update must not close the open picker.
+    rerender({ settings: { includeItems: ['setting:fast-model'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+  });
+
+  it('opens settings Add Model when the allowlist includes model management', async () => {
+    const { container, rerender } = renderApp({
+      settings: { includeItems: ['builtin:model-management'] },
+    });
     await flush();
     testState.prompt = '/settings';
     await clickSubmit(container);
@@ -35197,52 +35254,130 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="dialog-shell"]'),
     ).not.toBeNull();
-    rerender({ settings: { excludeItems: ['builtin:model-management'] } });
-    await flush();
-    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
-    testState.prompt = '/auth';
-    await clickSubmit(container);
-    await flush();
-    expect(
-      container.querySelector('[data-testid="dialog-shell"]'),
-    ).not.toBeNull();
-    rerender({ settings: { excludeItems: ['builtin:model-management'] } });
+    rerender({ settings: { includeItems: ['builtin:model-management'] } });
     await flush();
     expect(
       container.querySelector('[data-testid="dialog-shell"]'),
     ).not.toBeNull();
   });
 
-  it('closes an excluded settings picker and still allows a command-launched picker', async () => {
-    const { container, rerender } = renderApp();
+  it('opens a settings-launched voice picker allowed by the allowlist across rerenders', async () => {
+    const { voiceStatus, voiceResult } = armVoiceWorkspacePicker();
+    const { container, rerender } = renderApp({
+      settings: { includeItems: ['setting:voice-model'] },
+    });
     await flush();
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        .querySelector<HTMLButtonElement>('[data-testid="open-voice-model"]')
         ?.click();
+      await Promise.resolve();
     });
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
+    await act(async () => {
+      voiceResult.resolve(voiceStatus);
+      await Promise.resolve();
+    });
+    await flush();
     expect(
       container.querySelector('[data-testid="model-select"]'),
     ).not.toBeNull();
-    rerender({ settings: { excludeItems: ['setting:fast-model'] } });
-    await flush();
-    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
-        ?.click();
-    });
-    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
-    testState.prompt = '/model --fast';
-    await clickSubmit(container);
+    // A still-including presentation update must not close the open picker.
+    rerender({ settings: { includeItems: ['setting:voice-model'] } });
     await flush();
     expect(
       container.querySelector('[data-testid="model-select"]'),
     ).not.toBeNull();
   });
+
+  it.each(['exclusion', 'allowlist'] as const)(
+    'closes hidden settings Add Model without restricting command auth (%s)',
+    async (filter) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      await act(async () => {
+        testState.latestModelManagement?.onAddModel?.();
+      });
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).not.toBeNull();
+      rerender({
+        settings:
+          filter === 'exclusion'
+            ? { excludeItems: ['builtin:model-management'] }
+            : { includeItems: [] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).toBeNull();
+      testState.prompt = '/auth';
+      await clickSubmit(container);
+      await flush();
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).not.toBeNull();
+      rerender({
+        settings:
+          filter === 'exclusion'
+            ? { excludeItems: ['builtin:model-management'] }
+            : { includeItems: [] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).not.toBeNull();
+    },
+  );
+
+  it.each(['exclusion', 'allowlist'] as const)(
+    'closes a hidden settings picker and still allows a command-launched picker (%s)',
+    async (filter) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+          ?.click();
+      });
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).not.toBeNull();
+      rerender({
+        settings:
+          filter === 'exclusion'
+            ? { excludeItems: ['setting:fast-model'] }
+            : { includeItems: [] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).toBeNull();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+          ?.click();
+      });
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).toBeNull();
+      testState.prompt = '/model --fast';
+      await clickSubmit(container);
+      await flush();
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).not.toBeNull();
+    },
+  );
 
   it('keeps a status-bar model picker open when a stale settings key is excluded', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
@@ -35467,29 +35602,37 @@ describe('App session callbacks', () => {
     return { voiceStatus, voiceResult };
   }
 
-  it('closes a settings fallbacks dialog when model-fallbacks is excluded', async () => {
-    const { container, rerender } = renderApp();
-    await flush();
-    testState.prompt = '/settings';
-    await clickSubmit(container);
-    await flush();
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="open-modelFallbacks-workspace"]',
-        )
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-testid="fallbacks-confirm"]'),
-    ).not.toBeNull();
-    rerender({ settings: { excludeItems: ['setting:model-fallbacks'] } });
-    await flush();
-    expect(
-      container.querySelector('[data-testid="fallbacks-confirm"]'),
-    ).toBeNull();
-  });
+  it.each(['exclusion', 'allowlist'] as const)(
+    'closes a settings fallbacks dialog when its item is hidden (%s)',
+    async (filter) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-modelFallbacks-workspace"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="fallbacks-confirm"]'),
+      ).not.toBeNull();
+      rerender({
+        settings:
+          filter === 'exclusion'
+            ? { excludeItems: ['setting:model-fallbacks'] }
+            : { includeItems: [] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="fallbacks-confirm"]'),
+      ).toBeNull();
+    },
+  );
 
   it('forwards the host settings presentation to the settings panel', async () => {
     const settings = { excludeItems: ['setting:fast-model' as const] };
@@ -35532,60 +35675,78 @@ describe('App session callbacks', () => {
     },
   );
 
-  it('closes a settings-launched voice picker when voice-model is excluded', async () => {
-    const { voiceStatus, voiceResult } = armVoiceWorkspacePicker();
-    const { container, rerender } = renderApp();
-    await flush();
-    testState.prompt = '/settings';
-    await clickSubmit(container);
-    await flush();
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="open-voice-model"]')
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
-    await act(async () => {
-      voiceResult.resolve(voiceStatus);
-      await Promise.resolve();
-    });
-    await flush();
-    expect(
-      container.querySelector('[data-testid="model-select"]'),
-    ).not.toBeNull();
-    rerender({ settings: { excludeItems: ['setting:voice-model'] } });
-    await flush();
-    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
-  });
+  it.each(['exclusion', 'allowlist'] as const)(
+    'closes a settings-launched voice picker when its item is hidden (%s)',
+    async (filter) => {
+      const { voiceStatus, voiceResult } = armVoiceWorkspacePicker();
+      const { container, rerender } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-voice-model"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
+      await act(async () => {
+        voiceResult.resolve(voiceStatus);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).not.toBeNull();
+      rerender({
+        settings:
+          filter === 'exclusion'
+            ? { excludeItems: ['setting:voice-model'] }
+            : { includeItems: [] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).toBeNull();
+    },
+  );
 
-  it('does not close a command-taken-over vision picker when its setting is excluded', async () => {
-    const { container, rerender } = renderApp();
-    await flush();
-    testState.prompt = '/settings';
-    await clickSubmit(container);
-    await flush();
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="open-visionModel-workspace"]',
-        )
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-testid="model-select"]'),
-    ).not.toBeNull();
-    // The command takes over the vision surface and disarms the settings key.
-    testState.prompt = '/model --vision';
-    await clickSubmit(container);
-    await flush();
-    rerender({ settings: { excludeItems: ['setting:vision-model'] } });
-    await flush();
-    expect(
-      container.querySelector('[data-testid="model-select"]'),
-    ).not.toBeNull();
-  });
+  it.each(['exclusion', 'allowlist'] as const)(
+    'does not close a command-taken-over vision picker when its setting is hidden (%s)',
+    async (filter) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-visionModel-workspace"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).not.toBeNull();
+      // The command takes over the vision surface and disarms the settings key.
+      testState.prompt = '/model --vision';
+      await clickSubmit(container);
+      await flush();
+      rerender({
+        settings:
+          filter === 'exclusion'
+            ? { excludeItems: ['setting:vision-model'] }
+            : { includeItems: [] },
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).not.toBeNull();
+    },
+  );
 
   it('keeps a settings fallbacks dialog excludable across a bare /model command', async () => {
     const { container, rerender } = renderApp();
@@ -35650,54 +35811,64 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
   });
 
-  it('never opens a settings Voice picker whose item is excluded mid-flight', async () => {
-    mockConnection.workspaceCwd = '/work/secondary';
-    mockWorkspace.capabilities = {
-      workspaceCwd: '/work/primary',
-      features: [
-        'workspace_qualified_voice',
-        'workspace_qualified_rest_core',
-        'workspace_settings',
-      ],
-      workspaces: [
-        {
-          id: 'primary',
-          cwd: '/work/primary',
-          primary: true,
-          trusted: true,
-        },
-        {
-          id: 'secondary',
-          cwd: '/work/secondary',
-          primary: false,
-          trusted: true,
-        },
-      ],
-    } as typeof mockWorkspace.capabilities;
-    const voiceStatus = voiceWorkspaceStatus('/work/secondary');
-    const voiceResult = deferred<typeof voiceStatus>();
-    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
-    const { container, rerender } = renderApp();
-    await flush();
-    testState.prompt = '/settings';
-    await clickSubmit(container);
-    await flush();
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="open-voice-model"]')
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
-    rerender({ settings: { excludeItems: ['setting:voice-model'] } });
-    await flush();
-    await act(async () => {
-      voiceResult.resolve(voiceStatus);
-      await Promise.resolve();
-    });
-    await flush();
-    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
-  });
+  it.each(['exclusion', 'allowlist'] as const)(
+    'never opens a settings Voice picker whose item is hidden mid-flight (%s)',
+    async (filter) => {
+      mockConnection.workspaceCwd = '/work/secondary';
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/work/primary',
+        features: [
+          'workspace_qualified_voice',
+          'workspace_qualified_rest_core',
+          'workspace_settings',
+        ],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/work/primary',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary',
+            cwd: '/work/secondary',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      const voiceStatus = voiceWorkspaceStatus('/work/secondary');
+      const voiceResult = deferred<typeof voiceStatus>();
+      qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
+      const { container, rerender } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-voice-model"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
+      rerender({
+        settings:
+          filter === 'exclusion'
+            ? { excludeItems: ['setting:voice-model'] }
+            : { includeItems: [] },
+      });
+      await flush();
+      await act(async () => {
+        voiceResult.resolve(voiceStatus);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).toBeNull();
+    },
+  );
 
   it('closes the panel, sends /model --fast, and reloads settings on fast-model pick', async () => {
     const { container } = renderApp();
