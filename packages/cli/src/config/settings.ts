@@ -631,6 +631,9 @@ function mergeSettings(
     user,
     system,
   );
+  const legacySandbox = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['tools']>['sandbox']
+  >((current, scope) => scope.tools?.sandbox ?? current, undefined);
   // Restore the complete operator object even if a project replaced `tools`
   // with null, a scalar, or an array during the ordinary settings merge.
   if (executionSandbox) {
@@ -641,6 +644,11 @@ function mergeSettings(
         : {}),
       executionSandbox,
     };
+    if (legacySandbox === undefined) {
+      delete merged.tools.sandbox;
+    } else {
+      merged.tools.sandbox = legacySandbox;
+    }
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }

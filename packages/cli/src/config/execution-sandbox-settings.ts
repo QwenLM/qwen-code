@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
+import * as fs from 'node:fs';
 import path from 'node:path';
 import stripJsonComments from 'strip-json-comments';
 import {
@@ -75,19 +75,28 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
     getSystemSettingsPath(),
   ].map((file) => {
     if (!fs.existsSync(file)) return {};
+    let source: string;
     try {
-      const parsed: unknown = JSON.parse(
-        stripJsonComments(fs.readFileSync(file, 'utf8')),
-      );
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Expected a settings object.');
-      }
-      return parsed as SandboxSettingsInput;
+      source = fs.readFileSync(file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
       throw new InvalidExecutionSandboxConfigError(
         `Cannot read operator sandbox policy from ${file}: ${String(error)}`,
       );
+    }
+    try {
+      const parsed: unknown = JSON.parse(stripJsonComments(source));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Expected a settings object.');
+      }
+      return parsed as SandboxSettingsInput;
+    } catch (error) {
+      if (/"executionSandbox"\s*:/.test(stripJsonComments(source))) {
+        throw new InvalidExecutionSandboxConfigError(
+          `Cannot read operator sandbox policy from ${file}: ${String(error)}`,
+        );
+      }
+      return {};
     }
   });
   const executionSandbox = selectOperatorExecutionSandbox(...scopes);

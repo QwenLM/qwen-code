@@ -165,6 +165,30 @@ describe('operator execution sandbox policy', () => {
     );
     expect(fs.readFileSync(user, 'utf8')).toBe('{"tools":{"executionSandbox":');
   });
+  it('keeps normal corruption recovery for settings without a policy', () => {
+    fs.mkdirSync(path.dirname(user), { recursive: true });
+    fs.writeFileSync(user, 'invalid json');
+    const settings = loadSettings(workspace, { skipLoadEnvironment: true });
+    expect(settings.corruptedPath).toBe(`${user}.corrupted`);
+    expect(fs.readFileSync(`${user}.corrupted`, 'utf8')).toBe('invalid json');
+  });
+  it.each([undefined, false])(
+    'ignores a workspace legacy sandbox when operator selects %j',
+    (operatorSandbox) => {
+      write(user, {
+        tools: { executionSandbox: restricted, sandbox: operatorSandbox },
+      });
+      write(path.join(workspace, '.qwen', 'settings.json'), {
+        tools: { sandbox: 'docker' },
+      });
+      const settings = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      }).merged;
+      expect(settings.tools?.sandbox).toBe(operatorSandbox);
+      expect(validateExecutionSandboxSelection(settings)).toEqual(restricted);
+    },
+  );
   it.each(['SANDBOX', 'QWEN_SANDBOX'])(
     'rejects legacy %s=bwrap before entry',
     (key) => {

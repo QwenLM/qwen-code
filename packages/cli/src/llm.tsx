@@ -1028,7 +1028,7 @@ export async function main() {
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
-    if (settingsWatcher && !config.getShellExecutionSandbox()) {
+    if (settingsWatcher && !config.getShellExecutionSandbox?.()) {
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,
@@ -1054,7 +1054,7 @@ export async function main() {
     const extensionFileWatcher =
       isBareMode(argv.bare) ||
       config.isSafeMode() ||
-      config.getShellExecutionSandbox()
+      config.getShellExecutionSandbox?.()
         ? undefined
         : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
     extensionFileWatcher?.startWatching();
