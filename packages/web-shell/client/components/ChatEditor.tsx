@@ -3078,7 +3078,7 @@ export const ChatEditor = memo(
                   disabled={disabled}
                   aria-label={t('composerMobile.previousInput')}
                   title={t('composerMobile.previousInput')}
-                  onPointerDown={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={core.navigatePrevHistory}
                 >
                   <ArrowUpIcon />
@@ -3089,7 +3089,7 @@ export const ChatEditor = memo(
                   disabled={disabled}
                   aria-label={t('composerMobile.nextInput')}
                   title={t('composerMobile.nextInput')}
-                  onPointerDown={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={core.navigateNextHistory}
                 >
                   <ArrowDownIcon />
@@ -3100,7 +3100,7 @@ export const ChatEditor = memo(
                     className={styles.toolBtn}
                     disabled={disabled}
                     aria-label={t('composerMobile.history')}
-                    onPointerDown={(event) => event.preventDefault()}
+                    onMouseDown={(event) => event.preventDefault()}
                     onClick={core.searchState.openHistorySearch}
                   >
                     <HistoryIcon />
@@ -3111,7 +3111,7 @@ export const ChatEditor = memo(
                     type="button"
                     className={styles.toolBtn}
                     disabled={disabled}
-                    onPointerDown={(event) => event.preventDefault()}
+                    onMouseDown={(event) => event.preventDefault()}
                     onClick={core.toggleShellMode}
                   >
                     {t(
@@ -3127,7 +3127,7 @@ export const ChatEditor = memo(
                     type="button"
                     className={styles.toolBtn}
                     aria-label={t('composerMobile.hideKeyboard')}
-                    onPointerDown={(event) => event.preventDefault()}
+                    onMouseDown={(event) => event.preventDefault()}
                     onClick={() =>
                       core.mobileComposer?.textareaRef.current?.blur()
                     }
@@ -3140,7 +3140,7 @@ export const ChatEditor = memo(
                   className={styles.toolBtn}
                   disabled={disabled}
                   aria-label={t('composerMobile.expand')}
-                  onPointerDown={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
                     const textarea = core.mobileComposer?.textareaRef.current;
                     expandedSelectionRef.current = [
@@ -3996,7 +3996,7 @@ export const ChatEditor = memo(
                   variant="ghost"
                   className="size-11"
                   aria-label={t('composerMobile.hideKeyboard')}
-                  onPointerDown={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() =>
                     core.mobileComposer?.expandedTextareaRef.current?.blur()
                   }
