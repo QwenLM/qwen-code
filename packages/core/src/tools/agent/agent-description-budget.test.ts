@@ -58,7 +58,7 @@ interface Shape {
   /**
    * Whether the session can load a skill. A session that can gets a pointer
    * at the `agent-delegation` reference; one that cannot has the reference
-   * inlined, which is the largest this description gets for a session that has
+   * inlined, the route whose description is largest for a session that has
    * not opted the reference out (#12054). Not a floor: `withheld` is smaller
    * than the pointer shape, and the optional blocks stack on either route.
    */
@@ -186,8 +186,8 @@ describe('AgentTool per-turn size budgets', () => {
   });
 
   /**
-   * The largest description a session that has not opted out can reach, and
-   * the shape no setting turns into a pointer: a pointer there would send the
+   * The largest route a session that has not opted out can land on, and the
+   * shape no setting turns into a pointer: a pointer there would send the
    * model at something it cannot reach. Budgeted separately — and above the
    * pointer shape — so growth in the skill body is visible here.
    *
@@ -425,8 +425,8 @@ describe('AgentTool per-turn size budgets', () => {
 
   /**
    * The row above measures the pointer shape, which is what almost every
-   * session sends — so on its own it would let the inline route's surface grow
-   * unbounded while the design doc presented 11,750 as bounding every shape.
+   * session sends — so on its own it would leave the inline route's surface,
+   * which §5 of the design doc lists as a row of its own, unbounded here.
    * The inline surface is *above* the 13,374 every session paid before this
    * PR: a reference that cannot be loaded costs more per turn than the prose
    * it replaced did. That is the deliberate price for reaching skill-less

@@ -156,8 +156,8 @@ describe('bundled agent-delegation skill', () => {
     ['Brief the agent like a smart colleague'],
     ["Explain what you're trying to accomplish and why"],
     ["Describe what you've already learned or ruled out"],
-    // The bullet that left the description as a rewrite rather than a copy, so
-    // it is the one a later pass can drop from the skill with nothing noticing.
+    // Relocated verbatim from the description's bullet list; pinned here
+    // because nothing else in the repo asserts this sentence.
     ['Give enough context about the surrounding problem'],
     ['If you need a short response, say so explicitly'],
     ['For lookups, provide the exact target'],
