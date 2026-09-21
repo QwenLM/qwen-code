@@ -43,6 +43,8 @@ export interface TrajectoryPanelProps {
    * tab is waiting to be rewired, which renders as the loading state.
    */
   loadPage?: TrajectoryPageLoader;
+  /** Test seam for the window sizes; production uses the hook's defaults. */
+  windowOptions?: { pageSize?: number; maxPages?: number };
 }
 
 type VisualRow =
@@ -261,13 +263,28 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
   );
 }
 
-export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
+export function TrajectoryPanel({
+  loadPage,
+  windowOptions,
+}: TrajectoryPanelProps) {
   const { t } = useI18n();
-  const { trajectory, status, error, truncated, refresh } =
-    useTrajectoryWindow(loadPage);
+  const {
+    trajectory,
+    status,
+    error,
+    hasOlder,
+    loadingOlder,
+    atCapacity,
+    pageCount,
+    loadOlder,
+    refresh,
+    retry,
+  } = useTrajectoryWindow(loadPage, windowOptions ?? {});
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const previousPagesRef = useRef(0);
+  const previousCountRef = useRef(0);
   const settledOnceRef = useRef(false);
   /** Last offset this panel knows the reader at; see the resize effect. */
   const scrollTopRef = useRef(0);
@@ -314,6 +331,27 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     estimateSize: () => ROW_HEIGHT,
     overscan: 12,
   });
+
+  // Older pages prepend, so every row already on screen moves down by exactly
+  // the number of rows added. With uniform heights that offset is arithmetic,
+  // and applying it keeps the reader looking at the same row.
+  //
+  // The trigger is the window's own page count, not a flag set when the button
+  // is pressed: a load that fails leaves the held window — and therefore this
+  // effect's inputs — untouched, so a flag set on press would survive and fire
+  // on the next thing that lengthens the list.
+  useLayoutEffect(() => {
+    const count = visualRows.length;
+    const previousCount = previousCountRef.current;
+    const previousPages = previousPagesRef.current;
+    previousCountRef.current = count;
+    previousPagesRef.current = pageCount;
+    const delta = count - previousCount;
+    const element = scrollRef.current;
+    if (pageCount > previousPages && delta > 0 && element) {
+      scrollTo(element, element.scrollTop + delta * ROW_HEIGHT);
+    }
+  }, [pageCount, scrollTo, visualRows]);
 
   // Hiding an element resets its scroll offset to zero without a scroll event,
   // and the right panel's fullscreen toggle does exactly that to the dock on
@@ -467,7 +505,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           <button
             type="button"
             className={styles.headerButton}
-            onClick={refresh}
+            onClick={retry}
             disabled={status === 'loading'}
           >
             {t('common.retry')}
@@ -494,14 +532,25 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
             {/* Outside the scrolled box on purpose: inside it, its height
                 would offset every virtual row from the coordinates the
                 virtualizer computes. */}
-            {truncated && (
+            {(hasOlder || loadingOlder || atCapacity) && (
               <div className={styles.olderBar}>
-                <span
-                  className={styles.olderNotice}
-                  data-testid="trajectory-truncated"
-                >
-                  {t('trajectory.truncated')}
-                </span>
+                {atCapacity ? (
+                  <span className={styles.olderNotice}>
+                    {t('trajectory.atCapacity')}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className={styles.olderButton}
+                    onClick={loadOlder}
+                    disabled={loadingOlder || status === 'loading'}
+                    data-testid="trajectory-load-older"
+                  >
+                    {loadingOlder
+                      ? t('common.loading')
+                      : t('trajectory.loadOlder')}
+                  </button>
+                )}
               </div>
             )}
             <div

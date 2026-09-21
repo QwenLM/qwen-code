@@ -48,6 +48,8 @@ import { installSseTransport, type SseTransport } from './sseTransport';
 export interface DaemonRequestRecord {
   method: string;
   path: string;
+  /** Query string as sent, without the leading `?`. Empty when there was none. */
+  search: string;
   body: unknown;
   headers: Record<string, string>;
 }
@@ -102,10 +104,22 @@ export interface WebShellDaemonScenario {
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /**
-   * Page served by `GET /session/:id/transcript`. Unset answers an empty page,
-   * which is what a session with no persisted records reads as.
+   * Pages served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as. `older` is
+   * keyed by the `cursor` the previous page handed back, so a spec can walk
+   * backwards, and a `{ status }` entry answers that read with a failure
+   * instead of a page.
    */
-  transcriptPage?: { events: DaemonEvent[]; hasMore?: boolean };
+  transcriptPage?: {
+    events: DaemonEvent[];
+    hasMore?: boolean;
+    nextCursor?: string;
+    older?: Record<
+      string,
+      | { events: DaemonEvent[]; hasMore?: boolean; nextCursor?: string }
+      | { status: number }
+    >;
+  };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
   /**
@@ -506,6 +520,7 @@ export async function installMockDaemon(
     requests.push({
       method,
       path,
+      search: url.search.replace(/^\?/, ''),
       body,
       headers: request.headers(),
     });
@@ -2120,12 +2135,33 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'transcript') {
-      const page = scenario.transcriptPage;
+      const cursor = searchParams.get('cursor');
+      const configured = scenario.transcriptPage;
+      const page = cursor
+        ? configured?.older?.[cursor]
+        : configured
+          ? {
+              events: configured.events,
+              hasMore: configured.hasMore,
+              nextCursor: configured.nextCursor,
+            }
+          : undefined;
+      if (page && 'status' in page) {
+        await json(
+          route,
+          { error: 'Transcript page is unavailable' },
+          page.status,
+        );
+        return;
+      }
       await json(route, {
         v: 1,
         sessionId,
         events: page?.events ?? [],
         hasMore: page?.hasMore ?? false,
+        ...(page?.nextCursor !== undefined
+          ? { nextCursor: page.nextCursor }
+          : {}),
       });
       return;
     }

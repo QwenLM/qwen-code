@@ -28,6 +28,22 @@ describe('createTrajectoryPageLoader', () => {
     expect(calls).toEqual([['s-1', { direction: 'backward', limit: 100 }]]);
   });
 
+  it('walks backwards by cursor', async () => {
+    const { client, calls } = stubClient();
+
+    await createTrajectoryPageLoader(
+      client,
+      's-1',
+    )({
+      cursor: 'older-1',
+      limit: 50,
+    });
+
+    // A cursor already encodes the direction; sending both is rejected by the
+    // daemon as an invalid combination.
+    expect(calls).toEqual([['s-1', { cursor: 'older-1', limit: 50 }]]);
+  });
+
   it('never asks for the summary projection', async () => {
     const { client, calls } = stubClient();
 

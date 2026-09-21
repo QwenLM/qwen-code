@@ -3007,7 +3007,9 @@ const EN: Messages = {
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated': 'Showing the most recent records of this session.',
+  'trajectory.loadOlder': 'Load earlier records',
+  'trajectory.atCapacity':
+    'Earlier records are beyond the window this panel keeps.',
   'trajectory.loadFailed': (v) =>
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
@@ -6796,7 +6798,8 @@ const ZH: Messages = {
   'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示这个会话最近的记录。',
+  'trajectory.loadOlder': '加载更早的记录',
+  'trajectory.atCapacity': '更早的记录超出了本面板保留的范围。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.totals': (v) =>

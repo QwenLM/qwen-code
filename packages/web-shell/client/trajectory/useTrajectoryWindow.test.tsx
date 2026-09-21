@@ -79,7 +79,7 @@ let root: Root | null = null;
 
 function render(
   loadPage: TrajectoryPageLoader | undefined,
-  options?: { pageSize?: number },
+  options?: { pageSize?: number; maxPages?: number },
 ): {
   latest: () => TrajectoryWindow;
   rerender: (next: TrajectoryPageLoader | undefined) => void;
@@ -138,44 +138,171 @@ describe('useTrajectoryWindow', () => {
     expect(loadPage).toHaveBeenCalledTimes(1);
     expect(loadPage.mock.calls[0]![0]).toEqual({ limit: 250 });
     expect(view.latest().status).toBe('ready');
-    expect(view.latest().truncated).toBe(false);
     expect(view.latest().trajectory?.rows.map((row) => row.kind)).toEqual([
       'user',
       'request',
     ]);
   });
 
-  it('says when the session has history the page left out', async () => {
+  it('prepends an older page ahead of the window', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor === 'older-1'
+        ? page([userText('first', 'rec-0')])
+        : page([userText('second', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+    expect(view.latest().hasOlder).toBe(true);
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+
+    // Order is what makes the window contiguous: the older page has to land
+    // ahead of the one already held, not after it.
+    const texts = view
+      .latest()
+      .trajectory!.rows.map((row) =>
+        row.kind === 'user' ? row.block.text : '',
+      );
+    expect(texts).toEqual(['first', 'second']);
+    expect(view.latest().hasOlder).toBe(false);
+  });
+
+  it('keeps row identity when an older page lands', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor === 'older-1'
+        ? page([userText('first', 'rec-0')])
+        : page([userText('second', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+    const before = view.latest().trajectory!.rows.map((row) => row.key);
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+
+    const after = view.latest().trajectory!.rows.map((row) => row.key);
+    expect(after.slice(after.length - before.length)).toEqual(before);
+  });
+
+  it('stops paging once the window is full', async () => {
     const loadPage = vi.fn(async () =>
-      page([userText('newest', 'rec-1')], { hasMore: true }),
+      page([userText('turn', `rec-${loadPage.mock.calls.length}`)], {
+        hasMore: true,
+        nextCursor: `older-${loadPage.mock.calls.length}`,
+      }),
+    );
+    const view = render(loadPage, { maxPages: 2 });
+    await act(async () => {});
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+    expect(view.latest().atCapacity).toBe(true);
+    expect(view.latest().hasOlder).toBe(false);
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+    expect(loadPage).toHaveBeenCalledTimes(2);
+  });
+
+  it('collapses a double click into one request', async () => {
+    const pending = deferred<TrajectoryPageResult>();
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? pending.promise
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
     );
     const view = render(loadPage);
     await act(async () => {});
 
-    // Nothing here can reach that history yet, so the window reports it as a
-    // fact about the page rather than as something to act on.
-    expect(view.latest().truncated).toBe(true);
-    expect(loadPage).toHaveBeenCalledTimes(1);
+    act(() => {
+      view.latest().loadOlder();
+      view.latest().loadOlder();
+    });
+
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    expect(view.latest().loadingOlder).toBe(true);
+    await act(async () => {
+      pending.resolve(page([userText('older', 'rec-0')]));
+    });
+    expect(view.latest().loadingOlder).toBe(false);
   });
 
-  it('replaces the page on refresh rather than adding to it', async () => {
-    let body = 'first';
-    const loadPage = vi.fn(async () => page([userText(body, 'rec-1')]));
+  it('refuses to page while a refresh is still in flight', async () => {
+    const pending = deferred<TrajectoryPageResult>();
+    let served = 0;
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) => {
+      if (opts.cursor) return page([userText('older', 'rec-0')]);
+      served += 1;
+      return served === 1
+        ? page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          })
+        : pending.promise;
+    });
     const view = render(loadPage);
     await act(async () => {});
-    expect(view.latest().trajectory!.rows).toHaveLength(1);
+
+    await act(async () => {
+      view.latest().refresh();
+    });
+    act(() => {
+      view.latest().loadOlder();
+    });
+
+    // Paging bumps the generation, so letting it through here would throw
+    // away the refresh reply and leave the reader with no sign of it.
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      pending.resolve(page([userText('refreshed', 'rec-2')]));
+    });
+    const rows = view.latest().trajectory!.rows;
+    expect(rows[0]!.kind === 'user' && rows[0]!.block.text).toBe('refreshed');
+  });
+
+  it('rebuilds the window from the newest page on refresh', async () => {
+    let body = 'first';
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page([userText(body, 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+    expect(view.latest().trajectory!.rows).toHaveLength(2);
 
     body = 'second';
     await act(async () => {
       view.latest().refresh();
     });
 
-    // Page boundaries are picked per request, so a fresh page and the held one
-    // overlap by an unknown amount and cannot be joined without dropping or
-    // repeating records.
+    // A refresh starts a new window rather than splicing: page boundaries are
+    // picked per request, so the held older page cannot be joined to a fresh
+    // newest one without dropping or repeating records.
     const rows = view.latest().trajectory!.rows;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.kind === 'user' && rows[0]!.block.text).toBe('second');
+    expect(view.latest().hasOlder).toBe(true);
   });
 
   it('drops a reply that a refresh has already superseded', async () => {
@@ -251,7 +378,7 @@ describe('useTrajectoryWindow', () => {
     );
   });
 
-  it("drops the previous loader's page when the loader changes", async () => {
+  it("drops the previous loader's pages when the loader changes", async () => {
     const first: TrajectoryPageLoader = vi.fn(async () =>
       page([userText('first session', 'rec-1')]),
     );
@@ -276,7 +403,39 @@ describe('useTrajectoryWindow', () => {
     });
   });
 
-  it('reads again after a failure', async () => {
+  it('retries the older page at its cursor instead of rebuilding', async () => {
+    let olderCalls = 0;
+    const loadPage: TrajectoryPageLoader = vi.fn(async ({ cursor }) => {
+      if (cursor === undefined) {
+        return page([userText('newest', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'older-1',
+        });
+      }
+      olderCalls += 1;
+      return olderCalls === 1
+        ? page([], { replayError: 'flaky' })
+        : page([userText('older', 'rec-1')]);
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+    await act(async () => view.latest().loadOlder());
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'flaky',
+    });
+
+    await act(async () => view.latest().retry());
+
+    // Rebuilding from the newest page would discard every older page already
+    // paged back through, which is the opposite of what the reader asked for.
+    expect(loadPage).toHaveBeenCalledTimes(3);
+    expect(loadPage.mock.calls[2]![0].cursor).toBe('older-1');
+    expect(view.latest().pageCount).toBe(2);
+    expect(view.latest().error).toBeUndefined();
+  });
+
+  it('retries the newest page when that is what failed', async () => {
     let calls = 0;
     const loadPage: TrajectoryPageLoader = vi.fn(async () => {
       calls += 1;
@@ -290,10 +449,26 @@ describe('useTrajectoryWindow', () => {
       message: 'down',
     });
 
-    await act(async () => view.latest().refresh());
+    await act(async () => view.latest().retry());
 
     expect(view.latest().trajectory!.rows).toHaveLength(1);
-    expect(view.latest().error).toBeUndefined();
+    expect(loadPage.mock.calls[1]![0].cursor).toBeUndefined();
+  });
+
+  it('reports no older history when the page gave no cursor for it', async () => {
+    const loadPage: TrajectoryPageLoader = vi.fn(async () =>
+      page([userText('only', 'rec-1')], { hasMore: true }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    // `loadOlder` needs a cursor, so history reported without one is history
+    // this view cannot reach — saying otherwise offers an inert control and,
+    // at the window's ceiling, a notice about records it never had.
+    expect(view.latest().hasOlder).toBe(false);
+    expect(view.latest().atCapacity).toBe(false);
+    await act(async () => view.latest().loadOlder());
+    expect(loadPage).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the held window when a page cannot be read', async () => {
@@ -329,6 +504,50 @@ describe('useTrajectoryWindow', () => {
     // `partial` is a flag on the page, not a sentence; carrying it as a kind
     // keeps the literal out of the message the reader is shown.
     expect(view.latest().error).toEqual({ kind: 'partial' });
+  });
+
+  it('counts the pages it holds', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+    expect(view.latest().pageCount).toBe(1);
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+    expect(view.latest().pageCount).toBe(2);
+
+    await act(async () => {
+      view.latest().refresh();
+    });
+    expect(view.latest().pageCount).toBe(1);
+  });
+
+  it('holds its page count when an older page fails', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([], { replayError: 'unreadable page' })
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    await act(async () => {
+      view.latest().loadOlder();
+    });
+
+    expect(view.latest().status).toBe('error');
+    expect(view.latest().pageCount).toBe(1);
   });
 
   it('reports a partial page as an error rather than folding a prefix', async () => {

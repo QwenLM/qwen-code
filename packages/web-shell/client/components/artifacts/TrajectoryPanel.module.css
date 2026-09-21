@@ -129,6 +129,27 @@
   padding: 4px 0 6px;
 }
 
+.olderButton {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.olderButton:hover:not(:disabled),
+.olderButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.olderButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .olderNotice {
   font-size: 11px;
   color: var(--muted-foreground);

@@ -38,6 +38,9 @@ const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 // as zero for every element. Without a stubbed box it would mount no rows and
 // every assertion about the table would pass vacuously.
 const VIEWPORT_HEIGHT = 900;
+/** Matches the panel's own uniform row height; the prepend correction is
+ * arithmetic on it, so a test that asserts the offset has to know it. */
+const ROW_HEIGHT = 34;
 const BOX_PROPS = ['offsetHeight', 'offsetWidth'] as const;
 const originalBoxes = new Map<string, PropertyDescriptor | undefined>();
 // jsdom performs no layout, so its own `scrollTop` is pinned at 0 and an
@@ -567,28 +570,165 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('shell_output');
   });
 
-  it('says the page left history out, outside the scrolled rows', async () => {
-    const container = await render(async () =>
-      page(REAL_EVENTS, { hasMore: true }),
+  it('offers older history only while the window has room', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
     );
-    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
-    const notice = container.querySelector(
-      '[data-testid="trajectory-truncated"]',
-    );
+    const container = await render(loadPage);
 
-    expect(text(notice)).toContain('most recent records');
-    // Inside the scrolled box its height would offset every virtual row from
-    // the coordinates the virtualizer hands out.
-    expect(scroll.contains(notice)).toBe(false);
-    expect(scroll.children).toHaveLength(1);
+    const older = container.querySelector(
+      '[data-testid="trajectory-load-older"]',
+    ) as HTMLButtonElement;
+    expect(older).not.toBeNull();
+    await act(async () => older.click());
+
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('[data-testid="trajectory-load-older"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('older');
+    expect(container.textContent).toContain('newest');
   });
 
-  it('says nothing about older history when the page is the whole session', async () => {
-    const container = await render(async () => page(REAL_EVENTS));
+  it('keeps the reader on the same row when an older page lands', async () => {
+    const older = [
+      userText('older one', 'rec-0'),
+      userText('older two', 'rec--1'),
+    ];
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page(older)
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const container = await render(loadPage);
+    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+    scroll.scrollTop = 120;
+    const before = rowsOf(container).length;
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+
+    // Everything already on screen moved down by exactly the rows that were
+    // added, so the offset moves with it and the reader does not lose place.
+    const added = rowsOf(container).length - before;
+    expect(added).toBeGreaterThan(0);
+    expect(scroll.scrollTop).toBe(120 + added * ROW_HEIGHT);
+  });
+
+  it('does not move the view when a later read lengthens the list', async () => {
+    let rows = [userText('one', 'rec-1')];
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) => {
+      if (opts.cursor) throw new Error('older page is unreadable');
+      return page(rows, { hasMore: true, nextCursor: 'older-1' });
+    });
+    const container = await render(loadPage);
+    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    scroll.scrollTop = 80;
+
+    rows = [userText('one', 'rec-1'), userText('two', 'rec-2')];
+    await act(async () =>
+      (
+        container.querySelector('[aria-label="Refresh"]') as HTMLButtonElement
+      ).click(),
+    );
+
+    // The failed load added no page, so the correction must not fire on the
+    // next thing that lengthens the list.
+    expect(rowsOf(container).length).toBeGreaterThan(1);
+    expect(scroll.scrollTop).toBe(80);
+  });
+
+  it('retries the page that failed instead of rebuilding from the newest', async () => {
+    let olderCalls = 0;
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) => {
+      if (!opts.cursor) {
+        return page([userText('newest', 'rec-1')], {
+          hasMore: true,
+          nextCursor: 'older-1',
+        });
+      }
+      olderCalls += 1;
+      return olderCalls === 1
+        ? page([], { replayError: 'flaky' })
+        : page([userText('older', 'rec-0')], { hasMore: false });
+    });
+    const container = await render(loadPage);
+    const older = () =>
+      container.querySelector(
+        '[data-testid="trajectory-load-older"]',
+      ) as HTMLButtonElement | null;
+
+    await act(async () => older()!.click());
+    expect(text(container.querySelector('[role="alert"]'))).toContain('flaky');
+
+    await act(async () =>
+      (
+        container.querySelector('[role="alert"] button') as HTMLButtonElement
+      ).click(),
+    );
+
+    // The retry re-read the cursor rather than the newest page, so the pages
+    // already paged back through are still here — a rebuild would have thrown
+    // them away and put the reader back at the end.
+    expect(loadPage.mock.calls.filter(([opts]) => opts.cursor).length).toBe(2);
+    expect(loadPage.mock.calls.filter(([opts]) => !opts.cursor).length).toBe(1);
+    expect(container.textContent).toContain('older');
+    expect(container.textContent).toContain('newest');
+  });
+
+  it('does not offer history the page gave no cursor for', async () => {
+    const container = await render(async () =>
+      // `hasMore` without a cursor is history this view cannot reach; offering
+      // it would be a button that does nothing at all when pressed.
+      page([userText('only', 'rec-1')], { hasMore: true }),
+    );
 
     expect(
-      container.querySelector('[data-testid="trajectory-truncated"]'),
+      container.querySelector('[data-testid="trajectory-load-older"]'),
     ).toBeNull();
+    expect(container.textContent).not.toContain('beyond the window');
+  });
+
+  it('keeps the load-older control out of the scrolled rows', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page(REAL_EVENTS, { hasMore: true, nextCursor: 'older-1' }),
+    );
+    const container = await render(loadPage);
+    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+    const older = container.querySelector(
+      '[data-testid="trajectory-load-older"]',
+    ) as HTMLButtonElement;
+
+    // Inside the scrolled box its height would offset every virtual row from
+    // the coordinates the virtualizer hands out, and the bar vanishing with
+    // the last page would move the rows again on top of the prepend
+    // correction.
+    expect(older).not.toBeNull();
+    expect(scroll.contains(older)).toBe(false);
+    expect(scroll.children).toHaveLength(1);
   });
 
   it('numbers rows by their place in the whole table, not in the DOM', async () => {

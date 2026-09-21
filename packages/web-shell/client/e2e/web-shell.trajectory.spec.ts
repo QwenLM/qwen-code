@@ -9,6 +9,8 @@ import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
+  type MockDaemonController,
+  type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 
 /**
@@ -18,6 +20,7 @@ import {
  */
 const TURNS = 40;
 const ROWS_PER_TURN = 5;
+const OLDER_CURSOR = 'older-page-1';
 
 function sessionUpdate(update: Record<string, unknown>): DaemonEvent {
   return {
@@ -106,16 +109,20 @@ function transcriptEvents(turns: number): DaemonEvent[] {
 async function openTrajectory(
   page: Page,
   baseURL: string,
-  options: { hasMore?: boolean } = {},
-): Promise<Locator> {
+  options: {
+    older?: NonNullable<WebShellDaemonScenario['transcriptPage']>['older'];
+  } = {},
+): Promise<{ grid: Locator; daemon: MockDaemonController }> {
   const scenario = createWebShellDaemonScenario({
     workspaceCwd: '/tmp/qwen-web-shell-e2e',
     transcriptPage: {
       events: transcriptEvents(TURNS),
-      ...(options.hasMore ? { hasMore: true } : {}),
+      ...(options.older
+        ? { hasMore: true, nextCursor: OLDER_CURSOR, older: options.older }
+        : {}),
     },
   });
-  await installMockDaemon(page, scenario, { baseURL });
+  const daemon = await installMockDaemon(page, scenario, { baseURL });
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
   await expect(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
@@ -125,7 +132,14 @@ async function openTrajectory(
   await page.getByTestId('right-panel-open-trajectory').click();
   const grid = page.getByTestId('trajectory-rows');
   await expect(grid).toBeVisible();
-  return grid;
+  return { grid, daemon };
+}
+
+/** Requests the client actually made for transcript pages, in order. */
+function transcriptRequests(daemon: MockDaemonController): string[] {
+  return daemon.requests
+    .filter((request) => /\/session\/[^/]+\/transcript$/.test(request.path))
+    .map((request) => request.search);
 }
 
 /** Rows the virtualizer has mounted, which is never the whole page. */
@@ -137,7 +151,7 @@ test.describe('trajectory panel', () => {
   test('shows what each request and tool cost @smoke', async ({
     page,
   }, testInfo) => {
-    const grid = await openTrajectory(
+    const { grid } = await openTrajectory(
       page,
       String(testInfo.project.use.baseURL),
     );
@@ -171,7 +185,7 @@ test.describe('trajectory panel', () => {
   test('keeps its rows through the fullscreen toggle @smoke', async ({
     page,
   }, testInfo) => {
-    const grid = await openTrajectory(
+    const { grid } = await openTrajectory(
       page,
       String(testInfo.project.use.baseURL),
     );
@@ -195,7 +209,7 @@ test.describe('trajectory panel', () => {
   test('walks the rows from the keyboard @smoke', async ({
     page,
   }, testInfo) => {
-    const grid = await openTrajectory(
+    const { grid } = await openTrajectory(
       page,
       String(testInfo.project.use.baseURL),
     );
@@ -245,13 +259,61 @@ test.describe('trajectory panel', () => {
     await expect(mountedRows(page).first()).toBeVisible();
   });
 
-  test('says when the page left older history out @smoke', async ({
+  test('keeps the reader on the same row when earlier records land @smoke', async ({
     page,
   }, testInfo) => {
-    await openTrajectory(page, String(testInfo.project.use.baseURL), {
-      hasMore: true,
-    });
+    const { grid } = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+      { older: { [OLDER_CURSOR]: { events: transcriptEvents(5) } } },
+    );
 
-    await expect(page.getByTestId('trajectory-truncated')).toBeVisible();
+    // Anchored on a row the reader can see, found by its text: an older page
+    // renumbers every row behind it, so the index is not an identity.
+    const anchor = page
+      .locator('[data-testid="trajectory-rows"] [role="row"]')
+      .filter({ hasText: `Prompt number ${TURNS - 1}` });
+    await expect(anchor).toBeVisible();
+    const before = await anchor.boundingBox();
+    expect(before).not.toBeNull();
+
+    await page.getByTestId('trajectory-load-older').click();
+    await expect(grid).toHaveAttribute(
+      'aria-rowcount',
+      String((TURNS + 5) * ROWS_PER_TURN),
+    );
+
+    // The rows above grew by a known amount, so the row the reader was on has
+    // to stay where it was rather than being pushed down by that amount.
+    const after = await anchor.boundingBox();
+    expect(after).not.toBeNull();
+    expect(Math.abs(after!.y - before!.y)).toBeLessThan(2);
+  });
+
+  test('retries the page that failed rather than starting over @smoke', async ({
+    page,
+  }, testInfo) => {
+    const { grid, daemon } = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+      { older: { [OLDER_CURSOR]: { status: 500 } } },
+    );
+
+    await page.getByTestId('trajectory-load-older').click();
+    const alert = page.getByRole('alert');
+    await expect(alert).toBeVisible();
+
+    // The failed read is not the one on screen: the window it could not add to
+    // is still there, whole.
+    await expect(grid).toHaveAttribute(
+      'aria-rowcount',
+      String(TURNS * ROWS_PER_TURN),
+    );
+
+    await alert.getByRole('button').click();
+    const reads = transcriptRequests(daemon);
+    // Re-reading the newest page instead would throw away everything the
+    // reader had already paged back through.
+    expect(reads.at(-1)).toContain(`cursor=${OLDER_CURSOR}`);
   });
 });
