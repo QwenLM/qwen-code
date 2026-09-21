@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { parseSkillContent } from './skill-load.js';
 import {
@@ -37,6 +38,8 @@ interface StubOptions {
   revealed?: string[];
   disabledNames?: string[];
   disabledLevels?: string[];
+  /** `Config.getToolMode()` — defaults to direct mode. */
+  toolMode?: ToolMode;
 }
 
 /**
@@ -58,6 +61,7 @@ function stubConfig(options: StubOptions = {}) {
     revealed = [],
     disabledNames = [],
     disabledLevels = [],
+    toolMode = ToolMode.Direct,
   } = options;
   // Models the real `Config.isSkillEnabled`: a level other than the bundled one
   // for this skill finds no owner and answers false, so a drift in the level
@@ -74,6 +78,7 @@ function stubConfig(options: StubOptions = {}) {
       isDeferredToolRevealed: (name: string) => revealed.includes(name),
     }),
     getVisibleTools: () => new Set(visibleTools),
+    getToolMode: () => toolMode,
     isSkillEnabled,
     getDisabledSkillLevels: () => new Set(disabledLevels),
   } as unknown as Config;
@@ -181,6 +186,21 @@ describe('resolveWorkflowAuthoringRoute', () => {
     expect(resolveWorkflowAuthoringRoute(config)).toBe('skill-via-tool-search');
   });
 
+  // R1-21: CodeModeOnly hides both bridge tools (`code-mode.ts`
+  // HIDDEN_TOOLS), so a deferred Skill tool there is reached through the
+  // `exec` binding, not the bridge — the route must stay `skill`, because a
+  // bridge pointer would name tools the session cannot call, and a tool that
+  // freezes its surface at construction (AgentTool) would carry the dead
+  // instruction for the whole session. Mutation check: dropping the
+  // CodeModeOnly guard in bundled-reference.ts turns this red.
+  it('points straight at the skill when CodeModeOnly hides the bridge', () => {
+    const { config } = stubConfig({
+      toolMode: ToolMode.CodeModeOnly,
+      deferred: [ToolNames.SKILL],
+    });
+    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+  });
+
   // Deferred is not the same as hidden: `tools.visible` declares the schema
   // from session start, so the Skill tool is in every request and a detour
   // note would be false.
@@ -238,6 +258,13 @@ describe('resolveWorkflowAuthoringSurface', () => {
   it.each([
     [{}, 'pointer'],
     [{ deferred: [ToolNames.SKILL] }, 'pointer-via-tool-search'],
+    [
+      {
+        toolMode: ToolMode.CodeModeOnly,
+        deferred: [ToolNames.SKILL],
+      },
+      'pointer',
+    ],
     [
       {
         deferred: [ToolNames.SKILL],

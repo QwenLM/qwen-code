@@ -32,6 +32,7 @@
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { parseSkillContent } from './skill-load.js';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
@@ -142,7 +143,15 @@ export function resolveBundledReferenceRoute(
     const toolNames = registry?.getAllToolNames?.();
     if (!Array.isArray(toolNames)) return 'skill';
     if (!toolNames.includes(ToolNames.SKILL)) return 'inline';
-    if (isToolDeferredBehindToolSearch(config, ToolNames.SKILL)) {
+    if (
+      // CodeModeOnly hides both bridge tools (`code-mode.ts` HIDDEN_TOOLS),
+      // so registration is not reachability there: a bridge pointer would
+      // name tools the session cannot call, while a deferred Skill tool
+      // stays reachable through the `exec` binding. Fall through to `skill`;
+      // the plain pointer stays honest (the #12271 rule at fileUtils.ts).
+      config.getToolMode?.() !== ToolMode.CodeModeOnly &&
+      isToolDeferredBehindToolSearch(config, ToolNames.SKILL)
+    ) {
       // A withheld schema is only reachable through the tool_search +
       // tool_call bridge. Without BOTH halves the Skill tool is registered
       // but invisible, which is no route at all — with tool_search alone the
