@@ -37,11 +37,11 @@ qwen sandbox -- sh -c 'printf "confined command\n"'
 qwen -y -p "Update the project and run its tests"
 ```
 
-The report names the tool boundary, requested/effective backend, workspace, filesystem and command network policy. `--verify` checks workspace writes, denial against a file known to be writable on the host, private PID namespace identity and the selected network namespace. Backend setup errors fail before payload execution and never rerun the command on the host. The one-command subcommand forwards literal arguments and streams textual output; use terminal `!` for interactive PTY commands.
+The report names the tool boundary, requested/effective backend, workspace, filesystem and command network policy. `--verify` checks workspace writes, denial against a file known to be writable on the host, private PID namespace identity and the selected network namespace. Backend setup errors fail before payload execution and never rerun the command on the host. The one-command subcommand forwards literal arguments and redirected stdin while preserving stdout and stderr byte-for-byte; use terminal `!` for interactive PTY commands.
 
 ### Migrating from whole-CLI bwrap
 
-Replace `--sandbox bwrap` and remove `tools.sandbox: "bwrap"`, `QWEN_SANDBOX=bwrap`, `QWEN_SANDBOX_NET` and `QWEN_SANDBOX_PROXY_COMMAND` (including its `PROXY_COMMAND` alias), then configure `tools.executionSandbox` as above. Restart from a shell outside the old sandbox; inherited `SANDBOX=bwrap` is rejected. `proxied` is not a supported network policy. Do not combine this mode with Docker, Podman, Seatbelt or an inherited whole-CLI sandbox marker. Old bwrap settings produce an explicit migration error.
+Replace `--sandbox bwrap` and remove `tools.sandbox: "bwrap"`, `QWEN_SANDBOX=bwrap`, `QWEN_SANDBOX_NET` and `QWEN_SANDBOX_PROXY_COMMAND`, then configure `tools.executionSandbox` as above. Restart from a shell outside the old sandbox; inherited `SANDBOX=bwrap` is rejected. `proxied` is not a supported network policy. Do not combine this mode with Docker, Podman, Seatbelt or an inherited whole-CLI sandbox marker. Old bwrap settings produce an explicit migration error.
 
 The Docker, Podman and macOS Seatbelt methods below still run the whole CLI in their existing environment.
 

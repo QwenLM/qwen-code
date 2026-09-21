@@ -262,18 +262,35 @@ describe('operator execution sandbox policy', () => {
       validateExecutionSandboxSelection(createMinimalSettings().merged),
     ).toThrow('tools.executionSandbox');
   });
-  it.each([
-    'SANDBOX',
-    'QWEN_SANDBOX_NET',
-    'QWEN_SANDBOX_PROXY_COMMAND',
-    'PROXY_COMMAND',
-  ])('rejects a mixed boundary through %s', (key) => {
-    vi.stubEnv(key, 'fixture');
-    expect(() =>
+  it.each(['SANDBOX', 'QWEN_SANDBOX_NET', 'QWEN_SANDBOX_PROXY_COMMAND'])(
+    'rejects a mixed boundary through %s',
+    (key) => {
+      vi.stubEnv(key, 'fixture');
+      expect(() =>
+        validateExecutionSandboxSelection({
+          tools: { executionSandbox: restricted },
+        }),
+      ).toThrow('cannot be combined');
+    },
+  );
+  it.each(['SANDBOX', 'QWEN_SANDBOX_NET', 'QWEN_SANDBOX_PROXY_COMMAND'])(
+    'ignores an empty legacy %s export',
+    (key) => {
+      vi.stubEnv(key, '   ');
+      expect(
+        validateExecutionSandboxSelection({
+          tools: { executionSandbox: restricted },
+        }),
+      ).toEqual(restricted);
+    },
+  );
+  it('does not treat unrelated PROXY_COMMAND as sandbox selection', () => {
+    vi.stubEnv('PROXY_COMMAND', '/workspace/proxy');
+    expect(
       validateExecutionSandboxSelection({
         tools: { executionSandbox: restricted },
       }),
-    ).toThrow('cannot be combined');
+    ).toEqual(restricted);
   });
   it('rejects unsupported frontends with the actual policy', () => {
     expect(() =>

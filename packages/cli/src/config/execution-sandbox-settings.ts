@@ -138,13 +138,12 @@ export function validateExecutionSandboxSelection(
   if (
     policy &&
     ((legacy && ![false, '0', 'false'].includes(legacy as string | boolean)) ||
-      process.env['SANDBOX'] ||
-      process.env['QWEN_SANDBOX_NET'] !== undefined ||
-      process.env['QWEN_SANDBOX_PROXY_COMMAND'] !== undefined ||
-      process.env['PROXY_COMMAND'] !== undefined)
+      process.env['SANDBOX']?.trim() ||
+      process.env['QWEN_SANDBOX_NET']?.trim() ||
+      process.env['QWEN_SANDBOX_PROXY_COMMAND']?.trim())
   ) {
     throw new InvalidExecutionSandboxConfigError(
-      'tools.executionSandbox cannot be combined with a whole-CLI sandbox, SANDBOX marker, QWEN_SANDBOX_NET or PROXY_COMMAND. Remove the legacy configuration and restart.',
+      'tools.executionSandbox cannot be combined with a whole-CLI sandbox, SANDBOX marker, QWEN_SANDBOX_NET or QWEN_SANDBOX_PROXY_COMMAND. Remove the legacy configuration and restart.',
     );
   }
   return policy;

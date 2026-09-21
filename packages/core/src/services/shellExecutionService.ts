@@ -382,6 +382,8 @@ export interface ShellPostPromoteSettleInfo {
  */
 export interface ShellExecuteOptions {
   streamStdout?: boolean;
+  /** Stream byte-exact child output without text decoding or binary sniffing. */
+  streamRawOutput?: boolean;
   /**
    * Post-promote callback hooks. See {@link ShellPostPromoteHandlers}.
    * Optional; omit to preserve the caller-visible PR-2 detach-everything
@@ -394,6 +396,12 @@ export interface ShellExecuteOptions {
  * Describes a structured event emitted during shell command execution.
  */
 export type ShellOutputEvent =
+  | {
+      /** The event contains a byte-exact output chunk. */
+      type: 'raw_data';
+      chunk: Buffer;
+      stream: 'stdout' | 'stderr';
+    }
   | {
       /** The event contains a chunk of output data. */
       type: 'data';
@@ -893,6 +901,7 @@ export class ShellExecutionService {
       onOutputEvent,
       abortSignal,
       options.streamStdout ?? false,
+      options.streamRawOutput ?? false,
       getMaxBufferedOutputBytes(shellExecutionConfig),
       shellExecutionConfig.pager,
       options.postPromote,
@@ -906,6 +915,7 @@ export class ShellExecutionService {
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
     streamStdout: boolean,
+    streamRawOutput: boolean,
     maxBufferedOutputBytes: number,
     pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
@@ -1031,6 +1041,17 @@ export class ShellExecutionService {
         };
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
+          totalOutputBytes += data.length;
+          const capturedData = captureOutputData(data);
+          if (streamRawOutput) {
+            onOutputEvent({
+              type: 'raw_data',
+              chunk: Buffer.from(data),
+              stream,
+            });
+            return;
+          }
+
           if (!stdoutDecoder || !stderrDecoder) {
             const encoding = getCachedEncodingForBuffer(data);
             try {
@@ -1075,9 +1096,6 @@ export class ShellExecutionService {
               sniffChunks.length = 0;
             }
           }
-
-          totalOutputBytes += data.length;
-          const capturedData = captureOutputData(data);
 
           if (!isStreamingRawContent) {
             // Binary mode: drop further data. Foreground emits the

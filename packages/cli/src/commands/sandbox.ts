@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import type { CommandModule } from 'yargs';
 import { DEFAULT_COMMAND_OPTIONS } from '../config/top-level-options.js';
 
@@ -18,6 +19,12 @@ interface SandboxArgs {
   sandboxImage?: string;
   bare?: boolean;
   '--'?: string[];
+}
+
+function readRedirectedStdin(): Buffer | undefined {
+  if (process.stdin.isTTY) return undefined;
+  const input = fs.fstatSync(0);
+  return input.isFIFO() || input.isFile() ? fs.readFileSync(0) : undefined;
 }
 
 export const sandboxCommand: CommandModule = {
@@ -128,6 +135,8 @@ export const sandboxCommand: CommandModule = {
         ),
       );
       if (command.length) {
+        const stdin = readRedirectedStdin();
+        const pendingDrains = new Map<'stdout' | 'stderr', Promise<unknown>>();
         // env resolves PATH inside confinement and receives literal argv.
         const handle = await executeBwrap(
           policy,
@@ -136,21 +145,31 @@ export const sandboxCommand: CommandModule = {
             args: ['--', ...command],
             cwd: policy.workspace,
             env,
+            stdin,
           },
           (event) => {
-            if (event.type === 'data' && typeof event.chunk === 'string') {
-              (event.stream === 'stderr'
-                ? process.stderr
-                : process.stdout
-              ).write(event.chunk);
+            if (event.type === 'raw_data') {
+              const streamKey = event.stream;
+              const stream =
+                streamKey === 'stderr' ? process.stderr : process.stdout;
+              if (!stream.write(event.chunk) && !pendingDrains.has(streamKey)) {
+                const drained = once(stream, 'drain');
+                pendingDrains.set(streamKey, drained);
+                const clearDrain = () => {
+                  if (pendingDrains.get(streamKey) === drained)
+                    pendingDrains.delete(streamKey);
+                };
+                void drained.then(clearDrain, clearDrain);
+              }
             }
           },
           controller.signal,
           false,
           {},
-          { streamStdout: true },
+          { streamStdout: true, streamRawOutput: true },
         );
         const result = await handle.result;
+        await Promise.all([...pendingDrains.values()]);
         if (result.error && !result.aborted) throw result.error;
         process.exitCode = result.aborted
           ? cancellationExitCode

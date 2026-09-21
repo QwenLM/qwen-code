@@ -2578,6 +2578,44 @@ describe('ShellExecutionService', () => {
   });
 
   describe('Binary Output', () => {
+    it('streams byte-exact output when the caller requests raw chunks', async () => {
+      const stdout = Buffer.from([0x00, 0xff, 0x61]);
+      const stderr = Buffer.from([0x62, 0x00, 0xfe]);
+      const child = Object.assign(new EventEmitter(), {
+        pid: 56789,
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter(),
+        stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+        exitCode: null,
+        signalCode: null,
+      });
+      mockCpSpawn.mockReturnValue(child);
+      const handle = await ShellExecutionService.executeLaunch(
+        {
+          executable: '/trusted/program',
+          args: [],
+          cwd: '/workspace',
+          env: {},
+        },
+        onOutputEventMock,
+        new AbortController().signal,
+        false,
+        {},
+        { streamStdout: true, streamRawOutput: true },
+      );
+      child.stdout.emit('data', stdout);
+      child.stderr.emit('data', stderr);
+      child.emit('exit', 0, null);
+      child.emit('close', 0, null);
+      await handle.result;
+
+      expect(onOutputEventMock.mock.calls.map(([event]) => event)).toEqual([
+        { type: 'raw_data', chunk: stdout, stream: 'stdout' },
+        { type: 'raw_data', chunk: stderr, stream: 'stderr' },
+      ]);
+      expect(mockIsBinary).not.toHaveBeenCalled();
+    });
+
     it('should detect binary output and switch to progress events', async () => {
       mockIsBinary.mockReturnValueOnce(true);
       const binaryChunk1 = Buffer.from([0x89, 0x50, 0x4e, 0x47]);

@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
 import yargs from 'yargs';
 const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
@@ -152,6 +153,70 @@ describe('qwen sandbox tool boundary', () => {
     });
     expect(process.exitCode).toBe(42);
     expect(mocks.stdout).not.toHaveBeenCalled();
+  });
+  it('forwards redirected stdin and byte-exact output', async () => {
+    vi.spyOn(fs, 'fstatSync').mockReturnValue({
+      isFIFO: () => true,
+      isFile: () => false,
+    } as unknown as ReturnType<typeof fs.fstatSync>);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from([0x00, 0xff]));
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    mocks.execute.mockImplementationOnce(
+      async (_policy, _payload, onOutput: (event: object) => void) => {
+        onOutput({
+          type: 'raw_data',
+          chunk: Buffer.from([0xff, 0x00]),
+          stream: 'stdout',
+        });
+        return {
+          result: Promise.resolve({
+            exitCode: 0,
+            error: null,
+            aborted: false,
+          }),
+        };
+      },
+    );
+
+    await run({ '--': ['cat'] });
+
+    expect(mocks.execute.mock.calls[0]?.[1]).toMatchObject({
+      stdin: Buffer.from([0x00, 0xff]),
+    });
+    expect(mocks.execute.mock.calls[0]?.[6]).toEqual({
+      streamStdout: true,
+      streamRawOutput: true,
+    });
+    expect(write).toHaveBeenCalledWith(Buffer.from([0xff, 0x00]));
+  });
+  it('waits for redirected output backpressure before completing', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(false);
+    mocks.execute.mockImplementationOnce(
+      async (_policy, _payload, onOutput: (event: object) => void) => {
+        onOutput({
+          type: 'raw_data',
+          chunk: Buffer.from('payload'),
+          stream: 'stdout',
+        });
+        return {
+          result: Promise.resolve({
+            exitCode: 0,
+            error: null,
+            aborted: false,
+          }),
+        };
+      },
+    );
+    let completed = false;
+    const completion = run({ '--': ['printf', 'payload'] }).then(() => {
+      completed = true;
+    });
+    await vi.waitFor(() => expect(write).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    process.stdout.emit('drain');
+    await completion;
+    expect(completed).toBe(true);
   });
   it('restores signal listeners after failure', async () => {
     const signals = ['SIGINT', 'SIGTERM'] as const;
