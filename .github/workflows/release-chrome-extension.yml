@@ -190,23 +190,33 @@ jobs:
           # upload would otherwise fail the release with the package already in.
           # --retry 5 allows six attempts; --retry-max-time bounds when a new
           # one may START, so one call can run to roughly that plus --max-time.
+          # $1 names the endpoint; $2 says whether its body is safe to print.
+          # The token response is not: a transfer that dies after the body has
+          # landed would otherwise write a live access token to the log, before
+          # anything has had the chance to mask it.
           call() {
-            local what=$1 status
-            shift
+            local what=$1 body=$2 status
+            shift 2
             status=$(curl --silent --show-error --output response.json \
               --retry 5 --retry-delay 10 --retry-all-errors --retry-max-time 300 \
               --max-time 120 --write-out '%{http_code}' "$@") || {
               # Retries exhausted at the transport layer: curl printed its own
               # reason to stderr, but say which endpoint it was talking to.
               echo "::error::Could not reach ${what}."
-              cat response.json 2>/dev/null
+              [[ "${body}" == 'show-body' ]] && cat response.json 2>/dev/null
               return 1
             }
             if [[ "${status}" != 2?? ]]; then
               # Naming the endpoint matters: an expired refresh token fails at
               # Google's OAuth service, not at the store's dashboard.
               echo "::error::HTTP ${status} from ${what}:"
-              cat response.json
+              if [[ "${body}" == 'show-body' ]]; then
+                cat response.json
+              else
+                # A refusal here is an OAuth error object, but a 2xx body on
+                # this endpoint carries the token, so never print it verbatim.
+                node -p 'const v=JSON.parse(require("fs").readFileSync("response.json","utf8"));JSON.stringify({error:v.error,error_description:v.error_description})' 2>/dev/null
+              fi
               return 1
             fi
           }
@@ -216,7 +226,7 @@ jobs:
 
           # The refresh token is long-lived; the access token it mints lasts an
           # hour, which covers an upload and a publish.
-          call 'Google OAuth (refresh token)' \
+          call 'Google OAuth (refresh token)' 'hide-body' \
             --data-urlencode "client_id=${CLIENT_ID}" \
             --data-urlencode "client_secret=${CLIENT_SECRET}" \
             --data-urlencode "refresh_token=${REFRESH_TOKEN}" \
@@ -229,7 +239,7 @@ jobs:
           fi
           echo "::add-mask::${token}"
 
-          call 'the Chrome Web Store upload API' \
+          call 'the Chrome Web Store upload API' 'show-body' \
             --request PUT \
             --header "Authorization: Bearer ${token}" \
             --header 'x-goog-api-version: 2' \
