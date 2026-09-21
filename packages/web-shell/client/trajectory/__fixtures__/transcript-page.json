@@ -1,0 +1,419 @@
+{
+  "sessionId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83",
+  "events": [
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "user_message_chunk",
+        "content": {
+          "type": "text",
+          "text": "Read the file note.txt in the current directory, then list the directory contents. Use your tools. Then reply with one short sentence."
+        },
+        "_meta": {
+          "promptId": "13dcbd38-6a11-4e22-803c-fdebeb606531",
+          "timestamp": 1789877511051,
+          "qwenTranscript": {
+            "sourceRecordIds": ["d18a3a3b-0648-4dfb-a6c9-b4ea9e9fc6b1"],
+            "segmentId": "d18a3a3b-0648-4dfb-a6c9-b4ea9e9fc6b1:0"
+          },
+          "qwen.session.recordId": "d18a3a3b-0648-4dfb-a6c9-b4ea9e9fc6b1"
+        },
+        "timestamp": 1789877511051
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": ""
+        },
+        "_meta": {
+          "timing": {
+            "kind": "request",
+            "durationMs": 7823,
+            "startedAt": 1789877511096,
+            "responseId": "chatcmpl-442a782d-a586-97be-9e67-206b63078fe1",
+            "promptId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83########1",
+            "status": "ok",
+            "ttftMs": 3908,
+            "model": "qwen3.8-max"
+          },
+          "timestamp": 1789877518923,
+          "qwenTranscript": {
+            "sourceRecordIds": ["1c3841cf-7734-4b97-9a3b-59184e95a055"]
+          },
+          "qwen.session.recordId": "1c3841cf-7734-4b97-9a3b-59184e95a055"
+        },
+        "timestamp": 1789877518923
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_thought_chunk",
+        "content": {
+          "type": "text",
+          "text": "Let me read the file and list the directory contents. I should use read_file and glob (not ls).\n\nThe user says \"list the directory contents\" — I should use glob per the guidelines.\n\nLet me do both in parallel."
+        },
+        "_meta": {
+          "timestamp": 1789877518929,
+          "qwenTranscript": {
+            "sourceRecordIds": ["fc17ec85-7ef4-4901-8597-b0bae42a5be9"],
+            "segmentId": "fc17ec85-7ef4-4901-8597-b0bae42a5be9:0"
+          },
+          "qwen.session.recordId": "fc17ec85-7ef4-4901-8597-b0bae42a5be9"
+        },
+        "timestamp": 1789877518929
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": "I'll read `note.txt` and list the directory contents.\n\n"
+        },
+        "_meta": {
+          "timestamp": 1789877518929,
+          "qwenTranscript": {
+            "sourceRecordIds": ["fc17ec85-7ef4-4901-8597-b0bae42a5be9"],
+            "segmentId": "fc17ec85-7ef4-4901-8597-b0bae42a5be9:1"
+          },
+          "qwen.session.recordId": "fc17ec85-7ef4-4901-8597-b0bae42a5be9"
+        },
+        "timestamp": 1789877518929
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": ""
+        },
+        "_meta": {
+          "usage": {
+            "inputTokens": 26578,
+            "outputTokens": 253,
+            "totalTokens": 26831,
+            "thoughtTokens": 49,
+            "cachedReadTokens": 3072
+          },
+          "timestamp": 1789877518929,
+          "qwenTranscript": {
+            "sourceRecordIds": ["fc17ec85-7ef4-4901-8597-b0bae42a5be9"]
+          },
+          "qwen.session.recordId": "fc17ec85-7ef4-4901-8597-b0bae42a5be9"
+        },
+        "timestamp": 1789877518929
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_90d339aa79e549408e92a551",
+        "status": "in_progress",
+        "title": "ReadFile: note.txt",
+        "content": [],
+        "locations": [
+          {
+            "path": "/workspace/demo/note.txt",
+            "line": null
+          }
+        ],
+        "kind": "read",
+        "rawInput": {
+          "file_path": "/workspace/demo/note.txt"
+        },
+        "_meta": {
+          "toolName": "read_file",
+          "provenance": "builtin",
+          "timestamp": 1789877518929,
+          "qwenTranscript": {
+            "sourceRecordIds": ["fc17ec85-7ef4-4901-8597-b0bae42a5be9"]
+          },
+          "qwen.session.recordId": "fc17ec85-7ef4-4901-8597-b0bae42a5be9"
+        },
+        "timestamp": 1789877518929
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_7a36569ea40d481191602e78",
+        "status": "in_progress",
+        "title": "Glob: '*' in .",
+        "content": [],
+        "locations": [],
+        "kind": "search",
+        "rawInput": {
+          "pattern": "*",
+          "path": "/workspace/demo"
+        },
+        "_meta": {
+          "toolName": "glob",
+          "provenance": "builtin",
+          "timestamp": 1789877518929,
+          "qwenTranscript": {
+            "sourceRecordIds": ["fc17ec85-7ef4-4901-8597-b0bae42a5be9"]
+          },
+          "qwen.session.recordId": "fc17ec85-7ef4-4901-8597-b0bae42a5be9"
+        },
+        "timestamp": 1789877518929
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": ""
+        },
+        "_meta": {
+          "timing": {
+            "kind": "tool",
+            "durationMs": 35,
+            "startedAt": 1789877518944,
+            "promptId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83########1",
+            "callId": "call_90d339aa79e549408e92a551",
+            "toolName": "read_file",
+            "toolStatus": "success"
+          },
+          "timestamp": 1789877518980,
+          "qwenTranscript": {
+            "sourceRecordIds": ["3f21251b-5124-4251-a4b5-65428eb7de2c"]
+          },
+          "qwen.session.recordId": "3f21251b-5124-4251-a4b5-65428eb7de2c"
+        },
+        "timestamp": 1789877518980
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": ""
+        },
+        "_meta": {
+          "timing": {
+            "kind": "tool",
+            "durationMs": 20,
+            "startedAt": 1789877518982,
+            "promptId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83########1",
+            "callId": "call_7a36569ea40d481191602e78",
+            "toolName": "glob",
+            "toolStatus": "success"
+          },
+          "timestamp": 1789877519002,
+          "qwenTranscript": {
+            "sourceRecordIds": ["2f0aa35f-401b-41c0-87bc-3f2298dc6cbc"]
+          },
+          "qwen.session.recordId": "2f0aa35f-401b-41c0-87bc-3f2298dc6cbc"
+        },
+        "timestamp": 1789877519002
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call_90d339aa79e549408e92a551",
+        "status": "completed",
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": "hello from the trajectory timing e2e\n"
+            }
+          }
+        ],
+        "_meta": {
+          "toolName": "read_file",
+          "provenance": "builtin",
+          "timestamp": 1789877519006,
+          "qwenTranscript": {
+            "sourceRecordIds": ["7df61d72-3b8e-43b5-a669-39d9c354765f"]
+          },
+          "qwen.session.recordId": "7df61d72-3b8e-43b5-a669-39d9c354765f"
+        },
+        "rawOutput": "",
+        "timestamp": 1789877519006
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call_7a36569ea40d481191602e78",
+        "status": "completed",
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": "Found 1 file(s) matching \"*\" within /workspace/demo, sorted by modification time (newest first):\n---\n/workspace/demo/note.txt"
+            }
+          }
+        ],
+        "_meta": {
+          "toolName": "glob",
+          "provenance": "builtin",
+          "timestamp": 1789877519006,
+          "qwenTranscript": {
+            "sourceRecordIds": ["44c61446-c114-4963-8af7-2ab8d37b2b97"]
+          },
+          "qwen.session.recordId": "44c61446-c114-4963-8af7-2ab8d37b2b97"
+        },
+        "rawOutput": "Found 1 matching file(s)",
+        "timestamp": 1789877519006
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": ""
+        },
+        "_meta": {
+          "timing": {
+            "kind": "request",
+            "durationMs": 2530,
+            "startedAt": 1789877519017,
+            "responseId": "chatcmpl-23aecfe3-a760-9f1f-96a0-897f886ff8be",
+            "promptId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83########1",
+            "status": "ok",
+            "ttftMs": 1255,
+            "model": "qwen3.8-max"
+          },
+          "timestamp": 1789877521548,
+          "qwenTranscript": {
+            "sourceRecordIds": ["520696c5-a8d5-497d-85e3-789aed331de2"]
+          },
+          "qwen.session.recordId": "520696c5-a8d5-497d-85e3-789aed331de2"
+        },
+        "timestamp": 1789877521548
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_thought_chunk",
+        "content": {
+          "type": "text",
+          "text": "The directory contains note.txt (and .git which glob excludes as it's hidden/dotfiles maybe). Reply with one short sentence."
+        },
+        "_meta": {
+          "timestamp": 1789877521549,
+          "qwenTranscript": {
+            "sourceRecordIds": ["b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee"],
+            "segmentId": "b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee:0"
+          },
+          "qwen.session.recordId": "b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee"
+        },
+        "timestamp": 1789877521549
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": "`note.txt` (the only file, aside from `.git`) contains \"hello from the trajectory timing e2e\"."
+        },
+        "_meta": {
+          "timestamp": 1789877521549,
+          "qwenTranscript": {
+            "sourceRecordIds": ["b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee"],
+            "segmentId": "b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee:1",
+            "branchRecordId": "3f6666fd-fb44-453e-a3e1-df81d63ea4af"
+          },
+          "qwen.session.recordId": "b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee"
+        },
+        "timestamp": 1789877521549
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": ""
+        },
+        "_meta": {
+          "usage": {
+            "inputTokens": 27010,
+            "outputTokens": 55,
+            "totalTokens": 27065,
+            "thoughtTokens": 27,
+            "cachedReadTokens": 26112
+          },
+          "timestamp": 1789877521549,
+          "qwenTranscript": {
+            "sourceRecordIds": ["b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee"]
+          },
+          "qwen.session.recordId": "b1c76e20-f5b2-47a1-a8e0-40d4d67bcaee"
+        },
+        "timestamp": 1789877521549
+      }
+    },
+    {
+      "v": 1,
+      "type": "session_update",
+      "data": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": {
+          "type": "text",
+          "text": ""
+        },
+        "_meta": {
+          "timing": {
+            "kind": "request",
+            "durationMs": 6689,
+            "startedAt": 1789877521613,
+            "responseId": "chatcmpl-e5bf10fe-4cdd-9048-ba49-c975d44eb3d9",
+            "promptId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83#managed-auto-memory-extractor-3e254eae#0",
+            "subagentId": "managed-auto-memory-extractor-3e254eae",
+            "status": "ok",
+            "ttftMs": 1713,
+            "model": "qwen3.8-max"
+          },
+          "timestamp": 1789877528302,
+          "qwenTranscript": {
+            "sourceRecordIds": ["335e2d09-4a14-4ee5-827e-6c8ab49dfaac"]
+          },
+          "qwen.session.recordId": "335e2d09-4a14-4ee5-827e-6c8ab49dfaac"
+        },
+        "timestamp": 1789877528302
+      }
+    }
+  ]
+}

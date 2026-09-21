@@ -31,8 +31,9 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  */
 const WEB_SHELL_CSP_DIRECTIVES = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
+  // Export previews embed SRI-verified assets as data URLs; child frames stay offline.
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data:",
+  "style-src 'self' 'unsafe-inline' data:",
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
   "media-src 'self' data:",
@@ -70,7 +71,11 @@ export function buildWebShellCsp(
     : "frame-ancestors 'none'";
   // PDF attachments use blob URLs; live previews pin their own child source.
   const frameSrc = 'frame-src http: https: blob:';
-  const connectSrc = `connect-src 'self' ${connectOrigins.join(' ')}`.trim();
+  const connectSrc = [
+    "connect-src 'self'",
+    ...connectOrigins,
+    'https://unpkg.com/@qwen-code/',
+  ].join(' ');
   return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
 }
 
