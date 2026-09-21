@@ -55,6 +55,9 @@
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../packages/core/src/utils/transcript-records.ts"
       ],
+      "@qwen-code/qwen-code-core/shellResult": [
+        "../packages/core/src/utils/shell-result.ts"
+      ],
       "@qwen-code/qwen-code-core/telemetryConstants": [
         "../packages/core/src/telemetry/constants.ts"
       ],

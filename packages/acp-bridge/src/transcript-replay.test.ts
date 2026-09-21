@@ -1766,6 +1766,58 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
   });
 
+  it.each(['completed', 'failed', 'cancelled', 'timed_out'] as const)(
+    'replays persisted structured shell %s results without flattening metadata',
+    (outcome) => {
+      const resultDisplay = {
+        type: 'shell_result' as const,
+        version: 1 as const,
+        text: 'Display text differs from model envelope',
+        output: outcome === 'completed' ? '' : 'partial 😀 output',
+        directory: '/workspace/项目',
+        exitCode: outcome === 'completed' ? 0 : null,
+        signal: outcome === 'cancelled' ? 15 : null,
+        pid: 42,
+        error: outcome === 'failed' ? 'execution failed' : null,
+        outcome,
+        notices: ['Output persisted', 'Retained notice'],
+        truncated: true,
+        outputFiles: ['/tmp/shell-output.log'],
+      };
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('shell-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'shell-1',
+            toolName: 'run_shell_command',
+            status: outcome === 'completed' ? 'success' : 'error',
+            resultDisplay,
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  response: { output: 'Legacy model-facing envelope' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(projected).toHaveLength(1);
+      expect(projected[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'shell-1',
+        status: outcome === 'completed' ? 'completed' : 'failed',
+        rawOutput: resultDisplay,
+      });
+      expect(projected[0]).toHaveProperty('rawOutput', resultDisplay);
+    },
+  );
+
   it('attributes persisted Agent usage to its parent and omits it in summary', () => {
     const machine = createTranscriptReplayMachine();
     const result = updates(
