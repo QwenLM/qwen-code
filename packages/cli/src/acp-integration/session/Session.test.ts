@@ -6411,6 +6411,37 @@ describe('Session', () => {
         mockChatRecordingService.recordFileHistorySnapshot,
       ).not.toHaveBeenCalled();
     });
+
+    it('does not snapshot a retry of the same user turn', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'retry' }],
+        retry: true,
+      } as PromptRequest);
+
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('does not snapshot an interrupted-prompt continuation', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered question' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'continue' }],
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as PromptRequest);
+
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+    });
   });
 
   // Runs a full exit_plan_mode approval turn and returns the permission
@@ -7593,6 +7624,109 @@ describe('Session', () => {
         'Cannot rewind to the requested turn',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('lists and rewinds the absolute tail indexes after compression', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        { role: 'user', parts: [{ text: 'third' }] },
+        { role: 'model', parts: [{ text: 'third reply' }] },
+        { role: 'user', parts: [{ text: 'fourth' }] },
+        { role: 'model', parts: [{ text: 'fourth reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      const snapshots = ['p0', 'p1', 'p2', 'p3'].map((promptId) => ({
+        promptId,
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {},
+      }));
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(snapshots);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 4 });
+      expect(session.rewindToTurn(2)).toEqual({
+        targetTurnIndex: 2,
+        apiTruncateIndex: 2,
+      });
+      expect(session.rewindToTurn(3)).toEqual({
+        targetTurnIndex: 3,
+        apiTruncateIndex: 4,
+      });
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(() => session.rewindToTurn(1)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+    });
+
+    it('keeps the rewind count aligned when a retry pops and resends a turn', () => {
+      const failed: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(failed);
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(failed.slice(0, 2));
+      expect(session.getRewindableUserTurnCount()).toBe(1);
+
+      const retried: Content[] = [
+        ...failed.slice(0, 2),
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(retried);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(retried);
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+
+      const compressed: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        {
+          role: 'user',
+          parts: [{ text: '<background-tasks> check the jobs' }],
+        },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(compressed);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(compressed);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
+        {
+          promptId: 'p0',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      expect(session.getRewindableUserTurnCount()).toBe(1);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 1, end: 2 });
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+      });
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
     });
 
     it('rejects rewinds while a cron prompt is mutating history', () => {

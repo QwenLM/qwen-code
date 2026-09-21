@@ -37,6 +37,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from './environmentContext.js';
 import { prependToFirstTextPart } from '../utils/partUtils.js';
+import { POST_COMPACT_ATTACHMENT_SENTINEL } from '../services/post-compact-attachment-mark.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -904,7 +905,7 @@ describe('getStartupContextLength', () => {
     );
   });
 
-  it('is 4 for rewind with attachments and a trailing function call', () => {
+  it('is 2 when the first post-compress prompt only looks like an attachment', () => {
     const history: Content[] = [
       {
         role: 'user',
@@ -916,7 +917,33 @@ describe('getStartupContextLength', () => {
       },
       {
         role: 'user',
-        parts: [{ text: '<plan-mode-active>\nplan\n</plan-mode-active>' }],
+        parts: [{ text: '<background-tasks> check the jobs' }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      2,
+    );
+  });
+
+  it('is 4 for rewind with a marked attachment and a trailing function call', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            text:
+              POST_COMPACT_ATTACHMENT_SENTINEL +
+              '<plan-mode-active>\nplan\n</plan-mode-active>',
+          },
+        ],
       },
       {
         role: 'model',

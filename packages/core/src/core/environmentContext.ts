@@ -19,6 +19,7 @@ import {
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
+import { hasPostCompactAttachmentSentinel } from '../services/post-compact-attachment-mark.js';
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
@@ -639,24 +640,33 @@ function detectCompressedPrefixLength(
   return 2;
 }
 
+/**
+ * Openings produced before attachment entries carried a structural sentinel.
+ * These are the full producer templates, not the bare tags: a real first
+ * prompt after an attachment-less compress can start with `<background-tasks>`
+ * or `<plan-mode-active>` and must still count as a turn.
+ */
+const LEGACY_POST_COMPACT_ATTACHMENT_PREFIXES = [
+  'The following files were recently accessed before context was compacted.',
+  'Recently accessed file (full current content embedded):',
+  'Recent visual snapshots preserved from before context was compacted',
+  '<plan-mode-active>\nYou are currently in PLAN mode.',
+  '<background-tasks>\nThe following background subagent tasks were active at compaction.',
+];
+
 function isPostCompactAttachmentEntry(content: Content | undefined): boolean {
   if (content?.role !== 'user') return false;
+  if (hasPostCompactAttachmentSentinel(content)) return true;
   const parts = content.parts ?? [];
-  return parts.some(
-    (part) =>
-      typeof part.text === 'string' &&
-      (part.text.startsWith('<plan-mode-active>') ||
-        part.text.startsWith('<background-tasks>') ||
-        part.text.startsWith(
-          'The following files were recently accessed before context was compacted.',
-        ) ||
-        part.text.startsWith(
-          'Recently accessed file (full current content embedded):',
-        ) ||
-        part.text.startsWith(
-          'Recent visual snapshots preserved from before context was compacted',
-        )),
-  );
+  return parts.some((part) => {
+    const text = part.text;
+    return (
+      typeof text === 'string' &&
+      LEGACY_POST_COMPACT_ATTACHMENT_PREFIXES.some((prefix) =>
+        text.startsWith(prefix),
+      )
+    );
+  });
 }
 
 function isModelFunctionCallEntry(content: Content | undefined): boolean {

@@ -23,6 +23,7 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { markPostCompactAttachmentParts } from './post-compact-attachment-mark.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -863,7 +864,10 @@ export async function composePostCompactHistory(
 
   if (postAckParts.length > 0) {
     out.push({ role: 'model', parts: ackParts });
-    out.push({ role: 'user', parts: postAckParts });
+    out.push({
+      role: 'user',
+      parts: markPostCompactAttachmentParts(postAckParts),
+    });
     if (trailingFc) out.push(trailingFc);
   } else if (trailingFc) {
     // Fold the trailing functionCall into the ack's own Content so we don't

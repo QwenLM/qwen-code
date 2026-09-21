@@ -129,6 +129,7 @@ import {
   isSystemReminderContent,
   findApiRewindCutPoint,
   countApiUserPrompts,
+  getStartupContextLength,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -4724,6 +4725,23 @@ export class Session implements SessionContext {
     );
   }
 
+  /**
+   * Absolute file-history snapshot indexes a client may rewind to.
+   *
+   * `countApiUserPrompts` is the post-compression tail length. Snapshots keep
+   * their original positions, so using that length as `idx < count` lists the
+   * absorbed prefix and hides the tail. When a compressed prefix is present
+   * and more snapshots remain than tail prompts, the reachable indexes are
+   * the tail's absolute positions. `findApiRewindCutPoint` stays tail-ordinal;
+   * callers subtract `start` before using it.
+   */
+  getRewindableTurnRange(): { start: number; end: number } {
+    const history = this.captureHistorySnapshot();
+    const visible = countApiUserPrompts(history, ACP_API_USER_PROMPT_OPTIONS);
+    const start = this.#absorbedSnapshotCount(history, visible);
+    return { start, end: start + visible };
+  }
+
   restoreHistory(history: Content[]): void {
     if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
@@ -4741,13 +4759,34 @@ export class Session implements SessionContext {
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
+  #absorbedSnapshotCount(apiHistory: Content[], visible: number): number {
+    const snapshotCount = this.config
+      .getFileHistoryService()
+      .getSnapshots().length;
+    if (snapshotCount <= visible) return 0;
+    const compressed =
+      getStartupContextLength(apiHistory, { includeCompressed: true }) >
+      getStartupContextLength(apiHistory);
+    return compressed ? snapshotCount - visible : 0;
+  }
+
   #computeApiTruncationIndexForUserTurn(
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
+    const visible = countApiUserPrompts(
+      apiHistory,
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
+    const absorbed = this.#absorbedSnapshotCount(apiHistory, visible);
+    const tailOrdinal = targetTurnIndex - absorbed;
+    // Ordinal 0 is the cut-point API's "keep the prelude" shortcut, including
+    // an empty tail. Anything before the reachable range was absorbed.
+    if (tailOrdinal < 0) return -1;
+    if (tailOrdinal > 0 && tailOrdinal >= visible) return -1;
     return findApiRewindCutPoint(
       apiHistory,
-      targetTurnIndex,
+      tailOrdinal,
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -6365,9 +6404,11 @@ export class Session implements SessionContext {
             // block in LlmClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
-            // Restore continuations record no user message; rewindToTurn()
-            // indexes snapshots by user-turn position, so skip them.
-            if (!isRestoreAskUserQuestion) {
+            // Restore, retry, and interrupted-prompt continuation replay the
+            // same user turn. A second snapshot would outrun the counted
+            // prompts, and after compression that extra slot looks like a
+            // turn the summary absorbed.
+            if (!isRestoreAskUserQuestion && !isRetry && !isContinue) {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
                 await fileHistoryService.makeSnapshot(promptId);
