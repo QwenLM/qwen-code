@@ -32,6 +32,9 @@ import {
   SessionStorageEntryError,
   SessionTranscriptDurabilityError,
   SessionTranscriptChangedError,
+  SessionTranscriptReader,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+  encodeSessionTranscriptCursor,
   SessionWriterError,
   SessionWriterLostError,
   SessionWriterUnavailableError,
@@ -39,6 +42,10 @@ import {
   type SessionArchiveState,
   type SessionListItem,
   type SessionService,
+  type SessionTranscriptCursorState,
+  type SessionTranscriptReadPageOptions,
+  type SessionTranscriptReadTurnIndexOptions,
+  type SessionTranscriptTurnIndexPage,
   type SessionWriterErrorKind,
   type SessionWriterLease,
 } from '@qwen-code/qwen-code-core';
@@ -68,6 +75,8 @@ import {
   type SessionExportResult,
 } from '../server/session-export.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
+import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
@@ -240,6 +249,20 @@ export interface RestoredStandaloneSession extends BridgeRestoredSession {
     state: 'ready' | 'recreated';
     warnings?: string[];
   };
+}
+
+export interface StandaloneSessionTranscriptPage {
+  v: 1;
+  sessionId: string;
+  events: Array<{ v: 1; type: 'session_update'; data: unknown }>;
+  nextCursor?: string;
+  hasMore: boolean;
+  startTime: string;
+  lastUpdated: string;
+  partial?: true;
+  replayError?: string;
+  targetRecordId?: string;
+  hasOlder?: boolean;
 }
 
 export interface StandaloneSessionServiceOptions {
@@ -857,6 +880,87 @@ export class StandaloneSessionService {
           archiveState: durable.location,
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
         });
+      });
+    });
+  }
+
+  async getTurnIndexPage(
+    rawSessionId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<SessionTranscriptTurnIndexPage> {
+    const { sessionId } = parseRequiredSessionId(rawSessionId);
+    const runtime = await this.options.ensureRuntime();
+    return this.options.runRuntimeActivity(runtime, async () => {
+      this.options.assertRuntimeCurrent(runtime);
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      return this.options.lifecycle.runSharedMany([sessionId], async () => {
+        const { storageSessionId } = await this.assertActiveStandaloneSession(
+          runtime,
+          sessionId,
+        );
+        const page = await new SessionTranscriptReader(
+          runtime.workspaceCwd,
+          undefined,
+          runtime.sessionRuntimeBaseDir,
+        ).readTurnIndexPage(storageSessionId, options);
+        return { ...page, sessionId };
+      });
+    });
+  }
+
+  async getTranscriptPage(
+    rawSessionId: string,
+    options: SessionTranscriptReadPageOptions = {},
+  ): Promise<StandaloneSessionTranscriptPage> {
+    const { sessionId } = parseRequiredSessionId(rawSessionId);
+    const runtime = await this.options.ensureRuntime();
+    return this.options.runRuntimeActivity(runtime, async () => {
+      this.options.assertRuntimeCurrent(runtime);
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      return this.options.lifecycle.runSharedMany([sessionId], async () => {
+        const { storageSessionId } = await this.assertActiveStandaloneSession(
+          runtime,
+          sessionId,
+        );
+        const page = await new SessionTranscriptReader(
+          runtime.workspaceCwd,
+          undefined,
+          runtime.sessionRuntimeBaseDir,
+        ).readPage(storageSessionId, {
+          ...options,
+          maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+        });
+        const replay = await replayTranscriptRecordPage({
+          sessionId,
+          page,
+          encodeCursor: (state: SessionTranscriptCursorState) =>
+            encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
+        });
+        return {
+          v: 1 as const,
+          sessionId,
+          events: replay.updates.map((update) =>
+            omitSkillDetailsForSdkSurface({
+              v: 1 as const,
+              type: 'session_update' as const,
+              data: update,
+            }),
+          ),
+          ...(replay.nextCursor ? { nextCursor: replay.nextCursor } : {}),
+          hasMore: replay.hasMore,
+          startTime: replay.startTime,
+          lastUpdated: replay.lastUpdated,
+          ...(replay.partial
+            ? {
+                partial: true as const,
+                replayError: replay.replayError,
+              }
+            : {}),
+          ...(page.targetRecordId
+            ? { targetRecordId: page.targetRecordId }
+            : {}),
+          ...(page.hasOlder !== undefined ? { hasOlder: page.hasOlder } : {}),
+        };
       });
     });
   }

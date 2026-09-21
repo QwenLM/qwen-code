@@ -1078,10 +1078,14 @@ export class DaemonSessionClient {
   async getTranscriptPage(
     opts: DaemonSessionTranscriptPageOptions = {},
   ): Promise<DaemonSessionTranscriptPage> {
-    const page = await this.client.getSessionTranscriptPage(this.sessionId, {
-      ...opts,
-      clientId: opts.clientId ?? this.clientId,
-    });
+    const options = { ...opts, clientId: opts.clientId ?? this.clientId };
+    const page =
+      this.restoreStrategy.kind === 'standalone'
+        ? await this.client.getStandaloneSessionTranscriptPage(
+            this.sessionId,
+            options,
+          )
+        : await this.client.getSessionTranscriptPage(this.sessionId, options);
     return {
       ...page,
       events: await Promise.all(
@@ -1093,10 +1097,10 @@ export class DaemonSessionClient {
   async getTurnIndexPage(
     opts: DaemonSessionTurnIndexPageOptions = {},
   ): Promise<DaemonSessionTurnIndexPage> {
-    return this.client.getSessionTurnIndexPage(this.sessionId, {
-      ...opts,
-      clientId: opts.clientId ?? this.clientId,
-    });
+    const options = { ...opts, clientId: opts.clientId ?? this.clientId };
+    return this.restoreStrategy.kind === 'standalone'
+      ? this.client.getStandaloneSessionTurnIndexPage(this.sessionId, options)
+      : this.client.getSessionTurnIndexPage(this.sessionId, options);
   }
 
   removePendingPrompt(

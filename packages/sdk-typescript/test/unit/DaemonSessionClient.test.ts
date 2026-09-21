@@ -320,6 +320,62 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('routes standalone turn-index and transcript reads through dedicated routes', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const turnIndex = {
+      v: 1 as const,
+      sessionId,
+      snapshot: 'snap-1',
+      totalTurns: 0,
+      start: 0,
+      turns: [],
+    };
+    const transcript = {
+      v: 1 as const,
+      sessionId,
+      events: [],
+      hasMore: false,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+    };
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/capabilities')) {
+        return jsonResponse(200, { features: ['standalone_sessions_v1'] });
+      }
+      if (req.url.includes('/turn-index')) return jsonResponse(200, turnIndex);
+      if (req.url.includes('/transcript')) return jsonResponse(200, transcript);
+      return jsonResponse(404, {});
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId,
+        workspaceCwd: '/conversations',
+        attached: true,
+        clientId: 'client-1',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      },
+    });
+
+    await expect(session.getTurnIndexPage({ limit: 10 })).resolves.toEqual(
+      turnIndex,
+    );
+    await expect(
+      session.getTranscriptPage({ atRecordId: 'rec-1', snapshot: 'snap-1' }),
+    ).resolves.toEqual(transcript);
+
+    const reads = calls.filter((call) =>
+      /\/(turn-index|transcript)$/u.test(new URL(call.url).pathname),
+    );
+    expect(reads.map((call) => new URL(call.url).pathname)).toEqual([
+      `/standalone/sessions/${sessionId}/turn-index`,
+      `/standalone/sessions/${sessionId}/transcript`,
+    ]);
+    expect(reads[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('reads a saved workflow definition for its own session', async () => {
     const status = {
       v: 1 as const,

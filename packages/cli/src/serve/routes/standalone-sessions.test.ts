@@ -73,6 +73,22 @@ function createHarness({
       mimeType: 'text/markdown; charset=utf-8',
       content: '# Session',
     })),
+    getTurnIndexPage: vi.fn(async () => ({
+      v: 1 as const,
+      sessionId,
+      snapshot: 'snap-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [],
+    })),
+    getTranscriptPage: vi.fn(async () => ({
+      v: 1 as const,
+      sessionId,
+      events: [],
+      hasMore: false,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+    })),
     archive: vi.fn(async () => ({
       archived: [sessionId],
       alreadyArchived: [],
@@ -616,5 +632,57 @@ describe('standalone session routes', () => {
       retryable: false,
       sessionId,
     });
+  });
+
+  it('serves standalone turn-index pages', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?limit=10`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTurnIndexPage).toHaveBeenCalledWith(sessionId, {
+      limit: 10,
+    });
+  });
+
+  it('rejects a standalone turn-index start without a snapshot', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?start=2`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTurnIndexPage).not.toHaveBeenCalled();
+  });
+
+  it('serves standalone transcript pages', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-1&snapshot=snap-1&limit=50`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      atRecordId: 'rec-1',
+      snapshot: 'snap-1',
+      limit: 50,
+    });
+  });
+
+  it('rejects a standalone transcript anchor without a snapshot', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
   });
 });

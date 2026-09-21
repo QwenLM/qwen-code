@@ -3081,6 +3081,34 @@ export class DaemonClient {
     );
   }
 
+  async getStandaloneSessionTurnIndexPage(
+    sessionId: string,
+    opts: DaemonSessionTurnIndexPageOptions = {},
+  ): Promise<DaemonSessionTurnIndexPage> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'GET /standalone/sessions/:id/turn-index';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/turn-index${turnIndexPageSuffix(opts)}`,
+      route,
+      (response) => response as DaemonSessionTurnIndexPage,
+      { clientId: opts.clientId },
+    );
+  }
+
+  async getStandaloneSessionTranscriptPage(
+    sessionId: string,
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'GET /standalone/sessions/:id/transcript';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/transcript${transcriptPageSuffix(opts)}`,
+      route,
+      (response) => response as DaemonSessionTranscriptPage,
+      { clientId: opts.clientId },
+    );
+  }
+
   async archiveStandaloneSessions(
     sessionIds: string[],
   ): Promise<DaemonArchiveStandaloneSessionsResult> {
