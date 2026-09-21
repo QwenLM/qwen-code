@@ -15,6 +15,13 @@ import {
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
+const mockExecuteBwrap = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/bwrap-execution.js', () => ({
+  executeBwrap: mockExecuteBwrap,
+}));
+vi.mock('../sandbox/runtime-shell-policy.js', () => ({
+  assertShellSandboxCwd: vi.fn(),
+}));
 const mockExecFile = vi.hoisted(() => vi.fn());
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -286,6 +293,124 @@ describe('ShellTool', () => {
         maximum: 600000,
       }),
     );
+  });
+
+  describe('internal runtime sandbox routing', () => {
+    beforeEach(() => {
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue({
+        workspace: '/test/dir',
+        installation: '/install',
+        state: '/state',
+        filesystem: 'workspace-write',
+        network: 'closed',
+      });
+      mockExecuteBwrap.mockResolvedValue({
+        pid: 12345,
+        result: Promise.resolve({
+          rawOutput: Buffer.alloc(0),
+          output: 'confined',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+          sandboxStatus: { state: 'confirmed', exitCode: 0 },
+        }),
+      });
+    });
+
+    it('runs sed through the backend without host preview or write', async () => {
+      const invocation = shellTool.build({
+        command: "sed -i 's/old/new/' file.txt",
+        is_background: false,
+      });
+      expect(
+        (await invocation.getConfirmationDetails(new AbortController().signal))
+          .type,
+      ).toBe('exec');
+      await invocation.execute(new AbortController().signal);
+      expect(mockExecuteBwrap).toHaveBeenCalledOnce();
+      expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+      expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('keeps Git/PR metadata subprocesses off the host', async () => {
+      const gitSpy = vi.spyOn(
+        await import('node:child_process'),
+        'execFileSync',
+      );
+      try {
+        await shellTool
+          .build({ command: 'git commit -m test', is_background: false })
+          .execute(new AbortController().signal);
+        await shellTool
+          .build({
+            command: 'gh pr create --title test --body test',
+            is_background: false,
+          })
+          .execute(new AbortController().signal);
+        await shellTool
+          .build({
+            command: 'gh pr create --title background --body background',
+            is_background: true,
+          })
+          .execute(new AbortController().signal);
+        expect(mockExecuteBwrap).toHaveBeenCalledTimes(3);
+        expect(mockExecuteBwrap.mock.calls[0][1].args).toEqual([
+          '-c',
+          'git commit -m test',
+        ]);
+        expect(mockExecuteBwrap.mock.calls[1][1].args).toEqual([
+          '-c',
+          'gh pr create --title test --body test',
+        ]);
+        expect(mockExecuteBwrap.mock.calls[2][1].args).toEqual([
+          '-c',
+          'gh pr create --title background --body background',
+        ]);
+        expect(gitSpy).not.toHaveBeenCalled();
+        expect(mockExecFile).not.toHaveBeenCalled();
+        expect(fetchCurrentBranchPullRequest).not.toHaveBeenCalled();
+      } finally {
+        gitSpy.mockRestore();
+      }
+    });
+
+    it('routes background execution and closes its stream on setup failure', async () => {
+      const destroy = vi.fn();
+      vi.mocked(fs.createWriteStream).mockReturnValue({
+        on: vi.fn(),
+        destroy,
+      } as unknown as fs.WriteStream);
+      mockExecuteBwrap.mockRejectedValueOnce(new Error('sandbox setup failed'));
+      await expect(
+        shellTool
+          .build({ command: 'echo test', is_background: true })
+          .execute(new AbortController().signal),
+      ).rejects.toThrow('sandbox setup failed');
+      expect(mockExecuteBwrap.mock.calls[0][4]).toBe(false);
+      expect(destroy).toHaveBeenCalledOnce();
+      expect(fs.rmSync).toHaveBeenCalledWith(
+        expect.stringMatching(/\.output$/),
+        {
+          force: true,
+        },
+      );
+      expect(
+        mockConfig.getBackgroundShellRegistry().register,
+      ).not.toHaveBeenCalled();
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('uses a conservative permission default without host git probes', async () => {
+      expect(
+        await shellTool
+          .build({ command: 'git status', is_background: false })
+          .getDefaultPermission(),
+      ).toBe('ask');
+    });
   });
 
   describe('gh pr create binding', () => {

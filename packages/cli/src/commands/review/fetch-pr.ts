@@ -28,11 +28,13 @@
 import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
+  recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
   readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
@@ -41,7 +43,7 @@ import {
   untrustedGitfile,
   untrustedRepositoryFrom,
 } from './lib/worktree.js';
-import { setGhHost } from './lib/gh.js';
+import { resolveGhHost, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
 import {
@@ -127,6 +129,12 @@ import {
   prebuildWorktree,
   type WorktreeDependencies,
 } from './lib/prebuild.js';
+import {
+  resolveCriticalPosture,
+  type CriticalPostureCause,
+} from './lib/posture.js';
+import { recordedSeverityFloor } from './lib/authorization.js';
+import { parseRemoteUrl } from './lib/remote-match.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -375,6 +383,17 @@ export interface IncrementalDecision {
    * at the seam rather than order a from-scratch re-review.
    */
   scope?: IncrementalScope;
+  /**
+   * The round's posting posture, when the capture resolved it to
+   * critical-only (#10104) — present exactly beside an effective scope. It
+   * is what flips the round to the fix-audit shape: the territory fan-out
+   * regardless of the narrowed delta's size (`isFixAuditRound` in
+   * budget.ts) and the posture-narrowed reverse-audit schedule.
+   */
+  posture?: 'critical';
+  /** Which arm resolved it: the operator's recorded floor, the round
+   *  schedule, or the latched flat-trend streak. */
+  postureCause?: CriticalPostureCause;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -1055,7 +1074,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     let priorFetchedSha: string | null = null;
     if (args.resume) {
       const outcome = tryResume(args, wt, platform);
-      if (outcome.resumed) return;
+      if (outcome.resumed) {
+        // A continuation returns before the resolution that records the
+        // host-side merge base, and the lease acquisition above has already
+        // dropped the anchor (on purpose — see `createReviewWorktreeLease`).
+        // Without putting it back, every resumed review had no anchor and
+        // `base-tree` refused for the rest of it. The value restored is the
+        // lease's own prior, never the report or the plan.
+        restoreReviewWorktreeLeaseMergeBase(
+          process.cwd(),
+          leaseTarget,
+          sessionId,
+        );
+        return;
+      }
       // The fresh review that follows WILL record the flag, so the shell bar
       // the resume check skipped is owed now — before the stale worktree is
       // destroyed and the head fetched, not at the plan write after them —
@@ -1250,6 +1282,47 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
           `is resolved from a possibly stale local ref, so the diff may not be ` +
           `the one under review.`,
+      );
+    }
+    // Record the resolved merge base in the host-side lease, beside the
+    // review-lease directory nothing mounts.
+    //
+    // `base-tree` builds and certifies the A/B's BASE side at this sha, and
+    // the plan it reads is written into `.qwen/tmp` — the directory the
+    // sandbox hands the reviewed code read-write, minutes before the first
+    // `base-tree` ask exists. Without a host-side copy, the value the fence
+    // pins is whatever the plan says at that first ask, and the pin then
+    // authenticates the mount's choice against itself. With one, `base-tree`
+    // refuses a plan that disagrees with what this capture actually
+    // resolved. Not recorded when there is no merge base: `base-tree`
+    // reports the A/B unavailable for that case on its own.
+    //
+    // Never fatal HERE — but not harmless either, and this comment used to
+    // claim it was: `base-tree` now REFUSES when the lease carries no merge
+    // base, because the alternative is the mount-writable plan being the sole
+    // authority again. So a capture that cannot record it costs this review
+    // its A/B lane, and the note `base-tree` prints says how to get it back
+    // (re-run this command). Debug-logged rather than thrown, because the
+    // fetch itself succeeded and failing the capture over this write would be
+    // the worse trade.
+    //
+    // UNCONDITIONALLY when a merge base was resolved at all — the
+    // `baseFetchFailed` half used to skip it, and that skip is what let a
+    // PREVIOUS round's value survive in the lease and then AUTHENTICATE a
+    // plan rewritten back to it. The anchor has to belong to the capture
+    // that owns the plan, so a capture that resolved a (possibly stale)
+    // merge base records it — together with the capture's own ruling that it
+    // may be stale, which is what `base-tree` refuses the stale-base round
+    // on. That ruling used to be read from `plan.baseFetchFailed` alone,
+    // inside the mount, where the reviewed code could flip it to "fresh" and
+    // have the anchor authenticate a stale base; see `mergeBaseStale`.
+    if (mergeBaseSha !== null) {
+      recordReviewWorktreeLeaseMergeBase(
+        process.cwd(),
+        leaseTarget,
+        mergeBaseSha,
+        sessionId,
+        { stale: baseFetchFailed },
       );
     }
     const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');
@@ -1479,6 +1552,62 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           `agents will have to fall back to running \`git diff\` themselves.`,
       );
     }
+    // The round's posture, read at capture time (#10104). Only a round that
+    // is about to scope to an anchor asks: the fix-audit shape exists for
+    // the critical-only re-review of the commits since the last round, and
+    // without a usable anchor there is no "since". The floor is the CLI's
+    // own recorded invocation (never the orchestrator's account of it), and
+    // the side file is the same one compose's recovery reads next to this
+    // plan, so the prediction and the resolution share their facts.
+    let postureCause: CriticalPostureCause | null = null;
+    if (anchor?.diffBase) {
+      let sideLedger: unknown = null;
+      try {
+        sideLedger = JSON.parse(
+          readFileSync(
+            join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+            'utf8',
+          ),
+        );
+      } catch {
+        sideLedger = null;
+      }
+      postureCause = resolveCriticalPosture({
+        recordedFloor: recordedSeverityFloor({
+          callerPr: Number(prNumber),
+          callerRepo: ownerRepo,
+          // The host axis, bound to the evidence THIS command has (#10136):
+          // the explicit flag, else the host of the remote under review
+          // (the cwd origin submit's own chain reads — the one already
+          // selected this fetch's platform above), else the gh fallback
+          // (GH_HOST, else github.com). `resolveGhHost` alone never yields
+          // a recorded Aone or GHE host, so a flagless capture of a
+          // URL-shaped record missed the operator's explicit `suggestion`
+          // — the one miss that spends the narrowed shape against an
+          // instruction to keep the full one.
+          //
+          // Submit's chain has a fourth term this one deliberately omits
+          // (#10136 round 23): the RECORDED binding. There it is the host
+          // the write routes at, read from state the record does not
+          // supply; here the record IS what is being read, so binding the
+          // axis to the record's own host would make `recordedSeverityFloor`
+          // compare a value against itself and the axis would stop ruling
+          // at all. The two-names shape that term exists for — an Aone web
+          // host beside its git host — is absorbed downstream instead, by
+          // `hostsEquivalent`, and a bare-number record compares no host.
+          callerHost:
+            (typeof args.host === 'string' && args.host.trim()) ||
+            (remoteUrl ? parseRemoteUrl(remoteUrl)?.host : undefined) ||
+            resolveGhHost(undefined),
+          defaultSeverityFloor: operatorReviewSettings().severityFloor,
+          // No `skillArgs` seam here, deliberately: the caller-supplied
+          // record path is honoured only with no session id present, and
+          // this command refuses to run without one (the lease needs it) —
+          // the seam would be dead code wearing a flag.
+        })?.floor,
+        sideLedger,
+      });
+    }
     /** True when the FINAL published diff is the incremental delta. */
     let scopedDelta = false;
     /** The PR's own hunks, narrowed to what changed since the anchor. */
@@ -1587,6 +1716,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         if (publish(narrowed)) {
           scopedDelta = true;
           anchor.incremental.scope = widened.scope;
+          if (postureCause !== null) {
+            anchor.incremental.posture = 'critical';
+            anchor.incremental.postureCause = postureCause;
+            writeStderrLine(
+              `Critical posture (${postureCause}): fix-audit round shape — ` +
+                `territory fan-out over the delta and its import-seam ` +
+                `interaction files, with the reverse-audit waves narrowed ` +
+                `to the delta territories plus the non-delta territories ` +
+                `the previous waves could not certify dry.`,
+            );
+          }
           // The published hunks are byte-identical hunks of
           // `mergeBaseSha..head`, so that range is what downstream consumers
           // recomputing their own diffs must probe (Agent 7's test-efficacy
@@ -1916,6 +2056,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
         hasDeadline: wall.explicit,
+        ...(anchor ? { incremental: anchor.incremental } : {}),
       }),
       ...wall.fields,
       ...planEffortField(args.effort),
