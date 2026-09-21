@@ -789,12 +789,19 @@ export async function main() {
       );
       process.exit(0);
     } else {
-      // Relaunch app so we always have a child process that can be internally
-      // restarted if needed.
+      // Interactive and streaming modes keep a supervisor for in-session
+      // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
         childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
         onUpdateRelaunch,
+        replaceProcess:
+          !isAcpMode &&
+          argv.inputFormat !== InputFormat.STREAM_JSON &&
+          !argv.promptInteractive &&
+          !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+          argv.jsonFd === undefined &&
+          Boolean(argv.prompt),
       });
     }
   }

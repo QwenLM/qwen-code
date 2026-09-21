@@ -240,6 +240,38 @@ export class SessionCatalogStore {
     return this.getOrCreateEntry(query).snapshot;
   }
 
+  /**
+   * Reads a display name the catalog already holds for a session, scheduling
+   * nothing. A history session's name exists only here — neither the load
+   * response nor the metadata events carry it — so the header seeds the title
+   * from this cache instead of waiting for a round-trip.
+   */
+  peekSessionDisplayName(
+    sessionId: string,
+    workspaceCwd: string | undefined,
+  ): string | undefined {
+    if (!workspaceCwd) return undefined;
+    let displayName: string | undefined;
+    let updatedAt = -Infinity;
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      const name = entry.snapshot.page?.sessions.find(
+        // A page can hold sessions from another workspace (the daemon merges
+        // live runtime state), so match the row's workspace too, not just the
+        // entry's.
+        (session) =>
+          session.sessionId === sessionId &&
+          (!session.workspaceCwd || session.workspaceCwd === workspaceCwd),
+      )?.displayName;
+      const candidateUpdatedAt = entry.snapshot.updatedAt ?? 0;
+      if (name?.trim() && candidateUpdatedAt >= updatedAt) {
+        displayName = name;
+        updatedAt = candidateUpdatedAt;
+      }
+    }
+    return displayName;
+  }
+
   getEmptySnapshot(): SessionCatalogSnapshot {
     return EMPTY_SNAPSHOT;
   }
@@ -1567,4 +1599,17 @@ export function loadSessionCatalogOnce(
   options?: { fresh?: boolean },
 ): Promise<DaemonSessionListPage> {
   return getSessionCatalogStore(client).loadOnce(query, options);
+}
+
+/** Sync read of a cached display name; see `SessionCatalogStore.peekSessionDisplayName`. */
+export function peekSessionCatalogDisplayName(
+  client: DaemonClient,
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+): string | undefined {
+  if (!sessionId) return undefined;
+  return getSessionCatalogStore(client).peekSessionDisplayName(
+    sessionId,
+    workspaceCwd,
+  );
 }

@@ -7,7 +7,7 @@
 为 daemon 管理的频道 worker 增加运行时目标状态控制。daemon 可以不带
 `--channel` 启动，然后在不重启 daemon 的情况下启用、替换、查看、重载和停止
 频道选择。运行时变更不会持久化。下次 daemon 启动优先使用显式 `--channel`，
-否则恢复可信主 workspace 的 `serve.channels`；两者都没有时保持禁用。
+否则恢复每个可信已注册 workspace 各自的 `serve.channels`；两者都没有时保持禁用。
 
 控制层位于按 workspace 分组的 worker 实现之上。它负责已提交的频道选择，
 串行执行生命周期变更，保留归 serve 所有的频道服务租约，并仅协调有序频道选择
@@ -56,9 +56,13 @@ ready 状态。控制结果报告 `partial`，daemon 状态继续发出
 ## 兼容性
 
 启动时的 `--channel` 使用同一个 manager，并保留监听前预留租约和 worker
-ready 后才报告启动成功的行为。不带频道参数启动时，daemon 从可信主 workspace
-恢复 `serve.channels`。启动选择使用持久化的文件夹信任设置；worker 启动前会
-再次检查 workspace 归属和信任。次级 workspace 不会各自自动恢复自己的设置。
+ready 后才报告启动成功的行为。不带频道参数启动时，daemon 从每个可信已注册 workspace
+恢复 `serve.channels`，各自贡献本 workspace 作用域设置里的名单。启动选择使用
+持久化的文件夹信任设置；worker 启动前会再次检查 workspace 归属和信任。名字由
+哪个 workspace 列出，就在归属本来有歧义时判给它，并在 daemon 整个生命周期内
+一直按此判定，所以停掉后再启用仍然落回启动时那个 workspace；只由非主 workspace
+贡献的名字若解析不了，只记日志跳过，而不是让整份恢复失败，而主 workspace 列出的
+名字仍然会让整份恢复失败。`all` 仍然只对主 workspace 生效，配在别处会被跳过并记录。
 没有显式或持久化选择时，daemon 直到首次运行时变更才会预留频道服务或加载较重的
 频道 runtime。
 

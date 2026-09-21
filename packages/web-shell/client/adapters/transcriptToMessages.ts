@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readReportedArtifacts } from './reported-artifacts.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
@@ -740,6 +741,8 @@ export function transcriptBlocksToDaemonMessages(
           });
           break;
         }
+        const meta = getRecord(textBlock.meta);
+        const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
         if (notice?.source === 'vision_bridge_notice') {
           messages.push({
             id: block.id,
@@ -804,7 +807,10 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        const insightSegments = splitInsightSegments(textBlock.text);
+        const insightSegments =
+          reportedArtifacts.length > 0
+            ? null
+            : splitInsightSegments(textBlock.text);
         if (insightSegments) {
           let lastProgress: ParsedInsight | null = null;
           let hasTerminal = false;
@@ -889,6 +895,14 @@ export function transcriptBlocksToDaemonMessages(
           messages[currentAssistantIdx!] = {
             ...target,
             content: target.content + textBlock.text,
+            ...(reportedArtifacts.length
+              ? {
+                  reportedArtifacts: [
+                    ...(target.reportedArtifacts ?? []),
+                    ...reportedArtifacts,
+                  ],
+                }
+              : {}),
             isStreaming: textBlock.streaming,
             sourceBlockIds: unionMessageIds(target.sourceBlockIds, block.id),
             ...(textBlock.branchRecordId
@@ -903,6 +917,7 @@ export function transcriptBlocksToDaemonMessages(
             id: block.id,
             role: 'assistant',
             content: textBlock.text,
+            ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
@@ -1319,7 +1334,10 @@ export function transcriptBlocksToDaemonMessages(
       tool.args = permissionInfo.args;
     }
     if (
-      isSubAgentToolCall(tool) &&
+      (isSubAgentToolCall(tool) ||
+        /^(shell|bash|run_shell_command|execute_command)$/i.test(
+          tool.toolName,
+        )) &&
       isActiveToolStatus(tool.status) &&
       tool.endTime === undefined
     ) {
@@ -1771,6 +1789,18 @@ function getToolRawOutput(
 }
 
 function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
+  // Active shell details can be an input preview, not command output.
+  if (
+    /^(shell|bash|run_shell_command|execute_command)$/i.test(
+      block.toolName ?? '',
+    ) &&
+    ['pending', 'in_progress', 'running'].includes(block.status) &&
+    block.rawInput !== undefined &&
+    block.rawOutput === undefined
+  ) {
+    return undefined;
+  }
+
   if (isAskUserQuestionBlock(block) && block.status === 'failed') {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
@@ -1805,6 +1835,7 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'shell_result') return preview.result;
   if (preview.kind === 'question_answers') {
     return {
       type: 'ask_user_question_answers',

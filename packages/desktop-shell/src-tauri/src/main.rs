@@ -36,6 +36,8 @@ static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(target_os = "macos")]
+const MACOS_TITLEBAR_INIT_SCRIPT: &str = "window.__QWEN_CODE_MACOS_TITLEBAR__ = true;";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,7 +208,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
     let (width, height) = default_window_size();
 
-    let window = WebviewWindowBuilder::new(&handle, "main", WebviewUrl::App("index.html".into()))
+    let window_builder = WebviewWindowBuilder::new(
+        &handle,
+        "main",
+        WebviewUrl::App("index.html".into()),
+    )
         .title("Qwen Code")
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
@@ -230,8 +236,13 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }),
             DownloadEvent::Finished { .. } => true,
             _ => false,
-        })
-        .build()?;
+        });
+    #[cfg(target_os = "macos")]
+    let window_builder = window_builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .initialization_script(MACOS_TITLEBAR_INIT_SCRIPT);
+    let window = window_builder.build()?;
     restore_window(&window, window_state.as_ref());
 
     handle.manage(ApplicationState {

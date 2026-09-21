@@ -155,8 +155,11 @@ const composerCoreState = vi.hoisted(() => ({
   imageDragActive: false,
   navigatePrevHistory: vi.fn(),
   navigateNextHistory: vi.fn(),
+  hasContent: false,
   shellMode: false,
   setShellMode: vi.fn(),
+  toggleShellMode: vi.fn(),
+  submitText: vi.fn(),
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
@@ -229,7 +232,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         workspaceActionsRef: composerCoreState.workspaceActionsRef,
         mobileComposer: composerCoreState.mobileComposer,
         focus: composerCoreState.focus,
-        submitText: vi.fn(),
+        submitText: composerCoreState.submitText,
         clearText: vi.fn(),
         getText: composerCoreState.getText,
         hasInput: vi.fn(() => false),
@@ -237,8 +240,11 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           mockComposerCoreState.pastedImages.length > 0 ||
           mockComposerCoreState.pastedFiles.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
-        hasContent: false,
-        canSubmit: false,
+        hasContent: composerCoreState.hasContent,
+        canSubmit:
+          !options?.disabled &&
+          !options?.workspaceUploadBusy &&
+          composerCoreState.hasContent,
         pendingImageBatchCount: 0,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
@@ -277,7 +283,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         replaceEditorText: vi.fn(),
         shellMode: composerCoreState.shellMode,
         setShellMode: composerCoreState.setShellMode,
-        toggleShellMode: vi.fn(),
+        toggleShellMode: composerCoreState.toggleShellMode,
         currentMode: 'default',
         sessionName: undefined,
         searchState: {
@@ -298,7 +304,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         navigateNextHistory: composerCoreState.navigateNextHistory,
         showShortcutHints: false,
         followupState: { isVisible: false, suggestion: '' },
-        disabled: false,
+        disabled: Boolean(options?.disabled),
         onAcceptFollowup: vi.fn(),
         onDismissFollowup: vi.fn(),
         slashMenu: composerCoreState.slashMenu,
@@ -329,9 +335,25 @@ vi.mock('../voice/VoiceButton', () => ({
   },
 }));
 
-vi.mock('../live/LiveVoiceButton', () => ({
-  LiveVoiceButton: () => <span data-testid="live-voice-button" />,
-}));
+const liveVoiceState = vi.hoisted(() => ({ supported: false }));
+vi.mock('../live/LiveVoiceButton', async () => {
+  const React = await import('react');
+  return {
+    LiveVoiceButton: ({
+      open,
+      onSupportedChange,
+    }: {
+      open?: boolean;
+      onSupportedChange?: (supported: boolean) => void;
+    }) => {
+      const supported = liveVoiceState.supported;
+      React.useEffect(() => {
+        onSupportedChange?.(supported);
+      }, [onSupportedChange, supported]);
+      return <span data-testid="live-voice-button" data-open={open} />;
+    },
+  };
+});
 
 const mounted: Array<{
   root: Root;
@@ -357,11 +379,15 @@ afterEach(() => {
   composerCoreState.navigatePrevHistory.mockReset();
   composerCoreState.navigateNextHistory.mockReset();
   composerCoreState.setShellMode.mockReset();
+  composerCoreState.toggleShellMode.mockReset();
+  composerCoreState.submitText.mockReset();
   composerCoreState.shellMode = false;
+  composerCoreState.hasContent = false;
   composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
+  liveVoiceState.supported = false;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -377,7 +403,14 @@ afterEach(() => {
 interface ChatEditorRenderProps
   extends Pick<
     ComponentProps<typeof ChatEditor>,
-    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+    | 'contextChipPlacement'
+    | 'standaloneTargetSupported'
+    | 'onSelectStandaloneTarget'
+    | 'workspaceSelectionDisabled'
+    | 'selectedWorkspaceCwd'
+    | 'contextUsageAlwaysVisible'
+    | 'contextUsageControls'
+    | 'onOpenContextUsage'
   > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
@@ -399,6 +432,7 @@ interface ChatEditorRenderProps
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   isRunning?: boolean;
+  onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
   onCancel?: () => void;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
@@ -415,6 +449,8 @@ interface ChatEditorRenderProps
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
+  contextUsageAlwaysVisible?: boolean;
+  commands?: ComponentProps<typeof ChatEditor>['commands'];
   disabled?: boolean;
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
@@ -726,7 +762,10 @@ describe('ChatEditor add menu (+)', () => {
     )!.portalRoot;
     await act(async () => {
       trigger(container)!.dispatchEvent(
-        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        new MouseEvent(
+          composerCoreState.mobileComposer ? 'click' : 'pointerdown',
+          { bubbles: true, button: 0 },
+        ),
       );
     });
     await act(async () => {
@@ -897,10 +936,11 @@ describe('ChatEditor add menu (+)', () => {
   it('prepends a skill through the textarea backend on touch', async () => {
     composerCoreState.mobileComposer = {
       textareaRef: createRef<HTMLTextAreaElement>(),
+      expandedTextareaRef: createRef<HTMLTextAreaElement>(),
       value: 'existing draft',
       onChange: vi.fn(),
       onBlur: vi.fn(),
-      placeholder: '',
+      placeholder: 'Ask anything',
     } satisfies MobileComposerBackend;
     composerCoreState.getText.mockReturnValue('existing draft');
     const container = renderChatEditor({
@@ -1698,6 +1738,181 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       ws!.compareDocumentPosition(git!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+describe('ChatEditor context chip placement', () => {
+  const workspaceProps = {
+    workspaces: [
+      {
+        id: 'primary',
+        cwd: '/work/main',
+        label: 'main',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'api',
+        cwd: '/work/api',
+        label: 'api',
+        primary: false,
+        trusted: true,
+      },
+    ],
+    onSelectWorkspace: vi.fn(),
+  };
+  const bothChips = {
+    ...workspaceProps,
+    gitBranch: 'main',
+    visibleToolbarActions: ['workspace', 'gitBranch'] as const,
+  };
+
+  it('keeps both chips in the toolbar by default', () => {
+    const container = renderChatEditor(bothChips);
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+  });
+
+  it('moves both chips into the row under the composer', () => {
+    const container = renderChatEditor({
+      ...bothChips,
+      contextChipPlacement: 'below',
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    );
+
+    expect(row).not.toBeNull();
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    expect(surface.contains(row)).toBe(false);
+    expect(row!.querySelector('button[aria-label="Workspace"]')).not.toBeNull();
+    expect(
+      row!.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+    // Neither chip stays behind in the toolbar.
+    const toolbar = container.querySelector('[data-web-shell-toolbar-leading]');
+    expect(toolbar!.querySelector('button[aria-label="Workspace"]')).toBeNull();
+    expect(
+      toolbar!.querySelector('[aria-label^="Current Git branch:"]'),
+    ).toBeNull();
+  });
+
+  it('leaves the workspace to the header and keeps git in the toolbar', () => {
+    const container = renderChatEditor({
+      ...bothChips,
+      contextChipPlacement: 'header',
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders the row for git alone when only the git action is visible', () => {
+    const container = renderChatEditor({
+      gitBranch: 'main',
+      visibleToolbarActions: ['gitBranch'],
+      contextChipPlacement: 'below',
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    );
+
+    expect(
+      row?.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+    expect(row?.querySelector('button[aria-label="Workspace"]')).toBeNull();
+  });
+
+  it('does not keep an empty row for standalone support without a callback', () => {
+    const props = {
+      ...workspaceProps,
+      workspaces: workspaceProps.workspaces.slice(0, 1),
+      standaloneTargetSupported: true,
+      visibleToolbarActions: ['workspace', 'gitBranch'] as const,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(props);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+
+    rerenderChatEditor(container, {
+      ...props,
+      onSelectStandaloneTarget: vi.fn(),
+    });
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+
+    rerenderChatEditor(container, props);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+  });
+
+  it('follows controlled visibility without changing the workspace selection', () => {
+    const onSelectWorkspace = vi.fn();
+    const props = {
+      ...bothChips,
+      onSelectWorkspace,
+      selectedWorkspaceCwd: '/work/api',
+      workspaceSelectionDisabled: true,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(props);
+    const workspace = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Workspace"]',
+    );
+    expect(workspace?.textContent).toContain('api');
+    expect(workspace?.disabled).toBe(true);
+
+    for (const visibleToolbarActions of [
+      ['workspace'],
+      ['gitBranch'],
+      [],
+    ] as const) {
+      rerenderChatEditor(container, { ...props, visibleToolbarActions });
+      const row = container.querySelector(
+        '[data-web-shell-composer-context-row]',
+      );
+      expect(Boolean(row)).toBe(visibleToolbarActions.length > 0);
+      expect(
+        Boolean(row?.querySelector('button[aria-label="Workspace"]')),
+      ).toBe(visibleToolbarActions.some((action) => action === 'workspace'));
+      expect(Boolean(row?.querySelector('[data-web-shell-git-branch]'))).toBe(
+        visibleToolbarActions.some((action) => action === 'gitBranch'),
+      );
+    }
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('omits the row when neither chip is available', () => {
+    const container = renderChatEditor({
+      ...workspaceProps,
+      visibleToolbarActions: [],
+      contextChipPlacement: 'below',
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
   });
 });
 
@@ -3208,217 +3423,435 @@ describe('ChatEditor slash command popovers', () => {
   });
 });
 
-describe('ChatEditor mobile composer quick actions', () => {
-  const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(
-    Navigator.prototype,
-    'maxTouchPoints',
-  );
-
-  function withTouchDevice(run: () => void) {
-    Object.defineProperty(navigator, 'maxTouchPoints', {
-      value: 5,
-      configurable: true,
-    });
-    try {
-      run();
-    } finally {
-      if (originalMaxTouchPoints) {
-        Object.defineProperty(
-          Navigator.prototype,
-          'maxTouchPoints',
-          originalMaxTouchPoints,
-        );
-      } else {
-        delete (navigator as unknown as Record<string, unknown>)[
-          'maxTouchPoints'
-        ];
-      }
-    }
-  }
-
-  function mobileComposerStub(): MobileComposerBackend {
-    return {
+describe('ChatEditor mobile composer actions', () => {
+  function mobileComposer(value = ''): MobileComposerBackend {
+    const backend = {
       textareaRef: createRef<HTMLTextAreaElement>(),
-      value: '',
+      expandedTextareaRef: createRef<HTMLTextAreaElement>(),
+      value,
       onChange: vi.fn(),
       onBlur: vi.fn(),
-      placeholder: '',
+      placeholder: 'Ask anything',
     };
+    composerCoreState.mobileComposer = backend;
+    return backend;
   }
 
-  function openQuickActions(container: HTMLElement) {
-    const toggle = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="more actions"]',
+  async function clickButton(label: string) {
+    const button = Array.from(document.querySelectorAll('button')).find(
+      (candidate) =>
+        candidate.textContent === label ||
+        candidate.getAttribute('aria-label') === label,
     );
-    expect(toggle).not.toBeNull();
-    act(() => toggle!.click());
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
   }
 
-  it('maps the history quick action to the search UI on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const container = renderChatEditor({});
-      openQuickActions(container);
-
-      const historyButton = Array.from(
-        container.querySelectorAll('button'),
-      ).find((button) => button.textContent === 'Question history');
-      expect(historyButton).not.toBeUndefined();
-      act(() => historyButton!.click());
-
-      expect(composerCoreState.openHistorySearch).toHaveBeenCalledTimes(1);
-    });
+  it('opens history from the add drawer without simulated keyboard keys', async () => {
+    mobileComposer();
+    renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    await clickButton('Add to message');
+    expect(
+      document.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[aria-label="more actions"]')).toBeNull();
+    expect(
+      Array.from(document.querySelectorAll('button')).some((button) =>
+        ['Tab', 'Esc', '←', '→'].includes(button.textContent ?? ''),
+      ),
+    ).toBe(false);
+    await clickButton('Input history');
+    expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
   });
 
-  it('shows the keyboard shortcut hints grid on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const mobileContainer = renderChatEditor({});
-      openQuickActions(mobileContainer);
-      expect(
-        Array.from(mobileContainer.querySelectorAll('button')).some(
-          (button) => button.textContent === 'Tab',
-        ),
-      ).toBe(true);
-
-      composerCoreState.mobileComposer = null;
-      const desktopContainer = renderChatEditor({});
-      openQuickActions(desktopContainer);
-      expect(
-        Array.from(desktopContainer.querySelectorAll('button')).some(
-          (button) => button.textContent === 'Tab',
-        ),
-      ).toBe(true);
-    });
+  it('returns focus to the composer after entering Shell from the drawer', async () => {
+    mobileComposer('draft');
+    renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    await clickButton('Add to message');
+    composerCoreState.focus.mockClear();
+    await clickButton('Shell mode');
+    expect(composerCoreState.toggleShellMode).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).toBeNull();
   });
 
-  it('walks prompt history from the hint arrows on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const container = renderChatEditor({});
-      openQuickActions(container);
-      const pressHint = (label: string) => {
-        const button = Array.from(container.querySelectorAll('button')).find(
-          (candidate) => candidate.textContent === label,
-        );
-        expect(button).not.toBeUndefined();
-        act(() => button!.click());
-      };
-
-      pressHint('↑');
-      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
-      pressHint('↓');
-      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
-
-      // Tab has no completion target on the textarea backend.
-      pressHint('Tab');
-      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
-      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
+  it('calls history navigation directly without submitting or moving focus', async () => {
+    const backend = mobileComposer('working draft');
+    const onSubmit = vi.fn();
+    const container = renderChatEditor({ onSubmit });
+    act(() => backend.textareaRef.current!.focus());
+    const previous = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Previous input"]',
+    )!;
+    const pointerDown = new Event('pointerdown', {
+      bubbles: true,
+      cancelable: true,
     });
+    previous.dispatchEvent(pointerDown);
+    expect(pointerDown.defaultPrevented).toBe(false);
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    previous.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
+    composerCoreState.focus.mockClear();
+    await clickButton('Previous input');
+    await clickButton('Next input');
+    expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledOnce();
+    expect(composerCoreState.navigateNextHistory).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(backend.textareaRef.current);
   });
 
-  it('cancels the running turn from the Esc hint on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const onCancel = vi.fn();
-      const container = renderChatEditor({ isRunning: true, onCancel });
-      openQuickActions(container);
-      const escButton = Array.from(container.querySelectorAll('button')).find(
-        (button) => button.textContent === 'Esc',
-      );
-      expect(escButton).not.toBeUndefined();
-      act(() => escButton!.click());
-      expect(onCancel).toHaveBeenCalledTimes(1);
-    });
-  });
+  it('prevents mousedown default on the remaining migrated buttons', async () => {
+    mobileComposer('draft');
+    renderChatEditor({ visibleToolbarActions: [] });
 
-  it('moves the textarea caret from the cursor hints on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const container = renderChatEditor({});
-      const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
-      expect(textarea).not.toBeNull();
-      openQuickActions(container);
-      // Setting the value after the panel opens keeps React's controlled
-      // state from resetting it on the panel re-render.
-      textarea!.value = 'abcd';
-      textarea!.setSelectionRange(1, 3);
-      const pressHint = (label: string) => {
-        const button = Array.from(container.querySelectorAll('button')).find(
-          (candidate) => candidate.textContent === label,
-        );
-        expect(button).not.toBeUndefined();
-        act(() => button!.click());
-      };
+    const actions = document.querySelector(
+      '[data-web-shell-mobile-editing-actions]',
+    )!;
+    const historyButton = actions.querySelector<HTMLButtonElement>(
+      '[aria-label="Input history"]',
+    )!;
+    const shellButton = Array.from(actions.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Shell mode',
+    )!;
 
-      // An existing selection collapses to its far edge first.
-      pressHint('→');
-      expect(textarea!.selectionStart).toBe(3);
-      pressHint('→');
-      expect(textarea!.selectionStart).toBe(4);
-      pressHint('←');
-      expect(textarea!.selectionStart).toBe(3);
-
-      // Movement skips whole code points so an emoji is never split.
-      textarea!.value = 'a😀b';
-      textarea!.setSelectionRange(1, 1);
-      pressHint('→');
-      expect(textarea!.selectionStart).toBe(3);
-      pressHint('←');
-      expect(textarea!.selectionStart).toBe(1);
-    });
-  });
-
-  it('exits shell mode from the Esc hint on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      composerCoreState.shellMode = true;
-      const container = renderChatEditor({ isRunning: true });
-      openQuickActions(container);
-      const escButton = Array.from(container.querySelectorAll('button')).find(
-        (button) => button.textContent === 'Esc',
-      );
-      expect(escButton).not.toBeUndefined();
-      act(() => escButton!.click());
-      expect(composerCoreState.setShellMode).toHaveBeenCalledWith(false);
-    });
-  });
-
-  it('hides other toolbar actions while mobile voice capture is active', () => {
-    withTouchDevice(() => {
-      const container = renderChatEditor({
-        currentModel: 'qwen-test',
-        availableModels: [{ id: 'qwen-test' }],
+    const expectMousedownPrevented = (button: HTMLButtonElement) => {
+      const pointerDown = new Event('pointerdown', {
+        bubbles: true,
+        cancelable: true,
       });
-
-      expect(
-        container.querySelector('[data-web-shell-toolbar-leading]'),
-      ).toBeTruthy();
-      expect(
-        container.querySelector(
-          'button[aria-label="more actions"][data-hide-during-mobile-voice]',
-        ),
-      ).toBeTruthy();
-      expect(
-        container.querySelector('[data-web-shell-composer-submit]'),
-      ).toBeTruthy();
-
-      act(() => {
-        voiceButtonState.onActiveChange?.(true);
+      button.dispatchEvent(pointerDown);
+      expect(pointerDown.defaultPrevented).toBe(false);
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
       });
+      button.dispatchEvent(mouseDown);
+      expect(mouseDown.defaultPrevented).toBe(true);
+    };
 
+    expectMousedownPrevented(historyButton);
+    expectMousedownPrevented(shellButton);
+
+    await clickButton('Expand editor');
+    expectMousedownPrevented(
+      document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] [aria-label="Hide keyboard"]',
+      )!,
+    );
+  });
+
+  it('disables both history buttons when the composer is disabled', () => {
+    mobileComposer('draft');
+    const container = renderChatEditor({ disabled: true });
+    for (const label of ['Previous input', 'Next input', 'Expand editor']) {
+      const button = container.querySelector<HTMLButtonElement>(
+        `[aria-label="${label}"]`,
+      )!;
+      expect(button.disabled).toBe(true);
+      act(() => button.click());
+    }
+    expect(composerCoreState.navigatePrevHistory).not.toHaveBeenCalled();
+    expect(composerCoreState.navigateNextHistory).not.toHaveBeenCalled();
+  });
+
+  it.each([['approvalMode', 'model'], ['commands']] as const)(
+    'preserves shell and history without add opt-in: %j',
+    async (...actions) => {
+      mobileComposer();
+      renderChatEditor({ visibleToolbarActions: actions });
+      await clickButton('Input history');
+      await clickButton('Shell mode');
+      expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
+      expect(composerCoreState.toggleShellMode).toHaveBeenCalledOnce();
       expect(
-        container.querySelector('[data-mobile-voice-active="true"]'),
-      ).toBeTruthy();
+        document.querySelector('[aria-label="Add to message"]'),
+      ).toBeNull();
+    },
+  );
 
-      act(() => {
-        voiceButtonState.onActiveChange?.(false);
-      });
+  it('opens commands-only without exposing attachments and hides it in shell mode', async () => {
+    mobileComposer();
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['commands'],
+      commands: [{ name: 'goal', description: 'Set a goal' }],
+    };
+    const container = renderChatEditor(props);
+    await clickButton('All commands');
+    const drawer = document.querySelector('[data-web-shell-mobile-add-menu]')!;
+    expect(drawer.textContent).toContain('/goal');
+    expect(drawer.textContent).not.toContain('Photos');
+    await clickButton('close');
+    composerCoreState.shellMode = true;
+    rerenderChatEditor(container, props);
+    expect(
+      document.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBeNull();
+  });
 
-      expect(
-        container.querySelector('[data-mobile-voice-active="true"]'),
-      ).toBeFalsy();
+  it('cannot submit a disabled draft or exit shell', async () => {
+    mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    composerCoreState.shellMode = true;
+    const container = renderChatEditor({ disabled: true });
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!.disabled,
+    ).toBe(true);
+    await clickButton('Exit Shell');
+    expect(composerCoreState.toggleShellMode).not.toHaveBeenCalled();
+  });
+
+  it('stops with an empty draft and from the expanded editor without submitting', async () => {
+    mobileComposer();
+    const onCancel = vi.fn();
+    const container = renderChatEditor({ isRunning: true, onCancel });
+    expect(
+      container.querySelector('[data-web-shell-composer-stop]'),
+    ).toBeNull();
+    await clickButton('Stop');
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+    await clickButton('Expand editor');
+    const stop = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] button',
+      ),
+    ].find((b) => b.textContent === 'Stop')!;
+    act(() => stop.click());
+    expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { tokenCount: 10, contextWindow: 100 },
+    { contextUsageAlwaysVisible: true },
+  ])('retains the requested context control on mobile: %j', (props) => {
+    mobileComposer();
+    const container = renderChatEditor({
+      ...props,
+      visibleToolbarActions: ['contextUsage'],
     });
+    expect(
+      container.querySelector('[data-web-shell-context-usage]'),
+    ).not.toBeNull();
+  });
+
+  it.each([{ sessionId: 'b' }, { atWorkspaceCwd: '/b' }, { disabled: true }])(
+    'closes expanded editing only when its owner changes: %j',
+    async (change) => {
+      const backend = mobileComposer('draft');
+      const props = { sessionId: 'a', atWorkspaceCwd: '/a' };
+      const container = renderChatEditor(props);
+      await clickButton('Expand editor');
+      rerenderChatEditor(container, { ...props, currentModel: 'another' });
+      expect(
+        document.querySelector('[data-web-shell-expanded-editor]'),
+      ).not.toBeNull();
+      const expanded = document.querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-expanded-editor] textarea',
+      )!;
+      expect(expanded.getAttribute('aria-label')).toBe('Ask anything');
+      expect(expanded.placeholder).toBe('Ask anything');
+      expect(expanded.getAttribute('autocapitalize')).toBe('off');
+      expect(expanded.getAttribute('autocorrect')).toBe('off');
+      expect(expanded.getAttribute('spellcheck')).toBe('false');
+      await act(async () => {
+        rerenderChatEditor(container, { ...props, ...change });
+      });
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+      expect(
+        document.querySelector('[data-web-shell-expanded-editor]'),
+      ).toBeNull();
+      expect(document.activeElement).not.toBe(document.body);
+      if ('disabled' in change)
+        expect(document.activeElement).not.toBe(backend.textareaRef.current);
+    },
+  );
+
+  it('does not steal focus from the next dialog when expanded editing becomes disabled', async () => {
+    mobileComposer('draft');
+    const container = renderChatEditor({});
+    await clickButton('Expand editor');
+    const approval = document.createElement('button');
+    document.body.append(approval);
+    try {
+      await act(async () => rerenderChatEditor(container, { disabled: true }));
+      approval.focus();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+      expect(document.activeElement).toBe(approval);
+    } finally {
+      approval.remove();
+    }
+  });
+
+  it('keeps Hide keyboard in sync with focus across session changes and allows clicks to bubble', async () => {
+    const backend = mobileComposer('draft');
+    const container = renderChatEditor({ sessionId: 'a' });
+    act(() => backend.textareaRef.current!.focus());
+    rerenderChatEditor(container, { sessionId: 'b' });
+    expect(
+      document.querySelector('[aria-label="Hide keyboard"]'),
+    ).not.toBeNull();
+    const onClick = vi.fn();
+    document.addEventListener('click', onClick);
+    try {
+      await clickButton('Hide keyboard');
+      expect(onClick).toHaveBeenCalledOnce();
+      expect(document.activeElement).not.toBe(backend.textareaRef.current);
+    } finally {
+      document.removeEventListener('click', onClick);
+    }
+  });
+
+  it('keeps the history arrow controls out of the desktop composer', () => {
+    const container = renderChatEditor({});
+    expect(container.querySelector('[aria-label="Previous input"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Next input"]')).toBeNull();
+  });
+
+  it('gates the drawer Live entry by support and host voice opt-in and opens the controlled dialog', async () => {
+    mobileComposer();
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['addMenu', 'voice'],
+    };
+    const container = renderChatEditor(props);
+    await clickButton('Add to message');
+    expect(
+      document.querySelector('[data-web-shell-mobile-add-menu]')!.textContent,
+    ).not.toContain('Open Live Voice');
+    await clickButton('close');
+    liveVoiceState.supported = true;
+    rerenderChatEditor(container, props);
+    await clickButton('Add to message');
+    await clickButton('Open Live Voice');
+    expect(
+      container
+        .querySelector('[data-testid="live-voice-button"]')!
+        .getAttribute('data-open'),
+    ).toBe('true');
+    rerenderChatEditor(container, { visibleToolbarActions: ['addMenu'] });
+    await clickButton('Add to message');
+    expect(
+      document.querySelector('[data-web-shell-mobile-add-menu]')!.textContent,
+    ).not.toContain('Open Live Voice');
+  });
+
+  it('keeps stop and send reachable with a draft without clearing it', async () => {
+    const backend = mobileComposer('keep this draft');
+    composerCoreState.hasContent = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({ isRunning: true, onCancel });
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    )!;
+    expect(stop.disabled).toBe(false);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!.disabled,
+    ).toBe(false);
+    act(() => stop.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(backend.textareaRef.current!.value).toBe('keep this draft');
+    expect(composerCoreState.setText).not.toHaveBeenCalled();
+  });
+
+  it('blurs the textarea without bubbling back into composer focus', async () => {
+    const backend = mobileComposer('draft');
+    renderChatEditor({});
+    act(() => backend.textareaRef.current!.focus());
+    composerCoreState.focus.mockClear();
+    await clickButton('Hide keyboard');
+    expect(document.activeElement).not.toBe(backend.textareaRef.current);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(backend.textareaRef.current!.value).toBe('draft');
+  });
+
+  it('expands the same draft and restores selection without dropping attachments', async () => {
+    const backend = mobileComposer('hello world');
+    const container = renderChatEditor({
+      pastedFiles: [
+        { name: 'notes.txt', media_type: 'text/plain', text: 'notes' },
+      ],
+    });
+    backend.textareaRef.current!.setSelectionRange(2, 5);
+    await clickButton('Expand editor');
+    const expanded = document.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-expanded-editor] textarea',
+    )!;
+    expect(expanded.value).toBe('hello world');
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([2, 5]);
+    act(() => {
+      expanded.setSelectionRange(6, 6);
+      expanded.focus();
+      expanded.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      expanded.blur();
+    });
+    await clickButton('Done');
+    expect(backend.textareaRef.current!.value).toBe('hello world');
+    expect([
+      backend.textareaRef.current!.selectionStart,
+      backend.textareaRef.current!.selectionEnd,
+    ]).toEqual([6, 6]);
+    expect(
+      container.querySelector('[data-web-shell-composer-attachments]')!
+        .textContent,
+    ).toContain('notes');
+    expect(mockComposerCoreState.pastedFiles).toHaveLength(1);
+  });
+
+  it('closes expanded editing when the owning session changes', async () => {
+    mobileComposer('draft');
+    const container = renderChatEditor({ sessionId: 'a' });
+    await clickButton('Expand editor');
+    rerenderChatEditor(container, { sessionId: 'b' });
+    expect(
+      document.querySelector('[data-web-shell-expanded-editor]'),
+    ).toBeNull();
+  });
+
+  it('offers explicit shell exit without canceling a turn', async () => {
+    mobileComposer();
+    composerCoreState.shellMode = true;
+    const onCancel = vi.fn();
+    renderChatEditor({ isRunning: true, onCancel });
+    await clickButton('Exit Shell');
+    expect(composerCoreState.toggleShellMode).toHaveBeenCalledOnce();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('retains the reduced toolbar during mobile voice capture', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      currentModel: 'qwen-test',
+      availableModels: [{ id: 'qwen-test' }],
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(
+      container.querySelector('[data-mobile-voice-active="true"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer-submit]'),
+    ).not.toBeNull();
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(
+      container.querySelector('[data-mobile-voice-active="true"]'),
+    ).toBeNull();
   });
 });
 
