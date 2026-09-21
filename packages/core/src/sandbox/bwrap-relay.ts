@@ -5,11 +5,19 @@
  */
 
 import { spawn } from 'node:child_process';
-import { constants, openSync, writeFileSync, closeSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import type { Readable } from 'node:stream';
 import { MAX_STATUS_BYTES, parseBwrapStatus } from './bwrap-status.js';
 
-const [parentPid, statusPath, bwrap, ...args] = process.argv.slice(2);
+const [parentPid, statusPath, payloadEnvPath, bwrap, ...args] =
+  process.argv.slice(2);
 if (process.ppid !== Number(parentPid)) process.exit(1);
 const parentWatch = setInterval(() => {
   if (process.ppid !== Number(parentPid)) process.exit(1);
@@ -23,9 +31,28 @@ const fd = openSync(
     constants.O_NOFOLLOW,
   0o600,
 );
+const envFd = openSync(
+  payloadEnvPath,
+  constants.O_RDONLY | constants.O_NOFOLLOW,
+);
+let parsedEnv: unknown;
+try {
+  parsedEnv = JSON.parse(readFileSync(envFd, 'utf8'));
+} finally {
+  closeSync(envFd);
+  unlinkSync(payloadEnvPath);
+}
+if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv))
+  process.exit(1);
+const env = Object.fromEntries(
+  Object.entries(parsedEnv).map(([key, value]) => {
+    if (typeof value !== 'string') process.exit(1);
+    return [key, value];
+  }),
+);
 const child = spawn(bwrap, ['--json-status-fd', '3', ...args], {
   stdio: ['inherit', 'inherit', 'inherit', 'pipe'],
-  env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', TERM: 'xterm-256color' },
+  env,
 });
 let wire = '';
 let bytes = 0;
