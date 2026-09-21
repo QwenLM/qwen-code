@@ -1628,7 +1628,11 @@ export class LlmClient {
   }
 
   private getCachedGitStatus(): string | null {
-    if (this.config.getExecutionEnvironment?.()) {
+    if (
+      this.config.getExecutionEnvironment?.() ||
+      this.config.getShellExecutionSandbox?.()
+    ) {
+      // Even git status can execute repository-configured filters on the host.
       return null;
     }
     if (this.cachedGitStatus === undefined) {
