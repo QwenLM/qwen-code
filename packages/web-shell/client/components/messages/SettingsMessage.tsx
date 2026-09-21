@@ -74,8 +74,8 @@ import { Switch } from '../ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 import {
-  isItemVisible,
-  isSettingVisible,
+  isItemExcluded,
+  isSettingExcluded,
   type WebShellSettingsOptions,
 } from '../../settings';
 
@@ -545,7 +545,7 @@ export function SettingsMessage({
         ...group,
         items: group.items.filter((item) => {
           if (item.type === 'setting') {
-            return isSettingVisible(item.setting.key, presentation);
+            return !isSettingExcluded(item.setting.key, presentation);
           }
           const id =
             item.type === 'local'
@@ -559,7 +559,7 @@ export function SettingsMessage({
                   : item.type === 'connections'
                     ? 'builtin:connections'
                     : 'builtin:model-management';
-          return isItemVisible(id, presentation);
+          return !isItemExcluded(id, presentation);
         }),
       }))
       .filter((group) => group.items.length > 0);
