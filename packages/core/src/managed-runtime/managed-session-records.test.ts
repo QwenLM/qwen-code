@@ -1013,6 +1013,46 @@ describe('managed session transactions', () => {
     ).not.toThrow();
   });
 
+  it('preserves the event depth limit inside list validators', () => {
+    let target: unknown = null;
+    for (let depth = 3; depth <= MANAGED_SESSION_LIMITS.maxJsonDepth; depth++) {
+      target = { nested: target };
+    }
+    const exactDepthEvent = parseManagedSessionEvent({
+      v: 1,
+      sequence: 1,
+      eventId: 'evt-depth',
+      sessionKey,
+      kind: 'cancel.requested',
+      occurredAt: 1,
+      payload: {
+        requestId: 'req-1',
+        target,
+        reason: 'test',
+        requestedBy: 'user',
+      },
+    });
+
+    expect(() =>
+      assertManagedSessionTransaction([exactDepthEvent], 1024),
+    ).not.toThrow();
+    expect(() => managedSessionEventsDigest([exactDepthEvent])).not.toThrow();
+
+    const overDepthEvent = {
+      ...exactDepthEvent,
+      payload: {
+        ...exactDepthEvent.payload,
+        target: { nested: target },
+      },
+    } as ManagedSessionEvent;
+    expect(() =>
+      assertManagedSessionTransaction([overDepthEvent], 1024),
+    ).toThrow(/maximum JSON depth/);
+    expect(() => managedSessionEventsDigest([overDepthEvent])).toThrow(
+      /maximum JSON depth/,
+    );
+  });
+
   it('rejects an empty transaction or one over the event-count limit', () => {
     expect(() => assertManagedSessionTransaction([], 0)).toThrow(
       /must contain at least one event/,
@@ -1092,6 +1132,9 @@ describe('managed session transactions', () => {
   });
 
   it('bounds digest input before encoding event identities', () => {
+    expect(() => managedSessionEventsDigest([])).toThrow(
+      /must contain at least one event/,
+    );
     const events = Array.from(
       { length: MANAGED_SESSION_LIMITS.maxTransactionEvents + 1 },
       (_, index) => event(index + 1),

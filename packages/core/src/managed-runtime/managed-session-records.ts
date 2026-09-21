@@ -1237,7 +1237,7 @@ export function managedSessionEventsDigest(
       `transaction identity must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionEvents} events.`,
     );
   }
-  assertJsonValue(events, 'events');
+  assertJsonValue(events, 'events', new Set<object>(), 0);
   const identities: ManagedSessionJsonValue[] = [];
   for (let index = 0; index < events.length; index++) {
     const event = events[index];
@@ -1295,7 +1295,7 @@ export function assertManagedSessionTransaction(
       `a transaction must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionEvents} events.`,
     );
   }
-  assertJsonValue(events, 'transaction.events');
+  assertJsonValue(events, 'transaction.events', new Set<object>(), 0);
   if (!Number.isSafeInteger(encodedBytes) || encodedBytes < 1) {
     fail('transaction encoded size must be a positive safe integer.');
   }
