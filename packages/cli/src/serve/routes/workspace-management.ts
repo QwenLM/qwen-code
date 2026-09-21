@@ -61,6 +61,85 @@ import {
 // readdir/stat work on huge directories.
 const MAX_PATH_SUGGESTIONS = 50;
 
+// Budgets for the remote-daemon proxy routes below. Those routes dial an
+// origin the *caller* names, so a peer that accepts the connection and then
+// goes quiet, or one that answers with an endless body, must not be able to
+// pin a daemon request (and its socket) or grow this process without bound.
+// Legitimate answers are tiny: a suggestion list is already capped at
+// MAX_PATH_SUGGESTIONS entries and a registration returns one object.
+const REMOTE_DAEMON_PROXY_TIMEOUT_MS = 30_000;
+const REMOTE_DAEMON_PROXY_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Dials a caller-named remote daemon on behalf of a proxy route.
+ *
+ * Two deliberate departures from a bare `fetch`:
+ * - a full-transfer timeout, so a silent peer cannot hold the request open
+ *   forever (the same signal also bounds the body read below);
+ * - `redirect: 'error'`. Following a redirect would replay the forwarded
+ *   `Authorization` bearer against whatever origin the peer names, and a qwen
+ *   daemon never redirects these routes — a 3xx means a misconfigured or
+ *   hostile target, not a success.
+ *
+ * The private/metadata SSRF guard is intentionally NOT applied: the legitimate
+ * targets of these routes are other daemons on localhost and the LAN, which is
+ * exactly the address space that guard rejects. Restricting which origins an
+ * operator may proxy to is a separate policy decision.
+ */
+function fetchRemoteDaemon(
+  url: string,
+  init: RequestInit,
+): Promise<globalThis.Response> {
+  return fetch(url, {
+    ...init,
+    redirect: 'error',
+    signal: AbortSignal.timeout(REMOTE_DAEMON_PROXY_TIMEOUT_MS),
+  });
+}
+
+/**
+ * Reads a remote daemon's JSON answer under a byte cap enforced while
+ * streaming, with a `content-length` precheck — the same shape as `fetchBytes`
+ * in workspace-skill-management.ts, so an oversized answer is rejected before
+ * it is buffered rather than after.
+ *
+ * `globalThis.Response`, not the bare name: this module imports express's
+ * `Response` type, which shadows the fetch one.
+ */
+async function readRemoteDaemonJson(
+  response: globalThis.Response,
+): Promise<unknown> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > REMOTE_DAEMON_PROXY_MAX_BYTES) {
+    throw new Error(
+      `Remote daemon response exceeded the ${REMOTE_DAEMON_PROXY_MAX_BYTES}-byte limit`,
+    );
+  }
+  if (!response.body) {
+    return JSON.parse(await response.text()) as unknown;
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > REMOTE_DAEMON_PROXY_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(
+          `Remote daemon response exceeded the ${REMOTE_DAEMON_PROXY_MAX_BYTES}-byte limit`,
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks, size).toString('utf8')) as unknown;
+}
+
 export interface WorkspaceManagementRouteDeps {
   maxRegisteredWorkspaces?: number;
   workspaceRegistry: WorkspaceRegistry;
@@ -754,7 +833,7 @@ export function registerWorkspaceManagementRoutes(
       }
       try {
         const query = new URLSearchParams({ prefix: prefixRaw });
-        const upstream = await fetch(
+        const upstream = await fetchRemoteDaemon(
           `${daemonOrigin}/workspace-path-suggestions?${query.toString()}`,
           { headers },
         );
@@ -765,7 +844,7 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
-        const data = await upstream.json();
+        const data = await readRemoteDaemonJson(upstream);
         res.status(200).json(data);
       } catch (error) {
         res.status(502).json({
@@ -821,7 +900,7 @@ export function registerWorkspaceManagementRoutes(
         headers['Authorization'] = `Bearer ${token}`;
       }
       try {
-        const upstream = await fetch(`${daemonOrigin}/workspaces`, {
+        const upstream = await fetchRemoteDaemon(`${daemonOrigin}/workspaces`, {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -832,7 +911,7 @@ export function registerWorkspaceManagementRoutes(
               : {}),
           }),
         });
-        const data = await upstream.json();
+        const data = await readRemoteDaemonJson(upstream);
         res.status(upstream.status).json(data);
       } catch (error) {
         res.status(502).json({

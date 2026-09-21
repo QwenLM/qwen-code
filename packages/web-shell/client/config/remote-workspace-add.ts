@@ -16,6 +16,36 @@ export interface RemotePathSuggestions {
 }
 
 /**
+ * Headers for a call to this page's own daemon through one of its
+ * remote-workspace proxy routes.
+ *
+ * Two different credentials travel together, and they are not interchangeable:
+ * `Authorization` authenticates to the daemon that *serves* the proxy route —
+ * the routes are registered behind that daemon's global bearer gate, so
+ * omitting it 401s on any daemon started with `--token` — while
+ * `X-Daemon-Token` carries the *target* daemon's credential for the proxy to
+ * forward upstream.
+ *
+ * The serving daemon is the page origin, never `getDaemonBaseUrl()`: the proxy
+ * URLs are relative, and a `?daemon=` override names the target of the proxy,
+ * not the host answering it. Reading the token with no argument would hand the
+ * target's credential to the serving daemon's gate whenever the shell is
+ * pointed at another computer, which is exactly the case these routes exist
+ * for.
+ */
+function remoteProxyHeaders(
+  targetOrigin: string,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  const servingToken = getDaemonToken(window.location.origin);
+  if (servingToken) headers['Authorization'] = `Bearer ${servingToken}`;
+  const targetToken = getDaemonToken(targetOrigin);
+  if (targetToken) headers['X-Daemon-Token'] = targetToken;
+  return headers;
+}
+
+/**
  * Fetches directory suggestions from an arbitrary daemon origin without
  * navigating the page. Used by the Add-workspace dialog's location switcher
  * so the user can browse a remote daemon's folders in place.
@@ -26,13 +56,10 @@ export async function fetchRemotePathSuggestions(
   daemonOrigin: string,
   prefix: string,
 ): Promise<RemotePathSuggestions> {
-  const token = getDaemonToken(daemonOrigin);
   const query = new URLSearchParams({ daemon: daemonOrigin, prefix });
-  const headers: Record<string, string> = {};
-  if (token) headers['X-Daemon-Token'] = token;
   const res = await fetch(
     `/remote-workspace-path-suggestions?${query.toString()}`,
-    { headers },
+    { headers: remoteProxyHeaders(daemonOrigin) },
   );
   if (!res.ok) {
     throw new Error(
@@ -55,14 +82,11 @@ export async function addWorkspaceToDaemon(
   persist: boolean,
   displayName?: string,
 ): Promise<void> {
-  const token = getDaemonToken(daemonOrigin);
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (token) headers['X-Daemon-Token'] = token;
   const res = await fetch('/remote-workspaces', {
     method: 'POST',
-    headers,
+    headers: remoteProxyHeaders(daemonOrigin, {
+      'Content-Type': 'application/json',
+    }),
     body: JSON.stringify({
       daemon: daemonOrigin,
       cwd,

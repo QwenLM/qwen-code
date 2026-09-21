@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const navigateToDaemon = vi.hoisted(() => vi.fn());
 const confirmDaemonTarget = vi.hoisted(() => vi.fn());
+const getDaemonToken = vi.hoisted(() => vi.fn());
 const getAllowedDaemonOrigin = vi.hoisted(() =>
   vi.fn((raw: string) => {
     try {
@@ -19,13 +20,16 @@ const getAllowedDaemonOrigin = vi.hoisted(() =>
 vi.mock('./daemon', () => ({
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
+  getDaemonToken,
   navigateToDaemon,
 }));
 
 const {
+  addWorkspaceToDaemon,
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
   discardAbandonedRemoteWorkspaceAdd,
+  fetchRemotePathSuggestions,
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
   selectRemoteWorkspaceLocation,
@@ -170,5 +174,100 @@ describe('remote workspace add navigation', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('remote daemon proxy calls', () => {
+  const REMOTE = 'http://127.0.0.1:5199';
+
+  /**
+   * The proxy routes are relative URLs, so they are answered by the daemon that
+   * served the page — while `?daemon=` names the *target*. The two credentials
+   * are different and must not be swapped: `getDaemonToken` returns a distinct
+   * token per argument and nothing at all for the no-argument form, so a call
+   * that reads the connected daemon's token instead of the page origin's
+   * cannot authenticate here.
+   */
+  function stubTokens(): void {
+    getDaemonToken.mockImplementation((baseUrl?: string) => {
+      if (baseUrl === testOrigin) return 'serving-secret';
+      if (baseUrl === REMOTE) return 'target-secret';
+      return undefined;
+    });
+  }
+
+  function stubFetch(): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ dir: '/srv', sep: '/', suggestions: [] }),
+      text: async () => '',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('authenticates the path-suggestion proxy to the daemon serving it', async () => {
+    setLocation(`${testOrigin}/?daemon=${encodeURIComponent(REMOTE)}`);
+    stubTokens();
+    const fetchMock = stubFetch();
+
+    await fetchRemotePathSuggestions(REMOTE, '/srv/');
+
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    expect(url).toBe(
+      `/remote-workspace-path-suggestions?daemon=${encodeURIComponent(REMOTE)}&prefix=%2Fsrv%2F`,
+    );
+    expect(init.headers).toEqual({
+      Authorization: 'Bearer serving-secret',
+      'X-Daemon-Token': 'target-secret',
+    });
+  });
+
+  it('authenticates the workspace-registration proxy to the daemon serving it', async () => {
+    setLocation(`${testOrigin}/?daemon=${encodeURIComponent(REMOTE)}`);
+    stubTokens();
+    const fetchMock = stubFetch();
+
+    await addWorkspaceToDaemon(REMOTE, '/srv/shared-checkout/', true, 'Shared');
+
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { method: string; headers: Record<string, string>; body: string },
+    ];
+    expect(url).toBe('/remote-workspaces');
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer serving-secret',
+      'X-Daemon-Token': 'target-secret',
+    });
+    expect(JSON.parse(init.body)).toEqual({
+      daemon: REMOTE,
+      cwd: '/srv/shared-checkout/',
+      persist: true,
+      displayName: 'Shared',
+    });
+  });
+
+  it('sends no credential headers when neither daemon requires a token', async () => {
+    setLocation(`${testOrigin}/?daemon=${encodeURIComponent(REMOTE)}`);
+    getDaemonToken.mockReturnValue(undefined);
+    const fetchMock = stubFetch();
+
+    await fetchRemotePathSuggestions(REMOTE, '/srv/');
+
+    const [, init] = fetchMock.mock.calls[0] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    expect(init.headers).toEqual({});
   });
 });

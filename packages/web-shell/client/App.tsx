@@ -273,7 +273,6 @@ import {
   fetchRemotePathSuggestions,
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
-  selectRemoteWorkspaceLocation,
 } from './config/remote-workspace-add';
 import {
   clearInitialConnectionsSettingsCategory,
@@ -281,7 +280,11 @@ import {
   getInitialConnectionsSettingsCategory,
   listRemoteComputers,
 } from './config/remote-connections';
-import { getDaemonToken, isPageOriginDaemon } from './config/daemon';
+import {
+  getDaemonToken,
+  isPageOriginDaemon,
+  navigateToDaemon,
+} from './config/daemon';
 import { Button } from './components/ui/button';
 import {
   isPluginShadowPanel,
@@ -13416,8 +13419,13 @@ export function App({
         workspaceBrowseActiveRef.current = false;
         completeRemoteWorkspaceAdd();
         // Navigate to the target daemon so the user lands on the new
-        // workspace.
-        selectRemoteWorkspaceLocation(
+        // workspace. Deliberately a plain switch, NOT
+        // selectRemoteWorkspaceLocation(): that helper arms the
+        // `addRemoteWorkspace=browse` continuation on the target URL, so the
+        // daemon we just registered on would boot into a fresh, empty Add
+        // Workspace dialog on top of the workspace the user already added.
+        // The add is finished — there is no flow left to continue.
+        navigateToDaemon(
           workspaceAddSelectedLocation,
           getDaemonToken(workspaceAddSelectedLocation),
         );
