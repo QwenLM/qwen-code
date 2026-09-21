@@ -197,12 +197,12 @@ export function StandaloneAuth({
     unconfirmedTarget && !invalidTarget,
   );
   const [status, setStatus] = useState(
-    pairingFailed
-      ? copy.pairingFailed
-      : invalidTarget
-        ? copy.invalidAddress
-        : confirming
-          ? copy.confirmTarget
+    invalidTarget
+      ? copy.invalidAddress
+      : confirming
+        ? copy.confirmTarget
+        : pairingFailed
+          ? copy.pairingFailed
           : copy.connecting,
   );
   const [busy, setBusy] = useState(

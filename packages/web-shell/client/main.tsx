@@ -449,12 +449,12 @@ async function main() {
   const pairing = await exchangePairingCode(
     INVALID_DAEMON_TARGET ? '' : baseUrl,
   );
-  const daemonToken = pairing
-    ? pairing.token
-    : (storedToken ??
-      (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
-        ? await waitForDaemonTokenMessage()
-        : undefined));
+  const daemonToken =
+    pairing?.token ??
+    storedToken ??
+    (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
+      ? await waitForDaemonTokenMessage()
+      : undefined);
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -469,7 +469,7 @@ async function main() {
       <StandaloneAuth
         baseUrl={baseUrl}
         initialToken={daemonToken}
-        pairingFailed={pairing?.failed}
+        pairingFailed={Boolean(pairing?.failed) && !daemonToken}
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.

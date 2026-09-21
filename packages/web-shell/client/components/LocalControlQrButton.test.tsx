@@ -248,6 +248,70 @@ describe('LocalControlQrButton', () => {
     );
   });
 
+  it('shows the unencrypted notice for a legacy Local Control QR', async () => {
+    // Older daemons answer the POST with {active:false} and serve the
+    // long-lived URL from GET /workspace/local-control without expiresInMs.
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(localControlResponse({ active: false }))
+      .mockResolvedValueOnce(
+        localControlResponse({
+          active: true,
+          url: 'http://192.168.1.2:8080/ws#token=abc',
+          qrText: 'QR-TEXT',
+          encrypted: false,
+        }),
+      );
+    mount();
+    await openPopover();
+
+    expect(container.textContent).toContain('QR-TEXT');
+    expect(container.textContent).toContain('Traffic is unencrypted');
+  });
+
+  it('shows the secure notice for an encrypted pairing QR', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=one-time',
+        qrText: 'QR-TEXT',
+        expiresInMs: 60_000,
+        encrypted: true,
+      }),
+    );
+    mount();
+    await openPopover();
+
+    expect(container.textContent).toContain(
+      'Scan to grant access to this daemon.',
+    );
+    expect(container.textContent).not.toContain('Traffic is unencrypted');
+  });
+
+  it('clears the QR material when the popover closes', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=one-time',
+        qrText: 'QR-TEXT',
+        expiresInMs: 60_000,
+      }),
+    );
+    mount();
+    await openPopover();
+    expect(container.textContent).toContain('QR-TEXT');
+
+    const close = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Close test popover');
+    if (!close) throw new Error('close button not found');
+    act(() => close.click());
+
+    // A stale frame must not outlive the popover: the invitation the daemon
+    // issued is single-use and expires within a minute.
+    expect(container.textContent).not.toContain('QR-TEXT');
+    expect(container.textContent).not.toContain('#pairing=');
+  });
+
   it('prompts to open Settings when Local Control is off', async () => {
     vi.mocked(fetch).mockResolvedValue(localControlResponse({ active: false }));
     const onOpenSettings = vi.fn();

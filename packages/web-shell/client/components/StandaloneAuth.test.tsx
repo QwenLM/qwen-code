@@ -72,6 +72,35 @@ it('shows a recoverable pairing failure without probing or caching the invitatio
   expect(container.textContent).toContain('请扫描新的二维码');
   expect(fetch).not.toHaveBeenCalled();
   expect(tokenInput()).not.toBeNull();
+
+  // Recovery is the point of the `attempt === 0` escape hatch: a manual
+  // Connect after a failed pairing must issue the probe.
+  vi.mocked(fetch).mockResolvedValue(stubResponse({ status: 200 }));
+  await act(submitForm);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+  expect(container.textContent).toContain('Connected');
+});
+
+// The untrusted-target warning is the stronger state: an attacker-supplied
+// pairing fragment must not replace it with copy that asks for a token.
+it('warns about an unconfirmed target even when pairing failed', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(
+      <StandaloneAuth
+        baseUrl="http://daemon.test"
+        unconfirmedTarget
+        pairingFailed
+      >
+        {(token) => <p>Connected {token}</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('has not connected to before');
+  expect(container.textContent).not.toContain('Pairing failed');
+  expect(fetch).not.toHaveBeenCalled();
 });
 function stubResponse({
   status,

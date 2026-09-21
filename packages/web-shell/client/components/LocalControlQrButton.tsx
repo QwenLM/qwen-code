@@ -111,7 +111,16 @@ export function LocalControlQrButton({
       : Math.max(0, Math.ceil((status.expiresAt - now) / 1000));
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) {
+          setStatus(undefined);
+          setError('');
+        }
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           type="button"
@@ -159,7 +168,7 @@ export function LocalControlQrButton({
               <CopyIcon aria-hidden="true" />
               {t('common.copy')}
             </Button>
-            {remaining !== undefined && (
+            {status.encrypted !== undefined && (
               <p className="text-xs text-muted-foreground">
                 {t(
                   status.encrypted

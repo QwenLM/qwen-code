@@ -3820,7 +3820,7 @@ const EN: Messages = {
   'localControl.noNetwork':
     'No local network address is available. Open the Web Shell through an address your phone can reach.',
   'localControl.securePairing':
-    'Scan to grant access to this daemon. Connected devices stay signed in until it restarts.',
+    'Scan to grant access to this daemon. This browser tab stays signed in until the daemon restarts or the tab is closed.',
   'localControl.insecurePairing':
     'Scan to grant access until this daemon restarts. Traffic is unencrypted; use a trusted network.',
   'localControl.disabledHint':
@@ -7502,7 +7502,7 @@ const ZH: Messages = {
   'localControl.noNetwork':
     '没有可用的局域网地址。请通过手机可访问的地址打开 Web Shell。',
   'localControl.securePairing':
-    '扫码将授予此 daemon 的访问权限。已连接设备保持登录，直到 daemon 重启。',
+    '扫码将授予此 daemon 的访问权限。当前标签页保持登录，直到 daemon 重启或标签页关闭。',
   'localControl.insecurePairing':
     '扫码将授予访问权限，直到 daemon 重启。流量未加密，请使用受信任网络。',
   'localControl.disabledHint':
