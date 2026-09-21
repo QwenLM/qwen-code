@@ -263,6 +263,19 @@ export interface HeldMessage {
   cause: HoldCause;
   /** For the setting-driven causes: which scope set the policy, if known. */
   policyScope?: PolicyScope;
+  /**
+   * The addressee admission recorded this body under, captured when the
+   * message was parked.
+   *
+   * Asking again when the message is finally settled can give a different
+   * answer: the host's resolver may have forgotten the name by then, and
+   * the gate falls back to the id on the frame. A rollback keyed
+   * differently from the record it means to undo is a silent no-op, and
+   * the stale baseline then answers the sender's honest retry with
+   * `duplicate` — a verdict whose premise is that the far side has the
+   * message, which in that case nobody does.
+   */
+  dedupScope?: string;
   heldAt: number;
   /**
    * Monotonic counterpart of `heldAt`, from `performance.now()`.
@@ -857,10 +870,12 @@ export class InboundGate {
 
     const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
     const scope = decision.policy === 'hold' ? decision.scope : undefined;
+    const heldDedupScope = this.dedupScope(frame);
     this.held.push({
       frame,
       cause,
       ...(scope === undefined ? {} : { policyScope: scope }),
+      ...(heldDedupScope === undefined ? {} : { dedupScope: heldDedupScope }),
       heldAt: Date.now(),
       monotonicAt: performance.now(),
       ...(origin.selfSent ? { selfSent: true } : {}),
@@ -937,7 +952,7 @@ export class InboundGate {
       // A person saw this one, so the far *model* still did not: a
       // verbatim retry deserves the same review rather than a `duplicate`
       // asserting the content is already over there.
-      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
       this.recordSettled(entry.frame.msgId, 'denied');
       void this.report(entry.frame, 'denied');
     }
@@ -995,7 +1010,7 @@ export class InboundGate {
         // 'denied', not 'refused': this message was admitted and parked,
         // and what settles it now is the user switching the setting —
         // a decision, made after the fact, by a person.
-        this.forgetAdmittedBody(entry.frame, originOf(entry));
+        this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
         this.recordSettled(entry.frame.msgId, 'denied');
         void this.report(entry.frame, 'denied');
       } else {
@@ -1073,7 +1088,7 @@ export class InboundGate {
       `shutdown: expiring ${settling.length} held peer message(s)`,
     );
     const receipts = settling.map((entry) => {
-      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
       return this.report(entry.frame, 'expired');
     });
     this.notifyHeldChange();
@@ -1142,7 +1157,29 @@ export class InboundGate {
    */
   private dedupScope(frame: PeerUserFrame): string | undefined {
     if (!this.answersForSeveralSessions) return undefined;
-    return this.addressee(frame) ?? '';
+    return this.addresseeKey(frame);
+  }
+
+  /**
+   * The addressee, folded to one spelling, for the keys the gate derives
+   * from it: the hold bucket and the repeat window.
+   *
+   * The host resolves the names it knows to one, which is what lets the
+   * two ids a session answers to share an allowance. It is not obliged to
+   * fold every id shape it is handed, though — the one real host folds
+   * caller-supplied ids and leaves internal and legacy ones spelled as
+   * they came — and a name it does not recognize comes back here as the
+   * sender wrote it. So the gate keeps its own fold, which is the defence
+   * it had before a resolver existed: two spellings of one session must
+   * not buy two allowances. Case is all it can fold; anything more is the
+   * host's to know.
+   *
+   * Only for keys. A settings reader is asked about the name the host
+   * gave back, not this one, because that is the name the host can look
+   * up.
+   */
+  private addresseeKey(frame: PeerUserFrame): string {
+    return this.addressee(frame)?.toLowerCase() ?? '';
   }
 
   /**
@@ -1151,12 +1188,12 @@ export class InboundGate {
    * One bucket unless this gate answers for several sessions: a session
    * receives frames both pinned to it and unpinned, and counting those
    * apart would hand one session two allowances. Two spellings of one
-   * session share a bucket, because the host resolved them to one name
-   * before they got here.
+   * session share a bucket — the host resolves the ones it knows to one
+   * name, and `addresseeKey` folds the case of whatever comes back.
    */
   private heldSessionKey(frame: PeerUserFrame): string {
     if (!this.answersForSeveralSessions) return '';
-    return this.addressee(frame) ?? '';
+    return this.addresseeKey(frame);
   }
 
   /**
@@ -1165,7 +1202,7 @@ export class InboundGate {
    * from the duplicate window, and its sender told.
    */
   private settleMisaddressed(entry: HeldMessage): void {
-    this.forgetAdmittedBody(entry.frame, originOf(entry));
+    this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
     this.recordSettled(entry.frame.msgId, 'misaddressed');
     void this.report(entry.frame, 'misaddressed');
   }
@@ -1253,12 +1290,19 @@ export class InboundGate {
    * already has it. Keyed exactly as admission keyed it, or it is a
    * silent no-op.
    */
-  private forgetAdmittedBody(frame: PeerUserFrame, origin: PeerOrigin): void {
+  private forgetAdmittedBody(
+    frame: PeerUserFrame,
+    origin: PeerOrigin,
+    recordedScope?: string,
+  ): void {
     this.admission.forgetBody(
       peerSenderKey(frame, origin),
       frame.message.content,
       frame.msgId,
-      this.dedupScope(frame),
+      // A parked entry hands back the scope it was recorded under; a frame
+      // being rolled back inside `admit` has none to hand back, and there
+      // the resolver's answer is still the one admission just used.
+      recordedScope ?? this.dedupScope(frame),
     );
   }
 
@@ -1376,7 +1420,7 @@ export class InboundGate {
             entry.frame.toSessionId ?? 'unpinned'
           } holds for ${expiryMs} ms)`,
       );
-      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      this.forgetAdmittedBody(entry.frame, originOf(entry), entry.dedupScope);
       this.recordSettled(entry.frame.msgId, 'expired');
       void this.report(entry.frame, 'expired');
     }

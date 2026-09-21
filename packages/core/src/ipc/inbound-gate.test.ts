@@ -2667,6 +2667,124 @@ describe('a gate for a process hosting several sessions', () => {
     expect(host.delivered).toEqual([]);
   });
 
+  it('rolls a parked message back under the name it was recorded under', () => {
+    // A rollback keyed differently from the record it undoes is a silent
+    // no-op, and the stale baseline then answers the sender's honest retry
+    // with `duplicate` — which asserts the far side has a message nobody
+    // received. The host's answer can move between parking and settling:
+    // `/clear` takes the published id away, and the gate then falls back
+    // to the id on the frame.
+    const held = new Map<string, string>([['chat-published', 'chat-live']]);
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      admission: new PeerAdmission({
+        limits: {
+          bucketCapacity: 1e6,
+          refillPerSecond: 1e6,
+          globalBucketCapacity: 1e6,
+          globalRefillPerSecond: 1e6,
+          dedupWindowMs: 30_000,
+        },
+      }),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      // Answers to the published id and to the live one, resolving both to
+      // the published name — the shape a host keeps across a `/clear`.
+      resolveSessionId: (id) =>
+        [...held].find(([key, live]) => key === id || live === id)?.[0],
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const line = (msgId: string, toSessionId: string) => ({
+      ...buildUserFrame({ content: 'please review' }),
+      msgId,
+      fromMode: 'prompting' as const,
+      toSessionId,
+    });
+
+    // Parked, and its body recorded under the published name.
+    expect(gate.admit(line('m1', 'chat-live'))).toBe('held');
+    // The session leaves; a sibling's settings change re-judges the
+    // backlog and settles the parked message as misaddressed.
+    held.clear();
+    gate.reevaluate('approval-mode-changed');
+    expect(statuses).toEqual(['held', 'misaddressed']);
+
+    // Nobody received that line, so the sender saying it again must reach
+    // the gate rather than being folded into a repeat of itself.
+    held.set('chat-published', 'chat-live');
+    expect(gate.admit(line('m2', 'chat-published'))).toBe('held');
+    expect(delivered).toEqual([]);
+  });
+
+  it('asks the host for a lifetime once per message it expires', () => {
+    // The sweep decides with one read and then words its log line; asking
+    // again would double the round-trips, and for a host answering for
+    // several sessions each read is a lookup. It would also let the line
+    // report a lifetime the sweep did not act on.
+    const asked: Array<string | undefined> = [];
+    let expiryMs: number | null = null;
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      resolveSessionId: (id) => id,
+      // null while the messages are parked, so nothing arms a timer and
+      // the sweep runs exactly once, where the test asks for it.
+      getHeldExpiryMs: (id) => {
+        asked.push(id);
+        return expiryMs;
+      },
+      deliver: () => {},
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+
+    for (const toSessionId of ['chat-a', 'chat-b', 'chat-c']) {
+      expect(gate.admit(frame({ fromMode: 'prompting', toSessionId }))).toBe(
+        'held',
+      );
+    }
+
+    expiryMs = 0;
+    asked.length = 0;
+    gate.reevaluate('settings-changed');
+
+    expect(gate.getHeld()).toEqual([]);
+    expect(statuses.slice(-3)).toEqual(['expired', 'expired', 'expired']);
+    expect(asked).toEqual(['chat-a', 'chat-b', 'chat-c']);
+  });
+
+  it('gives two spellings of one name a single hold allowance', () => {
+    // The host resolves the names it knows to one, which is what lets the
+    // two ids a session answers to share an allowance. It is not obliged
+    // to fold every id shape — the real host leaves internal and legacy
+    // ids spelled as they came — so the gate keeps its own fold on the
+    // keys it derives, which is the defence it had before a resolver
+    // existed.
+    const delivered: PeerUserFrame[] = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      // A host that does not fold: it answers to whatever spelling it is
+      // handed, as `normalizeSessionIdForLookup` does for a legacy id.
+      resolveSessionId: (id) => id,
+      deliver: (candidate) => delivered.push(candidate),
+    });
+
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      expect(
+        gate.admit(frame({ fromMode: 'prompting', toSessionId: 'legacy-id' })),
+      ).toBe('held');
+    }
+    // The same session, spelled differently. One session, one allowance.
+    expect(
+      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'LEGACY-ID' })),
+    ).toBe('dropped');
+  });
+
   it('keeps a session as its own repeat baseline across an interleaving', () => {
     // The baseline is per addressee, not "the last message overall", so
     // a sender alternating between two sessions cannot launder a repeat
