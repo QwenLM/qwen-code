@@ -69,7 +69,7 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 | `inline`                | 没有任何 skill 通路（skill 关闭、Skill 被拒、或延迟且桥接不完整）                                     | 参考全文          |
 | `withheld`              | 用户按名字关掉了这份参考，或禁用了整个 bundled 层级                                                   | 什么都不带        |
 
-桥接那一行看的是可达性而不是注册：在 `ToolMode.CodeModeOnly` 下两个桥接工具都被隐藏（`code-mode.ts` 的 `HIDDEN_TOOLS`），所以跳过延迟分支、路由保持 `skill`——纯指针在那里依然诚实，因为被延迟的 Skill 工具仍可通过 `exec` 绑定调用。由于该判断是共享的，这对 #11013 已发布的 Workflow 参考同样是一次**路由变更**，不只是新参考的规则：CodeModeOnly 且 Skill 工具被权限延迟的会话，在本 PR 之前解析为 `skill-via-tool-search`，现在解析为 `skill`。钉住它的是本 PR 往 `workflow-authoring-skill.test.ts` 新增的那一行，而不是原有的行。
+桥接那一行看的是可达性而不是注册：在 `ToolMode.CodeModeOnly` 下两个桥接工具都被隐藏（`code-mode.ts` 的 `HIDDEN_TOOLS`），所以跳过延迟分支、路由保持 `skill`——纯指针在那里依然诚实，因为被延迟的 Skill 工具仍可通过 `exec` 绑定调用。由于该判断是共享的，这对 #11013 已发布的 Workflow 参考同样是一次**路由变更**，不只是新参考的规则：CodeModeOnly 且 Skill 工具被权限延迟的会话，在本 PR 之前解析为 `skill-via-tool-search`，现在解析为 `skill`。钉住它的是本 PR 新增的两行，而不是原有的行：`workflow-authoring-skill.test.ts` 里的 Workflow 路由行，以及 `SKILL.test.ts` 里的 `points straight at the skill when CodeModeOnly hides the bridge`（Agent 路由）——后者更需要这道守卫，因为 `AgentTool` 在构造函数里就冻结了自己的面，而 Workflow 描述每轮都会重新询问。
 
 桥接这条路由要求两半都在，因为 `tool_search` 只能查看 schema——调用仍然要走 `tool_call`，所以只有 `tool_search` 的会话根本没有可用通路，必须直接拿到内联的参考全文。这个判据是本分支切出之后才从 main 进来的；正因为该判断现在只存在于一个共享模块里，两份参考在同一次合并中一起拿到了它，而不是各自漂移。
 
@@ -81,7 +81,7 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 
 - **每次请求**携带的 Agent 声明都变短了。嵌套的 agent 启动与 fork 继承同一份描述。
 - **#12142 的预算测试**按新测量值下调，三条下调的描述行各取「实测长度 + 364～380」、总面那行 + 720（#12142 自己的余量是 430～490，所以「与该 PR 同口径」这句话也是错的）（默认 10,200 → 7,750；无 subagent 9,900 → 7,450；全块开启 11,200 → 8,750；整体可见面 14,200 → 11,750）。这四条下调行——三个描述上限加一个整体面上限——只约束**指针**形态，也就是几乎每个会话都会发送的那一种。另有第五条指针行是新增而非下调：桥接形态 7,504 → 7,900，并对桥接那句话自身的差值单独设了 ≤160 的上限，那是 §3 列出的 118 字符唯一的守卫。内联路由另有三行自己的上限：描述 10,412 → 10,750；描述再叠加 team 块后 11,396 → 11,770，这才是真正的最坏情况，并且高于改动前「全块开启」形态的 11,200 上限；整体面 14,056 → 14,430，高于本 PR 之前每个会话付出的 13,374——因为一份无法被加载的参考，每轮成本高于它所替换掉的那些文字。「指针 vs 内联」的差值改为钉在参考正文本身上，而不是钉在一个数量级上：数量级下限看不见「指导文本被贴回描述」这种回退——两个形态一起变大，先触发的是 7,750 那一行；唯一能单独触发它的反而是对参考的合法精简，实测精简 1,350 字符会把差值从 3,026 拉到 1,675。
-- **`agent.test.ts`**：六处锚在搬走文本上的断言已改锚，第七处被刻意保留。这七处原本全都会照常通过——因为该文件的 stub `Config` 没有 `getSkillManager`，路由落到 `inline`，描述里嵌入了整篇 `SKILL.md`，每一个搬走的锚点都还在里面。改锚的六处锚到描述在任何形态下都保留的事实（fork 上不要设 `model`、fork 默认继承完整对话、传一个简短的 `name`，以及「需要大量父会话上下文时才选 fork」）。保留的第七处是 `toContain('Never delegate understanding')`（`:989`，与 base 的 `:979` 相同），作为本文件对内联形态的钉子留下：它对 stub 的依赖写在测试自己的注释里（`:984-987`），而内联正文的逐字全文另由 `agent-description-budget.test.ts:255` 断言，所以内联分支被截断或按节拆开时，报警的是那里、不是这里。
+- **`agent.test.ts`**：六处锚在搬走文本上的断言被移除，其中五处就地改锚，第七处被刻意保留。这七处原本全都会照常通过——因为该文件的 stub `Config` 没有 `getSkillManager`，路由落到 `inline`，描述里嵌入了整篇 `SKILL.md`，每一个搬走的锚点都还在里面。改锚的五处锚到描述在任何形态下都保留的事实（fork 上不要设 `model`、fork 默认继承完整对话、传一个简短的 `name`，以及「需要大量父会话上下文时才选 fork」）。第六处 `toContain('Writing the prompt')` 改为在 `SKILL.test.ts` 的指针用例里断言：拆分之后这个标题属于指针、而不是内联正文，此外没有任何测试携带它。保留的第七处是 `toContain('Never delegate understanding')`（`:989`，与 base 的 `:979` 相同），作为本文件对内联形态的钉子留下：它对 stub 的依赖写在测试自己的注释里（`:984-987`），而内联正文的逐字全文另由 `agent-description-budget.test.ts:255` 断言，所以内联分支被截断或按节拆开时，报警的是那里、不是这里。
 - **skills 清单**多出一条内置项，会出现在 `/skills` 中，并与其他 skill 一样受 `skills.disabled` / `skills.enabled` 控制。它是通过会话启动前奏里的 `<available_skills>` 块到达模型的——一条 user 角色消息，不是系统提示词——代价就是 §3 里算过的渲染后 371 字符。
 - **打包**无需额外改动：`scripts/copy_bundle_assets.js` 与 `scripts/copy_files.js` 都递归拷贝 `skills/bundled/**`，而 `bundled-skills.integration.test.ts` 会解析每一份随包发布的 `SKILL.md`，新目录因此同时被两者覆盖。
 - **没有任何提示词、快照或 ACP 面**引用被搬走的文本：全仓库只有 `agent.ts` 和 `agent.test.ts` 提到它。
@@ -96,7 +96,8 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 
 ## 7. 验证
 
-- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` —— 双向分界表、指针措辞、优先级规则、内联形态、被关掉（withheld）形态（在 Skill 工具已注册与不存在两种情况下都断言，因为用户的退出选择优先于"没有通路"），以及"不要编造结果"那句的去重。
+- `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` —— 双向分界表（保留的那一半还断言每个锚点都不出现在会话启动清单要计费的 frontmatter 里）、指针措辞与其 `## Writing the prompt` 标题、优先级规则、内联形态、CodeModeOnly 的路由行、两个退出开关（整个 bundled 层级、按名字关掉）下被关掉（withheld）的形态（在 Skill 工具已注册与不存在两种情况下都断言，因为用户的退出选择优先于"没有通路"），以及"不要编造结果"那句的去重。
 - `packages/core/src/tools/agent/agent-description-budget.test.ts` —— 下调后的预算、内联形态的几条上限（描述、描述叠加可选块、以及整体面），以及「指针 vs 内联」的正文检查：内联形态里逐字携带参考正文，指针形态里一段都不带。
+- `packages/core/src/skills/bundled-reference.test.ts` —— 两份参考共享的读取缓存：两种填充顺序各自冷读、且都通过同一个模块实例读取，base 目录跟随名字，重复读取由缓存回答。
 - `packages/core/src/tools/workflow/workflow-description.test.ts` —— 未改动，它钉住的是 Workflow 描述自身那些形态没有移动。`packages/core/src/skills/workflow-authoring-skill.test.ts` **并非**未改动：本 PR 往里加了 27 行（`ToolMode` 的 import、桩上的 `toolMode` 字段与 `getToolMode`、CodeModeOnly 的路由行，以及一行 `resolveWorkflowAuthoringSurface`），且没有动到任何原有行；因此「抽取没有改变 #11013 的路由」这枚钉子来自它原有的那些行——那里变红应当读作「本 PR 新增的行写错了」，而不是「一枚未改动的钉子断了」。
 - `packages/core/src/skills/bundled-skills.integration.test.ts` —— 新 `SKILL.md` 能被解析，且 `name` 与目录名一致。

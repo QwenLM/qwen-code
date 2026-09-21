@@ -229,6 +229,11 @@ describe('bundled agent-delegation skill', () => {
     // The pointer has to say what is in there, or the model cannot tell
     // whether this turn needs it.
     expect(description).toContain('what to put in the prompt');
+    // The heading the moved section used to own. `agent.test.ts` asserted it
+    // before the split and no other test carries it, so without this assertion
+    // the pointer could lose the heading that separates it from the fork
+    // guidance above it and every test would stay green.
+    expect(description).toContain('## Writing the prompt');
   });
 
   /**

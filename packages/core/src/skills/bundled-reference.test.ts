@@ -14,13 +14,16 @@
  * inlines one tool's reference into the other's description, silently.
  *
  * These cases read both references through one module instance, on purpose and
- * in both orders. They must not use `vi.resetModules()`: resetting the registry
- * would give each read a fresh cache and let a single-slot cache pass, which is
- * the failure being pinned. (`workflow-authoring-skill.test.ts` does reset, for
- * the opposite reason — it needs the cache cold to exercise a failed read.)
+ * in both orders. Each order gets a cold cache of its own — one
+ * `vi.resetModules()` per case, then one re-import, so the two reads of a case
+ * share a single fresh instance. The reset has to stay per case rather than per
+ * read: a fresh registry for every read would hand each one an empty cache and
+ * let a single-slot cache pass, which is the failure being pinned.
+ * (`workflow-authoring-skill.test.ts` does reset, for the opposite reason — it
+ * needs the cache cold to exercise a failed read.)
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AGENT_DELEGATION_SKILL_NAME } from './agent-delegation-skill.js';
 import { readBundledReference } from './bundled-reference.js';
 import { WORKFLOW_AUTHORING_SKILL_NAME } from './workflow-authoring-skill.js';
@@ -45,12 +48,18 @@ describe('readBundledReference', () => {
     ['agent-delegation first', 1, 0],
   ])(
     'returns each skill its own body when %s',
-    (_case, firstIndex, secondIndex) => {
+    async (_case, firstIndex, secondIndex) => {
       const [firstName, firstAnchor, firstOther] = REFERENCES[firstIndex];
       const [secondName, secondAnchor, secondOther] = REFERENCES[secondIndex];
 
-      const first = readBundledReference(firstName);
-      const second = readBundledReference(secondName);
+      // Cold per case: through the file-wide instance the second case would
+      // find both entries already filled by the first and re-assert them, so
+      // the order it names would never be the order actually filled.
+      vi.resetModules();
+      const cold = await import('./bundled-reference.js');
+
+      const first = cold.readBundledReference(firstName);
+      const second = cold.readBundledReference(secondName);
 
       expect(first?.body).toContain(firstAnchor);
       expect(first?.body).not.toContain(firstOther);
