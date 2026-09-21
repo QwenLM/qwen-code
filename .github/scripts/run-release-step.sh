@@ -123,7 +123,7 @@ case "${step}" in
 
   push-release-branch)
     release_branch_name="${BRANCH_NAME:?}"
-    git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
+    git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
     if git diff --staged --quiet; then
       echo "No version changes to commit"
     else
@@ -197,6 +197,11 @@ case "${step}" in
       publish_package "packages/channels/${channel}" "${publish_marker}" "${channel}"
       echo "::endgroup::"
     done
+
+    # Last on purpose: this is the only name in the sequence CI has never
+    # published, so a failure here leaves every long-shipped package already
+    # out instead of stranding them under `set -eo pipefail`.
+    publish_package 'packages/web-shell'
 
     if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${publish_marker}" ]]; then
       echo "::warning::Every channel package was already published; nothing shipped"

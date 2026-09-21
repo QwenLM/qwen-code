@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveVoiceButton } from './LiveVoiceButton';
@@ -19,8 +19,20 @@ const mocks = vi.hoisted(() => ({
       phase: 'idle' as const,
       closeReason: undefined,
       errorMessage: undefined,
+      captureMode: undefined,
+      inputLevel: { current: { level: 0, at: 0, dropping: false } },
       connect: vi.fn(),
       disconnect: vi.fn(),
+      screenShare: {
+        supported: false,
+        sharing: false,
+        label: undefined,
+        errorMessage: undefined,
+        lastLookAt: undefined,
+        requestedWhileIdle: false,
+      },
+      startSharingScreen: vi.fn(async () => undefined),
+      stopSharingScreen: vi.fn(),
     },
     status: {
       v: 1 as const,
@@ -45,11 +57,13 @@ vi.mock('./useLiveVoice', () => ({
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-function mount(): HTMLElement {
+function mount(
+  props: ComponentProps<typeof LiveVoiceButton> = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<LiveVoiceButton />));
+  act(() => root.render(<LiveVoiceButton {...props} />));
   mounted.push({ root, container });
   return container;
 }
@@ -220,8 +234,20 @@ describe('LiveVoiceButton as a browser Host', () => {
       phase: 'idle',
       closeReason: undefined,
       errorMessage: undefined,
+      captureMode: undefined,
+      inputLevel: { current: { level: 0, at: 0, dropping: false } },
       connect: vi.fn(),
       disconnect: vi.fn(),
+      screenShare: {
+        supported: false,
+        sharing: false,
+        label: undefined,
+        errorMessage: undefined,
+        lastLookAt: undefined,
+        requestedWhileIdle: false,
+      },
+      startSharingScreen: vi.fn(async () => undefined),
+      stopSharingScreen: vi.fn(),
     };
   });
 
@@ -276,6 +302,189 @@ describe('LiveVoiceButton as a browser Host', () => {
 
     click(buttonNamed('live.browser.disconnect'));
     expect(mocks.result.browserHost.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('shows the microphone level only while this tab is the endpoint', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+    expect(document.querySelector('[data-live-level-meter]')).not.toBeNull();
+    expect(
+      document
+        .querySelector('[data-live-level-meter]')
+        ?.getAttribute('data-muted'),
+    ).toBe('false');
+  });
+
+  it('marks the meter muted when input is muted', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      inputMuted: true,
+      host: { kind: 'browser' },
+    };
+    openDialog();
+    expect(
+      document
+        .querySelector('[data-live-level-meter]')
+        ?.getAttribute('data-muted'),
+    ).toBe('true');
+  });
+
+  it('offers the screen only where this tab is the endpoint and can share', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.browserHost.screenShare = {
+      ...mocks.result.browserHost.screenShare,
+      supported: true,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    const toggle = document.querySelector('[data-live-screen-share-toggle]');
+    expect(toggle?.textContent).toBe('live.browser.startScreenShare');
+    act(() => {
+      (toggle as HTMLButtonElement).click();
+    });
+    // Called straight from the click: getDisplayMedia needs the gesture.
+    expect(mocks.result.browserHost.startSharingScreen).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the screen out of the native remote-control form', () => {
+    mocks.result.browserHost.screenShare = {
+      ...mocks.result.browserHost.screenShare,
+      supported: true,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: {},
+    };
+    openDialog();
+
+    expect(document.querySelector('[data-live-screen-share]')).toBeNull();
+  });
+
+  it('names what is shared and announces each look', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.browserHost.screenShare = {
+      supported: true,
+      sharing: true,
+      label: 'Terminal',
+      errorMessage: undefined,
+      lastLookAt: 1234,
+      requestedWhileIdle: false,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'thinking',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    expect(
+      document.querySelector('[data-live-screen-share-label]')?.textContent,
+    ).toBe('live.browser.sharingNamed');
+    expect(
+      document.querySelector('[data-live-screen-share-toggle]')?.textContent,
+    ).toBe('live.browser.stopScreenShare');
+    // A look leaves no other trace: the transcript shows the reply, not what
+    // was read to produce it.
+    expect(document.querySelector('[data-live-looked]')?.textContent).toBe(
+      'live.browser.lookedAtScreen',
+    );
+  });
+
+  it('points at the share button when the model asked and nothing is shared', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.browserHost.screenShare = {
+      supported: true,
+      sharing: false,
+      label: undefined,
+      errorMessage: undefined,
+      lastLookAt: undefined,
+      requestedWhileIdle: true,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    expect(
+      document.querySelector('[data-live-screen-share-requested]')?.textContent,
+    ).toBe('live.browser.screenRequested');
+    expect(document.querySelector('[data-live-looked]')?.textContent).toBe('');
+  });
+
+  it('records which capture path is live, for support', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.browserHost.captureMode = 'worklet';
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'idle',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+    expect(
+      document
+        .querySelector('[data-live-capture]')
+        ?.getAttribute('data-live-capture'),
+    ).toBe('worklet');
+  });
+
+  it('has a status region ready, and empty, while this tab is the endpoint', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    // Mounted before it has anything to say: a live region that appears
+    // together with its text is not announced.
+    const region = document.querySelector('[data-live-input-dropping]');
+    expect(region?.getAttribute('role')).toBe('status');
+    expect(region?.textContent).toBe('');
+    expect(region?.getAttribute('data-live-input-dropping')).toBe('false');
+  });
+
+  it('shows no meter for a call another endpoint is carrying', () => {
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+    expect(document.querySelector('[data-live-level-meter]')).toBeNull();
   });
 
   it('keeps the microphone while a call is running', () => {
@@ -379,5 +588,96 @@ describe('LiveVoiceButton as a browser Host', () => {
     // ...minus the claim that the browser microphone is never used.
     expect(document.body.textContent).not.toContain('live.noFallback');
     expect(buttonNamed('live.browser.connect')).toBeTruthy();
+  });
+});
+
+describe('mobile Live voice entry', () => {
+  it('opens from a controlled secondary entry while keeping the idle trigger hidden', () => {
+    const onSupportedChange = vi.fn();
+    const container = mount({
+      hideInactiveTrigger: true,
+      open: true,
+      onOpenChange: vi.fn(),
+      onSupportedChange,
+    });
+    expect(container.querySelector('button')).toBeNull();
+    expect(
+      document.querySelector('[data-web-shell-live-dialog]'),
+    ).not.toBeNull();
+    expect(onSupportedChange).toHaveBeenCalledWith(true);
+    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+  });
+  it('reports capability arrival and removal on the same mounted root', () => {
+    mocks.result.supported = false;
+    const onSupportedChange = vi.fn();
+    mount({ onSupportedChange });
+    expect(onSupportedChange).toHaveBeenLastCalledWith(false);
+    for (const supported of [true, false]) {
+      mocks.result.supported = supported;
+      act(() =>
+        mounted
+          .at(-1)!
+          .root.render(
+            <LiveVoiceButton onSupportedChange={onSupportedChange} />,
+          ),
+      );
+      expect(onSupportedChange).toHaveBeenLastCalledWith(supported);
+    }
+    expect(onSupportedChange).toHaveBeenCalledTimes(3);
+  });
+
+  it('forwards controlled trigger opening and closing through the parent', () => {
+    const onOpenChange = vi.fn();
+    const container = mount({ open: false, onOpenChange });
+    click(container.querySelector('button')!);
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    expect(document.querySelector('[data-web-shell-live-dialog]')).toBeNull();
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(<LiveVoiceButton open onOpenChange={onOpenChange} />),
+    );
+    expect(
+      document.querySelector('[data-web-shell-live-dialog]'),
+    ).not.toBeNull();
+    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+    click(
+      document.querySelector(
+        '[data-web-shell-live-dialog] [data-slot="dialog-close"]',
+      )!,
+    );
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('returns focus to the supplied mobile entry when the hidden-trigger dialog closes', async () => {
+    const fallback = document.createElement('button');
+    document.body.append(fallback);
+    const onRequestFocusFallback = () => fallback.focus();
+    mount({ hideInactiveTrigger: true, open: true, onRequestFocusFallback });
+    await act(async () => {
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceButton
+            hideInactiveTrigger
+            open={false}
+            onRequestFocusFallback={onRequestFocusFallback}
+          />,
+        );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(document.activeElement).toBe(fallback);
+  });
+
+  it('keeps the toolbar trigger available during an active call', () => {
+    mocks.result.status = {
+      ...mocks.result.status!,
+      available: true,
+      state: 'listening',
+    };
+    const container = mount({ hideInactiveTrigger: true });
+    expect(container.querySelector('[data-active="true"]')).not.toBeNull();
   });
 });

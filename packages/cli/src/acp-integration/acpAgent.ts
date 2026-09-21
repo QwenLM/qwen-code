@@ -157,6 +157,14 @@ import {
   extractAndStripMeta,
   listWorkflowSnapshots,
   claimInterruptedWorkflowRuns,
+  claimInterruptedWorkflowRun,
+  isWorkflowRunId,
+  readWorkflowCheckpoint,
+  readWorkflowSnapshot,
+  snapshotArgsUnavailable,
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
+  type WorkflowStatus,
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
@@ -507,6 +515,27 @@ function isSessionOwnedWorkflowTool(
   );
 }
 
+/** What a `workflow-action` answers. */
+type WorkflowActionResult = {
+  changed: boolean;
+  status?: WorkflowStatus;
+  taskId?: string;
+};
+
+/**
+ * The run a `retry` or `rerun` starts from: a live registry entry, or the
+ * snapshot of a run no registry holds any more.
+ */
+interface WorkflowRestartSource {
+  runId: string;
+  status: WorkflowStatus;
+  script: string;
+  scriptPath?: string;
+  args: unknown;
+  sourceRef?: WorkflowSourceRef;
+  workflowName?: string;
+}
+
 /**
  * Start a session-owned run, reporting a rejected parameter as one.
  *
@@ -530,7 +559,35 @@ async function startSessionOwnedWorkflow(
       error instanceof Error ? error.message : String(error),
     );
   }
-  const result = await invocation.execute(new AbortController().signal);
+  let result: WorkflowToolResult;
+  try {
+    result = await invocation.execute(new AbortController().signal);
+  } catch (error) {
+    // A retry resumes its run's journal, and the runner refuses one with no
+    // journal to replay. That is the run's state, not a fault here, and a
+    // rerun is what answers it.
+    if (error instanceof WorkflowJournalUnavailableError) {
+      debugLogger.debug(error.message);
+      throw RequestError.invalidParams(
+        { errorKind: 'workflow_journal_unavailable' },
+        error.reason === 'missing'
+          ? `Workflow run ${error.runId} has no journal on disk, so a retry has nothing to resume; rerun it to start it from the beginning.`
+          : `The journal of workflow run ${error.runId} could not be read, so a retry cannot resume it; rerun it to start it from the beginning.`,
+      );
+    }
+    // The run is recorded as running again before it registers, because a
+    // retry from history refuses a run whose checkpoint is still there. When
+    // that record cannot be written the resume does not start, and the
+    // caller is told so rather than being handed a daemon fault.
+    if (error instanceof WorkflowCheckpointUnwritableError) {
+      debugLogger.debug(error.message);
+      throw RequestError.invalidParams(
+        { errorKind: 'workflow_not_recorded' },
+        error.message,
+      );
+    }
+    throw error;
+  }
   if (result.error?.type === ToolErrorType.INVALID_TOOL_PARAMS) {
     throw RequestError.invalidParams(
       { errorKind: 'workflow_invalid_params' },
@@ -8693,6 +8750,7 @@ class QwenAgent implements Agent {
         runSavedArgs: true,
         runScript: true,
         nameOnly: config.isWorkflowNameOnly?.() === true,
+        retryHistorical: true,
       },
       savedWorkflows,
     };
@@ -12888,6 +12946,15 @@ class QwenAgent implements Agent {
           return attempt.value;
         }
         const task = registry.get(taskId);
+        if (!task && (action === 'retry' || action === 'rerun')) {
+          return this.restartWorkflowRunFromHistory(
+            sessionId,
+            config,
+            action,
+            taskId,
+            mutationClaim,
+          );
+        }
         if (!task) return { changed: false };
         if (action === 'retry' || action === 'rerun') {
           // A retry reuses its runId over the one journal/snapshot store
@@ -12915,74 +12982,16 @@ class QwenAgent implements Agent {
           if (!canStart || (!task.script && !savedScriptPath)) {
             return { changed: false, status: task.status };
           }
-          const attempt = await tryWithWorkflowTaskMutation(
-            mutationClaim,
-            async () => {
-              const workflowTool = config
-                .getToolRegistry()
-                .getTool(ToolNames.WORKFLOW);
-              if (!isSessionOwnedWorkflowTool(workflowTool)) {
-                throw RequestError.invalidParams(
-                  undefined,
-                  `The workflow tool is unavailable; cannot ${action} this run.`,
-                );
-              }
-              let readableScriptPath: string | undefined;
-              if (savedScriptPath) {
-                try {
-                  await resolveSavedWorkflowScript(
-                    { scriptPath: savedScriptPath },
-                    config,
-                  );
-                  readableScriptPath = savedScriptPath;
-                } catch {
-                  readableScriptPath = undefined;
-                }
-              }
-              if (!readableScriptPath && !task.script) {
-                return { changed: false, status: task.status };
-              }
-              const startParams: Omit<WorkflowParams, 'run_in_background'> = {
-                ...(readableScriptPath
-                  ? { scriptPath: readableScriptPath }
-                  : { script: task.script }),
-                args: task.args,
-                ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
-                ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
-              };
-              const result = await startSessionOwnedWorkflow(
-                workflowTool,
-                startParams,
-                readableScriptPath ? task.workflowName : undefined,
-              );
-              if (action === 'rerun') {
-                const rerunTask = result.workflowRunId
-                  ? registry.get(result.workflowRunId)
-                  : undefined;
-                if (rerunTask) {
-                  registry.setLineage(rerunTask.runId, task.runId, 'rerun');
-                }
-                return rerunTask
-                  ? {
-                      changed: true,
-                      status: rerunTask.status,
-                      taskId: rerunTask.runId,
-                    }
-                  : { changed: false, status: task.status };
-              }
-              // `execute()` reports a start that never registered — a
-              // cancel landing in the retry's starting window, whether from
-              // `cancelStarting` or a session dispose — by omitting
-              // `workflowRunId`, the same shape the rerun and run-saved
-              // branches gate on. Answering `changed: true` there tells the
-              // client a run exists that nothing will ever progress.
-              return result.workflowRunId
-                ? {
-                    changed: true,
-                    status: registry.get(result.workflowRunId)?.status,
-                  }
-                : { changed: false, status: task.status };
-            },
+          const attempt = await tryWithWorkflowTaskMutation(mutationClaim, () =>
+            this.startWorkflowRestart(config, action, {
+              runId: task.runId,
+              status: task.status,
+              script: task.script,
+              ...(savedScriptPath ? { scriptPath: savedScriptPath } : {}),
+              args: task.args,
+              ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
+              ...(task.workflowName ? { workflowName: task.workflowName } : {}),
+            }),
           );
           if (!attempt.acquired) {
             return { changed: false, status: task.status };
@@ -15265,6 +15274,187 @@ class QwenAgent implements Agent {
       },
     );
     config.setFileSystemService(acpFileSystemService);
+  }
+
+  /**
+   * `retry` or `rerun` of a run no registry here holds: one a previous daemon
+   * process ran, or one this session's registry has evicted. Its snapshot is
+   * the only record left of what it ran and with what.
+   */
+  private async restartWorkflowRunFromHistory(
+    sessionId: string,
+    config: Config,
+    action: 'retry' | 'rerun',
+    runId: string,
+    mutationClaim: string,
+  ): Promise<WorkflowActionResult> {
+    // The id is joined into paths under the runs directory. A live registry
+    // entry vouched for it until now; a client's `taskId` does not.
+    if (!isWorkflowRunId(runId)) return { changed: false };
+    const registry = config.getWorkflowRunRegistry();
+    // A run whose process exited mid-run has only the snapshot of an earlier
+    // attempt until its checkpoint is claimed. Claimed before the lock below,
+    // which the claim takes too.
+    await claimInterruptedWorkflowRun(config, runId);
+    const attempt = await tryWithWorkflowTaskMutation(
+      mutationClaim,
+      async (): Promise<WorkflowActionResult> => {
+        // Under this lock no start of the run can begin in this process —
+        // the runner takes the same lock to resume — so nothing read below
+        // goes stale before the retry registers.
+        const current = registry.get(runId);
+        if (current) return { changed: false, status: current.status };
+        // A run that is live is not history, whatever its snapshot says:
+        // starting here, settling here under a handle its evicted entry no
+        // longer shows (terminal entries are capped), or running in a
+        // sibling session. A rerun takes a new run id and so cannot corrupt
+        // the live run, but it would spend a second run's worth of tokens
+        // on work already in flight — and the live path refuses it too,
+        // because a live entry is not in a terminal state.
+        if (
+          QwenAgent.isWorkflowRunLiveInRegistry(registry, runId) ||
+          this.isWorkflowRunLiveOutsideSession(sessionId, runId)
+        ) {
+          return { changed: false };
+        }
+        const snapshot = await readWorkflowSnapshot(config, runId);
+        if (!snapshot) return { changed: false };
+        if (
+          (action === 'retry' && snapshot.status !== 'failed') ||
+          (!snapshot.script && !snapshot.scriptPath)
+        ) {
+          return { changed: false, status: snapshot.status };
+        }
+        // A checkpoint the claim above left in place records a process that
+        // has not been seen to exit: one still running here, one on another
+        // machine (never claimed, because its liveness cannot be observed),
+        // or one whose pid a live process has since reused. Resuming under
+        // its run id would put a second runner on its journal, so the retry
+        // is refused — and named, because from the run's history alone a
+        // client cannot tell this from an unknown run id, and because the
+        // way forward is a rerun, which takes a new run id and leaves this
+        // journal alone.
+        const checkpoint =
+          action === 'retry'
+            ? await readWorkflowCheckpoint(config, runId)
+            : undefined;
+        if (checkpoint) {
+          throw RequestError.invalidParams(
+            { errorKind: 'workflow_run_live_elsewhere' },
+            `Workflow run ${runId} is recorded as running in another process (host ${checkpoint.hostname}, pid ${checkpoint.pid}), so retrying it here would run two copies against its journal. Rerun it instead: that starts a new run id and leaves this one alone.`,
+          );
+        }
+        // Starting a run from history with the wrong args is worse than
+        // refusing it: the journal's key chain is rooted in a hash of the
+        // args, so a retry that supplies none replays nothing and
+        // re-dispatches every agent under the old run id, while the script
+        // reads `args` as undefined. A snapshot written before args were
+        // kept cannot say whether the run had any, so it is refused for the
+        // same reason as one whose args were too large — the cost is a
+        // legacy run that truly had none, which a relaunch covers.
+        // The same answer the task projection reports as `argsUnavailable`,
+        // so a client is never offered an action this refuses.
+        const unavailable = snapshotArgsUnavailable(snapshot);
+        const startedWith =
+          unavailable === 'omitted'
+            ? 'args too large to keep in its history'
+            : unavailable === 'unrecorded'
+              ? 'args this daemon recorded before it kept them, so its history cannot say what they were'
+              : undefined;
+        if (startedWith) {
+          throw RequestError.invalidParams(
+            { errorKind: 'workflow_args_unavailable' },
+            `Workflow run ${runId} was launched with ${startedWith}, so it cannot be ${action === 'retry' ? 'retried' : 'rerun'} from there. Start it again with run-saved or run-script and the args it should have.`,
+          );
+        }
+        return this.startWorkflowRestart(config, action, {
+          runId,
+          status: snapshot.status,
+          script: snapshot.script,
+          ...(snapshot.scriptPath ? { scriptPath: snapshot.scriptPath } : {}),
+          args: snapshot.args,
+          ...(snapshot.sourceRef ? { sourceRef: snapshot.sourceRef } : {}),
+          ...(snapshot.workflowName
+            ? { workflowName: snapshot.workflowName }
+            : {}),
+        });
+      },
+    );
+    return attempt.acquired ? attempt.value : { changed: false };
+  }
+
+  /**
+   * Start a `retry` (same run id, resuming its journal) or `rerun` (new run
+   * id) of `source`. The caller holds the run's mutation lock and has
+   * checked that the action applies.
+   */
+  private async startWorkflowRestart(
+    config: Config,
+    action: 'retry' | 'rerun',
+    source: WorkflowRestartSource,
+  ): Promise<WorkflowActionResult> {
+    const registry = config.getWorkflowRunRegistry();
+    const workflowTool = config.getToolRegistry().getTool(ToolNames.WORKFLOW);
+    if (!isSessionOwnedWorkflowTool(workflowTool)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `The workflow tool is unavailable; cannot ${action} this run.`,
+      );
+    }
+    let readableScriptPath: string | undefined;
+    if (source.scriptPath) {
+      try {
+        await resolveSavedWorkflowScript(
+          { scriptPath: source.scriptPath },
+          config,
+        );
+        readableScriptPath = source.scriptPath;
+      } catch {
+        readableScriptPath = undefined;
+      }
+    }
+    if (!readableScriptPath && !source.script) {
+      return { changed: false, status: source.status };
+    }
+    const startParams: Omit<WorkflowParams, 'run_in_background'> = {
+      ...(readableScriptPath
+        ? { scriptPath: readableScriptPath }
+        : { script: source.script }),
+      args: source.args,
+      ...(source.sourceRef ? { sourceRef: source.sourceRef } : {}),
+      ...(action === 'retry' ? { resumeFromRunId: source.runId } : {}),
+    };
+    const result = await startSessionOwnedWorkflow(
+      workflowTool,
+      startParams,
+      readableScriptPath ? source.workflowName : undefined,
+    );
+    if (action === 'rerun') {
+      const rerunTask = result.workflowRunId
+        ? registry.get(result.workflowRunId)
+        : undefined;
+      if (rerunTask) {
+        registry.setLineage(rerunTask.runId, source.runId, 'rerun');
+      }
+      return rerunTask
+        ? {
+            changed: true,
+            status: rerunTask.status,
+            taskId: rerunTask.runId,
+          }
+        : { changed: false, status: source.status };
+    }
+    // `execute()` reports a start that never registered — a cancel landing
+    // in the retry's starting window, whether from `cancelStarting` or a
+    // session dispose — by omitting `workflowRunId`, the same shape the
+    // rerun and run-saved branches gate on. Answering `changed: true` there
+    // tells the client a run exists that nothing will ever progress.
+    return result.workflowRunId
+      ? {
+          changed: true,
+          status: registry.get(result.workflowRunId)?.status,
+        }
+      : { changed: false, status: source.status };
   }
 
   /**

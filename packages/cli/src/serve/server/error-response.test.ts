@@ -76,6 +76,42 @@ describe('workflow parameter errors', () => {
   );
 
   it.each([
+    'workflow_journal_unavailable',
+    'workflow_args_unavailable',
+    'workflow_run_live_elsewhere',
+  ])('answers %s with 409 and its message', (errorKind) => {
+    const source = RequestError.invalidParams(
+      { errorKind },
+      'Workflow run wf_1234abcd has no journal on disk',
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: errorKind,
+    });
+  });
+
+  it('answers workflow_not_recorded with 503 and its message', () => {
+    const source = RequestError.invalidParams(
+      { errorKind: 'workflow_not_recorded' },
+      'Could not record that workflow run wf_1234abcd is running again',
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: 'workflow_not_recorded',
+    });
+  });
+
+  it.each([
     new Error('Unexpected workflow failure'),
     RequestError.invalidParams(undefined, 'Unclassified parameter error'),
     RequestError.internalError(

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import { LIVE_MESSAGES_EN } from './live/messages';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
@@ -314,6 +315,38 @@ describe('build artifact — package boundary', () => {
   });
 });
 
+describe('build artifact — Live Voice capture worklet', () => {
+  // audioWorklet.addModule() is subject to the Web Shell CSP (`script-src
+  // 'self'`, no `data:` or `blob:`). At ~2 KB the worklet is under Vite's
+  // inline limit, and an inlined module fails to load — silently, because the
+  // client then falls back to the deprecated main-thread capture node. No
+  // unit test can see that; only the emitted files can.
+  const ASSETS_DIR = resolve(DIST_DIR, 'assets');
+
+  it('ships the worklet as a same-origin file in the app build', () => {
+    const emitted = readdirSync(ASSETS_DIR).filter((fileName) =>
+      /^capture-worklet-.+\.js$/.test(fileName),
+    );
+    expect(emitted).toHaveLength(1);
+    const source = readFileSync(resolve(ASSETS_DIR, emitted[0]!), 'utf8');
+    expect(source).toContain("registerProcessor('qwen-live-capture'");
+    // Loaded as a classic module by the audio thread: nothing to resolve.
+    expect(source).not.toMatch(/^\s*import\s/m);
+  });
+
+  it('references that file from the app bundle, not an inlined data: URL', () => {
+    const appJavascript = readdirSync(ASSETS_DIR)
+      .filter((fileName) => fileName.endsWith('.js'))
+      .map((fileName) => readFileSync(resolve(ASSETS_DIR, fileName), 'utf8'))
+      .join('\n');
+    expect(appJavascript).toMatch(/assets\/capture-worklet-[^"'`]+\.js/);
+    expect(appJavascript).not.toContain(
+      // base64 of the worklet's licence header, i.e. the module inlined
+      'data:text/javascript;base64,LyoqCiAqIEBsaWNlbnNl',
+    );
+  });
+});
+
 describe('build artifact — standalone PWA', () => {
   it('emits a classic root service worker tied to the package version', () => {
     const worker = readFileSync(SERVICE_WORKER_DIST_PATH, 'utf8');
@@ -371,6 +404,26 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js.length).toBeLessThan(1_300_000);
+  });
+
+  it('carries no Live Voice strings and looks none up', () => {
+    // vite.lib.config.ts swaps client/live/messages.ts for an empty stub in
+    // this build, which keeps ~200 entries out of every exported document. It
+    // is only safe while nothing in the bundle asks for one: a lookup here
+    // would render as its key name. Key literals survive minification, so
+    // their absence shows that no Live surface entered the graph — the app
+    // itself may use them anywhere (the composer's add menu does).
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const keys = Object.keys(LIVE_MESSAGES_EN);
+    expect(keys.length).toBeGreaterThan(50);
+    const present = keys.filter(
+      (key) => js.includes(`"${key}"`) || js.includes(`'${key}'`),
+    );
+    expect(present).toEqual([]);
+    expect(js).not.toContain('Talk in this browser');
   });
 
   it('still carries what a transcript actually renders', () => {
