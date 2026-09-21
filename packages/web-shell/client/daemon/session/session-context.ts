@@ -186,3 +186,14 @@ export function getStandaloneConnectionState(
     workingDirectory: standalone.workingDirectory,
   };
 }
+
+export function isStandaloneDaemonSession(
+  session: DaemonSession | undefined,
+): boolean {
+  if (!session) return false;
+  const standalone = session as Partial<DaemonStandaloneSession>;
+  return (
+    standalone.sourceType === 'standalone' &&
+    standalone.context?.kind === 'standalone'
+  );
+}

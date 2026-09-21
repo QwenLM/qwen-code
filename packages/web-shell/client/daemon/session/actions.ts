@@ -75,6 +75,7 @@ import {
 import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
+  isStandaloneDaemonSession,
   resolveActionSessionContext,
   sessionContextKey,
 } from './session-context.js';
@@ -901,12 +902,14 @@ export function createDaemonSessionActions({
       currentConnection.sessionContext ??
       (currentConnection.workspaceCwd
         ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
-        : currentSession?.workspaceCwd
-          ? {
-              kind: 'workspace' as const,
-              cwd: currentSession.workspaceCwd,
-            }
-          : undefined);
+        : isStandaloneDaemonSession(currentSession?.session)
+          ? { kind: 'standalone' as const }
+          : currentSession?.workspaceCwd
+            ? {
+                kind: 'workspace' as const,
+                cwd: currentSession.workspaceCwd,
+              }
+            : undefined);
     const fallbackContext = currentConnection.error
       ? getDefaultSessionContext()
       : (currentSessionContext ?? getDefaultSessionContext());
@@ -2047,10 +2050,14 @@ export function createDaemonSessionActions({
         session.sessionId,
         'load',
         {
-          sessionContext: getConnection().sessionContext ?? {
-            kind: 'workspace',
-            cwd: session.workspaceCwd,
-          },
+          sessionContext:
+            getConnection().sessionContext ??
+            (isStandaloneDaemonSession(session.session)
+              ? { kind: 'standalone' as const }
+              : {
+                  kind: 'workspace' as const,
+                  cwd: session.workspaceCwd,
+                }),
         },
         signal,
         options?.replaySource,
