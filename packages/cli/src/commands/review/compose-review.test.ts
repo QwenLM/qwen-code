@@ -18338,6 +18338,9 @@ describe('composeReview — the decided-stop re-rule', () => {
     expect(r.body).toContain(
       'Re-rule of standing findings — no new review ran.',
     );
+    // And the coverage state says the same thing the body does: a plan was
+    // given, but nothing was launched and coverage was never attempted.
+    expect(r.terminalState).toBe('skipped');
   });
 
   it('refuses a full-round plan wearing the flag', () => {
