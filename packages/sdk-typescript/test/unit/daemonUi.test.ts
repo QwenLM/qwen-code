@@ -5390,6 +5390,96 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     ).toBeUndefined();
   });
 
+  it.each([false, true])(
+    'retains structured shell metadata while bounding large preview text: %s',
+    (large) => {
+      const text = large ? 'output '.repeat(100_000) : '';
+      const result = {
+        type: 'shell_result',
+        version: 1,
+        text,
+        output: text,
+        directory: '/workspace',
+        exitCode: null,
+        signal: 15,
+        pid: 42,
+        error: large ? 'error '.repeat(30_000) : null,
+        outcome: 'cancelled',
+        notices: ['Cancelled by user', text],
+        truncated: false,
+        outputFiles: ['/tmp/output.log'],
+      };
+      const preview = createDaemonToolResultPreview({
+        ...result,
+        internalPayload: 'x'.repeat(200_000),
+      });
+      expect(preview).not.toHaveProperty('result.internalPayload');
+      expect(preview?.kind).toBe('shell_result');
+      if (preview?.kind !== 'shell_result')
+        throw new Error('Missing shell preview');
+      expect(preview.result).toMatchObject({
+        type: 'shell_result',
+        version: 1,
+        directory: '/workspace',
+        exitCode: null,
+        signal: 15,
+        pid: 42,
+        outcome: 'cancelled',
+        notices: ['Cancelled by user', expect.any(String)],
+        truncated: large,
+        outputFiles: ['/tmp/output.log'],
+      });
+      const retainedText = [
+        preview.result.text,
+        preview.result.output,
+        preview.result.error ?? '',
+        ...preview.result.notices,
+        preview.result.directory,
+        ...preview.result.outputFiles,
+      ].join('');
+      expect(retainedText.length).toBeLessThanOrEqual(100_000);
+      if (large) {
+        expect(preview.result.output.length).toBeGreaterThan(0);
+        expect(preview.result.output.length).toBeLessThan(text.length);
+        expect(text.startsWith(preview.result.output)).toBe(true);
+      } else {
+        expect(preview.result).toEqual(result);
+      }
+      expect(result.truncated).toBe(false);
+      expect(result.output).toBe(text);
+    },
+  );
+
+  it('does not split emoji at an odd structured shell preview boundary', () => {
+    const text = '😀'.repeat(100_000);
+    const preview = createDaemonToolResultPreview({
+      type: 'shell_result',
+      version: 1,
+      text,
+      output: text,
+      directory: 'xx',
+      exitCode: 0,
+      signal: null,
+      pid: 42,
+      error: null,
+      outcome: 'completed',
+      notices: [],
+      truncated: false,
+      outputFiles: [],
+    });
+    expect(preview?.kind).toBe('shell_result');
+    if (preview?.kind !== 'shell_result')
+      throw new Error('Missing shell preview');
+    expect(preview.result.truncated).toBe(true);
+    for (const value of [preview.result.text, preview.result.output]) {
+      expect(value.length).toBeGreaterThan(0);
+      expect(value.length).toBeLessThanOrEqual(49_999);
+      expect(Buffer.from(value, 'utf8').toString('utf8')).toBe(value);
+      expect(value).not.toContain('\uFFFD');
+      expect(value.length % 2).toBe(0);
+    }
+  });
+
   it('preserves bounded question answer pairs without unknown raw fields', () => {
     const output = {
       type: 'ask_user_question_answers',
