@@ -19,10 +19,15 @@ document.documentElement.classList.add(`theme-${theme}`);
 document.documentElement.classList.toggle('dark', theme === 'dark');
 
 const validIds: ReadonlySet<string> = new Set(WEB_SHELL_SETTING_ITEM_IDS);
-const excludeItems = (params.get('exclude') ?? '')
-  .split(',')
-  .map((item) => item.trim())
-  .filter((item): item is WebShellSettingItemId => validIds.has(item));
+const parseItems = (value: string) =>
+  value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item): item is WebShellSettingItemId => validIds.has(item));
+const excludeItems = parseItems(params.get('exclude') ?? '');
+const includeItems = params.has('include')
+  ? parseItems(params.get('include') ?? '')
+  : undefined;
 
 function SettingsHarness() {
   const [modelManagement, setModelManagement] = useState(() => ({
@@ -45,7 +50,7 @@ function SettingsHarness() {
       baseUrl={window.location.origin}
       sessionId={sessionId}
       theme={theme}
-      settings={{ excludeItems }}
+      settings={{ includeItems, excludeItems }}
       modelManagement={modelManagement}
     />
   );

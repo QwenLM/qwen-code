@@ -602,6 +602,8 @@ describe('ReadFileTool', () => {
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toEqual([
         {
+          // This suite's Config stub exposes no tool registry, so zoom_image is
+          // not reachable and the hint is withheld (#12271).
           text: 'Image overview: 20x10; oriented source: 20x10.',
         },
         {
