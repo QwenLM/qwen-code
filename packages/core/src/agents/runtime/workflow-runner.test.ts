@@ -30,8 +30,10 @@ import {
 import {
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
+  WorkflowJournalUnavailableError,
   WorkflowStartCancelledError,
 } from './workflow-runner.js';
+import { claimInterruptedWorkflowRuns } from '../workflow-checkpoint.js';
 import { compileWorkflowScript } from './workflow-sandbox.js';
 import {
   WORKFLOW_SIZE_GUIDELINE_AGENTS,
@@ -47,6 +49,7 @@ const {
   resolveSavedWorkflowScriptMock,
   readWorkflowSnapshotMock,
   writeLineMock,
+  writeWorkflowCheckpointMock,
   writeWorkflowSnapshotMock,
 } = vi.hoisted(() => ({
   createProductionDispatchMock: vi.fn(),
@@ -57,6 +60,7 @@ const {
   resolveSavedWorkflowScriptMock: vi.fn(),
   readWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
   writeLineMock: vi.fn(),
+  writeWorkflowCheckpointMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -65,10 +69,20 @@ vi.mock('../../telemetry/loggers.js', () => ({
   logWorkflowSizeWarning: logWorkflowSizeWarningMock,
 }));
 
-vi.mock('../workflow-snapshot.js', () => ({
+vi.mock('../workflow-snapshot.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../workflow-snapshot.js')>()),
   readWorkflowSnapshot: readWorkflowSnapshotMock,
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
 }));
+
+vi.mock('../workflow-checkpoint.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../workflow-checkpoint.js')>();
+  writeWorkflowCheckpointMock.mockImplementation(
+    actual.writeWorkflowCheckpoint,
+  );
+  return { ...actual, writeWorkflowCheckpoint: writeWorkflowCheckpointMock };
+});
 
 vi.mock('../../utils/jsonl-utils.js', async (importOriginal) => {
   const actual =
@@ -171,6 +185,7 @@ describe('WorkflowRunner', () => {
     journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
     persistInlineWorkflowScriptMock.mockClear();
+    writeWorkflowCheckpointMock.mockClear();
     resolveSavedWorkflowScriptMock.mockReset();
     writeLineMock.mockReset();
     writeLineMock.mockResolvedValue(undefined);
@@ -1722,14 +1737,22 @@ describe('WorkflowRunner', () => {
       stubStorage(config, root);
       const dispatch = vi.fn(async () => 'live');
 
-      await expect(
-        WorkflowRunner.start({
-          ...resumeOptions(config, 'wf_1234abcd'),
-          dispatch,
-        }),
-      ).rejects.toThrow(
+      const start = WorkflowRunner.start({
+        ...resumeOptions(config, 'wf_1234abcd'),
+        dispatch,
+      });
+      await expect(start).rejects.toThrow(
         'No journal found for workflow run wf_1234abcd, so there is nothing to resume. To run the workflow from the start, call Workflow again without resumeFromRunId.',
       );
+      // Typed, so a host resuming on a caller's behalf can answer it as the
+      // run's state rather than as its own fault.
+      await expect(start).rejects.toBeInstanceOf(
+        WorkflowJournalUnavailableError,
+      );
+      await expect(start).rejects.toMatchObject({
+        runId: 'wf_1234abcd',
+        reason: 'missing',
+      });
 
       expect(dispatch).not.toHaveBeenCalled();
       expect(registry.get('wf_1234abcd')).toBeUndefined();
@@ -1750,14 +1773,18 @@ describe('WorkflowRunner', () => {
       });
       const dispatch = vi.fn(async () => 'live');
 
-      await expect(
-        WorkflowRunner.start({
-          ...resumeOptions(config, 'wf_1234abcd'),
-          dispatch,
-        }),
-      ).rejects.toThrow(
+      const start = WorkflowRunner.start({
+        ...resumeOptions(config, 'wf_1234abcd'),
+        dispatch,
+      });
+      await expect(start).rejects.toThrow(
         /^Could not read the journal for workflow run wf_1234abcd: \S/,
       );
+      await expect(start).rejects.toMatchObject({
+        name: 'WorkflowJournalUnavailableError',
+        runId: 'wf_1234abcd',
+        reason: 'unreadable',
+      });
       expect(dispatch).not.toHaveBeenCalled();
       expect(registry.get('wf_1234abcd')).toBeUndefined();
     });
@@ -1908,6 +1935,77 @@ describe('WorkflowRunner', () => {
 
       await expect(resumed.completion).resolves.toMatchObject({ ok: true });
       expect(readWorkflowSnapshotMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the run checkpoint', () => {
+    it('is on disk while the run is live, and gone once it settles', async () => {
+      const { config } = configWithRegistry();
+      const root = await makeStorageRoot();
+      stubStorage(config, root);
+      let release: ((value: string) => void) | undefined;
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script:
+          'export const meta = { name: "audit", description: "Audit" };\nreturn await agent("work")',
+        args: { files: ['a.csv'] },
+        dispatch: () =>
+          new Promise<string>((resolve) => {
+            release = resolve;
+          }),
+      });
+      const file = path.join(root, handle.runId, 'checkpoint.json');
+
+      await vi.waitFor(async () =>
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toMatchObject({
+          runId: handle.runId,
+          pid: process.pid,
+          meta: { name: 'audit', description: 'Audit' },
+          description: 'audit',
+          args: { files: ['a.csv'] },
+        }),
+      );
+      // This process still has the run, whatever the pid check would say.
+      await expect(
+        claimInterruptedWorkflowRuns(config, { isProcessRunning: () => false }),
+      ).resolves.toEqual([]);
+
+      await vi.waitFor(() => expect(release).toBeDefined());
+      release!('done');
+      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      await expect(fs.access(file)).rejects.toThrow();
+    });
+
+    // The write is not awaited at start; settlement must wait for it, or a run
+    // that ends before the write lands removes nothing and leaves the file.
+    it('does not outlive a run that settles before its write lands', async () => {
+      const { config } = configWithRegistry();
+      const root = await makeStorageRoot();
+      stubStorage(config, root);
+      const { writeWorkflowCheckpoint } = await vi.importActual<
+        typeof import('../workflow-checkpoint.js')
+      >('../workflow-checkpoint.js');
+      writeWorkflowCheckpointMock.mockImplementationOnce(
+        async (...args: Parameters<typeof writeWorkflowCheckpoint>) => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return writeWorkflowCheckpoint(...args);
+        },
+      );
+
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return "done"',
+        args: undefined,
+        dispatch: async () => 'unused',
+      });
+      await handle.completion;
+
+      expect(writeWorkflowCheckpointMock).toHaveBeenCalledTimes(1);
+      await expect(
+        fs.access(path.join(root, handle.runId, 'checkpoint.json')),
+      ).rejects.toThrow();
     });
   });
 

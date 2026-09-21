@@ -1864,6 +1864,9 @@ export default {
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
+  'Startup context': 'Contexto inicial',
+  Unattributed: 'Não atribuído',
+  'Cached prefix': 'Prefixo em cache',
   'Run /context detail for per-item breakdown.':
     'Execute /context detail para detalhamento por item.',
   active: 'ativo',
