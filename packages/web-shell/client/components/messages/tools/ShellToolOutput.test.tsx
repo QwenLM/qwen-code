@@ -295,6 +295,19 @@ describe('shell result presentation', () => {
     expect(container.textContent).not.toContain('footer pill');
   });
 
+  it('treats an empty string rawOutput as authoritative empty output', () => {
+    // A persisted empty display string is falsy but still authoritative: the
+    // card must not fall back to the model-facing envelope in `content`.
+    render(tool(envelope(''), { rawOutput: '' }));
+    expect(container.textContent).not.toContain('Directory:');
+    expect(
+      container.querySelector('button[aria-label="Copy command"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="shellDetails"] > pre')?.textContent,
+    ).toBe('No output');
+  });
+
   it('escapes control characters in the rendered command but copies it raw', async () => {
     const tricky = 'ls \u202efile';
     render(tool('', { args: { command: tricky } }));

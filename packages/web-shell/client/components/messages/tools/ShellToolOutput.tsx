@@ -40,7 +40,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
   };
   const raw = tool.rawOutput;
   const text =
-    typeof raw === 'string' && raw
+    typeof raw === 'string'
       ? raw
       : raw &&
           typeof raw === 'object' &&
