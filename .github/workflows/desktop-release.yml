@@ -308,6 +308,9 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libatk-bridge2.0-0 at-spi2-core dbus-x11 patchelf libfuse2 xdg-utils xvfb
 
       - name: 'Install Qwen Code dependencies'
+        # The body is bash. Without this the Windows runner parses it as pwsh
+        # and dies before npm or pnpm runs (#12414).
+        shell: 'bash'
         working-directory: '${{ runner.temp }}/qwen-code-source'
         env:
           QWEN_SKIP_PREPARE: '1'
