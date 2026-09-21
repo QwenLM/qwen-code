@@ -2638,6 +2638,97 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'does NOT credit a create-directory verdict when the start was BELT-CUT',
+    async () => {
+      // The arm above credits the wording because a start that threw never
+      // bound a socket. A belt-cut start throws too — but the client forks
+      // the server before it returns, so the cut can leave the server up
+      // and its socket bound (the measured loaded-runner shape). The
+      // captured command can then destroy the socket dir and make the base
+      // uncreatable, and the pinned kill answers this same wording about a
+      // directory that DID exist: credited, the run exits 3 with no orphan
+      // WARNING over a live server the readdir sweep can no longer see.
+      // The belt kill carries ETIMEDOUT, which is the discriminating signal.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-reapbc-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    sleep 5
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    if [ "$TMUX_TMPDIR" = '${envBase}' ]; then
+      echo "couldn't create directory $TMUX_TMPDIR/tmux-$(id -u) (Permission denied)" >&2
+      exit 1
+    fi
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    echo "no server running on \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" >&2
+    exit 1
+  fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realBelt = tmuxControl.timeoutMs;
+      tmuxControl.timeoutMs = 500;
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stdout, stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('tmux failed mid-capture');
+        expect(stderr).toContain('ETIMEDOUT');
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain(envBase);
+        // The start base may have held the server, so its create-directory
+        // answer establishes nothing — the doubt is said out loud.
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('may still be running');
+        expect(JSON.parse(stdout)).toMatchObject({ captured: false });
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      } finally {
+        tmuxControl.timeoutMs = realBelt;
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'still credits a create-directory verdict on a base that never held the server',
     async () => {
       // The balance point of the arm above: an env base ALREADY unusable at
@@ -3376,15 +3467,17 @@ exit 0
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-hangprobe-'));
       const binDir = join(dir, 'bin');
       mkdirSync(binDir, { recursive: true });
-      // /bin/sleep by absolute path: PATH is binDir alone below, so a bare
-      // `sleep` would ENOENT and the shim would EXIT instantly instead of
-      // hanging — the test then never exercised the belt at all.
+      // Hang on shell BUILTINS: PATH is binDir alone below, so a bare
+      // `sleep` would ENOENT, and a hardcoded /bin/sleep does the same on
+      // hosts that lack it (NixOS store paths, minimal rootfs) — either way
+      // the shim EXITS instantly instead of hanging and the test never
+      // exercised the belt at all.
       // TERM-immune, like the measured wedge: without killSignal SIGKILL
       // the belt only SENDS a TERM this shim ignores, and the spawn blocks
       // past any deadline — the SIGKILL half of the belt is what this pins.
       writeFileSync(
         join(binDir, 'tmux'),
-        "#!/bin/sh\ntrap '' TERM\n/bin/sleep 30\n",
+        "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n",
         {
           mode: 0o755,
         },

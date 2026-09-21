@@ -1350,6 +1350,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // distinction, since it is also absent when stamping fails after a
   // successful start.
   let startThrew = false;
+  // ...and whether that throw was the control belt cutting the client
+  // (ETIMEDOUT) rather than tmux answering: a belt-cut start can leave the
+  // server forked and its socket bound, so it is NOT evidence the socket
+  // directory never existed, and the never-created wording is not credited
+  // under it.
+  let startBeltCut = false;
   let reaped = false;
   const reap = (): void => {
     // serverStarted is set BEFORE the start call: the call forks the
@@ -1603,6 +1609,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           // a socket: there the directory never existed, so the wording
           // is admitted on the start base under that flag (without it a
           // false orphan WARNING printed for a server that never existed).
+          // A BELT-CUT start is the exception to the exception: it throws
+          // too, but with the server possibly forked and its socket bound
+          // (the shape documented at the start call), so the directory may
+          // well have existed and the wording reads as "destroyed
+          // mid-window" again — not credited, the same conflation the
+          // ENOENT class below is excluded for.
           //
           // The ENOENT class establishes death only where start never bound
           // a socket: once stamped, it means the stamped socket was removed
@@ -1634,7 +1646,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             !(
               isSocketDirNeverCreated(stderrText) &&
               onStartBase &&
-              !startThrew
+              (!startThrew || startBeltCut)
             ) &&
             !(
               onStartBase &&
@@ -1783,6 +1795,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       tmux(plan.start);
     } catch (e) {
       startThrew = true;
+      // A belt kill carries ETIMEDOUT (the freeze path names the same
+      // shape); every other throw is tmux, or the spawn, answering.
+      startBeltCut = (e as NodeJS.ErrnoException).code === 'ETIMEDOUT';
       throw e;
     }
     {
