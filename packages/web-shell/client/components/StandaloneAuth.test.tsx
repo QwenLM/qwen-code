@@ -38,6 +38,7 @@ async function mount(
       continueFlow?: 'workspace' | 'connection';
     },
   ) => boolean | void,
+  pairingFailed?: boolean,
 ) {
   await act(async () =>
     root.render(
@@ -49,6 +50,7 @@ async function mount(
         invalidTarget={invalidTarget}
         initialAddress={initialAddress}
         onChangeTarget={onChangeTarget}
+        pairingFailed={pairingFailed}
       >
         {(token) => <p>Connected {token}</p>}
       </StandaloneAuth>,
@@ -100,6 +102,9 @@ it('warns about an unconfirmed target even when pairing failed', async () => {
   );
   expect(container.textContent).toContain('has not connected to before');
   expect(container.textContent).not.toContain('Pairing failed');
+  // The trust decision is pending, so no field may pre-commit focus.
+  expect(document.activeElement).not.toBe(tokenInput());
+  expect(document.activeElement).not.toBe(addressInput());
   expect(fetch).not.toHaveBeenCalled();
 });
 function stubResponse({
@@ -205,6 +210,25 @@ it('reports an invalid daemon target without contacting another daemon', async (
   // unreachable in a real browser unless noValidate is set.
   expect(container.querySelector('form')!.noValidate).toBe(true);
   expect(addressInput().value).toBe('not-a-url');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('focuses the address field for an invalid target even when pairing failed', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    true,
+    'not-a-url',
+    undefined,
+    true,
+  );
+  expect(container.textContent).toContain('Invalid daemon address');
+  // The copy asks for a corrected address; the later token-field autoFocus
+  // must not win over the address field's.
+  expect(document.activeElement).toBe(addressInput());
   expect(fetch).not.toHaveBeenCalled();
 });
 it('lets an invalid target be replaced from the connection form', async () => {

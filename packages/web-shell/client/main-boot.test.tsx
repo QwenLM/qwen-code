@@ -160,6 +160,44 @@ describe('web shell boot', () => {
     }
   });
 
+  it('offers the rescan recovery when the stored credential is also rejected', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      status: 401,
+      ok: false,
+      headers: new Headers(),
+      json: async () => ({ error: 'expired' }),
+    });
+    vi.stubGlobal('fetch', fetch);
+    // Session storage outlives a daemon restart: this tab still holds a
+    // device credential the (restarted) daemon no longer recognizes.
+    testState.storedToken = 'stale-device-credential';
+    window.history.replaceState(null, '', '/#pairing=expired-code');
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.rendered).toHaveLength(1));
+
+    const gate = document.createElement('div');
+    document.body.appendChild(gate);
+    await act(async () => {
+      createRoot(gate).render(testState.rendered[0]);
+    });
+
+    // The stored credential is still probed…
+    const probes = fetch.mock.calls.filter(([url]) =>
+      String(url).endsWith('/capabilities'),
+    );
+    expect(probes.length).toBeGreaterThan(0);
+    for (const [, init] of probes) {
+      expect(init).toMatchObject({
+        headers: { Authorization: 'Bearer stale-device-credential' },
+      });
+    }
+    // …but its rejection must surface the rescan recovery, not the
+    // terminal-token copy a phone user cannot act on.
+    expect(gate.textContent).toContain('Pairing failed or the QR code expired');
+    expect(gate.textContent).not.toContain('Invalid or expired token');
+  });
+
   it('clears the boot fallback when the app mounts after the grace period', async () => {
     document.body.innerHTML =
       '<div id="root"><div data-boot-fallback>failed to load</div></div>';

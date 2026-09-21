@@ -43,6 +43,17 @@ describe('pairing bootstrap', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it('ignores an empty pairing fragment without POSTing it', async () => {
+    // A truncated `#pairing=` can never match the server's bearer shape, so
+    // boot must not spend a pre-auth request (and its rate-limit token) on a
+    // certain 401.
+    window.history.replaceState(null, '', '/#pairing=');
+    vi.stubGlobal('fetch', vi.fn());
+    expect(await exchangePairingCode(window.location.origin)).toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#pairing=');
+  });
+
   it('never sends a fragment invitation to a different or invalid daemon target', async () => {
     vi.stubGlobal('fetch', vi.fn());
     for (const target of ['http://other.test', '']) {

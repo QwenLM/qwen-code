@@ -10,7 +10,12 @@ import { bearerAuth } from '../auth.js';
 import type { CredentialStore } from '../local-control/credentials.js';
 import { listLanCandidates } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
-import { isLoopbackBind, isWildcardBind } from '../loopback-binds.js';
+import {
+  canonicalHost,
+  formatHostForAuthority,
+  isLoopbackBind,
+  isWildcardBind,
+} from '../loopback-binds.js';
 import { ACCESS_LOG_REJECT_LOCAL } from '../server/access-log.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 
@@ -31,8 +36,14 @@ export function registerWebShellPairingRoutes(
   rateLimiter?: Pick<RateLimiterInstance, 'middleware' | 'checkRate'>,
 ): void {
   const invitations = new Map<string, { origin: string; expiresAt: number }>();
+  // The loopback half canonicalizes the operator's spelling (`127.1`) the way
+  // Node's bind does, so a short-spelled loopback listener keeps the Local
+  // Control remediation path instead of minting invitations that only the
+  // operator's own machine could redeem. `isLoopbackBind` itself stays
+  // spelling-exact: the boot-time token check and the Host allowlist depend
+  // on the raw value.
   const available = (req: Request) =>
-    !isLoopbackBind(hostname) &&
+    !isLoopbackBind(canonicalHost(hostname)) &&
     listenerIdentityOf(req).kind === 'primary' &&
     !credentials.isOpen({ kind: 'primary' });
 
@@ -113,9 +124,9 @@ export function registerWebShellPairingRoutes(
               res.json({ active: true, interfaces });
               return;
             }
-            url.hostname = selected.address;
+            url.hostname = formatHostForAuthority(selected.address);
           } else {
-            url.hostname = hostname;
+            url.hostname = formatHostForAuthority(hostname);
           }
         }
         const secret = randomBytes(32).toString('base64url');

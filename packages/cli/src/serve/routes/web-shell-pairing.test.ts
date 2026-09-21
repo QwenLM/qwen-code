@@ -268,13 +268,16 @@ describe('Web Shell pairing', () => {
     expect((await exchange(codeOf(issued))).status).toBe(200);
   });
 
-  it('keeps loopback on the existing Local Control path', async () => {
-    const { app } = setup('127.0.0.1');
-    const response = await request(app)
-      .post('/web-shell/pairing')
-      .set('Authorization', 'Bearer runtime-secret');
-    expect(response.body).toEqual({ active: false });
-  });
+  it.each(['127.0.0.1', '127.1', '127.0.1'])(
+    'keeps loopback on the existing Local Control path for %s',
+    async (hostname) => {
+      const { app } = setup(hostname);
+      const response = await request(app)
+        .post('/web-shell/pairing')
+        .set('Authorization', 'Bearer runtime-secret');
+      expect(response.body).toEqual({ active: false });
+    },
+  );
 
   it('never exchanges a primary invitation on the Local Control listener', async () => {
     const { app, credentials, issue } = setup();
@@ -374,6 +377,18 @@ describe('Web Shell pairing', () => {
       .set('Authorization', 'Bearer runtime-secret');
     expect(response.status).toBe(200);
     expect(new URL(response.body.url).origin).toBe('http://192.168.1.5:4170');
+  });
+
+  it('brackets a raw IPv6 bind when substituting the bound address', async () => {
+    const { app } = setup('2001:db8::5');
+    const response = await request(app)
+      .post('/web-shell/pairing')
+      .set('Host', '127.0.0.1:4170')
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(response.status).toBe(200);
+    // Assigning the unbracketed literal to URL.hostname would silently
+    // no-op and leave the QR pointing at the browser's own loopback.
+    expect(new URL(response.body.url).hostname).toBe('[2001:db8::5]');
   });
 
   it('evicts only the oldest live invitation at the cap', async () => {

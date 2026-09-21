@@ -301,12 +301,14 @@ describe('LocalControlQrButton', () => {
     await openPopover();
 
     expect(container.textContent).toContain(
-      'This browser tab stays signed in until the daemon restarts or the tab is closed.',
+      "The device that scans stays signed in until the daemon restarts or that device's tab is closed.",
     );
     expect(container.textContent).toContain('Traffic is unencrypted');
     expect(container.textContent).not.toContain(
       'Scan to grant access until this daemon restarts.',
     );
+    // The credential lives on the scanning device, not in this popover's tab.
+    expect(container.textContent).not.toContain('This browser tab');
   });
 
   it('keeps the daemon-lifetime wording on an encrypted legacy Local Control QR', async () => {
@@ -348,6 +350,100 @@ describe('LocalControlQrButton', () => {
     await act(async () => vi.advanceTimersByTimeAsync(5000));
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain('No local network address');
+  });
+
+  it('does not re-poll while the operator is choosing a network', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        interfaces: [
+          { interfaceName: 'en0', address: '192.168.1.2' },
+          { interfaceName: 'en1', address: '10.0.0.2' },
+        ],
+      }),
+    );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain('en0: 192.168.1.2');
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // The choice list only advances through `setAddress`, so an idle popover
+    // must not keep spending mutation-tier POSTs on an unchanged screen.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers from a refresh that never settles', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockResolvedValueOnce(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=old',
+        qrText: 'OLD-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    // The refresh settles only when the request's own signal aborts it.
+    vi.mocked(fetch).mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          (init as RequestInit | undefined)?.signal?.addEventListener(
+            'abort',
+            () => reject(new Error('The operation timed out.')),
+          );
+        }),
+    );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain('OLD-QR');
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(container.textContent).not.toContain('OLD-QR');
+    // The stall must land in the error branch so a recovery affordance is on
+    // screen instead of the expired copy idling forever.
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(container.textContent).toContain('Retry');
+  });
+
+  it('offers a manual retry while an expired refresh is still in flight', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockResolvedValueOnce(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=old',
+        qrText: 'OLD-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    vi.mocked(fetch).mockImplementation(() => new Promise<Response>(() => {}));
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(61_000));
+    expect(container.textContent).toContain('QR code expired');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Retry');
+    expect(retry).toBeDefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      retry!.click();
+    });
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it('recovers from a failed refresh without a manual retry', async () => {

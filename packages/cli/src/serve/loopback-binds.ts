@@ -55,6 +55,27 @@ export function isLoopbackAddress(hostname: string): boolean {
 }
 
 /**
+ * Canonicalize a `--hostname` spelling through the WHATWG host parser — the
+ * same normalization Node applies at bind time — so inet_aton short forms
+ * (`127.1`, `0`), IPv6 variants, and case classify the way the bound socket
+ * behaves. Falls back to the trimmed lowercase spelling when the parse fails,
+ * so callers keep the operator's exact text rather than losing it.
+ */
+export function canonicalHost(hostname: string): string {
+  const trimmed = hostname.trim().toLowerCase();
+  const inner =
+    trimmed.startsWith('[') && trimmed.endsWith(']')
+      ? trimmed.slice(1, -1)
+      : trimmed;
+  try {
+    return new URL(`http://${inner.includes(':') ? `[${inner}]` : inner}`)
+      .hostname;
+  } catch {
+    return trimmed;
+  }
+}
+
+/**
  * Is this `--hostname` spelling a wildcard bind (`0.0.0.0` / `::`)? The
  * spelling is canonicalized through the WHATWG URL parser before comparing —
  * the same normalization Node applies at bind time — so inet_aton short
@@ -63,29 +84,16 @@ export function isLoopbackAddress(hostname: string): boolean {
  * what the socket actually binds. A DNS name or an empty string never does.
  */
 export function isWildcardBind(hostname: string): boolean {
-  const trimmed = hostname.trim().toLowerCase();
-  const inner =
-    trimmed.startsWith('[') && trimmed.endsWith(']')
-      ? trimmed.slice(1, -1)
-      : trimmed;
-  try {
-    const parsed = new URL(
-      `http://${inner.includes(':') ? `[${inner}]` : inner}`,
-    ).hostname;
-    const canonical =
-      parsed.startsWith('[') && parsed.endsWith(']')
-        ? parsed.slice(1, -1)
-        : parsed;
-    // `::ffff:0:0` is the WHATWG serialization of the IPv4-mapped wildcard
-    // `::ffff:0.0.0.0`, which Node binds as a working wildcard.
-    return (
-      canonical === '0.0.0.0' ||
-      canonical === '::' ||
-      canonical === '::ffff:0:0'
-    );
-  } catch {
-    return false;
-  }
+  const parsed = canonicalHost(hostname);
+  const canonical =
+    parsed.startsWith('[') && parsed.endsWith(']')
+      ? parsed.slice(1, -1)
+      : parsed;
+  // `::ffff:0:0` is the WHATWG serialization of the IPv4-mapped wildcard
+  // `::ffff:0.0.0.0`, which Node binds as a working wildcard.
+  return (
+    canonical === '0.0.0.0' || canonical === '::' || canonical === '::ffff:0:0'
+  );
 }
 
 export function formatHostForAuthority(hostname: string): string {

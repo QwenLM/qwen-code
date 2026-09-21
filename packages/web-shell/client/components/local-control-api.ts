@@ -58,6 +58,9 @@ export async function requestLocalControl(
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    // A silently stalled socket must settle as an error so the caller's retry
+    // path engages; 10 s stays under the QR popover's 15 s refresh horizon.
+    signal: AbortSignal.timeout(10_000),
   });
   const text = await response.text();
   let payload: (LocalControlStatus & { error?: string }) | undefined;

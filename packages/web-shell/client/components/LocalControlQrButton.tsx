@@ -92,10 +92,17 @@ export function LocalControlQrButton({
             () => void refresh(),
             Math.max(1000, expiresAt - Date.now() - 15_000),
           );
-        } else if (next.active && !next.url && !next.urlRedacted) {
+        } else if (
+          next.active &&
+          !next.url &&
+          !next.urlRedacted &&
+          !next.interfaces?.length
+        ) {
           // A wildcard bind can find no LAN candidate for a while (an
           // interface flapping down/up); poll again rather than sticking on
-          // the empty choice until the popover is reopened.
+          // the empty choice until the popover is reopened. A populated
+          // choice list advances only through `setAddress`, so re-polling it
+          // would just spend mutation-tier requests.
           refreshTimer = setTimeout(() => void refresh(), 5000);
         }
       } catch (failure) {
@@ -192,9 +199,20 @@ export function LocalControlQrButton({
           </div>
         )}
         {remaining === 0 && (
-          <p className="text-sm text-muted-foreground">
-            {t('localControl.expired')}
-          </p>
+          <div className="flex flex-col items-start gap-2">
+            <p className="text-sm text-muted-foreground">
+              {t('localControl.expired')}
+            </p>
+            {!error && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
+                {t('localControl.retry')}
+              </Button>
+            )}
+          </div>
         )}
         {status?.active &&
           !status.url &&

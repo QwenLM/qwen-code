@@ -469,7 +469,7 @@ async function main() {
       <StandaloneAuth
         baseUrl={baseUrl}
         initialToken={daemonToken}
-        pairingFailed={Boolean(pairing?.failed) && !daemonToken}
+        pairingFailed={Boolean(pairing?.failed)}
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.

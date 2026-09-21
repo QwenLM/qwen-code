@@ -196,19 +196,30 @@ export function StandaloneAuth({
   const [confirming, setConfirming] = useState(
     unconfirmedTarget && !invalidTarget,
   );
+  // A failed pairing exchange parks the gate on the rescan copy only when
+  // there is no credential left to try; with one (a stored device token) the
+  // boot probe still runs, and the rescan copy surfaces if the daemon rejects
+  // it. Session storage outlives a daemon restart, so "a credential exists"
+  // is not "a credential worked".
+  const awaitingPairing = pairingFailed && !initialToken;
   const [status, setStatus] = useState(
     invalidTarget
       ? copy.invalidAddress
       : confirming
         ? copy.confirmTarget
-        : pairingFailed
+        : awaitingPairing
           ? copy.pairingFailed
           : copy.connecting,
   );
   const [busy, setBusy] = useState(
-    !pairingFailed && !invalidTarget && !confirming,
+    !awaitingPairing && !invalidTarget && !confirming,
   );
-  const [needsToken, setNeedsToken] = useState(pairingFailed);
+  // Focus the token field only when entering a token is the pending step: an
+  // invalid or unconfirmed target asks for the address (or a trust decision)
+  // first, and the token input's later autoFocus would otherwise win focus.
+  const [needsToken, setNeedsToken] = useState(
+    awaitingPairing && !invalidTarget && !confirming,
+  );
   // Every probe — the first one, a manual retry, and each auto-retry — is one
   // bump of this counter, so exactly one effect run owns the in-flight request
   // and aborts its predecessor on cleanup.
@@ -291,9 +302,14 @@ export function StandaloneAuth({
           // is not what this 401 rejected and must survive it.
           if (candidate && candidate === initialCandidateRef.current)
             setToken((current) => (current === candidate ? '' : current));
+          // A boot credential rejected after a failed pairing exchange points
+          // at the rescan recovery, not the terminal-token copy a phone user
+          // cannot act on; a rejected hand-typed token keeps the token copy.
           setStatus(
             candidate
-              ? copyRef.current.invalidToken
+              ? pairingFailed && candidate === initialCandidateRef.current
+                ? copyRef.current.pairingFailed
+                : copyRef.current.invalidToken
               : copyRef.current.enterToken,
           );
         } else if (response.status === 403) {
@@ -344,15 +360,22 @@ export function StandaloneAuth({
         clearTimeout(timeout);
       }
     },
-    [baseUrl, remoteConnectionAddActive],
+    [baseUrl, pairingFailed, remoteConnectionAddActive],
   );
 
   useEffect(() => {
-    if (invalidTarget || confirming || (pairingFailed && attempt === 0))
+    if (invalidTarget || confirming || (awaitingPairing && attempt === 0))
       return undefined;
     void connect(candidateRef.current);
     return retireProbe;
-  }, [connect, attempt, invalidTarget, confirming, pairingFailed, retireProbe]);
+  }, [
+    connect,
+    attempt,
+    invalidTarget,
+    confirming,
+    awaitingPairing,
+    retireProbe,
+  ]);
 
   if (accepted) return children(accepted.token);
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());

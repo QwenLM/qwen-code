@@ -26,7 +26,11 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
-import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
+import {
+  canonicalHost,
+  formatHostForAuthority,
+  isLoopbackBind,
+} from '../loopback-binds.js';
 import {
   AcpDispatcher,
   type LegacyStandaloneSessionRestorer,
@@ -1643,7 +1647,7 @@ export function mountAcpHttp(
       const authenticatedRemoteBind =
         upgradeListenerIdentity.kind === 'primary' &&
         opts.hostname !== undefined &&
-        !isLoopbackBind(opts.hostname) &&
+        !isLoopbackBind(canonicalHost(opts.hostname)) &&
         !upgradeCredentials.isOpen(upgradeListenerIdentity);
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware

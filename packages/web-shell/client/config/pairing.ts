@@ -12,7 +12,9 @@ export async function exchangePairingCode(
   const url = new URL(window.location.href);
   const fragment = new URLSearchParams(url.hash.slice(1));
   const code = fragment.get('pairing');
-  if (code === null) return undefined;
+  // An empty `#pairing=` can never match the server's bearer shape, so it is
+  // left in the hash and unexchanged rather than POSTed into a certain 401.
+  if (!code) return undefined;
   fragment.delete('pairing');
   url.hash = fragment.toString();
   window.history.replaceState(null, '', url);

@@ -11850,6 +11850,27 @@ describe('ACP WebSocket transport security', () => {
     },
   );
 
+  it('applies the loopback Host allowlist on a short-spelled loopback bind', async () => {
+    // `127.1` is the inet_aton short form Node binds as 127.0.0.1: the
+    // listener is loopback, so a rebound Host/Origin pair must fail the
+    // loopback allowlist even with a valid device credential — the bind must
+    // not classify as an authenticated remote one.
+    await startServer({
+      hostname: '127.1',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+    });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+      Authorization: 'Bearer device-token',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`, {
+      Authorization: 'Bearer device-token',
+    });
+    expect(legit.code).toBe(101);
+  });
+
   it('rejects WS upgrade with cross-origin Origin header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
