@@ -9766,6 +9766,104 @@ describe('Session', () => {
       expect(core.getInvocationContext()).toBeUndefined();
     });
 
+    describe('output-length truncation stop reason (issue #12113)', () => {
+      // When bounded output recovery (llm-chat.ts's
+      // MAX_OUTPUT_RECOVERY_ATTEMPTS loop) runs and still ends on a
+      // provider `MAX_TOKENS` finish reason, the visible response is a
+      // truncated partial, not a completed turn -- the ACP client is
+      // entitled to the protocol's own `max_tokens` stop reason rather
+      // than `end_turn`. See https://github.com/QwenLM/qwen-code/issues/12113.
+      it('reports max_tokens when the final finish reason is still MAX_TOKENS after recovery', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'partial fixture reply' }] },
+                    finishReason: 'MAX_TOKENS',
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'reply briefly' }],
+        });
+
+        expect(result.stopReason).toBe('max_tokens');
+      });
+
+      it('still reports end_turn for a normal, non-truncated completion', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'complete reply' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'reply briefly' }],
+        });
+
+        expect(result.stopReason).toBe('end_turn');
+      });
+
+      it('reports end_turn when a truncated segment is followed by a successful one', async () => {
+        // A recovery attempt that truncates, followed by a later attempt
+        // that completes, must not leak the earlier MAX_TOKENS into the
+        // terminal decision -- only the LAST observed segment's finish
+        // reason counts.
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'partial fixture reply' }] },
+                    finishReason: 'MAX_TOKENS',
+                  },
+                ],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: ' continued and done' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'reply briefly' }],
+        });
+
+        expect(result.stopReason).toBe('end_turn');
+      });
+    });
+
     describe('turn result recording', () => {
       const trustedContext: core.InvocationContextV1 = {
         version: 1,

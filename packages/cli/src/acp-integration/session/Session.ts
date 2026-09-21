@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { FinishReason } from '@google/genai';
 import type {
   Content,
   FunctionCall,
@@ -1605,6 +1606,34 @@ interface AgentResponseCapture {
     finalText: string;
   };
   agentOutput: AgentOutputMessageCapture;
+  /**
+   * The provider `finishReason` of the most recently observed stream
+   * candidate for this turn, tracked independently of `agentOutput`
+   * because `AgentOutputMessageCapture.observeFinishReason` is a
+   * telemetry sink that no-ops unless sensitive span attributes are
+   * enabled -- it cannot be relied on to decide the ACP terminal stop
+   * reason. Updated at every site that also calls `observeFinishReason`,
+   * so it reflects the last segment's terminal reason: a truncated
+   * attempt followed by a successful continuation ends on `STOP`, not a
+   * stale `MAX_TOKENS`.
+   */
+  lastFinishReason?: FinishReason;
+}
+
+/**
+ * True when the turn's final observed provider finish reason is still an
+ * unresolved output-length truncation. Bounded output recovery
+ * (`MAX_OUTPUT_RECOVERY_ATTEMPTS` in `llm-chat.ts`) already tried and
+ * exhausted its attempts by the time `#handleStopHookLoop`'s natural-stop
+ * branch is reached -- if the provider's last segment still ended on
+ * `MAX_TOKENS`, the visible response is a truncated partial, not a
+ * completed turn, and the ACP client is entitled to be told so via the
+ * protocol's own `max_tokens` stop reason rather than `end_turn`.
+ */
+function isUnresolvedOutputTruncation(
+  responseCapture: AgentResponseCapture | undefined,
+): boolean {
+  return responseCapture?.lastFinishReason === FinishReason.MAX_TOKENS;
 }
 
 interface ChannelDeliveryResponseBlock {
@@ -6714,6 +6743,10 @@ export class Session implements SessionContext {
                         responseCapture.agentOutput.observeFinishReason(
                           candidate.finishReason,
                         );
+                        if (candidate.finishReason) {
+                          responseCapture.lastFinishReason =
+                            candidate.finishReason;
+                        }
                       }
 
                       if (
@@ -7339,7 +7372,11 @@ export class Session implements SessionContext {
       }
 
       if (!externalReason && !guardContinuation) {
-        return { stopReason: 'end_turn' };
+        return {
+          stopReason: isUnresolvedOutputTruncation(responseCapture)
+            ? 'max_tokens'
+            : 'end_turn',
+        };
       }
 
       const continueParts: Part[] = [];
@@ -7868,6 +7905,9 @@ export class Session implements SessionContext {
             options.responseCapture?.agentOutput.observeFinishReason(
               candidate.finishReason,
             );
+            if (candidate.finishReason && options.responseCapture) {
+              options.responseCapture.lastFinishReason = candidate.finishReason;
+            }
           }
 
           if (
@@ -10162,6 +10202,10 @@ export class Session implements SessionContext {
                       responseCapture.agentOutput.observeFinishReason(
                         candidate.finishReason,
                       );
+                      if (candidate.finishReason) {
+                        responseCapture.lastFinishReason =
+                          candidate.finishReason;
+                      }
                     }
 
                     if (
