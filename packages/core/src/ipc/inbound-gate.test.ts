@@ -2816,7 +2816,10 @@ describe('a gate for a process hosting several sessions', () => {
     // session map to have moved. Deriving the scope again there keys the
     // rollback away from the record it means to undo, and the sender's
     // honest retry comes back `duplicate`.
-    let answers = 0;
+    // The host stops recognizing the id while this admission is running.
+    // A settings reader is where that can happen: it is the one thing the
+    // gate calls between opening the lookup and rolling the body back.
+    let holdsLiveId = true;
     const gate = new InboundGate({
       admission: new PeerAdmission({
         limits: {
@@ -2828,25 +2831,59 @@ describe('a gate for a process hosting several sessions', () => {
         },
       }),
       getApprovalMode: () => ApprovalMode.YOLO,
-      // The reader the resolver's answer is fetched for, which is where
-      // a host gets the chance to move its session map mid-admission.
-      getPolicySetting: () => 'refuse',
-      resolveSessionId: (id) => {
-        answers += 1;
-        return answers === 1 ? id : undefined;
+      getPolicySetting: () => {
+        holdsLiveId = false;
+        return 'refuse';
       },
+      // `chat-live` is the id the sender addresses; `chat-pub` is the name
+      // the host keeps the session under and the scope the body is
+      // recorded against.
+      resolveSessionId: (id) =>
+        id === 'chat-live' && holdsLiveId ? 'chat-pub' : undefined,
       deliver: () => {},
     });
     const line = (msgId: string) => ({
       ...buildUserFrame({ content: 'stand by' }),
       msgId,
       fromMode: 'bypass' as const,
-      toSessionId: 'chat-a',
+      toSessionId: 'chat-live',
     });
 
     expect(gate.admit(line('m1'))).toBe('refused');
-    // A sender told its message was refused must keep hearing that.
+    holdsLiveId = true;
+    // A sender told its message was refused must keep hearing that, not
+    // have its next verbatim attempt folded into a repeat of itself.
     expect(gate.admit(line('m2'))).toBe('refused');
+  });
+
+  it('releases on the pin answer it judged the message with', () => {
+    // The judging loop and the release loop run back to back, and asking
+    // the host twice inside one sweep can get two answers. The message
+    // was judged releasable on the first; releasing it on a second that
+    // says something else is judging it twice.
+    let answers = 0;
+    const delivered: PeerUserFrame[] = [];
+    let mode: ApprovalMode = ApprovalMode.DEFAULT;
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      resolveSessionId: (id) => {
+        answers += 1;
+        // Fine for the admission and for the judging loop; gone by the
+        // time a second pin check would run.
+        if (answers >= 3) throw new Error('the session map is being torn down');
+        return id;
+      },
+      deliver: (candidate) => delivered.push(candidate),
+    });
+
+    const parked = frame({ fromMode: 'bypass', toSessionId: 'chat-a' });
+    expect(gate.admit(parked)).toBe('held');
+
+    mode = ApprovalMode.YOLO;
+    expect(gate.reevaluate('approval-mode-changed')).toBe(1);
+    expect(delivered).toEqual([parked]);
   });
 
   it('re-judges a parked message for the session it was parked for', () => {
