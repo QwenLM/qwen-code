@@ -1554,9 +1554,11 @@ export interface ComposeReviewResult {
   remediation: string[];
   /**
    * The FIXes the coverage check withheld because the plan's wall would
-   * refuse the build they name, each with the gate's arithmetic — printed
-   * to stderr as `NOTE:` lines beside the FIX lines, never rendered into
-   * the body. A gap the body discloses with no FIX beside it is explained
+   * refuse the build they name, each with the gate's arithmetic — and the
+   * one repair that is named but never performed mid-round (selection
+   * drift: re-planning moves the epoch the round's evidence is fenced on).
+   * Printed to stderr as `NOTE:` lines beside the FIX lines, never rendered
+   * into the body. A gap the body discloses with no FIX beside it is explained
    * here, not left to look like an oversight.
    */
   waivedFixes: string[];
@@ -5771,6 +5773,29 @@ function composeReviewBody(
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      // Operator register only, and NOT pushed through `coverageEntries`: that
+      // channel caps (every entry folds into the unreviewed-dimension cap and
+      // the posted "Not reviewed:" list), and a check this new must not be
+      // able to take an Approve away before anyone has seen how often it
+      // fires.
+      //
+      // A NOTE, not a FIX. A `FIX:` line is a repair the skill tells the
+      // orchestrator to perform this round, and re-capturing or re-planning
+      // must NOT be performed mid-round: the plan's mtime is the epoch the
+      // round's prompt records and transcripts are fenced on. So it rides the
+      // channel for repairs that are named and withheld. What is withheld is
+      // exactly that — the suffix does not forbid repairing an unreadable
+      // path, which moves no plan.
+      if (cov.selectionDrift !== null) {
+        waivedFixes.push(
+          // Names the artifact, not a direction: this command prints no
+          // coverage summary, so "the coverage below" pointed at the VOLUME
+          // and CONVERGENCE lines that follow it.
+          `selection drift: ${cov.selectionDrift}. The coverage this round ` +
+            `reports is against the plan as written; do not re-capture or ` +
+            `re-plan mid-round.`,
+        );
+      }
       for (const id of cov.missingChunks) missingReceipts.push(id);
       unplannedDeclared.push(...cov.unplannedDeclarations);
       for (const id of cov.uncoverableChunks) {

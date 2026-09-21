@@ -25,6 +25,8 @@ import {
   mkdirSync,
   utimesSync,
   readdirSync,
+  renameSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,6 +45,8 @@ import {
   findingsFilePath,
 } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
+import { buildSelectionIdentity } from './lib/selection.js';
+import * as selectionModule from './lib/selection.js';
 import { checkCoverageCommand } from './check-coverage.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -173,9 +177,15 @@ function transcript(
      * credit narrows to its ranged reads.
      */
     range?: [number, number];
+    /**
+     * The diff path the tool calls name, for a fixture whose plan points at a
+     * real file instead of the module's `DIFF` constant.
+     */
+    toolPath?: string;
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const diffPath = opts.toolPath ?? DIFF;
   const pointedAtBriefs = [
     ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
   ].map((m) => m[1]);
@@ -204,11 +214,11 @@ function transcript(
                 name: 'read_file',
                 args: opts.range
                   ? {
-                      file_path: DIFF,
+                      file_path: diffPath,
                       offset: opts.range[0],
                       limit: opts.range[1],
                     }
-                  : { file_path: DIFF },
+                  : { file_path: diffPath },
               },
             },
           ],
@@ -3331,5 +3341,312 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     // silently dropping recovered whole-diff work (verify, reverse-audit)
     // from the continuity count.
     expect(r.recoveredAgents).toBe(3);
+  });
+});
+
+describe('coverage — a drifted selection identity, end to end', () => {
+  // The plan carries a `selection` identity (as every capture command writes —
+  // see lib/selection.ts) bound to a REAL diff file, and the file is rewritten
+  // after the agents ran. Coverage still computes, and computes the same
+  // thing: the check reports, and nothing reads the report to decide anything.
+  // Not ASCII, on purpose: the identity digests the decoded TEXT, and a
+  // reader that decoded the file any other way than the writers do would
+  // agree with them on every ASCII fixture and report drift on real diffs.
+  const diffText =
+    'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+const s = "变更 — é";\n';
+
+  /** A compliant fully-covered run over a plan with a real identity. */
+  function identityRun(): { p: string; diffPath: string } {
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(diffPath, diffText);
+    const chunks = [
+      { id: 1, startLine: 1, endLine: 100 },
+      { id: 2, startLine: 101, endLine: 200 },
+    ];
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 5000,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks,
+        selection: buildSelectionIdentity(diffText, chunks),
+      }),
+    );
+    // `good()` names the module's `DIFF` constant, a path that does not
+    // exist; these prompts name the fixture's own file.
+    const goodHere = (c: number) =>
+      `You are reviewing chunk ${c} of 2.\n` +
+      `read_file(file_path="${chunkBrief(c)}")\n` +
+      `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
+    for (const c of [1, 2]) built(p, c, goodHere(c));
+    satisfyRoster(p);
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+    transcript('a1', goodHere(1), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2', goodHere(2), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+    });
+    return { p, diffPath };
+  }
+
+  it('reports no drift for a plan that carries no identity', () => {
+    // Every other fixture in this file writes a plan without one — they stand
+    // in for plans written before the field existed, and those must not
+    // narrate a defect.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    expect(coverageFromTranscripts(plan(), ENV).selectionDrift).toBeNull();
+  });
+
+  it('reports no drift when the identity-carrying diff is unchanged', () => {
+    // The control for the two tests below: a reader digesting the wrong text
+    // would report drift on rewritten diffs as expected AND on unchanged
+    // ones, and only this goes red.
+    const { p } = identityRun();
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.selectionDrift).toBeNull();
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('reports the drift and moves nothing else', () => {
+    const { p, diffPath } = identityRun();
+    const before = coverageFromTranscripts(p, ENV);
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const after = coverageFromTranscripts(p, ENV);
+    expect(after.selectionDrift).toMatch(/diff file has changed/);
+    // Report-only, stated as strongly as it can be: every other field of the
+    // report is what it was before the diff moved.
+    expect({ ...after, selectionDrift: null }).toEqual(before);
+  });
+
+  it('reports a missing diff file rather than reading it as a match', () => {
+    // `null` means the identity was checked and everything matched. A file
+    // that is gone was not checked — and a swept diff is the one case where
+    // re-capturing is the repair.
+    const { p, diffPath } = identityRun();
+    rmSync(diffPath);
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).toMatch(/is gone/);
+    expect(said).toMatch(/re-capture the diff and re-plan/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'names a diff replaced by something that is not a file as replaced',
+    () => {
+      // Every capture command writes a regular file, so a directory at the
+      // path means the file was removed and something else put there — the
+      // same mutation as a missing file, with the same repair.
+      const { p, diffPath } = identityRun();
+      rmSync(diffPath);
+      mkdirSync(diffPath);
+
+      const said = coverageFromTranscripts(p, ENV).selectionDrift;
+      expect(said).toMatch(/is no longer a regular file/);
+      expect(said).toMatch(/re-capture the diff and re-plan/);
+      expect(said).not.toMatch(/may not have moved/);
+    },
+  );
+
+  it('calls a path with nothing at it gone, however the platform says so', () => {
+    // A path THROUGH a regular file is ENOTDIR here and ENOENT on Windows.
+    // Either way no file can be there, and the repair is the same.
+    const { p, diffPath } = identityRun();
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        diffPathAbsolute: join(diffPath, 'through-a-file.diff'),
+      }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).toMatch(/is gone/);
+    expect(said).toMatch(/re-capture the diff and re-plan/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a symlink at the diff path to the file it names',
+    () => {
+      const { p, diffPath } = identityRun();
+      const real = join(dir, 'real.diff');
+      renameSync(diffPath, real);
+      symlinkSync(real, diffPath);
+
+      expect(coverageFromTranscripts(p, ENV).selectionDrift).toBeNull();
+    },
+  );
+
+  it('says so, rather than throwing, when the check itself gives out', () => {
+    // A throw out of the coverage walk is a coverage failure, and that caps:
+    // a report-only check must not be able to cost a verdict. Whatever goes
+    // wrong past the read comes back as a sentence.
+    const { p } = identityRun();
+    const spy = vi
+      .spyOn(selectionModule, 'selectionDrift')
+      .mockImplementation(() => {
+        throw new RangeError('Invalid string length');
+      });
+    try {
+      const r = coverageFromTranscripts(p, ENV);
+      expect(r.selectionDrift).toMatch(/could not be checked/);
+      expect(r.selectionDrift).toMatch(/re-plan$/);
+      expect(r.ok).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('names a chunk range that is not numbers, and does not throw on it', () => {
+    // A parsed plan can hold anything where a line number belongs, and only
+    // ids are checked at plan read. 6000 levels of nesting overflow the
+    // serialiser the digest uses: thrown from here, a report-only check
+    // became a coverage failure that caps.
+    const { p } = identityRun();
+    // Spliced in as text: the parser takes any depth, and the serialiser —
+    // which is the point — does not, so the fixture cannot be stringified.
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    planJson.chunks[1].endLine = 'DEEP';
+    const deep = `${'{"a":'.repeat(6000)}1${'}'.repeat(6000)}`;
+    writeFileSync(p, JSON.stringify(planJson).replace('"DEEP"', deep));
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    let said: string | null = null;
+    expect(() => {
+      said = coverageFromTranscripts(p, ENV).selectionDrift;
+    }).not.toThrow();
+    expect(said).toMatch(/not a pair of numbers/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'calls a symlink loop at the path replaced, not unreadable',
+    () => {
+      const { p, diffPath } = identityRun();
+      rmSync(diffPath);
+      symlinkSync(diffPath, diffPath);
+
+      const said = coverageFromTranscripts(p, ENV).selectionDrift;
+      expect(said).toMatch(/is no longer a regular file/);
+      expect(said).toMatch(/re-capture the diff and re-plan/);
+    },
+  );
+
+  it('names the failure of a read that failed for any other reason', () => {
+    // A path Node itself refuses, standing in for the class (EACCES, EIO): a
+    // file that is there and cannot be read may not have moved, and the
+    // message says which failure it was. Chosen because it is the same on
+    // every platform.
+    const { p, diffPath } = identityRun();
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({ ...planJson, diffPathAbsolute: `${diffPath}\u0000x` }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).toMatch(/could not be read \(ERR_INVALID_ARG_VALUE\)/);
+    expect(said).toMatch(/may not have moved/);
+    expect(said).not.toMatch(/is gone/);
+  });
+
+  it('does not let a path from the plan open a second stderr line', () => {
+    // The path is plan JSON, and a plan is a file anything can write.
+    // Interpolated raw, a newline in it forged an `ERROR:` line on the
+    // channel the orchestrator reads repairs from, and an ESC reached the
+    // terminal as an escape sequence. Which branch names the path differs by
+    // platform (these characters are not legal in a Windows filename); that
+    // it is named inertly must not.
+    const { p } = identityRun();
+    const hostile = join(dir, 'x\nERROR forged line\u001b[2K\u202e.diff');
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({ ...planJson, diffPathAbsolute: hostile }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    // eslint-disable-next-line no-control-regex
+    expect(said).not.toMatch(/[\u0000-\u001f\u007f]/);
+    expect(said?.split('\n')).toHaveLength(1);
+    // A bidi override survives JSON quoting and is what `inertPath` is for…
+    expect(said).not.toContain('\u202e');
+    // …and the quoting is what keeps prose in a path reading as the path.
+    expect(said).toMatch(/the diff file at "[^"]*ERROR forged line[^"]*" /);
+  });
+
+  it('does not echo a path of unbounded length', () => {
+    const { p } = identityRun();
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        diffPathAbsolute: join(dir, 'a'.repeat(100_000)),
+      }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).not.toBeNull();
+    expect(said!.length).toBeLessThan(1000);
+  });
+
+  it('prints the drift as a NOTE scoped to the whole report, exit unchanged', () => {
+    const { p, diffPath } = identityRun();
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+
+      const lines = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]));
+      const note = lines.find((l) => l.includes('diff file has changed'));
+      expect(note).toBeDefined();
+      expect(note).toMatch(/^NOTE: /);
+      // "The summary line above" has to be true: the NOTE follows it.
+      expect(lines.indexOf(note!)).toBeGreaterThan(
+        lines.findIndex((l) => l.startsWith('Coverage:')),
+      );
+      expect(lines.findIndex((l) => l.startsWith('Coverage:'))).not.toBe(-1);
+      // The summary fraction above the NOTE is the very number a moved diff
+      // qualifies, so the caveat names it rather than only what follows.
+      expect(note).toContain('the summary line above');
+      expect(lines.some((l) => l.startsWith('ERROR:'))).toBe(false);
+      expect(process.exitCode).toBe(prevExit);
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 });

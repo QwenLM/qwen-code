@@ -31,6 +31,7 @@ import {
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
+import { buildSelectionIdentity } from './lib/selection.js';
 import {
   LEDGER_MAX_CLOSED,
   LEDGER_MAX_FILE,
@@ -21251,5 +21252,75 @@ describe('the fix-induced marking behind a source tag (#10291, review round 2)',
       id: 'R3-2',
       title: '[probe] the fix opened a new gap',
     });
+  });
+});
+
+describe('selection drift — report-only, end to end', () => {
+  /**
+   * `coveredPlan()` with the identity a capture command would have recorded
+   * for it, added in place and backdated again so the transcripts stay newer
+   * than the plan.
+   */
+  function coveredPlanWithIdentity(): string {
+    const p = coveredPlan();
+    const planJson = JSON.parse(readFileSync(p, 'utf8')) as {
+      chunks: Array<{ id: number; startLine: number; endLine: number }>;
+    };
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        selection: buildSelectionIdentity(
+          readFileSync(DIFF, 'utf8'),
+          planJson.chunks,
+        ),
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    return p;
+  }
+
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('says nothing while the diff is what the plan was written over', () => {
+    const r = compose(coveredPlanWithIdentity());
+    expect(r.remediation.join(' ')).not.toContain('selection drift:');
+    expect(r.waivedFixes.join(' ')).not.toContain('selection drift:');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('lands among the NOTEs, caps nothing, and moves neither event nor body', () => {
+    // The diff rewritten AFTER the agents ran — the failure the identity
+    // exists to catch — disclosed on the operator's channel, and wired to
+    // nothing that caps or posts.
+    const p = coveredPlanWithIdentity();
+    const before = compose(p);
+    writeFileSync(DIFF, `${readFileSync(DIFF, 'utf8')}+moved under the plan\n`);
+
+    const after = compose(p);
+    const line = after.waivedFixes.find((l) =>
+      l.startsWith('selection drift:'),
+    );
+    expect(line).toMatch(/diff file has changed/);
+    // A NOTE, not a FIX: the skill performs FIX lines as this round's
+    // repairs, and re-planning mid-round orphans the round's own evidence.
+    expect(after.remediation.join(' ')).not.toContain('selection drift');
+    expect(line).toContain('do not re-capture or re-plan mid-round');
+    // No direction: `compose-review` prints no coverage summary, and what
+    // follows its NOTE lines on stderr is VOLUME and CONVERGENCE.
+    expect(line).toContain('The coverage this round reports');
+    expect(line).not.toMatch(/coverage (below|above)/);
+    expect(after.cappedBy).toEqual([]);
+    expect(after.event).toBe('APPROVE');
+    expect(after.event).toBe(before.event);
+    expect(after.body).toBe(before.body);
   });
 });
