@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { buildDiffPlan } from './diff-plan.js';
 import { buildPlanReport, stringifyPlanReport } from './report.js';
+import { selectionDrift } from './selection.js';
 import { makeDiff } from './test-utils.js';
 
 /** A diff that edits an existing file: `ctx` context lines then `add` new ones. */
@@ -181,6 +182,24 @@ describe('buildPlanReport', () => {
     expect(report.selection.sourceArtifactSha256).toBe(
       createHash('sha256').update(diff, 'utf8').digest('hex'),
     );
+  });
+
+  it('writes an identity its own reader accepts, through the plan file', () => {
+    // Writer to reader, end to end: every other test of the reader builds the
+    // identity by hand, and every other test of the writer checks only the
+    // text digest — so an identity recorded over the wrong chunk list passed
+    // them all, and would have reported "the plan was edited" on every plan
+    // every capture command writes.
+    const diff =
+      editFile('src/heavy.ts', 3, 900) + makeDiff('src/light.ts', 20);
+    const report = planReportOf(diff, () => 30);
+    expect(report.chunks.length).toBeGreaterThan(1);
+    const onDisk = JSON.parse(stringifyPlanReport(report)) as typeof report;
+    expect(selectionDrift(onDisk.selection, diff, onDisk.chunks)).toBeNull();
+    // …and it is a real check: the same identity refuses a moved boundary.
+    expect(
+      selectionDrift(onDisk.selection, diff, onDisk.chunks.slice(1)),
+    ).toMatch(/chunk boundaries do not match/);
   });
 
   it('records the low-effort candidate floor from changed-file count', () => {

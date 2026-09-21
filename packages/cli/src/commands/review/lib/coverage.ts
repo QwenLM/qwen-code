@@ -91,6 +91,7 @@ import {
   verifyBudgetExhausted,
 } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
+import { inertPath } from './paths.js';
 import { selectionDrift, type SelectionDrift } from './selection.js';
 import { shellQuotePath } from './shell-quote.js';
 
@@ -283,11 +284,7 @@ interface Plan {
   selection?: unknown;
 }
 
-function readPlan(path: string): {
-  plan: Plan;
-  mtimeMs: number;
-  drift: SelectionDrift;
-} {
+function readPlan(path: string): { plan: Plan; mtimeMs: number } {
   const plan = JSON.parse(readFileSync(path, 'utf8')) as Plan;
   if (typeof plan?.diffPathAbsolute !== 'string' || !plan.diffPathAbsolute) {
     throw new Error(`coverage: ${path} has no diffPathAbsolute`);
@@ -302,30 +299,90 @@ function readPlan(path: string): {
   if (problem) {
     throw new Error(`coverage: ${path} has ${problem}`);
   }
-  // Does the plan still describe the diff it was planned over? Reported, never
-  // thrown — see `selectionDrift`'s own note on why an unmeasured predicate
-  // does not get to refuse a review. An unreadable diff is not "no drift" on a
-  // plan that carries an identity: `null` means the identity was checked and
-  // everything matched, and a file that cannot be read was not checked. An
-  // identity-less plan checks nothing, so it stays `null` there — the same
-  // absence rule `selectionDrift` itself states.
-  let drift: SelectionDrift = null;
+  return { plan, mtimeMs: statSync(path).mtimeMs };
+}
+
+/**
+ * Does the plan still describe the diff it was planned over? Reported, never
+ * thrown — see `selectionDrift`'s own note on why an unmeasured predicate
+ * does not get to refuse a review. "Never thrown" is literal: whatever goes
+ * wrong in here comes back as a sentence, because a throw out of the coverage
+ * walk is a coverage failure, and that caps.
+ *
+ * Its own function rather than part of `readPlan`, because only the coverage
+ * walk reports it: `verificationGaps` reads the same plan and would hash the
+ * whole diff a second time per compose for a result it discards.
+ *
+ * `null` means the identity was checked and everything matched, so a diff
+ * that cannot be read is not `null` on a plan that carries an identity. An
+ * identity-less plan checks nothing and stays `null` — the same absence rule
+ * `selectionDrift` itself states.
+ */
+function planSelectionDrift(plan: Plan): SelectionDrift {
   const identity = plan.selection;
-  if (identity !== undefined && identity !== null) {
+  if (identity === undefined || identity === null) return null;
+  // The path is the plan's, and a plan is a file anything can write. It goes
+  // through `inertPath` so a control character in it cannot open a second
+  // stderr line or reach the terminal as an escape sequence; it is cut to a
+  // length a path has any business being, because this string travels to
+  // stderr, the composed verdict and the run result; and it is quoted, so
+  // prose inside it reads as part of a path and not as the message.
+  const shown = inertPath(plan.diffPathAbsolute);
+  const at = JSON.stringify(
+    shown.length > 300 ? `${shown.slice(0, 300)}…` : shown,
+  );
+  try {
+    let diffText: string;
     try {
-      drift = selectionDrift(
-        identity,
-        readFileSync(plan.diffPathAbsolute, 'utf8'),
-        plan.chunks,
-      );
-    } catch {
-      drift =
-        `the diff file at ${plan.diffPathAbsolute} could not be read when ` +
-        'the selection identity was checked, so the plan’s chunk ranges ' +
+      // Read the way `diffHashOf` already reads this same path — one plain
+      // read, as bytes, decoded the way every capture command decoded what it
+      // chunked. Deliberately no cleverer than that precedent: in
+      // `compose-review`, whatever can make this read misbehave already
+      // makes that one misbehave whenever a script-lint or test-plan report
+      // is present. `check-coverage` did not open the diff before; it gains
+      // this one read.
+      diffText = readFileSync(plan.diffPathAbsolute).toString('utf8');
+    } catch (err) {
+      // The cause picks the repair. Every capture command writes a regular
+      // file, so a path that is now MISSING, or now something that cannot be
+      // read as a file at all, holds a file that was removed or replaced: the
+      // mutation the identity exists to catch, and re-capturing is its
+      // repair. A file that is there and cannot be read — a mode changed
+      // after the capture, an I/O fault — may never have moved, and sending
+      // the operator to re-capture it spends a review round on the wrong
+      // cause. Same rule as `fetch-pr`'s previous-report read.
+      const replaced = (how: string): string =>
+        `the diff file at ${at} ${how}, so the plan\u2019s chunk ranges ` +
         'could not be verified against it — re-capture the diff and re-plan';
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      // Nothing at the path: the name is missing (ENOENT), or a component
+      // above it is a regular file — ENOTDIR here, ENOENT on Windows, and the
+      // same fact: no file can be there.
+      if (code === 'ENOENT' || code === 'ENOTDIR') return replaced('is gone');
+      // Something at the path that is not a file to read: a directory, a
+      // symlink loop, a socket where the platform reports one this way.
+      if (code === 'EISDIR' || code === 'ENXIO' || code === 'ELOOP') {
+        return replaced('is no longer a regular file');
+      }
+      return (
+        `the diff file at ${at} could not be read ` +
+        `(${typeof code === 'string' ? code : 'read failed'}) when the ` +
+        'selection identity was checked, so the plan\u2019s chunk ranges ' +
+        'could not be verified against it — the file may not have moved: ' +
+        'repair the read and check again before re-capturing'
+      );
     }
+    return selectionDrift(identity, diffText, plan.chunks);
+  } catch {
+    // Not a read failure, and not to be reported as one: the check itself
+    // gave out. No plan is known to reach this — the boundary validation in
+    // `selectionDrift` stops the inputs that used to — and it stays so that
+    // one that does is a sentence, not a throw.
+    return (
+      'the plan\u2019s selection identity could not be checked against ' +
+      `the diff file at ${at} — re-plan`
+    );
   }
-  return { plan, mtimeMs: statSync(path).mtimeMs, drift };
 }
 
 /**
@@ -486,7 +543,7 @@ export function coverageFromTranscripts(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): CoverageFromTranscripts {
-  const { plan, mtimeMs, drift } = readPlan(planPath);
+  const { plan, mtimeMs } = readPlan(planPath);
   // The RUN's transcripts, not the session's: a resumed run (`--resume`)
   // continues in a new session, and the interrupted attempt's evidence lives
   // under the session id the run ledger recorded. Same fence (the plan's
@@ -1210,7 +1267,7 @@ export function coverageFromTranscripts(
         .map((f) => f?.path)
         .filter((p): p is string => typeof p === 'string' && p !== ''),
     })),
-    selectionDrift: drift,
+    selectionDrift: planSelectionDrift(plan),
   };
 }
 

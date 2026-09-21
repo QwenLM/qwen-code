@@ -249,7 +249,6 @@ describe('plan-diff', () => {
         .update(readFileSync(diffPath, 'utf8'), 'utf8')
         .digest('hex'),
     );
-    expect(plan.selection.chunkCount).toBe(plan.chunks.length);
   });
 
   it('carries the PR identity when told to — the roster requires Agent 0 from it', () => {

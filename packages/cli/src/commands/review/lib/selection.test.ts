@@ -13,9 +13,6 @@
 // moved — the review certifies chunk 7 and the agent read a different one.
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   buildSelectionIdentity,
   selectionDigest,
@@ -39,17 +36,16 @@ const CHUNKS = [chunk(1, 1, 100), chunk(2, 101, 200)];
 const DIFF = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+x\n';
 
 describe('selectionDigest', () => {
-  it('keeps its separator an escape in source: no raw NUL byte in the file', () => {
-    // The separator is a NUL by design (no `id:start-end` field can contain
-    // one), but it must be WRITTEN as an escape: a literal 0x00 in the source
-    // made git classify this whole module as binary — invisible in GitHub's
-    // diff view, unsearchable with git grep, unreviewable inline. The escape
-    // is byte-identical at runtime, so the digests below pin the behavior and
-    // this pins the file.
-    const src = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), 'selection.ts'),
+  it('is this exact digest for this chunk list, under this schema version', () => {
+    // Every other test here compares a digest with another digest, so none of
+    // them notices the canonical form changing — and a plan an older build
+    // wrote would then be reported as "edited after it was written". The
+    // form is part of `qwen.review-selection/v1`: change it, and this vector
+    // and the schema version change with it.
+    expect(SELECTION_SCHEMA_VERSION).toBe('qwen.review-selection/v1');
+    expect(selectionDigest(CHUNKS)).toBe(
+      '8485afc714264017a7114242b7bd0c185c37ec1dc6015c9a9d74dd66440d5aed',
     );
-    expect(src.includes(0)).toBe(false);
   });
 
   it('is stable across the order the chunks were emitted in', () => {
@@ -76,6 +72,36 @@ describe('selectionDigest', () => {
     );
   });
 
+  it('cannot be made to spell two different chunk lists the same way', () => {
+    // Hand-joined, `1:1-1` + `12:5-9` and `1:1-11` + `2:5-9` run together
+    // into one string once the separator goes…
+    expect(selectionDigest([chunk(1, 1, 1), chunk(12, 5, 9)])).not.toBe(
+      selectionDigest([chunk(1, 1, 11), chunk(2, 5, 9)]),
+    );
+    // …and no separator survives a reader's input: it digests a PARSED plan,
+    // where nothing has checked that `endLine` is a number, so a string can
+    // carry the separator itself and fold two chunks into one.
+    const two = [chunk(1, 1, 100), chunk(2, 101, 200)];
+    const folded = [
+      { id: 1, startLine: 1, endLine: '100\u00002:101-200' },
+    ] as unknown as DiffChunk[];
+    expect(selectionDigest(folded)).not.toBe(selectionDigest(two));
+  });
+
+  it('changes when only a start moves', () => {
+    expect(selectionDigest([chunk(1, 1, 100), chunk(2, 101, 200)])).not.toBe(
+      selectionDigest([chunk(1, 1, 100), chunk(2, 102, 200)]),
+    );
+  });
+
+  it('does not throw on a field a template literal cannot print', () => {
+    // A parsed plan can hold `{ "toString": 1 }` where a number belongs.
+    const odd = [
+      { id: 1, startLine: { toString: 1 }, endLine: 100 },
+    ] as unknown as DiffChunk[];
+    expect(() => selectionDigest(odd)).not.toThrow();
+  });
+
   it('distinguishes one chunk from two that tile the same lines', () => {
     expect(selectionDigest([chunk(1, 1, 200)])).not.toBe(
       selectionDigest(CHUNKS),
@@ -84,7 +110,7 @@ describe('selectionDigest', () => {
 });
 
 describe('selectionDrift', () => {
-  const identity = buildSelectionIdentity(DIFF, CHUNKS, 200);
+  const identity = buildSelectionIdentity(DIFF, CHUNKS);
 
   it('reports nothing when the diff and the chunks are unchanged', () => {
     expect(selectionDrift(identity, DIFF, CHUNKS)).toBeNull();
@@ -108,20 +134,11 @@ describe('selectionDrift', () => {
 
   it('names the boundaries when the plan was edited in place', () => {
     const edited = [chunk(1, 1, 120), chunk(2, 121, 200)];
-    expect(selectionDrift(identity, DIFF, edited)).toMatch(
-      /chunk boundaries do not match/,
-    );
-  });
-
-  it('reports a count mismatch that survives an equal digest', () => {
-    // Reachable only through a hand-edited identity, which is the point: the
-    // count is a second, independent statement of the denominator, and a
-    // reader that trusted the digest alone would take a rewritten one at its
-    // word.
-    const lying = { ...identity, chunkCount: 99 };
-    expect(selectionDrift(lying, DIFF, CHUNKS)).toMatch(
-      /records 99 chunk\(s\) but carries 2/,
-    );
+    const said = selectionDrift(identity, DIFF, edited);
+    expect(said).toMatch(/chunk boundaries do not match/);
+    // The repair is the plan's, not the diff's: the diff matched.
+    expect(said).toMatch(/— re-plan$/);
+    expect(said).not.toMatch(/re-capture/);
   });
 
   it('refuses an identity from a schema it cannot read', () => {
@@ -130,8 +147,13 @@ describe('selectionDrift', () => {
     // noticing it stopped.
     const future = { ...identity, schemaVersion: 'qwen.review-selection/v2' };
     const said = selectionDrift(future, DIFF, CHUNKS);
-    expect(said).toMatch(/cannot read/);
+    expect(said).toMatch(/cannot\s+read/);
     expect(said).toContain(SELECTION_SCHEMA_VERSION);
+    // The value found is plan JSON, and this string reaches a terminal and
+    // an orchestrator: it is not echoed, whatever it holds.
+    expect(said).not.toContain('v2');
+    const hostile = { ...identity, schemaVersion: 'x\u202e'.repeat(50_000) };
+    expect(selectionDrift(hostile, DIFF, CHUNKS)).toBe(said);
   });
 
   it('names an identity whose digests are missing as unreadable, not as drift', () => {
@@ -145,25 +167,97 @@ describe('selectionDrift', () => {
     expect(said).not.toMatch(/diff file has changed/);
   });
 
+  it('names a changed diff first when the boundaries moved as well', () => {
+    // Re-capturing is the repair that also fixes the other; "re-plan" alone
+    // would leave the plan over a diff that still moved.
+    const edited = [chunk(1, 1, 120), chunk(2, 121, 200)];
+    expect(selectionDrift(identity, `${DIFF}+more\n`, edited)).toMatch(
+      /diff file has changed/,
+    );
+  });
+
+  it.each([
+    ['empty', ''],
+    ['truncated', 'abc123'],
+    ['re-cased', 'A'.repeat(64)],
+    ['over-long', 'a'.repeat(65)],
+    ['prefixed', `x${'a'.repeat(64)}`],
+  ])(
+    'names a %s digest as unreadable, not as a diff that changed',
+    (_shape, bad) => {
+      // A string that is not a sha256 compares unequal to the actual hash
+      // just as `undefined` does — and would send the operator to re-capture
+      // a diff that never moved. Either half, since both are compared.
+      for (const field of ['sourceArtifactSha256', 'selectionSha256']) {
+        const said = selectionDrift(
+          { ...identity, [field]: bad },
+          DIFF,
+          CHUNKS,
+        );
+        expect(said).toMatch(/not a sha256/);
+        expect(said).not.toMatch(/has changed|do not match/);
+      }
+    },
+  );
+
+  it('names a missing boundary digest as unreadable too', () => {
+    const { selectionSha256: _dropped, ...half } = identity;
+    expect(selectionDrift(half, DIFF, CHUNKS)).toMatch(/missing its digests/);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['non-finite', Number.POSITIVE_INFINITY],
+    ['a string', '100'],
+  ])('names a %s line number as that, instead of digesting it', (_n, bad) => {
+    // JSON folds a missing boundary, `null` and `Infinity` into one spelling,
+    // so digested they would be three different chunk lists under one digest
+    // — and `Infinity` is a range every read "covers". Either end of the
+    // range, since both are digested.
+    for (const field of ['startLine', 'endLine']) {
+      const odd = [
+        chunk(1, 1, 100),
+        { ...chunk(2, 101, 200), [field]: bad },
+      ] as unknown as DiffChunk[];
+      const said = selectionDrift(identity, DIFF, odd);
+      expect(said).toMatch(/not a pair of numbers/);
+      expect(said).toMatch(/re-plan$/);
+    }
+  });
+
   it('refuses a `selection` that is not an object', () => {
     expect(selectionDrift('nope', DIFF, CHUNKS)).toMatch(/not an object/);
     expect(selectionDrift([identity], DIFF, CHUNKS)).toMatch(/not an object/);
+    // Every message names its repair; this one had none.
+    expect(selectionDrift('nope', DIFF, CHUNKS)).toMatch(/re-plan$/);
   });
 });
 
 describe('buildSelectionIdentity', () => {
-  it('records the denominator beside its digest', () => {
-    const id = buildSelectionIdentity(DIFF, CHUNKS, 200);
+  it('records the schema and the two digests, and nothing else', () => {
+    // Nothing else, on purpose: a count cannot disagree once the boundary
+    // digest matches, and a line count would duplicate the plan's own. A
+    // field no reader checks can only ever be wrong.
+    const id = buildSelectionIdentity(DIFF, CHUNKS);
+    expect(Object.keys(id).sort()).toEqual([
+      'schemaVersion',
+      'selectionSha256',
+      'sourceArtifactSha256',
+    ]);
     expect(id.schemaVersion).toBe(SELECTION_SCHEMA_VERSION);
-    expect(id.chunkCount).toBe(2);
-    expect(id.diffLines).toBe(200);
     expect(id.sourceArtifactSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(id.selectionSha256).toBe(selectionDigest(CHUNKS));
   });
 
-  it('digests the diff TEXT, so identical text hashes identically', () => {
-    const a = buildSelectionIdentity(DIFF, CHUNKS, 200);
-    const b = buildSelectionIdentity(`${DIFF}`, CHUNKS, 200);
-    expect(a.sourceArtifactSha256).toBe(b.sourceArtifactSha256);
+  it('digests the diff TEXT: a different text is a different identity', () => {
+    // Against a digest that ignores its input — a constant, the chunk list,
+    // a re-encoded form — which a same-text comparison cannot tell apart
+    // from the real thing.
+    const a = buildSelectionIdentity(DIFF, CHUNKS);
+    const moved = buildSelectionIdentity(`${DIFF}+moved\n`, CHUNKS);
+    expect(moved.sourceArtifactSha256).not.toBe(a.sourceArtifactSha256);
+    // …and the boundary digest does not move with the text.
+    expect(moved.selectionSha256).toBe(a.selectionSha256);
   });
 });

@@ -1798,6 +1798,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // A write failure here is degradation, not a tiling failure: the
           // inner catch must not swallow it into "both ranges refuse to tile"
           // and ship plan chunks beside a null `diffPath`.
+          // `publish` is the sole writer of `diffText` as well as of the
+          // path, so publishing BEFORE the swap is also what keeps the plan's
+          // recorded selection identity (`buildPlanReport` below digests
+          // `diffText`) over the text `rescued` was chunked from and the
+          // bytes now on disk — not over the delta this branch abandoned.
           if (publish(fullBytes)) {
             plan = rescued;
             scopedDelta = false;

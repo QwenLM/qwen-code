@@ -2260,6 +2260,17 @@ describe('fetch-pr report assembly', () => {
     // diffPath leak this PR shipped and fixed.
     expect(writtenDiff()).toBe(NARROWED);
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
+    // …and the recorded identity is over that payload. `fullText` is in scope
+    // at the same call site and is a `string` too: recorded over it, the
+    // coverage reader reports drift on every incremental round of a plan
+    // nothing touched.
+    const narrowedSha = createHash('sha256')
+      .update(NARROWED, 'utf8')
+      .digest('hex');
+    expect(
+      (report.selection as { sourceArtifactSha256: string })
+        .sourceArtifactSha256,
+    ).toBe(narrowedSha);
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(NARROWED.trimEnd().split('\n').length);
@@ -3176,6 +3187,15 @@ describe('fetch-pr report assembly', () => {
     // The rescue republished the FULL range — the file agents read must be
     // the range the report now describes.
     expect(writtenDiff()).toBe(FULL_DIFF);
+    // …and so must the recorded identity. This is the one branch where the
+    // diff text is reassigned AFTER a plan was already built, which is where
+    // a digest of the wrong text hides: recorded over the delta, the
+    // coverage reader would report drift on every rescued round.
+    const sha = (text: string): string =>
+      createHash('sha256').update(text, 'utf8').digest('hex');
+    const selection = report.selection as { sourceArtifactSha256: string };
+    expect(selection.sourceArtifactSha256).toBe(sha(FULL_DIFF));
+    expect(selection.sourceArtifactSha256).not.toBe(sha(NARROWED));
     // The anchor cannot stay effective over a full-range plan — one round,
     // two scopes is what that would mean for Agent 7's welded --base — and
     // the reason names what actually happened, not a capture that worked.
@@ -4459,7 +4479,11 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     // A different question from `diffSha256` above (see lib/selection.ts):
     // this one is re-checked by the coverage reader against the diff on disk,
     // so it must digest the decoded text the chunks were cut from.
-    const diff = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
+    // Not ASCII: the reader decodes the file as utf8, and a writer that
+    // decoded its bytes any other way would agree with it on an ASCII diff
+    // and report drift on every real one.
+    const diff =
+      'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+const s = "变更 é";\n';
     const { resolveMergeBase } = await import('./lib/merge-base.js');
     const { gitRaw } = await import('./lib/git.js');
     vi.mocked(resolveMergeBase).mockReturnValue({

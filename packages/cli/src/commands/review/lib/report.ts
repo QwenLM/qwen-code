@@ -227,7 +227,7 @@ export function buildPlanReport(
     wrapperSignal: plan.wrapperSignal,
     chunks: plan.chunks,
     files,
-    selection: buildSelectionIdentity(diffText, plan.chunks, plan.diffLines),
+    selection: buildSelectionIdentity(diffText, plan.chunks),
     budget: reviewBudget(
       {
         srcDiffLines: plan.srcDiffLines,

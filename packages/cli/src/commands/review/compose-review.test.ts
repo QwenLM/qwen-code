@@ -20793,7 +20793,6 @@ describe('selection drift — report-only, end to end', () => {
     const p = coveredPlan();
     const planJson = JSON.parse(readFileSync(p, 'utf8')) as {
       chunks: Array<{ id: number; startLine: number; endLine: number }>;
-      diffLines: number;
     };
     writeFileSync(
       p,
@@ -20802,7 +20801,6 @@ describe('selection drift — report-only, end to end', () => {
         selection: buildSelectionIdentity(
           readFileSync(DIFF, 'utf8'),
           planJson.chunks,
-          planJson.diffLines,
         ),
       }),
     );
@@ -20823,21 +20821,31 @@ describe('selection drift — report-only, end to end', () => {
   it('says nothing while the diff is what the plan was written over', () => {
     const r = compose(coveredPlanWithIdentity());
     expect(r.remediation.join(' ')).not.toContain('selection drift:');
+    expect(r.waivedFixes.join(' ')).not.toContain('selection drift:');
     expect(r.event).toBe('APPROVE');
   });
 
-  it('lands in remediation, caps nothing, and moves neither event nor body', () => {
+  it('lands among the NOTEs, caps nothing, and moves neither event nor body', () => {
     // The diff rewritten AFTER the agents ran — the failure the identity
-    // exists to catch — disclosed where the other operator repairs are, and
-    // wired to nothing that caps or posts.
+    // exists to catch — disclosed on the operator's channel, and wired to
+    // nothing that caps or posts.
     const p = coveredPlanWithIdentity();
     const before = compose(p);
     writeFileSync(DIFF, `${readFileSync(DIFF, 'utf8')}+moved under the plan\n`);
 
     const after = compose(p);
-    expect(after.remediation.join(' ')).toMatch(
-      /selection drift: .*diff file has changed/,
+    const line = after.waivedFixes.find((l) =>
+      l.startsWith('selection drift:'),
     );
+    expect(line).toMatch(/diff file has changed/);
+    // A NOTE, not a FIX: the skill performs FIX lines as this round's
+    // repairs, and re-planning mid-round orphans the round's own evidence.
+    expect(after.remediation.join(' ')).not.toContain('selection drift');
+    expect(line).toContain('do not re-capture or re-plan mid-round');
+    // No direction: `compose-review` prints no coverage summary, and what
+    // follows its NOTE lines on stderr is VOLUME and CONVERGENCE.
+    expect(line).toContain('The coverage this round reports');
+    expect(line).not.toMatch(/coverage (below|above)/);
     expect(after.cappedBy).toEqual([]);
     expect(after.event).toBe('APPROVE');
     expect(after.event).toBe(before.event);
