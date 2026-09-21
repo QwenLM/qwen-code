@@ -114,9 +114,9 @@ describe('SubagentManager', () => {
       ]),
       // `buildSubagentContextOverride` now rebuilds the tool registry on
       // its override and copies discovered tools from this parent
-      // registry. The real implementation iterates `source.tools.values()`,
-      // so the stub needs a `tools` Map to avoid a TypeError.
+      // registry. Mirror both discovered-tool maps read by that copy.
       tools: new Map(),
+      mcpAppTools: new Map(),
     } as unknown as ToolRegistry;
 
     // Create mock Config object using test utility
