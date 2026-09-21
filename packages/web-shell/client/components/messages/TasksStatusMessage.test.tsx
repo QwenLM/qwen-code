@@ -973,6 +973,26 @@ describe('TasksStatusMessage workflow details', () => {
     expect(generic.textContent).toContain('Could not update the workflow');
     expect(generic.textContent).not.toContain('socket hang up');
 
+    // Nothing started because the record that keeps a second runner off the
+    // journal could not be written. It arrives as a 503, and it is the one
+    // refusal whose advice is to make the same call again.
+    controlWorkflowTaskMock.mockRejectedValue(
+      Object.assign(new Error('Service Unavailable'), {
+        status: 503,
+        body: {
+          code: 'workflow_not_recorded',
+          error:
+            'Could not record that workflow run wf_1234abcd is running again, so another process could start it a second time. Nothing was started; try again.',
+        },
+      }),
+    );
+    const unrecorded = renderPanel([historical()]);
+    await clickRetry(unrecorded);
+    expect(unrecorded.textContent).toContain('Nothing was started; try again.');
+    expect(unrecorded.textContent).not.toContain(
+      'Could not update the workflow',
+    );
+
     // A conflict from somewhere else in the daemon is not a sentence about
     // this action.
     controlWorkflowTaskMock.mockRejectedValue(

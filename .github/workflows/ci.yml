@@ -1466,23 +1466,23 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      - name: 'Install Playwright Chromium (hosted)'
+      - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         run: |-
-          node node_modules/playwright/cli.js install --with-deps chromium
+          node node_modules/playwright/cli.js install --with-deps chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium
+            node "${nested_cli}" install chromium webkit
           fi
 
-      - name: 'Install Playwright Chromium (self-hosted)'
+      - name: 'Install Playwright Chromium and WebKit (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
         run: |-
-          node node_modules/playwright/cli.js install chromium
+          node node_modules/playwright/cli.js install chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium
+            node "${nested_cli}" install chromium webkit
           fi
 
       - name: 'Choose web-shell Playwright port'
