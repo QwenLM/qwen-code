@@ -8,9 +8,9 @@
 
 ---
 
-> **⚠️ 2026-09-20：本文所有基线数字都是 `v0.24.1` 口径。** `v0.24.2` 含 [#10410](https://github.com/QwenLM/qwen-code/pull/10410)（`70edbf47`）：延迟工具改走 `tool_search` → `tool_call` 桥接，`tools.toolSearch.threshold` 默认 10→0，**按需池不再在开场预加载**。因此 §1 的健康线、§2 的实测样本（21,461 / 46,734 一类）、§5 的预期收益**都必须在 ≥ 0.24.2 上重测之后才能引用**；§6 的成本模型整节作废（见该节顶部告示）；§3 的机制盘点还要补上桥接的另一半 `tool_call`（同样豁免于 `tools.eager`）。重测步骤见 [`docs/verification/context-token-governance/README.md`](../verification/context-token-governance/README.md) 的 §0.1。
+> **⚠️ 2026-09-20：本文所有基线数字都是 `v0.24.1` 口径。** `v0.24.2` 含 [#10410](https://github.com/QwenLM/qwen-code/pull/10410)（`70edbf47`）：延迟工具改走 `tool_search` → `tool_call` 桥接，`tools.toolSearch.threshold` 默认 10→0，**按需池不再在开场预加载**。因此 §1 的健康线、§2 的实测样本（21,461 / 46,734 一类）、§5 的预期收益**都必须在 ≥ 0.24.2 上重测之后才能引用**；§6 的成本模型整节作废（告示就在 `## 6. 成本模型` 标题下面）。§3 的机制盘点**已就地更正**：豁免名单补上了桥接的另一半 `tool_call`（同样豁免于 `tools.eager`），"桥接不完整时的兜底"一行也从"揭示全部"改成了代码的实际行为。重测步骤见 [`docs/verification/context-token-governance/README.md`](../verification/context-token-governance/README.md) 的 §0.1。
 >
-> 连带更正一句：§10 结尾「上游这几个 PR 加起来省下的量，不到这一步的十分之一」是旧口径。按 #10410 之后的归因，**它自己就贡献了约 4.2k**、白名单还剩约 11.4k——那句话现在应读作「上游已交付这笔量的约四分之一，其余仍在部署侧」。
+> 连带更正一句：§10 结尾那句「上游这几个 PR 加起来省下的量，不到这一步的十分之一」是旧口径，**已就地改写**为按 #10410 之后的归因（**它自己就贡献了约 4.2k**、白名单还剩约 11.4k）。
 
 ## 1. 指标：不要用"占窗口百分比"
 
@@ -82,24 +82,24 @@
 
 决定"某个工具的 schema 是否进入首轮请求"的全部机制：
 
-| 机制                            | 位置                                        | 急/懒                      | 是否作用于子 agent                            |
-| ------------------------------- | ------------------------------------------- | -------------------------- | --------------------------------------------- |
-| `shouldDefer=true`              | `tools/tools.ts:233-240`                    | 懒                         | **否**（子 agent 带 `includeDeferred: true`） |
-| `alwaysLoad=true`               | `tools/tools.ts:241-246`                    | 急，覆盖延迟               | —                                             |
-| `tools.eager` 白名单            | `tools/tool-registry.ts:384-419`            | 懒（降级，仍可用）         | **是**                                        |
-| `tools.visible`                 | `config/config.ts:6969-6977`                | 急（强制常驻）             | —                                             |
-| `tools.disabled`                | `tools/tool-registry.ts:289-321`            | 不注册，不可达             | 是                                            |
-| `permissions.deny`（整工具）    | `permissions/permission-manager.ts:848-866` | 不注册，不可达             | 是                                            |
-| `toolSearch.threshold` 预加载   | `core/client.ts:1746-1774`                  | 急，全有全无，仅会话开始   | —                                             |
-| 历史回放揭示                    | `core/client.ts:1783-1822`                  | 恢复会话时急               | —                                             |
-| 无 ToolSearch 时的兜底          | `core/client.ts:1847-1884`                  | 急，**揭示全部**           | —                                             |
-| ToolSearch (`select:` / 关键词) | `tools/tool-search.ts`                      | 懒，**唯一的意图驱动加载** | —                                             |
+| 机制                            | 位置                                                         | 急/懒                                                                                                                  | 是否作用于子 agent                            |
+| ------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `shouldDefer=true`              | `tools/tools.ts:233-240`                                     | 懒                                                                                                                     | **否**（子 agent 带 `includeDeferred: true`） |
+| `alwaysLoad=true`               | `tools/tools.ts:241-246`                                     | 急，覆盖延迟                                                                                                           | —                                             |
+| `tools.eager` 白名单            | `tools/tool-registry.ts:384-419`                             | 懒（降级，仍可用）                                                                                                     | **是**                                        |
+| `tools.visible`                 | `config/config.ts:6969-6977`                                 | 急（强制常驻）                                                                                                         | —                                             |
+| `tools.disabled`                | `tools/tool-registry.ts:289-321`                             | 不注册，不可达                                                                                                         | 是                                            |
+| `permissions.deny`（整工具）    | `permissions/permission-manager.ts:848-866`                  | 不注册，不可达                                                                                                         | 是                                            |
+| `toolSearch.threshold` 预加载   | `core/client.ts:1746-1774`                                   | 急，全有全无，仅会话开始                                                                                               | —                                             |
+| 历史回放揭示                    | `core/client.ts` 的 `revealDeferredToolsReferencedInHistory` | 恢复会话时急                                                                                                           | —                                             |
+| 桥接不完整时的兜底              | `core/client.ts` 的 `resolveDeferredToolsForReminder`        | 急，但**只揭示普通延迟工具**；被 `tools.eager` 降级的那批仍扣留（仍注册，按名直呼走正常审批），只记一次 `console.warn` | —                                             |
+| ToolSearch (`select:` / 关键词) | `tools/tool-search.ts`                                       | 懒，**唯一的意图驱动加载**                                                                                             | —                                             |
 
 几条容易踩错的语义：
 
 - **审批模式和 `permissions.allow` 不省 token。** `permission-manager.ts:798-801` 原文："`permissions.allow` is pure auto-approval: it never demotes, hides, or removes a tool"。
 - **`tools.eager` 不是禁用。** 白名单外的工具仍然注册、仍然可用，只是首轮不发 schema，模型通过 `tool_search` 取。
-- **`tools.eager` 有一组豁免**：`mcp__*`、`structured_output`、plan 相关、`ask_user_question`、`task_stop`、`tool_search`。要省这几个只能 `permissions.deny`。
+- **`tools.eager` 有一组豁免**（判据是 `permission-manager.ts` 的 `isExemptFromEagerAllowList`）：`structured_output`、plan 生命周期三件（`enter_plan_mode` / `exit_plan_mode` / `ask_user_question`）、`task_stop`、`tool_search`、**`tool_call`（#10410 新增的桥接另一半，2026-09-20 就地补上）**、`mcp__*`、`computer_use__*`。**豁免 ≠ 常驻**：豁免只说明"写进白名单也无效"，而 `task_stop`、`mcp__*`、`computer_use__*` 自身 `shouldDefer=true`，本来就不进首轮请求，所以也不占常驻地板。要真去掉某个豁免工具，用整工具 `permissions.deny`、`tools.disabled` 或 `--exclude-tools`；桥接那一对还可以用 `tools.toolSearch.enabled: false` 一次摘掉两半，代价见上表最后一行。
 - **被 `tools.eager` 降级的工具会同时被排除出预加载候选集**（`tool-registry.ts:1061`）。因此**在没有 MCP 工具时，`tools.eager` 一个开关就够了，不必再设 `threshold`**；MCP 豁免于 eager 降级，只受 threshold 管。
 
 ### skill 的三层（外加条件激活）
@@ -153,7 +153,7 @@
 
 延迟工具的清单会以 `名字 + 描述首行（截断到 160 字符）` 注入 prelude（`environmentContext.ts:131-142`），所以工具命名和描述首行要能自解释；另有 `searchHint` 字段（`tools.ts:252`）可改善 ToolSearch 关键词召回，且不占常驻 token。
 
-**不需要意图分类器。** ToolSearch 本身就是模型驱动的按需加载，揭示结果在会话内复用、压缩后保留（`client.ts` 的 `resetChat` 注释：只有 `/clear` 清空），延迟工具提醒就是兜底。若上线后 `tool_search` 调用率超过 §6 的盈亏线，退路是让部署后端在**创建会话时**按入口场景（文件分析 / SQL 查询等）设置 `tools.visible`：会话级、零路由开销，也不会在会话中途打掉缓存。
+**不需要意图分类器。** ToolSearch 本身就是模型驱动的按需加载，揭示结果在会话内复用、压缩后保留（`client.ts` 的 `resetChat` 注释：只有 `/clear` 清空），延迟工具提醒就是兜底。若上线后 `tool_search` 调用率偏高（§6 那条"盈亏线"已随该节整节作废，≥ 0.24.2 上要按桥接语义重推，别拿旧阈值当判据），退路是让部署后端在**创建会话时**按入口场景（文件分析 / SQL 查询等）设置 `tools.visible`：会话级、零路由开销，也不会在会话中途打掉缓存。
 
 **常驻工具的描述精简（可选，收益小）。** 延迟工具揭示前不占 token，所以只有白名单内的工具值得精简。白名单生效后最大的常驻项是 `run_shell_command`（1,495）：其描述（`shell.ts` 的 `getShellToolDescription`）大半是开发场景示例（dev server、build watcher、`mongod`/`redis-server`、`npm install`、`git push`）和 good/bad 代码块，可换成一两个数据处理示例；**要保留**的是调用约定——超时与 `is_background`、用 `task_stop` 而非按进程名 kill、引号与命令串联、优先专用文件工具、避免 `cd`，删了会直接表现为调用失败。实现上沿用已有写法：`AgentTool.updateDescriptionAndSchema` 已经按 `isAgentTeamEnabled()` / `isTodoWriteEnabled()` 条件拼装描述，给少数大工具加一个由开关控制的精简变体即可，不要在部署侧整段覆盖描述（和替换系统提示词一样会与上游脱节）。跟进在 #12054：triage 已把范围收窄为先治 `agent`（按 `workflow` 的做法外置委派说明，并在 `agent.test.ts` 加描述体积预算），再把 `workflow.test.ts` 的预算测试推广到其余常驻工具；合并文件工具另行讨论。
 
@@ -208,6 +208,8 @@ extension 的内容按性质分三层：
 
 ## 6. 成本模型
 
+> **⚠️ 本节整节作废（含下面的 `threshold: 0` 小节），不要引用其中任何数字。** [#10410](https://github.com/QwenLM/qwen-code/pull/10410) 已于 2026-09-20 合入（`70edbf47`）：`tool_search` → `tool_call` 桥接取代了"揭示即改写声明列表"，声明列表保持字节稳定，**中途发现工具不再作废前缀缓存**，`tools.toolSearch.threshold` 的默认值随之改为 `0`。因此本节的每一个数字与结论——下面这张建立在空载 46.7k 上的每轮 ¥ 表、"**缓存命中率决定收益相差约 5 倍**"、以及 `threshold: 0` 小节里的"平衡点约 40 轮"、"一次揭示 ¥0.28–0.40"、"`tool_search` ≤2 次/会话"——**都不再成立**：延迟加载现在的代价是首次使用前多一次往返，而不是一次前缀重算。要重新论证"预加载是否值得"，必须按桥接语义重推，并在含 #10410 的版本上重新取基线。本节保留只为记录当时的推理过程。
+
 以 1M 窗口、输入 ¥12/百万 token、隐式缓存命中 20%（¥2.4/百万）计：
 
 |                          |   每轮 |
@@ -221,7 +223,7 @@ extension 的内容按性质分三层：
 
 ### `threshold: 0` 不是白捡的收益
 
-> **⚠️ 本小节的成本模型已作废。** [#10410](https://github.com/QwenLM/qwen-code/pull/10410) 已于 2026-09-20 合入（`70edbf47`）：`tool_search` → `tool_call` 桥接取代了"揭示即改写声明列表"，声明列表保持字节稳定，**中途发现工具不再作废前缀缓存**，`tools.toolSearch.threshold` 的默认值随之改为 `0`。因此下面这笔账的每一个数字与结论（含"平衡点约 40 轮"、"一次揭示 ¥0.28–0.40"、"tool_search ≤2 次/会话"）**都不再成立**：延迟加载现在的代价是首次使用前多一次往返，而不是一次前缀重算。要重新论证"预加载是否值得"，必须按桥接语义重推，并在含 #10410 的版本上重新取基线。
+> **⚠️ 本小节同样作废**，判据见 `## 6. 成本模型` 标题下的整节告示。具体到这一小节：下面这张表里的"平衡点约 **40 轮**"、"设 0 后中途揭示一次 ≈ ¥0.40"，以及紧随其后的结论"**只有当会话基本不会用到那些延迟工具时，设 0 才划算**"，全部建立在"一次中途揭示会整段重写前缀"上——#10410 之后声明列表字节稳定，这个前提没有了，所以这三个数字都不能再用，也不能拿它们反推"`threshold: 0` 值不值"。
 
 `docs/design/toolsearch-preload-threshold.md` 说明了这个权衡：一次会话中途的 ToolSearch 揭示会重写函数声明列表，而它在前缀最前面，**整段 prompt KV 缓存作废**。
 
@@ -242,7 +244,7 @@ extension 的内容按性质分三层：
 1. **子 agent 拿到全部工具，包括延迟的。** `agents/runtime/agent-core.ts:841-851` 使用 `includeDeferred: true`，未声明 `tools` 列表的子 agent 会拿到所有 schema，不走 ToolSearch。threshold 对子 agent 完全无效，**唯一能过滤的是 `tools.eager` 和 `permissions.deny`**。若部署会起子 agent，其工具 token 可能比主会话还多，需单独统计。
 2. **后台记忆 agent 依赖六个工具**（`read_file`/`grep`/`glob`/`shell`/`write_file`/`edit`）。被 deny 会静默降质，不报错。开了自动记忆就不要 deny 这六个。
 3. **token 可能只是换了类别。** 去掉 `grep`/`glob` 后模型会改用 shell 里的 `find`/`grep`，输出进对话上下文。验收必须看**每任务总 input token 与实际计费**，不能只看非对话那几类。
-4. **旧会话恢复。** 被 `tools.eager` 降级的工具若出现在历史里会自动补发 schema（`client.ts:1783-1822`）；被 deny 的不会。上线前拿几条旧会话恢复试一下。
+4. **旧会话恢复。** 被 `tools.eager` 降级的工具若出现在历史里会自动补发 schema（`client.ts` 的 `revealDeferredToolsReferencedInHistory`；引符号名而不引行号，行号会随文件漂移）；被 deny 的不会。上线前拿几条旧会话恢复试一下。
 5. **skill 的 `allowedTools` 只给自动放行，不声明也不加载工具**（`skills/types.ts:38-56`）。依赖被 deny 工具的 skill 要到运行时才失败。
 6. **作用域外溢。** `permissions.deny` 写在 settings 里会作用于所有读这份 settings 的客户端（CLI、web-shell）；`--system-prompt` 只能按进程生效。需要独立的 settings 与进程池。
 7. **DeepSeek 系模型上整条路线不成立（2026-09-20 起作废）。** 该判断依据的自动退出分支已被 #10410 删除：`cli/src/config/config.ts` 里已无 `deepseek` 引用，唯一的桥接开关是显式 `tools.toolSearch.enabled: false`（同文件的 `shouldDisableToolSearch`，同时 deny `tool_search` 与 `tool_call`；这里引符号名而不引行号，行号会随文件漂移）。这类部署现在与其他部署同路；若想要旧的「全部急揭示」行为，手工设置该开关即可。
@@ -265,7 +267,7 @@ extension 的内容按性质分三层：
 - 任务集：真实会话抽 100–200 条，按类型分层（纯问答、文件处理、Shell、数据查询、多步任务），每类 ≥20 条；另备 10–20 条安全用例（危险命令、伪装成用户指令的 hook 文本、被拒后是否绕路）。
 - 跑法：headless 模式对同一任务集跑新旧配置，模型与温度固定，每条跑 3 次以估噪声。
 - 指标：空载成本 · 每任务总 input token · 缓存命中/未命中与实际计费 · 工具召回率 · `tool_search` 调用率（即"路由遗漏比例"）· 坏调用率（相对路径、未声明工具名、参数校验失败）· 任务成功率 · 安全用例通过率（必须 100%）。
-- 埋点缺口：OTel 属性 `qwen-code.context.usage` 目前只有分类合计。`context-usage-snapshot.ts` 的 `estimateToolCategories` 本来就逐个遍历声明，扩展为输出**每个工具的 token、声明的工具数、加载原因**（常驻 / `tool_search` 揭示 / 预算预加载 / 历史回放 / `tools.visible`），`tool_search` 调用率与"每会话揭示次数 ≤ 2"这条运营线就能直接从线上遥测读，而不用解析会话记录。遥测数字本身的正确性在 #12048（两套估算器、skill 正文归因）；按工具明细与加载原因目前还没有 issue。
+- 埋点缺口：OTel 属性 `qwen-code.context.usage` 目前只有分类合计。`context-usage-snapshot.ts` 的 `estimateToolCategories` 本来就逐个遍历声明，扩展为输出**每个工具的 token、声明的工具数、加载原因**（常驻 / `tool_search` 揭示 / 预算预加载 / 历史回放 / `tools.visible`），`tool_search` 调用率与"每会话揭示次数 ≤ 2"这条运营线（**该 ≤2 阈值出自已作废的 §6**，桥接之后要重测再定，埋点本身仍值得做）就能直接从线上遥测读，而不用解析会话记录。遥测数字本身的正确性在 #12048（两套估算器、skill 正文归因）；按工具明细与加载原因目前还没有 issue。
 
 **第 3 层 · 线上灰度（天级）**
 
@@ -297,4 +299,4 @@ extension 的内容按性质分三层：
 | #11814 · `tools.disabled`             | **指引部分已修**（PR #12271），schema 泄漏未复现                                                        | 第 7 节第 8 条，已就地更新。                                                                                                                                                                                                                                                                                                                                      |
 | #12029 · 百分比门限                   | **一半收口**：告警上限随 #12034 合入；**预加载预算在 `threshold > 0` 时仍然没有绝对上限**，这一半仍开放 | #10410 改的是**默认值**、没有加上限：`client.ts` 仍按 `Math.floor(窗口 × 百分比 / 100)` 计算，唯一的夹取是把百分比夹到 100——按百分比对称而不是按 token 对称，且预加载是全有全无。默认 `0` 只是让它默认不触发，**而本项目的验证文档恰恰建议"会话确定会用到那些工具时抬高门限"**，一旦抬高这个缺口就回来了。第 6 节的 `threshold: 0` 小节作废（见该小节顶部告示）。 |
 
-**没有变的是最重要的那条**：第 4 节的步骤 1 和步骤 2（关掉默认就该关的功能、上 `tools.eager` 白名单）依然是 0 代码、低风险、收益最大的一步（内置工具 21,461 → 4,080–5,766），也依然**没有人执行**。上游这几个 PR 加起来省下的量，不到这一步的十分之一。验收线若是"简单轮次的内置工具 token 减半"，唯一能达成它的仍然是这一步。
+**没有变的是最重要的那条**：第 4 节的步骤 1 和步骤 2（关掉默认就该关的功能、上 `tools.eager` 白名单）依然是 0 代码、低风险、收益最大的一步（内置工具 21,461 → 4,080–5,766），也依然**没有人执行**。上游这几个 PR 加起来省下的量约占这一步的四分之一——按 #10410 之后的归因，**它自己就贡献了约 4.2k**、白名单还剩约 11.4k，其余仍在部署侧。（这句 2026-09-20 就地更正：原文写的是"不到这一步的十分之一"，那是 #10410 合入前的旧口径，见文首告示。）验收线若是"简单轮次的内置工具 token 减半"，唯一能达成它的仍然是这一步。
