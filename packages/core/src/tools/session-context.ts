@@ -160,12 +160,17 @@ class SessionContextInvocation extends BaseToolInvocation<
           );
           break;
         }
-        case ToolNames.SESSION_HISTORY:
-          await this.config.getChatRecordingService()!.flush();
-          output = await this.chat
-            .getSessionHistoryService()
-            .query(this.params as SessionHistoryRequest, signal);
+        case ToolNames.SESSION_HISTORY: {
+          const chat = this.chat;
+          output = await this.config
+            .getChatRecordingService()!
+            .runWithWriteBarrier(() =>
+              chat
+                .getSessionHistoryService()
+                .query(this.params as SessionHistoryRequest, signal),
+            );
           break;
+        }
         case ToolNames.GET_CONTEXT_REMAINING:
           output = JSON.stringify(this.chat.getContextRemaining());
           break;
