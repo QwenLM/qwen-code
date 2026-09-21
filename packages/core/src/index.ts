@@ -150,6 +150,7 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
+export * from './managed-runtime/managed-session-records.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {

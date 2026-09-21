@@ -231,14 +231,16 @@ import {
   sanitizeWorkerDiagnostic,
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
-import {
-  channelSelectionNames,
-  normalizeServeChannelSelection,
-} from './channel-selection.js';
+import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
   type ChannelWorkspaceGroup,
+  type ChannelWorkspaceGroupingSkip,
 } from './channel-workspace-grouping.js';
+import {
+  resolveStartupChannelSelection,
+  type StartupChannelDiagnostic,
+} from './channel-startup-restore.js';
 import { type ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type {
   ChannelWorkerControlState,
@@ -2116,6 +2118,12 @@ export interface RunQwenServeDeps {
    * Reusing it avoids a second pre-listen settings/env scan.
    */
   bootSettings?: ServeFastPathSettings;
+  /**
+   * Reads one registered workspace's settings summary. Only the boot-time
+   * `serve.channels` restore needs it, to read the workspaces the fast path
+   * did not already load for `bootSettings`.
+   */
+  loadWorkspaceBootSettings?: (workspaceCwd: string) => ServeFastPathSettings;
   /**
    * Pre-resolved daemon debug directory. The full CLI/exported API can pass
    * Storage.getGlobalDebugDir(); the serve fast path intentionally avoids
@@ -4051,6 +4059,21 @@ async function runQwenServeImpl(
   });
   loggerLifecycle.initialized(daemonLog);
   let channelSelectionFromSettings = false;
+  // Which workspace a channel name belongs to when ownership is otherwise
+  // ambiguous. Two layers: the boot hints record the workspace that listed the
+  // name in its own `serve.channels` and never change, and the committed groups
+  // layer over them so a later runtime change resolves the way the running
+  // groups do. A commit only overrides the names it carries, so a channel
+  // toggled off and back on still resolves the way it did at boot instead of
+  // turning ambiguous until the next restart. A boot hint naming a workspace
+  // that is no longer registered is inert: `resolveChannelWorkspaceGroups` only
+  // takes a hint that matches one of the live owners.
+  let bootChannelOwnerHints: ReadonlyMap<string, string> = new Map();
+  let channelOwnerHints: ReadonlyMap<string, string> = new Map();
+  // Names a non-primary workspace contributed, which may be dropped instead of
+  // stranding the other workspaces. Empty for an explicit `--channel`
+  // selection and for every runtime change, both of which stay fail-fast.
+  let channelStartupTolerantNames: ReadonlySet<string> = new Set();
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       redactLogCredentials(
@@ -4067,38 +4090,83 @@ async function runQwenServeImpl(
       `workspace serve.channels was not restored: ${detail} Continuing without channels`,
     );
   };
-  if (!opts.channelSelection && bootSettings?.serve?.channels !== undefined) {
-    try {
-      const rawChannels = bootSettings.serve.channels;
-      if (
-        !Array.isArray(rawChannels) ||
-        !rawChannels.every((name): name is string => typeof name === 'string')
-      ) {
-        throw new Error('serve.channels must be a string array.');
-      }
-      const configuredChannels = rawChannels.filter((name, index) => {
-        if (
-          !name ||
-          name !== name.trim() ||
-          sanitizeLogText(name, name.length) !== name
-        ) {
-          daemonLog.warn(
-            `ignored invalid workspace serve.channels entry at index ${index}`,
-          );
-          return false;
-        }
-        return true;
+  const reportStartupChannelDiagnostic = (
+    diagnostic: StartupChannelDiagnostic,
+  ): void => {
+    const detail = sanitizeLogText(
+      redactLogCredentials(diagnostic.message),
+      512,
+    );
+    if (diagnostic.code === 'invalid_entry') {
+      // Matches the pre-multi-workspace behavior: a single unusable entry is
+      // an operator typo, not something worth a boot banner.
+      daemonLog.warn(detail, { workspaceCwd: diagnostic.workspaceCwd });
+      return;
+    }
+    if (diagnostic.code === 'claimed_by_multiple_workspaces') {
+      // Two workspaces listing the same name is what the per-workspace toggle
+      // produces, and ownership still resolves from the channel config alone,
+      // so the channel usually starts exactly as configured. Only a resolution
+      // that actually fails costs the operator a channel, and that reports
+      // itself; this one stays out of the boot banner.
+      daemonLog.warn(detail, {
+        code: diagnostic.code,
+        workspaceCwd: diagnostic.workspaceCwd,
+        ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
       });
-      opts.channelSelection = normalizeServeChannelSelection(
-        configuredChannels,
-        'serve.channels',
-      );
+      return;
+    }
+    writeStderrLine(
+      `qwen serve: workspace ${JSON.stringify(
+        diagnostic.workspaceCwd,
+      )} serve.channels: ${detail}`,
+    );
+    daemonLog.warn(`workspace serve.channels not fully restored: ${detail}`, {
+      code: diagnostic.code,
+      workspaceCwd: diagnostic.workspaceCwd,
+      ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
+    });
+  };
+  const startupChannelWorkspaces = workspaceInputs.map((workspace, index) => ({
+    workspaceCwd: workspace.cwd,
+    primary: index === 0,
+  }));
+  if (
+    !opts.channelSelection &&
+    (bootSettings?.serve?.channels !== undefined ||
+      startupChannelWorkspaces.length > 1)
+  ) {
+    try {
+      const restored = resolveStartupChannelSelection({
+        workspaces: startupChannelWorkspaces,
+        // The fast path already read the primary workspace; every other
+        // registered workspace is read here, through the same loader, so a
+        // secondary workspace contributes exactly what it would contribute if
+        // it were the one the daemon bound to.
+        loadStartupChannels: (workspaceCwd) =>
+          (workspaceCwd === boundWorkspace
+            ? bootSettings
+            : (deps.loadWorkspaceBootSettings ?? loadServeFastPathSettings)(
+                workspaceCwd,
+              )
+          )?.serve?.channels,
+      });
+      for (const diagnostic of restored.diagnostics) {
+        reportStartupChannelDiagnostic(diagnostic);
+      }
+      opts.channelSelection = restored.selection;
       if (opts.channelSelection) {
         channelSelectionFromSettings = true;
+        bootChannelOwnerHints = restored.ownerHints;
+        channelOwnerHints = restored.ownerHints;
+        channelStartupTolerantNames = restored.tolerantNames;
         channelRuntime = await ensureChannelRuntime();
         daemonLog.info('restoring channels from workspace serve.channels', {
           channels: channelSelectionNames(opts.channelSelection),
           workspaceCwd: boundWorkspace,
+          ...(restored.ownerHints.size > 0
+            ? { requestedByWorkspace: Object.fromEntries(restored.ownerHints) }
+            : {}),
         });
       }
     } catch (error) {
@@ -8328,7 +8396,12 @@ async function runQwenServeImpl(
     | typeof import('../config/daemon-trust-policy.js')
     | undefined;
   let channelValidationTrustSnapshot: DaemonTrustPolicySnapshot | undefined;
-  const resolveChannelWorkspaceGroupsAtListen = () => {
+  const resolveChannelWorkspaceGroupsAtListen = ():
+    | {
+        groups: readonly ChannelWorkspaceGroup[];
+        skipped: readonly ChannelWorkspaceGroupingSkip[];
+      }
+    | undefined => {
     const validationSettingsRuntime = channelValidationSettingsRuntime;
     if (
       !opts.channelSelection ||
@@ -8435,6 +8508,8 @@ async function runQwenServeImpl(
         if (!settings) return {};
         return channelRuntime!.loadChannelsConfig(cwd, settings);
       },
+      preferredOwners: channelOwnerHints,
+      tolerant: channelStartupTolerantNames,
     });
     if (!grouping.ok) {
       throw Object.assign(new Error(grouping.error.message), {
@@ -8442,7 +8517,10 @@ async function runQwenServeImpl(
         ...(grouping.error.channel ? { channel: grouping.error.channel } : {}),
       });
     }
-    return grouping.groups;
+    // A selection that owns more workspaces than channel control supports
+    // still fails loudly through assertChannelControlWorkspaceCapacity; the
+    // restore is dropped whole rather than silently hosting a subset.
+    return { groups: grouping.groups, skipped: grouping.skipped ?? [] };
   };
 
   if (opts.channelSelection) {
@@ -8457,9 +8535,9 @@ async function runQwenServeImpl(
         opts.channelSelection.mode === 'names' &&
         workspaceInputs.length > MAX_CHANNEL_CONTROL_WORKSPACES
       ) {
-        const groups = resolveChannelWorkspaceGroupsAtListen();
+        const resolved = resolveChannelWorkspaceGroupsAtListen();
         assertChannelControlWorkspaceCapacity(
-          groups?.map((group) => group.workspaceCwd) ?? [],
+          resolved?.groups.map((group) => group.workspaceCwd) ?? [],
         );
       }
       reserveChannelServicePidfile(opts.channelSelection);
@@ -9022,6 +9100,11 @@ async function runQwenServeImpl(
               ? workerRuntime.loadChannelsConfig(cwd, settings)
               : {};
           },
+          // A runtime change must resolve ownership the way this daemon
+          // already resolved it; without the hint a name that only boot could
+          // disambiguate would start failing every PUT as ambiguous. Runtime
+          // changes stay fail-fast, so no name is tolerated here.
+          preferredOwners: channelOwnerHints,
         });
         if (!grouping.ok) {
           throw Object.assign(new Error(grouping.error.message), {
@@ -9215,6 +9298,16 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
+              channelOwnerHints = new Map([
+                ...bootChannelOwnerHints,
+                ...groups.flatMap((group) =>
+                  group.selection.mode === 'names'
+                    ? group.selection.names.map(
+                        (name) => [name, group.workspaceCwd] as const,
+                      )
+                    : [],
+                ),
+              ]);
               channelWebhookConfigVersion += 1;
               refreshChannelWebhookConfigs?.();
             },
@@ -9828,7 +9921,49 @@ async function runQwenServeImpl(
       handle.close = () => serveAppLifecycle.close();
 
       try {
-        channelWorkspaceGroups = resolveChannelWorkspaceGroupsAtListen();
+        const resolved = resolveChannelWorkspaceGroupsAtListen();
+        channelWorkspaceGroups = resolved?.groups;
+        if (resolved) {
+          for (const skip of resolved.skipped) {
+            const detail = sanitizeLogText(
+              redactLogCredentials(skip.message),
+              512,
+            );
+            writeStderrLine(
+              `qwen serve: channel "${skip.channel}" was not restored: ${detail}`,
+            );
+            daemonLog.warn(`channel was not restored: ${detail}`, {
+              code: skip.code,
+              channel: skip.channel,
+            });
+          }
+          if (resolved.skipped.length > 0) {
+            // The committed selection has to name exactly what the groups
+            // host: the worker manager, the service lease and
+            // `/workspace/channel` all read it back, and a name nothing hosts
+            // would report itself as enabled forever.
+            const hosted = new Set(
+              resolved.groups.flatMap((group) =>
+                group.selection.mode === 'names' ? group.selection.names : [],
+              ),
+            );
+            const remaining =
+              opts.channelSelection?.mode === 'names'
+                ? opts.channelSelection.names.filter((name) => hosted.has(name))
+                : [];
+            opts.channelSelection =
+              remaining.length > 0
+                ? { mode: 'names', names: remaining }
+                : undefined;
+            if (!opts.channelSelection) {
+              channelWorkspaceGroups = undefined;
+              removeCurrentServePidfile();
+              reportConfiguredChannelStartupFailure(
+                new Error('No configured channel could be hosted.'),
+              );
+            }
+          }
+        }
       } catch (err) {
         removeCurrentServePidfile();
         const error = err instanceof Error ? err : new Error(String(err));

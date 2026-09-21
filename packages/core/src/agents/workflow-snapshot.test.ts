@@ -17,6 +17,7 @@ import {
   listWorkflowSnapshots,
   deleteWorkflowSnapshot,
   snapshotArgs,
+  snapshotArgsUnavailable,
   MAX_RETAINED_SNAPSHOTS,
   MAX_SNAPSHOT_ARGS_CHARS,
 } from './workflow-snapshot.js';
@@ -291,6 +292,21 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
   // A retry keys its journal from a hash of the run's args, so "the run had
   // none" has to be a recorded fact rather than the absence of a field: a
   // snapshot from before args were kept looks the same and must be refused.
+  // The daemon refuses a restart on this answer and the task projection
+  // reports it, so the two must never disagree about one snapshot.
+  it.each([
+    [
+      'args it kept',
+      { args: { a: 1 }, argsRecorded: true } as const,
+      undefined,
+    ],
+    ['no args, recorded as none', { argsRecorded: true } as const, undefined],
+    ['args too large to keep', { argsOmitted: true } as const, 'omitted'],
+    ['a snapshot from before args were kept', {}, 'unrecorded'],
+  ])('says of %s why a restart has no args to use', (_case, fields, why) => {
+    expect(snapshotArgsUnavailable(fields)).toBe(why);
+  });
+
   it('records that a run had no args, and rejects a marker that is not true', async () => {
     expect(snapshotArgs(undefined)).toEqual({ argsRecorded: true });
     expect(snapshotArgs({ q: 1 })).toEqual({

@@ -161,6 +161,7 @@ import {
   isWorkflowRunId,
   readWorkflowCheckpoint,
   readWorkflowSnapshot,
+  snapshotArgsUnavailable,
   WorkflowCheckpointUnwritableError,
   WorkflowJournalUnavailableError,
   type WorkflowStatus,
@@ -15434,11 +15435,15 @@ class QwenAgent implements Agent {
         // kept cannot say whether the run had any, so it is refused for the
         // same reason as one whose args were too large — the cost is a
         // legacy run that truly had none, which a relaunch covers.
-        const startedWith = snapshot.argsOmitted
-          ? 'args too large to keep in its history'
-          : snapshot.argsRecorded !== true && snapshot.args === undefined
-            ? 'args this daemon recorded before it kept them, so its history cannot say what they were'
-            : undefined;
+        // The same answer the task projection reports as `argsUnavailable`,
+        // so a client is never offered an action this refuses.
+        const unavailable = snapshotArgsUnavailable(snapshot);
+        const startedWith =
+          unavailable === 'omitted'
+            ? 'args too large to keep in its history'
+            : unavailable === 'unrecorded'
+              ? 'args this daemon recorded before it kept them, so its history cannot say what they were'
+              : undefined;
         if (startedWith) {
           throw RequestError.invalidParams(
             { errorKind: 'workflow_args_unavailable' },
