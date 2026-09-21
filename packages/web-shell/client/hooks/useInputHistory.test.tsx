@@ -88,6 +88,17 @@ it('keeps a browsing snapshot and draft until the next navigation cycle', () => 
   act(() => expect(history.navigateUp('working draft')).toBe('third'));
 });
 
+it('returns to the draft when a duplicate push arrives mid-browse', () => {
+  pushInputHistoryEntry('workspace', 'a');
+  pushInputHistoryEntry('workspace', 'b');
+  render();
+  act(() => expect(history.navigateUp('my draft')).toBe('b'));
+  pushInputHistoryEntry('workspace', 'x');
+  act(() => history.push('x'));
+  act(() => expect(history.navigateDown()).toBe('my draft'));
+  act(() => expect(history.navigateDown()).toBeNull());
+});
+
 it('uses workspace history ahead of fallback and respects disabled fallback', () => {
   pushInputHistoryEntry('workspace', 'workspace input');
   render('workspace', 'legacy');
@@ -143,4 +154,16 @@ it('does not carry unsaved history into another workspace', () => {
   act(() => history.push('unsaved workspace input'));
   render('other');
   expect(history.getReverseMatches('')).toEqual(['other input']);
+});
+
+it('re-reads storage after a workspace switch that follows a failed save', () => {
+  render();
+  const save = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    throw new DOMException('Quota exceeded', 'QuotaExceededError');
+  });
+  act(() => history.push('unsaved input'));
+  save.mockRestore();
+  render('other');
+  pushInputHistoryEntry('other', 'late acceptance');
+  expect(history.getReverseMatches('')).toEqual(['late acceptance']);
 });

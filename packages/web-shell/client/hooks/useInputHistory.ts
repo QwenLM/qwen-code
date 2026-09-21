@@ -126,7 +126,6 @@ export function useInputHistory(
   const push = useCallback(
     (text: string) => {
       const h = readCurrentHistory();
-      historyRef.current = h;
       if (h[h.length - 1] === text) {
         if (
           unsavedHistoryRef.current ||
@@ -137,6 +136,7 @@ export function useInputHistory(
         }
         return;
       }
+      historyRef.current = h;
       h.push(text);
       if (h.length > MAX_HISTORY) h.shift();
       unsavedHistoryRef.current = !saveHistory(storageKeyRef.current, h);

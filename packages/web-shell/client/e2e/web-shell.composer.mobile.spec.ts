@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Mobile composer backend (#5958). Runs under the `mobile-chromium` project
-// (Pixel 7 emulation: touch, coarse pointer, no hover), where the composer
-// must render the plain-textarea backend instead of CodeMirror.
+// Mobile composer backend (#5958). Runs under the `mobile-chromium` (Pixel 7)
+// and `mobile-webkit` (iPhone 13) projects — both emulate touch, coarse
+// pointer, and no hover — where the composer must render the plain-textarea
+// backend instead of CodeMirror.
 
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
