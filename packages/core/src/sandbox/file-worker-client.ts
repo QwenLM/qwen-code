@@ -62,15 +62,17 @@ export async function writeSandboxFile(
       `Sandbox file write failed (${result.sandboxStatus.state}): ${detail}`,
     );
   }
-  if (result.sandboxStatus.exitCode === 0) return;
   let parsedReply: Record<string, unknown> | undefined;
   try {
     parsedReply = JSON.parse(reply.trim()) as Record<string, unknown>;
   } catch {
+    if (result.sandboxStatus.exitCode === 0)
+      throw new Error('Invalid sandbox file worker reply.');
     throw new Error(
       `Sandbox file worker exited ${result.sandboxStatus.exitCode}: ${diagnostics || result.output || reply || 'invalid reply'}`,
     );
   }
+  if (result.sandboxStatus.exitCode === 0 && parsedReply['ok'] === true) return;
   if (parsedReply['ok'] === false && typeof parsedReply['error'] === 'string') {
     throw Object.assign(new Error(parsedReply['error']), {
       ...(typeof parsedReply['code'] === 'string'
