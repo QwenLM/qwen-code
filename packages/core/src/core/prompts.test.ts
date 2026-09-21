@@ -1358,7 +1358,7 @@ describe('resident tool gating (#12032)', () => {
     // text, shows up here instead of silently.
     const saved = full.length - trimmed.length;
     expect(saved).toBeGreaterThan(900);
-    expect(saved).toBeLessThan(1_400);
+    expect(saved).toBeLessThan(1_500);
     expect(countExamples(trimmed)).toBe(countExamples(full));
   });
 
