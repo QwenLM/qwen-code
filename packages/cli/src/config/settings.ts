@@ -24,6 +24,7 @@ import {
   parseExecutionSandboxSettings,
   readOperatorSandboxSettings,
   selectOperatorExecutionSandbox,
+  stripUtf8Bom,
 } from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
@@ -819,7 +820,7 @@ export class LoadedSettings {
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      const parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         if (scope !== SettingScope.Workspace) {
           parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
@@ -1074,9 +1075,9 @@ export function loadSettings(
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
-          rawSettings = JSON.parse(stripJsonComments(content));
+          rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
-          if (operatorSandbox && scope === SettingScope.Workspace)
+          if (scope !== SettingScope.Workspace || operatorSandbox)
             throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →

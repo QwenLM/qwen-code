@@ -168,6 +168,29 @@ describe('operator execution sandbox policy', () => {
       '{"tools":{"executionSandbox":',
     );
   });
+  it.each([
+    ['system defaults', () => defaults],
+    ['user', () => user],
+    ['system', () => system],
+  ])('accepts UTF-8 BOM in %s settings', (_scope, getFile) => {
+    const file = getFile();
+    const content = `\uFEFF${JSON.stringify({
+      $version: 4,
+      tools: { executionSandbox: restricted },
+    })}`;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+    for (const settings of [
+      readOperatorSandboxSettings(),
+      createMinimalSettings().merged,
+      loadSettings(workspace, { skipLoadEnvironment: true }).merged,
+      loadServeFastPathSettings(workspace),
+    ]) {
+      expect(settings.tools?.executionSandbox).toEqual(restricted);
+    }
+    expect(fs.readFileSync(file, 'utf8')).toBe(content);
+    expect(fs.existsSync(`${file}.corrupted`)).toBe(false);
+  });
   it('fails closed when truncation removes the policy key', () => {
     const truncated =
       '{"$version":4,"general":{"previewFeatures":true},"tools":{';

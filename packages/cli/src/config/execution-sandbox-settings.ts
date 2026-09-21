@@ -21,6 +21,10 @@ export interface ExecutionSandboxSettings {
 
 export class InvalidExecutionSandboxConfigError extends Error {}
 
+export function stripUtf8Bom(content: string): string {
+  return content.startsWith('\uFEFF') ? content.slice(1) : content;
+}
+
 export const BWRAP_MIGRATION_MESSAGE =
   'Whole-CLI bwrap has been removed. Replace tools.sandbox: "bwrap" / QWEN_SANDBOX=bwrap with tools.executionSandbox: {"backend":"auto","filesystem":"workspace-write","network":"closed"} in User or System settings; remove inherited SANDBOX=bwrap and restart outside the old sandbox.';
 
@@ -86,7 +90,9 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
       );
     }
     try {
-      const parsed: unknown = JSON.parse(stripJsonComments(source));
+      const parsed: unknown = JSON.parse(
+        stripJsonComments(stripUtf8Bom(source)),
+      );
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error('Expected a settings object.');
       }

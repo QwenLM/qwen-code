@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readOperatorSandboxSettings } from '../config/execution-sandbox-settings.js';
+import {
+  readOperatorSandboxSettings,
+  stripUtf8Bom,
+} from '../config/execution-sandbox-settings.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -433,7 +436,9 @@ function readSettingsSummary(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(fs.readFileSync(filePath, 'utf8')));
+    parsed = JSON.parse(
+      stripJsonComments(stripUtf8Bom(fs.readFileSync(filePath, 'utf8'))),
+    );
   } catch (err) {
     throw new Error(
       `Failed to read serve fast path settings from ${filePath}: ${

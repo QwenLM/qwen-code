@@ -77,7 +77,7 @@ import {
 } from './settingsUtils.js';
 import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
-import { QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -2162,6 +2162,48 @@ describe('Settings Loading and Merging', () => {
         'utf-8',
       );
     });
+
+    it.each([
+      ['user', () => USER_SETTINGS_PATH],
+      ['system', getSystemSettingsPath],
+    ])(
+      'should fail closed if %s operator settings tear after policy pre-read',
+      (_scope, getFile) => {
+        const file = getFile();
+        const validJsonContent = JSON.stringify({
+          $version: 4,
+          tools: {
+            executionSandbox: {
+              filesystem: 'read-only',
+              network: 'closed',
+            },
+          },
+        });
+        let reads = 0;
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === file,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p !== file) return '{}';
+            reads += 1;
+            return reads === 1 ? validJsonContent : '{';
+          },
+        );
+
+        let error: unknown;
+        try {
+          loadSettings(MOCK_WORKSPACE_DIR);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(FatalConfigError);
+        expect(error).toMatchObject({ message: expect.stringContaining(file) });
+        expect(reads).toBe(2);
+        expect(fs.copyFileSync).not.toHaveBeenCalled();
+        expect(fs.writeFileSync).not.toHaveBeenCalledWith(file, '{}', 'utf-8');
+      },
+    );
 
     it('should still fail closed when preserving malformed settings fails', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
