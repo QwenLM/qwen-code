@@ -596,7 +596,10 @@ export async function rebuildToolRegistryOnOverride(
     skipDiscovery: true,
     forSubAgent: true,
   });
-  if (!override.getExecutionEnvironment?.()) {
+  if (
+    !override.getExecutionEnvironment?.() &&
+    !base.getShellExecutionSandbox?.()
+  ) {
     agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   }
   ov.getToolRegistry = () => agentRegistry;
@@ -2456,6 +2459,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         executionBackendError,
         executionBackendError,
       );
+    }
+    if (
+      this.config.getShellExecutionSandbox?.() &&
+      (this.params.isolation || this.params.working_dir || this.params.name)
+    ) {
+      const message =
+        'Tool execution sandbox supports only same-workspace in-process agents; worktrees, working_dir and teammates are unavailable.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
     }
     const sessionWorkflowAgent =
       this.config.getSessionWorkflowPlanRevision?.() !== undefined;
