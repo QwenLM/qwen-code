@@ -2336,7 +2336,7 @@ are a `409` (`-32602` over ACP, with `data.httpStatus: 409`):
 | `code` / `errorKind`           | When                                                                                                                                                          | What to do                                                     |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | `workflow_journal_unavailable` | a `retry` whose run has no journal on disk, or one that cannot be read                                                                                        | `rerun` it, which starts it from the beginning                 |
-| `workflow_args_unavailable`    | a `retry` or `rerun` of a history entry that carries `argsOmitted`                                                                                            | start it again with `run-saved` or `run-script` and its `args` |
+| `workflow_args_unavailable`    | a `retry` or `rerun` of a history entry marked `argsUnavailable`: its `args` were too large to keep, or its snapshot predates keeping them                    | start it again with `run-saved` or `run-script` and its `args` |
 | `workflow_run_live_elsewhere`  | a `retry` of a run whose checkpoint records a process that has not been seen to exit — one still running, one on another machine, or one whose pid was reused | `rerun` it, which takes a new run id                           |
 
 `workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
