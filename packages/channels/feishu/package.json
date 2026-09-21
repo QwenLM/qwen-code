@@ -26,7 +26,8 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.0",
-    "@qwen-code/channel-base": "0.24.2"
+    "@qwen-code/channel-base": "0.24.2",
+    "markdown-it": "^15.0.0"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

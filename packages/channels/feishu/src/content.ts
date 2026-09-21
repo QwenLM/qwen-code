@@ -1,3 +1,5 @@
+import MarkdownIt from 'markdown-it';
+
 export interface FeishuResource {
   type: 'image' | 'file' | 'audio' | 'video';
   key: string;
@@ -6,6 +8,26 @@ export interface FeishuResource {
 
 export interface FeishuContent {
   text: string;
+  /**
+   * `text` rendered without the adapter's media placeholders, for command
+   * classification. The parser knows which spans it synthesized while it
+   * renders them, so the placeholder-free form is produced here rather than
+   * recovered from `text` afterwards. Same rows as `text`, links as their
+   * label alone.
+   */
+  commandText: string;
+  /**
+   * The post as the command classifier read it before this parser existed —
+   * its title, then the legacy `content` rows' text, link labels and mention
+   * names, and nothing else — when that reads differently from `commandText`.
+   * Tried first: a command these rows spell is dispatched exactly as it
+   * always was, with no Markdown, code block or rule in or ahead of it.
+   * `commandText` answers only where they cannot: a command after a Markdown
+   * mention tag, which they spell as a display name no mention key resolves.
+   * A command's arguments are therefore the legacy rows' text, as they always
+   * were: a code block or link target beside a command is not part of them.
+   */
+  legacyCommandText?: string;
   resources: FeishuResource[];
   userAuthoredText: boolean;
   /**
@@ -15,7 +37,7 @@ export interface FeishuContent {
    * placeholder is never another user's original message.
    */
   synthesizedText: boolean;
-  /** Resource references dropped by the per-message cap, for reporting. */
+  /** Distinct resources dropped by the per-message cap, for reporting. */
   droppedResourceCount: number;
 }
 
@@ -25,6 +47,13 @@ export interface FeishuContent {
  * order; the tail is dropped, never reordered.
  */
 const MAX_RESOURCES_PER_MESSAGE = 8;
+
+/**
+ * Bound on the `md` text handed to the Markdown parser. Far above any post
+ * the platform delivers; the parser is linear on the inputs measured, and
+ * this keeps one message's synchronous parse bounded regardless.
+ */
+const MD_ANALYSIS_MAX_CHARS = 100_000;
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -37,631 +66,417 @@ function string(value: unknown): string {
 }
 
 /**
- * Container prefixes before a block fence: blockquote `>` markers (each
- * preceded by up to 3 spaces) plus the content indentation of an open list
- * item. A fence closes only on a fence-run-only line carrying the opener's
- * exact container prefix, and auto-closes where the container ends (a line
- * without the prefix) — CommonMark's container boundary rule.
+ * A code fence no run inside `text` can close: one backtick longer than the
+ * longest backtick run, and never shorter than three. The census runs on the
+ * text without its square brackets: the group-path sanitizer deletes
+ * start-of-line bracket pairs, which joins the runs on either side of one,
+ * and a fence sized for the text as written would be matched by a run that
+ * only exists after the peel. Deleting every bracket bounds whatever subset
+ * the peel deletes. Reduced by hand, never spread — an input-sized census
+ * overflows the call stack via Math.max(...runs).
  */
-const BQ_PREFIX_RE = /^(?: {0,3}> ?)+/;
-
-/**
- * Lines that cannot open or continue a paragraph: ATX headings and thematic
- * breaks. After one of these, an indented line is an indented code block,
- * not a lazy paragraph continuation.
- */
-const ATX_OR_HR_LINE_RE =
-  /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:-[ \t]*){3,}$)/;
-/** Setext underline: closes the paragraph it underlines (a heading has no
- *  lazy continuation either). Only reads as a heading while a paragraph is
- *  open — with none, the same line is ordinary paragraph text. */
-const SETEXT_LINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
-
-/**
- * A line that starts an HTML block (comment, processing instruction,
- * declaration, or a tag-open line) — a block type this grammar does not
- * model, so harvesting around it would guess. The platform's own
- * `<at user_id=…>` mention tags are excepted: they appear at line starts in
- * real posts and are handled by the mention grammar.
- */
-const HTML_BLOCK_START_RE =
-  /^ {0,3}<(?:!--|\?|!|\/?(?!at[\s/>])[a-zA-Z][a-zA-Z0-9-]*[\s/>])/;
-
-interface FenceState {
-  char: string;
-  length: number;
-  /** Literal container prefix, reproduced by closeOpenFence's closer. */
-  prefix: string;
-  /**
-   * Canonical container form for comparison: each blockquote marker as a
-   * bare `>`, list indentation preserved. The literal form cannot be
-   * compared — `> ` and `>` are the same container, while spaces that are
-   * list indentation are significant.
-   */
-  container: string;
-}
-
-/** Blockquote markers compare canonically: the spaces around `>` are
- *  insignificant in CommonMark, so `>```` is the same container as `> `. */
-const canonicalBq = (bqPrefix: string) => bqPrefix.replace(/ {0,3}> ?/g, '>');
-
-/**
- * Line-based code-fence scan with container state. A fence opens when a line
- * — after its blockquote markers and open-list indentation are stripped —
- * starts with at most 3 spaces then 3+ backticks or tildes, including on a
- * list marker's own line (`- ``` ` opens a fence at the item's content
- * indent). It closes on a fence-run-only line with the same character, at
- * least the opener's length, and the opener's container prefix (compared
- * canonically), with trailing spaces or tabs allowed; it auto-closes at a
- * container boundary. A bare blank line ends a blockquote container and
- * whatever it held, but not a top-level list item; a blank carrying the
- * quote marker is inside the quote. An unclosed fence consumes the rest of
- * its container only. A line indented 4+ columns (tabs advance to the next
- * multiple of 4) beyond its blockquote-free container is an indented code
- * block and is never harvested either — unless it lazily continues an open
- * paragraph, and headings, thematic breaks and setext underlines leave no
- * paragraph open. Linear in the input — no backreference rescans.
- *
- * The list content indent is measured ahead of blockquote markers nested
- * inside the item: a `>` past the item's indent is content (or a quote
- * inside the item), not the item's container boundary — stripping it first
- * would tear the item and any fence it holds.
- *
- * Inline backtick runs are deliberately NOT stripped: a stray backtick is
- * common in chat text, and pairing it with a later one would silently delete
- * a real image reference between them. A genuine inline code sample that
- * mentions an `img_` key degrades to a failed-download marker instead.
- */
-function scanFenceLines(
-  text: string,
-  onKeptLine?: (line: string) => void,
-): { fence: FenceState | undefined; unsafe: boolean } {
-  let fence: FenceState | undefined;
-  // True once the scan meets a construct this grammar provably mis-reads —
-  // a list marker whose content starts with a tab (tabs advance to 4-column
-  // stops, which the literal-space prefix comparisons below do not
-  // reproduce), an HTML block start, or a backtick fence whose info string
-  // carries a backtick (a paragraph per CommonMark, a fence here).
-  // Harvesting from such a node would guess, so callers skip it and rely on
-  // the legacy img/media nodes.
-  let unsafe = false;
-  // Open list items as a stack of content-indent widths (markers nest), plus
-  // the blockquote prefix of the context they opened in.
-  const listStack: number[] = [];
-  let listIndent = 0;
-  let listBq = '';
-  // Whether the previous line holds an open paragraph: CommonMark forbids an
-  // indented code block from interrupting one, so a 4-column line directly
-  // after a paragraph line is a lazy continuation whose images are real —
-  // even across container prefixes (lazy continuations carry no markers).
-  // Blank lines, fences, headings, thematic breaks and setext underlines end
-  // paragraphs.
-  let paragraphOpen = false;
-  // Line endings are normalized first: CommonMark admits CR and CRLF, and a
-  // fence line terminated by `\r` must still read as a fence line.
-  for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
-    // Blank detection ahead of any container handling: blanks never pop a
-    // list and never close a list-held fence.
-    const blankBq = BQ_PREFIX_RE.exec(line);
-    if (/^[\t ]*$/.test(blankBq ? line.slice(blankBq[0].length) : line)) {
-      // Blank lines end paragraphs in every container.
-      paragraphOpen = false;
-      if (!blankBq) {
-        // A bare blank line ends a blockquote container (CommonMark), and
-        // with it a fence or list held inside one — resetting a LIST fence
-        // here would tear it in half, but a quote's fence really closes.
-        if (fence && canonicalBq(fence.prefix).includes('>')) fence = undefined;
-        if (listBq) {
-          listStack.length = 0;
-          listIndent = 0;
-          listBq = '';
-        }
-      }
-      // A blank line carrying the quote marker sits inside the blockquote.
-      if (!fence) onKeptLine?.(line);
-      continue;
-    }
-    let prefix = '';
-    let rest = line;
-    // The open lists' own quote context, stripped before the indent test.
-    let bqBefore = '';
-    // Pop list levels until the line carries the remaining content indent;
-    // the innermost list ending ends a fence it held, an outer list may not.
-    // The indent is measured after the list's own quote context but before
-    // any blockquote marker nested inside the item.
-    if (listIndent > 0) {
-      let ctx = rest;
-      if (listBq && ctx.startsWith(listBq)) {
-        bqBefore = listBq;
-        ctx = ctx.slice(listBq.length);
-      }
-      while (listIndent > 0 && !ctx.startsWith(' '.repeat(listIndent))) {
-        listStack.pop();
-        listIndent = listStack.reduce((sum, width) => sum + width, 0);
-        if (listIndent === 0) {
-          listBq = '';
-          fence = undefined;
-        }
-      }
-      if (listIndent > 0) {
-        prefix = bqBefore + ' '.repeat(listIndent);
-        rest = ctx.slice(listIndent);
-      } else {
-        prefix = bqBefore;
-        rest = ctx;
-      }
-    }
-    // Blockquote markers beyond the list's own context, including markers
-    // nested inside a list item.
-    const bq = BQ_PREFIX_RE.exec(rest);
-    const bqInner = bq ? bq[0] : '';
-    if (bq) {
-      prefix += bq[0];
-      rest = rest.slice(bq[0].length);
-    }
-    const bqContext = bqBefore + bqInner;
-    // Canonical container for comparison, in nesting order: the lists' quote
-    // context, the list indentation (literal — it is significant), then any
-    // quote nested inside the item. A fence survives only on lines whose
-    // container extends its own — extra markers past the fence's container
-    // are its content, never its boundary.
-    const container =
-      canonicalBq(bqBefore) + ' '.repeat(listIndent) + canonicalBq(bqInner);
-
-    if (fence) {
-      if (!container.startsWith(fence.container)) {
-        // Container boundary: the fence auto-closes and this line is outside.
-        fence = undefined;
-        paragraphOpen = false;
-      } else {
-        const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(rest);
-        if (
-          close &&
-          container === fence.container &&
-          close[1]!.charAt(0) === fence.char &&
-          close[1]!.length >= fence.length
-        ) {
-          fence = undefined;
-          paragraphOpen = false;
-        }
-        continue;
-      }
-    }
-
-    if (
-      /^ {0,3}(?:[-*+]|\d+[.)])\t/.test(rest) ||
-      HTML_BLOCK_START_RE.test(rest)
-    ) {
-      unsafe = true;
-    }
-    const leadingWhitespace = /^[ \t]*/.exec(rest)![0];
-    let leadingColumns = 0;
-    for (const ch of leadingWhitespace)
-      leadingColumns += ch === '\t' ? 4 - (leadingColumns % 4) : 1;
-    const open = /^ {0,3}(`{3,}|~{3,})/.exec(rest);
-    if (open && leadingColumns <= 3) {
-      if (
-        open[1]!.charAt(0) === '`' &&
-        rest.slice(open[0].length).includes('`')
-      ) {
-        unsafe = true;
-      }
-      fence = {
-        char: open[1]!.charAt(0),
-        length: open[1]!.length,
-        prefix,
-        container,
-      };
-      paragraphOpen = false;
-      continue;
-    }
-    if (leadingColumns >= INDENTED_CODE_SPACES && !paragraphOpen) {
-      // An indented code block: code, so never harvested. A paragraph left
-      // open by the previous line makes such a line a lazy continuation
-      // instead — CommonMark forbids indented code from interrupting a
-      // paragraph, in any container.
-      continue;
-    }
-    onKeptLine?.(line);
-    paragraphOpen = !(
-      ATX_OR_HR_LINE_RE.test(rest) ||
-      (paragraphOpen && SETEXT_LINE_RE.test(rest))
-    );
-    // A list marker outside a fence opens a nested list whose content lines
-    // carry the accumulated marker widths as extra indentation. A thematic
-    // break ('- - -') is never a list marker — treating it as one measures
-    // every following line's indent two columns short.
-    const listMarker = /^ {0,3}(?:[-*+]|\d+[.)]) /.exec(rest);
-    if (listMarker && !ATX_OR_HR_LINE_RE.test(rest)) {
-      listStack.push(listMarker[0].length);
-      listIndent += listMarker[0].length;
-      listBq = bqContext;
-      // A fence opened on the marker line itself sits at the item's content
-      // indent; re-test the remainder, or its closer reads as a fresh opener
-      // and code/prose inverts for the rest of the item.
-      const markerRest = rest.slice(listMarker[0].length);
-      const markerFence = /^ {0,3}(`{3,}|~{3,})/.exec(markerRest);
-      if (markerFence) {
-        if (
-          markerFence[1]!.charAt(0) === '`' &&
-          markerRest.slice(markerFence[0].length).includes('`')
-        ) {
-          unsafe = true;
-        }
-        fence = {
-          char: markerFence[1]!.charAt(0),
-          length: markerFence[1]!.length,
-          prefix: prefix + ' '.repeat(listMarker[0].length),
-          container: canonicalBq(bqContext) + ' '.repeat(listIndent),
-        };
-        paragraphOpen = false;
-      }
-    }
+export function fenceFor(text: string): string {
+  let maxRun = 0;
+  for (const match of text.replace(/[[\]]/g, '').matchAll(/`+/g)) {
+    if (match[0].length > maxRun) maxRun = match[0].length;
   }
-  return { fence, unsafe };
-}
-
-const INDENTED_CODE_SPACES = 4;
-
-function stripFencedCode(text: string): { prose: string; unsafe: boolean } {
-  const kept: string[] = [];
-  const { unsafe } = scanFenceLines(text, (line) => kept.push(line));
-  return { prose: kept.join('\n'), unsafe };
+  return '`'.repeat(Math.max(3, maxRun + 1));
 }
 
 /**
- * Close a fence left open at end of input (e.g. by a length cap), so text
- * appended after it is not swallowed into another message's code sample. The
- * closer carries the opener's container prefix so it closes rather than
- * opening a fresh top-level fence.
+ * At-mention markup in `md` text, one grammar in three parts: the parser
+ * reads the opener and closer as inline HTML tokens and the name between
+ * them, the adapter deletes the whole tag from quoted text. Bounded so
+ * truncated markup cannot stall and a member cannot pass a paragraph off as
+ * a display name; and a name holds no `<`, so the deletion never runs across
+ * a second opener and takes the prose between them with it.
  */
-export function closeOpenFence(text: string): string {
-  const { fence, unsafe } = scanFenceLines(text);
-  // An unsafe scan may be holding a fence that is not one (or missing the
-  // real boundary): appending a closer on a guess can OPEN a fence that
-  // swallows the text appended after it, so untrusted scans close nothing.
-  return fence && !unsafe
-    ? `${text}\n${fence.prefix}${fence.char.repeat(fence.length)}`
-    : text;
+const MD_AT_OPEN_SOURCE = String.raw`<at\s+user_id=["'][^"']{1,200}["']\s*>`;
+const MD_AT_NAME_MAX_CHARS = 200;
+export const MD_AT_TAG_SOURCE = `${MD_AT_OPEN_SOURCE}[^<]{0,${MD_AT_NAME_MAX_CHARS}}</at>`;
+const MD_AT_OPEN_RE = new RegExp(`^${MD_AT_OPEN_SOURCE}$`);
+const MD_AT_CLOSE_RE = /^<\/at>$/;
+
+/** A Markdown image destination that is a platform image key. */
+const IMAGE_KEY_RE = /^img_[A-Za-z0-9_.:-]{1,200}$/;
+
+/**
+ * Block and inline structure of `md` text comes from a CommonMark parser,
+ * never from expressions over the rendered text: which `![alt](key)` is an
+ * image and which is a code sample is a question about fences, code spans,
+ * indentation, containers, reference definitions and HTML blocks, and only a
+ * full parser answers it the way the text renders.
+ */
+const markdown = new MarkdownIt('commonmark');
+const NESTING_LIMIT: number = markdown.options.maxNesting ?? 20;
+
+interface MarkdownFacts {
+  /** Platform image keys the text renders as images, in document order. */
+  imageKeys: string[];
+  /** The text carries prose, code or a link the member typed. */
+  authored: boolean;
+  /** The text carries anything beyond image references and bare mentions. */
+  substantive: boolean;
 }
 
 /**
- * Markdown inline image reference to a platform image key: `![alt](key)`,
- * bare or angle-bracket destination, optional quoted title. Alt, key and
- * title are length-bounded so an unbroken `![` run cannot backtrack
- * superlinearly, and the key charset matches the platform id charset
- * (FEISHU_ID_RE also admits `.` and `:`). Reference-style `![alt][ref]`
- * images are not produced by the platform's Markdown export and resolving
- * them would take a second definition pass — out of scope.
+ * One parse answers every question asked of an `md` node — harvest and both
+ * authorship flags — so the answers cannot disagree about what the text is.
  */
-const MD_IMAGE_SOURCE = String.raw`!\[[^\]\n]{0,200}\]\(\s*<?(img_[A-Za-z0-9_.:-]{1,200})>?(?:\s+(?:"[^"\n]{0,200}"|'[^'\n]{0,200}'))?\s*\)`;
-const mdImageRe = () => new RegExp(MD_IMAGE_SOURCE, 'g');
-
-/**
- * Every image-shaped citation, loose form: `![alt](…)` or `![alt][ref]`,
- * bounded so adversarial markup stays linear. Used only to assign citation
- * positions — harvesting stays with the tight grammar above.
- */
-const MD_IMAGE_CITATION_G_RE =
-  /!\[[^\]\n]{0,1000}\](?:\[([^\]\n]{1,200})\]|\(\s*<?([^)\n]{0,300})\))/g;
-/** Reference-style image definition: `[ref]: img_key`. */
-const MD_REFERENCE_DEFINITION_G_RE =
-  /^ {0,3}\[([^\]\n]{1,200})\]:[ \t]*(img_[A-Za-z0-9_.:-]{1,200})/gm;
-
-/** At-mention markup in `md` text; bounded so truncated markup cannot stall. */
-export const MD_AT_TAG_SOURCE = String.raw`<at\s+user_id=["'][^"']{1,200}["']\s*>[\s\S]{0,200}?</at>`;
-
-/**
- * Sort base for legacy-only keys the rendered text never cites: past any
- * possible citation offset (a message cannot carry a billion characters).
- */
-const LEGACY_ONLY_POSITION_BASE = 1 << 30;
+function analyzeMarkdown(
+  text: string,
+  onParseError?: (err: unknown) => void,
+): MarkdownFacts {
+  const imageKeys = new Set<string>();
+  let authored = false;
+  let substantive = false;
+  const visit = (tokens: ReturnType<typeof markdown.parse>): void => {
+    // A mention's display name is not message prose; it sits between the
+    // platform's own <at …> … </at> inline tags. Text is a name only once
+    // its </at> arrives: an opener that never closes must not turn the rest
+    // of the paragraph into one.
+    let inMention = false;
+    let nameChars = 0;
+    const endMention = (closed: boolean): void => {
+      if (!closed && nameChars > 0) authored = true;
+      inMention = false;
+      nameChars = 0;
+    };
+    for (const token of tokens) {
+      // The parser stops descending at its nesting limit and drops what
+      // lies below without a word. An opener at the limit therefore means
+      // content this walk never sees: it counts as typed rather than as
+      // absent, so a deeply nested message is not taken for a placeholder.
+      if (token.nesting === 1 && token.level >= NESTING_LIMIT - 1) {
+        authored = substantive = true;
+      }
+      switch (token.type) {
+        case 'image': {
+          // The alt text belongs to the reference, not to the prose.
+          const src = String(token.attrGet('src') ?? '');
+          if (IMAGE_KEY_RE.test(src)) imageKeys.add(src);
+          else authored = substantive = true;
+          break;
+        }
+        case 'html_inline':
+          if (MD_AT_OPEN_RE.test(token.content)) {
+            endMention(false);
+            inMention = true;
+          } else if (inMention && MD_AT_CLOSE_RE.test(token.content)) {
+            endMention(nameChars <= MD_AT_NAME_MAX_CHARS);
+          } else {
+            authored = substantive = true;
+          }
+          break;
+        case 'html_block':
+          if (token.content.trim()) authored = substantive = true;
+          break;
+        case 'text':
+        case 'code_inline':
+          if (token.content.trim()) {
+            substantive = true;
+            // A display name holds no `<` (the adapter's deletion of mention
+            // markup from quoted text stops at one); text that does is prose
+            // behind an opener that names nobody.
+            if (inMention && token.content.includes('<')) endMention(false);
+            if (inMention) nameChars += token.content.length;
+            else authored = true;
+          }
+          break;
+        case 'fence':
+        case 'code_block':
+          if (token.content.trim() || token.info.trim()) authored = true;
+          substantive = true;
+          break;
+        case 'link_open':
+          if (token.attrGet('href')) authored = substantive = true;
+          break;
+        case 'hr':
+          substantive = true;
+          break;
+        default:
+          if (token.children) visit(token.children);
+      }
+    }
+    endMention(false);
+  };
+  try {
+    visit(markdown.parse(text.slice(0, MD_ANALYSIS_MAX_CHARS), {}));
+  } catch (err) {
+    // A parser failure costs this node its harvest, never the message: the
+    // text still renders and counts as typed, and the legacy mirror still
+    // carries the post's media.
+    onParseError?.(err);
+    return { imageKeys: [], authored: true, substantive: true };
+  }
+  if (text.slice(MD_ANALYSIS_MAX_CHARS).trim()) authored = substantive = true;
+  return { imageKeys: [...imageKeys], authored, substantive };
+}
 
 export function parseFeishuContent(
   type: string,
   json: string,
   onParseError?: (err: unknown) => void,
 ): FeishuContent {
-  const result: FeishuContent = {
+  const empty = (): FeishuContent => ({
     text: '',
+    commandText: '',
     resources: [],
     userAuthoredText: false,
     synthesizedText: false,
     droppedResourceCount: 0,
-  };
+  });
   let body: Record<string, unknown>;
   try {
     body = record(JSON.parse(json));
   } catch (err) {
     onParseError?.(err);
-    return result;
+    return empty();
   }
-  const add = (
+  const single = (
     type: FeishuResource['type'],
     key: unknown,
     fileName?: unknown,
-  ) => {
-    if (typeof key !== 'string' || !key) return;
-    if (result.resources.some((r) => r.key === key && r.type === type)) return;
-    if (result.resources.length >= MAX_RESOURCES_PER_MESSAGE) {
-      result.droppedResourceCount += 1;
-      return;
-    }
-    result.resources.push({
-      type,
-      key,
-      ...(string(fileName) ? { fileName: string(fileName) } : {}),
-    });
-  };
+  ): FeishuResource[] =>
+    typeof key === 'string' && key
+      ? [
+          {
+            type,
+            key,
+            ...(string(fileName) ? { fileName: string(fileName) } : {}),
+          },
+        ]
+      : [];
   if (type === 'text') {
-    return { ...result, text: string(body['text']), userAuthoredText: true };
+    const text = string(body['text']);
+    return { ...empty(), text, commandText: text, userAuthoredText: true };
   }
   if (type === 'image') {
-    add('image', body['image_key']);
-    return { ...result, text: '(image)', synthesizedText: true };
+    return {
+      ...empty(),
+      text: '(image)',
+      resources: single('image', body['image_key']),
+      synthesizedText: true,
+    };
   }
   if (type === 'file' || type === 'audio' || type === 'media') {
     const kind = type === 'media' ? 'video' : type;
-    add(kind, body['file_key'], body['file_name']);
     return {
-      ...result,
+      ...empty(),
       text:
         type === 'file'
           ? `(file: ${
-              // The placeholder is a single line by contract (the command-turn
-              // placeholder filter is line-based), so a sender-chosen name may
-              // not carry newlines into it. The metadata keeps the raw name.
+              // A sender-chosen name may not carry newlines into the
+              // single-line placeholder. The metadata keeps the raw name.
               string(body['file_name'])
                 .replace(/[\r\n]+/g, ' ')
                 .trim() || 'file'
             })`
           : `(${kind})`,
+      resources: single(kind, body['file_key'], body['file_name']),
       synthesizedText: true,
     };
   }
   if (type === 'interactive') {
     return {
-      ...result,
+      ...empty(),
       text: '(card message — not supported)',
       synthesizedText: true,
     };
   }
-  if (type !== 'post') return result;
+  if (type !== 'post') return empty();
 
-  // The render phase runs on unbounded remote text; a throw here must degrade
-  // to an empty result through the same sink a JSON failure uses rather than
-  // escape into the adapter's message-level catch, which would strand the
-  // dedupe entry and drop the message on every redelivery.
+  // The render phase runs on unbounded remote text. A throw here is reported
+  // through the same sink a JSON failure uses and yields an empty result,
+  // which the adapter drops as an empty message. The Markdown parser — the
+  // one step that runs third-party code over that text — is guarded on its
+  // own inside analyzeMarkdown and costs a node its harvest, not the message.
   try {
-    return parsePostContent(body, result, add);
+    return parsePostContent(body, onParseError);
   } catch (err) {
     onParseError?.(err);
-    return {
-      text: '',
-      resources: [],
-      userAuthoredText: false,
-      synthesizedText: false,
-      droppedResourceCount: 0,
-    };
+    return empty();
   }
+}
+
+/**
+ * How a post renders. `model` is what the agent reads: media placeholders,
+ * links with their targets. `command` is the same rows for the command
+ * classifier: media as nothing, links as their label. `legacy` is the
+ * rendering the classifier read before this parser existed — text, link
+ * labels and mention names, every other node as nothing — so a command the
+ * legacy rows spell is dispatched exactly as it always was.
+ */
+type Rendering = 'model' | 'command' | 'legacy';
+
+/**
+ * Render one post node to text. Pure: resources and authorship are collected
+ * separately, so the same node renders in any of the three ways.
+ */
+function renderNode(value: unknown, rendering: Rendering): string {
+  const node = record(value);
+  const text = string(node['text']);
+  switch (node['tag']) {
+    case 'text':
+      return text;
+    case 'a': {
+      const href = string(node['href']);
+      if (rendering !== 'model') return text;
+      return href ? `[${text || href}](${href})` : text;
+    }
+    case 'at': {
+      const name = string(node['user_name']);
+      return name ? `@${name}` : '';
+    }
+    default:
+  }
+  if (rendering === 'legacy') return '';
+  switch (node['tag']) {
+    case 'img':
+      return rendering === 'model' ? '(image)' : '';
+    case 'media':
+      return rendering === 'model' ? '(video)' : '';
+    case 'code_block': {
+      // The language tag is user-controlled and interpolated next to the
+      // fence — strip characters that could break the fence line.
+      const language = string(node['language'])
+        .replace(/[\r\n`~]/g, '')
+        .trim();
+      const fence = fenceFor(text);
+      // Own-lined so a block sharing a row with sibling nodes still opens
+      // and closes on its own lines.
+      return `\n${fence}${language}\n${text}\n${fence}\n`;
+    }
+    case 'md':
+      return text;
+    case 'hr':
+      return '---';
+    default:
+      return '';
+  }
+}
+
+function renderRows(
+  rows: unknown,
+  title: string,
+  rendering: Rendering,
+): string {
+  const lines: string[] = title ? [title] : [];
+  if (Array.isArray(rows)) {
+    for (const row of rows) {
+      if (!Array.isArray(row)) continue;
+      lines.push(row.map((node) => renderNode(node, rendering)).join(''));
+    }
+  }
+  return lines.join('\n').trim();
 }
 
 function parsePostContent(
   bodyArg: Record<string, unknown>,
-  result: FeishuContent,
-  add: (type: FeishuResource['type'], key: unknown, fileName?: unknown) => void,
+  onParseError?: (err: unknown) => void,
 ): FeishuContent {
   let body = bodyArg;
   if (!('content' in body) && !('content_v2' in body) && !('title' in body)) {
     body = record(body['zh_cn'] ?? body['en_us'] ?? Object.values(body)[0]);
   }
   const v2 = body['content_v2'];
-  const rows = Array.isArray(v2) && v2.length > 0 ? v2 : body['content'];
-  const lines: string[] = [];
+  const legacy = body['content'];
+  const usesV2 = Array.isArray(v2) && v2.length > 0;
+  const rows = usesV2 ? v2 : legacy;
+  const title = string(body['title']);
+
+  let userAuthoredText = Boolean(title.trim());
   // Whether any node contributed real (non-placeholder) content: title prose,
   // text/link/mention/code/markdown — anything but an img/media placeholder.
-  let hasNonPlaceholderContent = false;
-  // Document position of every referenced key, as the rendered-text offset
-  // of the citation or node that names it. Deriving order from WHERE a
-  // reference stands — not from WHICH grammar matched it — keeps the loose
-  // citation sweep and the tight harvest grammar from disagreeing: a key
-  // the loose sweep misses (nested parentheses, an over-long destination)
-  // still sorts at its own text offset. A key cited nowhere falls past the
-  // end of the document in legacy node order. The merge sorts on these so
-  // attachment order follows the order the rendered text cites each key.
-  const positions = new Map<string, number>();
-  const resourceById = new Map<string, FeishuResource>();
-  const addAtPosition = (
-    type: FeishuResource['type'],
-    key: unknown,
-    fileName: unknown,
-    position: number,
-  ) => {
-    if (typeof key === 'string' && key) {
-      const id = `${type}:${key}`;
-      // A key's position is its EARLIEST citation: the loose citation sweep
-      // can re-match a key past the tight harvest's first sighting (a
-      // nested-paren citation hides the inner form from the sweep), so the
-      // smaller offset wins and pass order cannot demote a first-cited key.
-      const prev = positions.get(id);
-      if (prev === undefined || position < prev) positions.set(id, position);
-      if (!resourceById.has(id)) {
-        resourceById.set(id, {
-          type,
-          key,
-          ...(string(fileName) ? { fileName: string(fileName) } : {}),
-        });
-      }
-    }
-    add(type, key, fileName);
+  let hasNonPlaceholderContent = userAuthoredText;
+  // Every distinct resource in document order — the order the rows render
+  // them, with an `md` node's images in the order the parser reads them. The
+  // cap applies once, below, over the whole list.
+  const found: FeishuResource[] = [];
+  const seen = new Set<string>();
+  const add = (type: FeishuResource['type'], key: unknown): void => {
+    if (typeof key !== 'string' || !key || seen.has(`${type}:${key}`)) return;
+    seen.add(`${type}:${key}`);
+    found.push({ type, key });
   };
-  const title = string(body['title']);
-  if (title) {
-    lines.push(title);
-    if (title.trim()) {
-      result.userAuthoredText = true;
-      hasNonPlaceholderContent = true;
+  const collectMedia = (node: Record<string, unknown>): void => {
+    if (node['tag'] === 'img') add('image', node['image_key']);
+    else if (node['tag'] === 'media') add('video', node['file_key']);
+  };
+  const eachNode = (
+    source: unknown,
+    visit: (node: Record<string, unknown>) => void,
+  ): void => {
+    if (!Array.isArray(source)) return;
+    for (const row of source) {
+      if (Array.isArray(row)) for (const value of row) visit(record(value));
     }
-  }
-  const render = (value: unknown, base: number): string => {
-    const node = record(value);
+  };
+
+  eachNode(rows, (node) => {
     const text = string(node['text']);
     switch (node['tag']) {
       case 'text':
-      case 'a': {
+      case 'a':
         if (text.trim() || string(node['href'])) {
-          result.userAuthoredText = true;
+          userAuthoredText = true;
           hasNonPlaceholderContent = true;
         }
-        return node['tag'] === 'a' && string(node['href'])
-          ? `[${text || string(node['href'])}](${string(node['href'])})`
-          : text;
-      }
-      case 'at': {
+        break;
+      case 'at':
         // A mention display name is not message prose: media-only posts must
         // keep userAuthoredText false so their synthesized placeholder is
         // never recorded into group history as something a member typed.
-        const name = string(node['user_name']);
-        if (name) hasNonPlaceholderContent = true;
-        return name ? `@${name}` : '';
-      }
-      case 'img':
-        addAtPosition('image', node['image_key'], undefined, base);
-        return '(image)';
-      case 'media':
-        addAtPosition('video', node['file_key'], undefined, base);
-        return '(video)';
-      case 'code_block': {
-        // The language tag is user-controlled and interpolated next to the
-        // fence — strip characters that could break the fence line — and it
-        // counts as authored content either way.
-        const language = string(node['language'])
-          .replace(/[\r\n`~]/g, '')
-          .trim();
-        if (text.trim() || language) result.userAuthoredText = true;
+        if (string(node['user_name'])) hasNonPlaceholderContent = true;
+        break;
+      case 'code_block':
+        if (
+          text.trim() ||
+          string(node['language'])
+            .replace(/[\r\n`~]/g, '')
+            .trim()
+        )
+          userAuthoredText = true;
         hasNonPlaceholderContent = true;
-        // Reduce by hand, never spread: an input-sized backtick census
-        // overflows the call stack via Math.max(...runs).
-        let maxRun = 0;
-        for (const match of text.matchAll(/`+/g)) {
-          if (match[0].length > maxRun) maxRun = match[0].length;
-        }
-        const fence = '`'.repeat(Math.max(3, maxRun + 1));
-        // Own-lined so a block sharing a row with sibling nodes still opens
-        // and closes on its own lines.
-        return `\n${fence}${language}\n${text}\n${fence}\n`;
-      }
+        break;
       case 'md': {
-        // Code examples are not resource references, so keys are harvested
-        // from fence-stripped prose. Remote URLs are never fetched. When the
-        // scan met a construct it provably mis-reads (a backtick in a
-        // backtick fence's info string, a tab after a list marker, an HTML
-        // block start), its block structure is untrustworthy: skip the
-        // harvest for this node and let the legacy `content` rescue below
-        // carry the node's img/media keys.
-        const { prose, unsafe } = stripFencedCode(text);
-        if (!unsafe) {
-          // Reference-style definitions resolve `[ref]: img_key`. Both
-          // sweeps run over the same prose, so a match index is one document
-          // position for both; and a prose index never exceeds the raw
-          // text's length, so positions stay ordered across nodes as well.
-          const definitions = new Map<string, string>();
-          for (const def of prose.matchAll(MD_REFERENCE_DEFINITION_G_RE)) {
-            definitions.set(def[1]!, def[2]!);
-          }
-          for (const citation of prose.matchAll(MD_IMAGE_CITATION_G_RE)) {
-            const key =
-              citation[1] !== undefined
-                ? definitions.get(citation[1])
-                : /^<?(img_[A-Za-z0-9_.:-]{1,200})/.exec(citation[2]!)?.[1];
-            if (key) {
-              const id = `image:${key}`;
-              const position = base + citation.index;
-              const prev = positions.get(id);
-              if (prev === undefined || position < prev) {
-                positions.set(id, position);
-              }
-            }
-          }
-          for (const match of prose.matchAll(mdImageRe())) {
-            addAtPosition('image', match[1], undefined, base + match.index);
-          }
-        }
-        // Authorship is judged on the RETURNED text (minus image references
-        // and at-tags), not on the harvest-stripped variant.
-        const visible = text
-          .replace(new RegExp(MD_AT_TAG_SOURCE, 'g'), '')
-          .replace(mdImageRe(), '');
-        if (visible.trim()) result.userAuthoredText = true;
-        if (text.trim()) hasNonPlaceholderContent = true;
-        return text;
+        // Remote URLs are never fetched: only platform image keys the parser
+        // reads as rendered images become resources.
+        const facts = analyzeMarkdown(text, onParseError);
+        for (const key of facts.imageKeys) add('image', key);
+        if (facts.authored) userAuthoredText = true;
+        if (facts.substantive) hasNonPlaceholderContent = true;
+        break;
       }
       case 'hr':
         hasNonPlaceholderContent = true;
-        return '---';
+        break;
       default:
-        return '';
+        collectMedia(node);
     }
+  });
+  // The legacy representation mirrors the same document with typed img/media
+  // nodes, the platform's own statement of what the post carries. A key it
+  // names that `content_v2` did not yield joins after the ones that did, in
+  // legacy node order: `content_v2` gives it no position to sort by.
+  if (usesV2) eachNode(legacy, collectMedia);
+
+  const resources = found.slice(0, MAX_RESOURCES_PER_MESSAGE);
+  const text = renderRows(rows, title, 'model');
+  const commandText = renderRows(rows, title, 'command');
+  const legacyCommandText = renderRows(legacy, title, 'legacy');
+  return {
+    text: text || (resources.length ? '(media)' : ''),
+    commandText,
+    ...(legacyCommandText && legacyCommandText !== commandText
+      ? { legacyCommandText }
+      : {}),
+    resources,
+    userAuthoredText,
+    // The text is adapter-synthesized when every rendered span is a media
+    // placeholder (or there were none and the fallback produced one). Such
+    // text is never wrapped as another user's quoted message.
+    synthesizedText: !hasNonPlaceholderContent,
+    droppedResourceCount: found.length - resources.length,
   };
-  if (Array.isArray(rows)) {
-    // The rendered text joins rows with '\n', so each row's base offset is
-    // the running length plus one per preceding row.
-    let base = lines.reduce((sum, line) => sum + line.length + 1, 0);
-    for (const row of rows) {
-      if (!Array.isArray(row)) continue;
-      let rowText = '';
-      for (const value of row) {
-        rowText += render(value, base + rowText.length);
-      }
-      lines.push(rowText);
-      base += rowText.length + 1;
-    }
-  }
-  // The legacy representation carries image nodes even when Markdown uses
-  // syntax outside the simple inline image form above. It mirrors the same
-  // document, so a rescued key takes the offset of the citation that names
-  // it when the text cites it at all — including citations the harvest
-  // grammar rejects — and falls past the end of the document in legacy node
-  // order otherwise. Keys both representations carry keep the v2 position,
-  // and the cap applies once over the position-sorted union.
-  if (rows === v2 && Array.isArray(body['content'])) {
-    let legacyNodeIndex = -1;
-    for (const row of body['content']) {
-      if (!Array.isArray(row)) continue;
-      for (const value of row) {
-        legacyNodeIndex += 1;
-        const node = record(value);
-        const key =
-          node['tag'] === 'img'
-            ? node['image_key']
-            : node['tag'] === 'media'
-              ? node['file_key']
-              : undefined;
-        if (typeof key !== 'string' || !key) continue;
-        const type: FeishuResource['type'] =
-          node['tag'] === 'img' ? 'image' : 'video';
-        const id = `${type}:${key}`;
-        if (resourceById.has(id)) continue;
-        if (!positions.has(id)) {
-          positions.set(id, LEGACY_ONLY_POSITION_BASE + legacyNodeIndex);
-        }
-        resourceById.set(id, { type, key });
-      }
-    }
-    const ordered = [...resourceById.values()].sort(
-      (a, b) =>
-        positions.get(`${a.type}:${a.key}`)! -
-        positions.get(`${b.type}:${b.key}`)!,
-    );
-    const kept = ordered.slice(0, MAX_RESOURCES_PER_MESSAGE);
-    result.resources = kept;
-    result.droppedResourceCount = ordered.length - kept.length;
-  }
-  result.text = lines.join('\n').trim();
-  if (!result.text && result.resources.length) result.text = '(media)';
-  // The text is adapter-synthesized when every rendered line is a media
-  // placeholder (or there were none and the fallback produced one). Such text
-  // is never wrapped as another user's quoted message.
-  result.synthesizedText = !hasNonPlaceholderContent;
-  return result;
 }
