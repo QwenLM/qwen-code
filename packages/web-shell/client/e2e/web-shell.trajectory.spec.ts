@@ -212,7 +212,9 @@ test.describe('trajectory panel', () => {
     // a stale scroll offset leaves rows in the DOM below the viewport.
     await page.keyboard.press('End');
     const active = await grid.getAttribute('aria-activedescendant');
-    const activeRow = page.locator(`#${active}`);
+    // Matched as an attribute, not as `#id`: React's `useId` puts colons in
+    // the value, which a CSS id selector cannot carry.
+    const activeRow = page.locator(`[id="${active}"]`);
     await expect(activeRow).toBeVisible();
     const [rowBox, gridBox] = await Promise.all([
       activeRow.boundingBox(),
