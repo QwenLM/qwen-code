@@ -301,6 +301,16 @@ export type {
 } from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+export {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  resolveDeferredToolCall,
+} from './tools/tool-call.js';
+export type {
+  DeferredToolCallResolution,
+  ToolCallTool,
+  ToolCallParams,
+} from './tools/tool-call.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export type {
   TeamPlanApprovalTool,
@@ -491,6 +501,8 @@ export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
+export * from './agents/workflow-checkpoint.js';
+export { WorkflowJournalUnavailableError } from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -501,6 +513,7 @@ export {
   EXTENSION_WORKFLOW_NAME_PATTERN,
   qualifyExtensionWorkflowName,
   parseExtensionWorkflowName,
+  isWorkflowRunId,
   type SavedWorkflowEntry,
   type SavedWorkflowScope,
   type SavedWorkflowSource,
@@ -762,7 +775,7 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './tools/tool-utils.js';
 export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
-export * from './utils/yaml-parser.js';
+export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';

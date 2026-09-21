@@ -61,6 +61,7 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { workflowRequestErrorStatus } from '../workflow-errors.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import {
@@ -938,8 +939,9 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
-      if (kind === 'workflow_invalid_params') {
-        res.status(400).json({
+      const workflowStatus = workflowRequestErrorStatus(kind);
+      if (workflowStatus !== undefined) {
+        res.status(workflowStatus).json({
           error: errorMessage(err),
           code: kind,
         });

@@ -53,7 +53,7 @@ export interface ToolInvocation<
    * The coreToolScheduler uses this as the *default* permission which may be
    * overridden by PermissionManager rules at L4.
    */
-  getDefaultPermission(): Promise<PermissionDecision>;
+  getDefaultPermission(signal?: AbortSignal): Promise<PermissionDecision>;
 
   /**
    * Whether this invocation must be approved through an explicit host/user
@@ -102,6 +102,9 @@ export interface ToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
+
+  /** Release prepared resources when the scheduler finalizes the call. */
+  release?(): Promise<void>;
 }
 
 /**
@@ -299,9 +302,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool and invokes it through
+     * {@link ToolNames.TOOL_CALL}, keeping the declaration list stable. Mirrors
+     * the `shouldDefer` field described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**

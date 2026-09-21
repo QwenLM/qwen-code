@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type {
-  ActiveGoal,
   ApprovalModeValue,
   GoalSnapshotV2,
   SubagentConfig,
@@ -251,11 +250,6 @@ export interface ToolProgressStreamEvent {
   content: McpToolProgressData | ShellProgressData;
 }
 
-export interface ActiveGoalStreamEvent {
-  type: 'active_goal';
-  active_goal: ActiveGoal | null;
-}
-
 export interface GoalStateStreamEvent {
   type: 'goal_state';
   goal_state: GoalSnapshotV2;
@@ -268,8 +262,7 @@ export type StreamEvent =
   | ContentBlockStopEvent
   | MessageStopStreamEvent
   | ToolProgressStreamEvent
-  | GoalStateStreamEvent
-  | ActiveGoalStreamEvent;
+  | GoalStateStreamEvent;
 
 export interface CLIPartialAssistantMessage {
   type: 'stream_event';
