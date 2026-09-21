@@ -1006,6 +1006,7 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.private).not.toBe(true);
     expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
@@ -1435,6 +1436,7 @@ describe('package asset scripts', () => {
           name: '@qwen-code/qwen-code',
           version: '0.17.0',
           description: 'Qwen Code',
+          private: true,
           repository: {
             type: 'git',
             url: 'https://github.com/QwenLM/qwen-code.git',

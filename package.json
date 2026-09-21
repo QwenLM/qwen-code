@@ -1,5 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
+  "private": true,
   "version": "0.24.3",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
@@ -43,7 +44,7 @@
     "build-and-start": "npm run build && npm run start",
     "build:vscode": "node scripts/build_vscode_companion.js",
     "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
-    "build:packages": "npm run build --workspaces",
+    "build:packages": "corepack pnpm -r run build",
     "build:sandbox": "node scripts/build_sandbox.js",
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
     "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present",
