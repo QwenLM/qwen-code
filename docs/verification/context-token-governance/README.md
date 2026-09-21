@@ -145,7 +145,9 @@ qwen --version        # 必须 ≥ 0.24.2；0.24.1 及之前不含 #10410，会�
 
 文档：`docs/users/configuration/settings.md` 的 `tools.eager` 一行。
 
-**豁免名单**（列不列都常驻，共 2,163 token 的地板）：`tool_search` 375 · `ask_user_question` 751 · `exit_plan_mode` 592 · `enter_plan_mode` 343 · `task_stop` 102；另有 `mcp__*`、`structured_output`、`computer_use__*`。
+**豁免名单**（列不列都常驻）：`ask_user_question` 751 · `exit_plan_mode` 592 · `enter_plan_mode` 343 · `tool_search` 394 · `tool_call` 148；另有 `mcp__*`、`structured_output`、`computer_use__*` 同样豁免。合计约 **2,230 token 的地板**。
+
+> **2026-09-20 更正**：原文写的地板是 2,163（含 `task_stop` 102、`tool_search` 375、且没有 `tool_call`）。三处都变了——`tool_call` 是 #10410 新增的桥接另一半、豁免且常驻（实测 148）；`tool_search` 已从 375 漂到 394；`task_stop` 自身 `shouldDefer=true`，本来就不常驻、不该计入。上面这几个数字来自评审在本仓已构建产物上用快照自带的估算器实测（不是我测的），**按你自己的 `/context detail` 读数为准**。
 
 ### 2.2 要写的配置
 
@@ -316,7 +318,7 @@ ls ~/.qwen/extensions/*/skills/
 
 ## 8. 请报告回来什么
 
-0. **（新，最先做）§0.1 的重新取基线读数**，填这张表——只有第一行是必须的，后面几行做到哪填到哪：
+0. **（新，最先做）§0.1 的重新取基线读数**，填这张表——**第 2 行必填**（§0.1 已把它定为任何验证的前提）；第 1 行只在还留着升级前的环境时填，缺它就用 §0.1 推算的 ~17,300 代替；第 3 行是白名单归因所必需，做到了再填：
 
    |                           | `/context detail` 内置工具 | 首轮 input token | 每会话 `tool_search` 次数 | 版本 |
    | ------------------------- | -------------------------: | ---------------: | ------------------------: | ---- |
