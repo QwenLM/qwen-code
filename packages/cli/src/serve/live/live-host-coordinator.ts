@@ -7,7 +7,10 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 import { getErrorMessage } from '../../utils/errors.js';
-import { LiveVisualCaptureStore } from './visual-capture-store.js';
+import {
+  LiveVisualCaptureStore,
+  type LiveVisualCaptureSink,
+} from './visual-capture-store.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import {
   LIVE_HOST_BUNDLE_ID,
@@ -121,7 +124,7 @@ export interface LiveHostCoordinatorOptions {
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
   appshotTimeoutMs?: number;
-  visualCaptures?: LiveVisualCaptureStore;
+  visualCaptures?: LiveVisualCaptureSink;
   now?: () => number;
 }
 
@@ -546,7 +549,7 @@ export class LiveHostCoordinator {
   private outputMuted = false;
   private lastCallError?: string;
   private readonly pendingAppshots = new Map<string, PendingAppshot>();
-  private readonly visualCaptures: LiveVisualCaptureStore;
+  private readonly visualCaptures: LiveVisualCaptureSink;
   private pendingShortcut?: PendingShortcut;
   private readonly inactiveWaiters = new Set<() => void>();
 

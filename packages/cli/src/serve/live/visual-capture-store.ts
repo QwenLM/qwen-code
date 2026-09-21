@@ -29,7 +29,19 @@ const STALE_CAPTURE_AGE_MS = 5 * 60_000;
  */
 const CHECKS_POSIX_MODE = process.platform !== 'win32';
 
-export class LiveVisualCaptureStore {
+/**
+ * What the coordinator needs of a store. It is an interface rather than the
+ * class because the class keeps private state, which makes it nominally typed:
+ * a test double could otherwise never stand in for it.
+ */
+export interface LiveVisualCaptureSink {
+  /** Persists the image and returns the path the tool should read. */
+  store(image: Buffer): Promise<string>;
+  /** Drops anything still held, on shutdown. */
+  dispose(): void;
+}
+
+export class LiveVisualCaptureStore implements LiveVisualCaptureSink {
   private readonly cleanupTimers = new Map<NodeJS.Timeout, string>();
 
   constructor(
