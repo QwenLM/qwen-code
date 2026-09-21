@@ -105,6 +105,18 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         : ''),
   );
 
+  // Before anything the chunk ids are used for below, because it qualifies all
+  // of it: a plan that stopped describing its diff still matches every id. A
+  // NOTE, not an ERROR, and the exit code does not read it — the check has
+  // never fired on a real run, so it reports and nothing more.
+  if (report.selectionDrift !== null) {
+    writeStderrLine(
+      `NOTE: ${report.selectionDrift}. The chunk coverage in this report — ` +
+        `the summary line above and every line below — is against the plan ` +
+        `as written.`,
+    );
+  }
+
   // The defect that actually happened, named as itself.
   if (report.blindAgents.length > 0) {
     writeStderrLine(

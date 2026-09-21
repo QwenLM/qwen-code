@@ -40,6 +40,7 @@ import {
   findingsFilePath,
 } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
+import { buildSelectionIdentity } from './lib/selection.js';
 import { checkCoverageCommand } from './check-coverage.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -170,9 +171,15 @@ function transcript(
      * credit narrows to its ranged reads.
      */
     range?: [number, number];
+    /**
+     * The diff path the tool calls name, for a fixture whose plan points at a
+     * real file instead of the module's `DIFF` constant.
+     */
+    toolPath?: string;
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const diffPath = opts.toolPath ?? DIFF;
   const pointedAtBriefs = [
     ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
   ].map((m) => m[1]);
@@ -201,11 +208,11 @@ function transcript(
                 name: 'read_file',
                 args: opts.range
                   ? {
-                      file_path: DIFF,
+                      file_path: diffPath,
                       offset: opts.range[0],
                       limit: opts.range[1],
                     }
-                  : { file_path: DIFF },
+                  : { file_path: diffPath },
               },
             },
           ],
@@ -2996,5 +3003,138 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     // silently dropping recovered whole-diff work (verify, reverse-audit)
     // from the continuity count.
     expect(r.recoveredAgents).toBe(3);
+  });
+});
+
+describe('coverage — a drifted selection identity, end to end', () => {
+  // The plan carries a `selection` identity (as every capture command writes —
+  // see lib/selection.ts) bound to a REAL diff file, and the file is rewritten
+  // after the agents ran. Coverage still computes, and computes the same
+  // thing: the check reports, and nothing reads the report to decide anything.
+  const diffText = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+x\n';
+
+  /** A compliant fully-covered run over a plan with a real identity. */
+  function identityRun(): { p: string; diffPath: string } {
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(diffPath, diffText);
+    const chunks = [
+      { id: 1, startLine: 1, endLine: 100 },
+      { id: 2, startLine: 101, endLine: 200 },
+    ];
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 5000,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks,
+        selection: buildSelectionIdentity(diffText, chunks, 200),
+      }),
+    );
+    // `good()` names the module's `DIFF` constant, a path that does not
+    // exist; these prompts name the fixture's own file.
+    const goodHere = (c: number) =>
+      `You are reviewing chunk ${c} of 2.\n` +
+      `read_file(file_path="${chunkBrief(c)}")\n` +
+      `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
+    for (const c of [1, 2]) built(p, c, goodHere(c));
+    satisfyRoster(p);
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+    transcript('a1', goodHere(1), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2', goodHere(2), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+    });
+    return { p, diffPath };
+  }
+
+  it('reports no drift for a plan that carries no identity', () => {
+    // Every other fixture in this file writes a plan without one — they stand
+    // in for plans written before the field existed, and those must not
+    // narrate a defect.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    expect(coverageFromTranscripts(plan(), ENV).selectionDrift).toBeNull();
+  });
+
+  it('reports no drift when the identity-carrying diff is unchanged', () => {
+    // The control for the two tests below: a reader digesting the wrong text
+    // would report drift on rewritten diffs as expected AND on unchanged
+    // ones, and only this goes red.
+    const { p } = identityRun();
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.selectionDrift).toBeNull();
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('reports the drift and moves nothing else', () => {
+    const { p, diffPath } = identityRun();
+    const before = coverageFromTranscripts(p, ENV);
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const after = coverageFromTranscripts(p, ENV);
+    expect(after.selectionDrift).toMatch(/diff file has changed/);
+    // Report-only, stated as strongly as it can be: every other field of the
+    // report is what it was before the diff moved.
+    expect({ ...after, selectionDrift: null }).toEqual(before);
+  });
+
+  it('reports an unreadable diff file rather than reading it as a match', () => {
+    // `null` means the identity was checked and everything matched. A file
+    // that is gone was not checked.
+    const { p, diffPath } = identityRun();
+    rmSync(diffPath);
+
+    expect(coverageFromTranscripts(p, ENV).selectionDrift).toMatch(
+      /could not be read/,
+    );
+  });
+
+  it('prints the drift as a NOTE scoped to the whole report, exit unchanged', () => {
+    const { p, diffPath } = identityRun();
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+
+      const lines = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]));
+      const note = lines.find((l) => l.includes('diff file has changed'));
+      expect(note).toBeDefined();
+      expect(note).toMatch(/^NOTE: /);
+      // The summary fraction above the NOTE is the very number a moved diff
+      // qualifies, so the caveat names it rather than only what follows.
+      expect(note).toContain('the summary line above');
+      expect(lines.some((l) => l.startsWith('ERROR:'))).toBe(false);
+      expect(process.exitCode).toBe(prevExit);
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 });

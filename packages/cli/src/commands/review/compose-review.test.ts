@@ -42,6 +42,7 @@ import {
   serializeLedger,
 } from './lib/ledger.js';
 import { countInlineFindings, readClaimHead } from './lib/inline-counts.js';
+import { buildSelectionIdentity } from './lib/selection.js';
 import {
   aboveChurnBar,
   CHURN_MIN_FRESH,
@@ -20170,5 +20171,67 @@ describe('the fix-induced marking behind a source tag (#10291, review round 2)',
       id: 'R3-2',
       title: '[probe] the fix opened a new gap',
     });
+  });
+});
+
+describe('selection drift — report-only, end to end', () => {
+  /**
+   * `coveredPlan()` with the identity a capture command would have recorded
+   * for it, added in place and backdated again so the transcripts stay newer
+   * than the plan.
+   */
+  function coveredPlanWithIdentity(): string {
+    const p = coveredPlan();
+    const planJson = JSON.parse(readFileSync(p, 'utf8')) as {
+      chunks: Array<{ id: number; startLine: number; endLine: number }>;
+      diffLines: number;
+    };
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        selection: buildSelectionIdentity(
+          readFileSync(DIFF, 'utf8'),
+          planJson.chunks,
+          planJson.diffLines,
+        ),
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    return p;
+  }
+
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('says nothing while the diff is what the plan was written over', () => {
+    const r = compose(coveredPlanWithIdentity());
+    expect(r.remediation.join(' ')).not.toContain('selection drift:');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('lands in remediation, caps nothing, and moves neither event nor body', () => {
+    // The diff rewritten AFTER the agents ran — the failure the identity
+    // exists to catch — disclosed where the other operator repairs are, and
+    // wired to nothing that caps or posts.
+    const p = coveredPlanWithIdentity();
+    const before = compose(p);
+    writeFileSync(DIFF, `${readFileSync(DIFF, 'utf8')}+moved under the plan\n`);
+
+    const after = compose(p);
+    expect(after.remediation.join(' ')).toMatch(
+      /selection drift: .*diff file has changed/,
+    );
+    expect(after.cappedBy).toEqual([]);
+    expect(after.event).toBe('APPROVE');
+    expect(after.event).toBe(before.event);
+    expect(after.body).toBe(before.body);
   });
 });

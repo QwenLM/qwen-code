@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
 vi.mock('../../config/settings.js', async (importOriginal) => {
@@ -230,6 +231,25 @@ describe('plan-diff', () => {
     expect(plan.srcDiffLines).toBe(plan.diffLines);
     expect(plan.files[0].path).toBe('src/a.ts');
     expect(plan.files[0].kind).toBe('source');
+  });
+
+  it('records the identity of the diff it planned over', () => {
+    // The coverage reader re-hashes the file at `diffPathAbsolute` and
+    // compares it to this, so it must digest the text this command read —
+    // any other string at the call site type-checks and reads as drift on
+    // every run.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 1200));
+    run(diffPath, out);
+
+    const plan = JSON.parse(readFileSync(out, 'utf8'));
+    expect(plan.selection.sourceArtifactSha256).toBe(
+      createHash('sha256')
+        .update(readFileSync(diffPath, 'utf8'), 'utf8')
+        .digest('hex'),
+    );
+    expect(plan.selection.chunkCount).toBe(plan.chunks.length);
   });
 
   it('carries the PR identity when told to — the roster requires Agent 0 from it', () => {

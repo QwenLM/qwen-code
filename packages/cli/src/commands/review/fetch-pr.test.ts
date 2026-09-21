@@ -4098,6 +4098,28 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     );
   });
 
+  it('records the selection identity over the text it planned from', async () => {
+    // A different question from `diffSha256` above (see lib/selection.ts):
+    // this one is re-checked by the coverage reader against the diff on disk,
+    // so it must digest the decoded text the chunks were cut from.
+    const diff = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: 'base123',
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('diff') ? Buffer.from(diff) : Buffer.from(''),
+    );
+
+    const report = await reportFor();
+    const selection = report.selection as { sourceArtifactSha256: string };
+    expect(selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(diff, 'utf8').digest('hex'),
+    );
+  });
+
   it('hashes the BYTES, not a utf8 decode of them', async () => {
     // A pure-ASCII fixture cannot see the difference: digests of the Buffer
     // and of its utf8-decoded string coincide for every valid-UTF-8 diff and
@@ -4238,10 +4260,17 @@ describe('fetch-pr run-session ledger wiring', () => {
 // count the gitRaw mock answers every `git show` with (the diff's own five
 // lines).
 function resumePlanFields(diffBytes: string): Record<string, unknown> {
-  return buildPlanReport(buildDiffPlan(diffBytes, 400), () => 5, {
-    operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-    hasDeadline: hasReviewDeadline(process.env),
-  }) as unknown as Record<string, unknown>;
+  return buildPlanReport(
+    buildDiffPlan(diffBytes, 400),
+    () => 5,
+    {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    },
+    // The same bytes the plan was built from — the fixture stands in for what
+    // a real `fetch-pr` wrote, and a real one records its own diff text here.
+    diffBytes,
+  ) as unknown as Record<string, unknown>;
 }
 
 describe('fetch-pr --resume', () => {

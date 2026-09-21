@@ -5644,6 +5644,18 @@ function composeReviewBody(
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      // Operator register only, and NOT pushed through `coverageEntries`: that
+      // channel caps (every entry folds into the unreviewed-dimension cap and
+      // the posted "Not reviewed:" list), and a check this new must not be
+      // able to take an Approve away before anyone has seen how often it
+      // fires. The repair is an operator's — re-capture and re-plan — so it
+      // goes where the other repairs are.
+      if (cov.selectionDrift !== null) {
+        remediation.push(
+          `selection drift: ${cov.selectionDrift}. The coverage below is ` +
+            `reported against the plan as written.`,
+        );
+      }
       for (const id of cov.missingChunks) missingReceipts.push(id);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:

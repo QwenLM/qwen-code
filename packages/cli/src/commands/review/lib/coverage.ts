@@ -91,6 +91,7 @@ import {
   verifyBudgetExhausted,
 } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
+import { selectionDrift, type SelectionDrift } from './selection.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -250,6 +251,17 @@ export interface CoverageFromTranscripts {
    * before chunks carried them.
    */
   plannedChunks: Array<{ id: number; files: string[] }>;
+  /**
+   * What the plan's recorded identity said when it was checked against the
+   * diff on disk — see lib/selection.ts — or `null` when it matched, and when
+   * the plan predates the field and carries none.
+   *
+   * REPORTED, and nothing else: it is not a conjunct of `ok`, and no chunk's
+   * outcome reads it. The check has never fired on a real run, so its
+   * false-positive rate is unknown, and an unmeasured predicate does not get
+   * to refuse a review.
+   */
+  selectionDrift: string | null;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
@@ -262,9 +274,20 @@ interface Plan {
     endLine: number;
     files?: Array<{ path: string }>;
   }>;
+  /**
+   * What the plan was computed from — see lib/selection.ts. `unknown`, not
+   * `SelectionIdentity`: this is parsed JSON, a plan written before the field
+   * existed carries none, and `selectionDrift` is what decides whether what
+   * is here can be read.
+   */
+  selection?: unknown;
 }
 
-function readPlan(path: string): { plan: Plan; mtimeMs: number } {
+function readPlan(path: string): {
+  plan: Plan;
+  mtimeMs: number;
+  drift: SelectionDrift;
+} {
   const plan = JSON.parse(readFileSync(path, 'utf8')) as Plan;
   if (typeof plan?.diffPathAbsolute !== 'string' || !plan.diffPathAbsolute) {
     throw new Error(`coverage: ${path} has no diffPathAbsolute`);
@@ -279,7 +302,30 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
   if (problem) {
     throw new Error(`coverage: ${path} has ${problem}`);
   }
-  return { plan, mtimeMs: statSync(path).mtimeMs };
+  // Does the plan still describe the diff it was planned over? Reported, never
+  // thrown — see `selectionDrift`'s own note on why an unmeasured predicate
+  // does not get to refuse a review. An unreadable diff is not "no drift" on a
+  // plan that carries an identity: `null` means the identity was checked and
+  // everything matched, and a file that cannot be read was not checked. An
+  // identity-less plan checks nothing, so it stays `null` there — the same
+  // absence rule `selectionDrift` itself states.
+  let drift: SelectionDrift = null;
+  const identity = plan.selection;
+  if (identity !== undefined && identity !== null) {
+    try {
+      drift = selectionDrift(
+        identity,
+        readFileSync(plan.diffPathAbsolute, 'utf8'),
+        plan.chunks,
+      );
+    } catch {
+      drift =
+        `the diff file at ${plan.diffPathAbsolute} could not be read when ` +
+        'the selection identity was checked, so the plan’s chunk ranges ' +
+        'could not be verified against it — re-capture the diff and re-plan';
+    }
+  }
+  return { plan, mtimeMs: statSync(path).mtimeMs, drift };
 }
 
 /**
@@ -440,7 +486,7 @@ export function coverageFromTranscripts(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): CoverageFromTranscripts {
-  const { plan, mtimeMs } = readPlan(planPath);
+  const { plan, mtimeMs, drift } = readPlan(planPath);
   // The RUN's transcripts, not the session's: a resumed run (`--resume`)
   // continues in a new session, and the interrupted attempt's evidence lives
   // under the session id the run ledger recorded. Same fence (the plan's
@@ -1164,6 +1210,7 @@ export function coverageFromTranscripts(
         .map((f) => f?.path)
         .filter((p): p is string => typeof p === 'string' && p !== ''),
     })),
+    selectionDrift: drift,
   };
 }
 
