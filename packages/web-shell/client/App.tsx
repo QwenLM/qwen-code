@@ -192,6 +192,7 @@ import {
   DaemonStatusDialog,
 } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { GaugeIcon, LayersIcon } from 'lucide-react';
@@ -1599,6 +1600,12 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
 ];
+/**
+ * One trajectory tab per session, so re-opening an already-open one reveals it
+ * rather than stacking a second. Shared with the entry, which hides itself
+ * once this session's tab is open.
+ */
+const trajectoryTabId = (sessionId: string) => `trajectory:${sessionId}`;
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
   ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
@@ -1828,6 +1835,10 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'workspaceCwd'
     >
   | Pick<
+      Extract<ArtifactPanelTab, { kind: 'trajectory' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
+    >
+  | Pick<
       Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
       'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
     >
@@ -2008,6 +2019,13 @@ function parsePersistedArtifactPanelTab(
         kind: 'terminal',
         workspaceCwd: tab['workspaceCwd'],
       } as PersistedArtifactPanelTab;
+    case 'trajectory':
+      if (typeof tab['sessionId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'trajectory',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     case 'token_usage':
     case 'context_usage':
       if (typeof tab['sessionId'] !== 'string') return;
@@ -2154,6 +2172,8 @@ function serializeArtifactPanelTabs(
             workspaceCwd: tab.workspaceCwd,
           },
         ];
+      case 'trajectory':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'token_usage':
       case 'context_usage':
         return tab.sessionId
@@ -4787,6 +4807,7 @@ export function App({
       true;
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
+  const trajectoryAvailable = rightPanelItems.includes('trajectory');
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -5502,6 +5523,28 @@ export function App({
       setArtifactPanelOpen(true);
     },
     [getDefaultReviewPanelWidth, t],
+  );
+  const openTrajectoryPanel = useCallback(
+    (sourceSessionId: string) => {
+      const tab: ArtifactPanelTab = {
+        id: trajectoryTabId(sourceSessionId),
+        kind: 'trajectory',
+        title: t('trajectory.title'),
+        sessionId: sourceSessionId,
+        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t, workspace.client],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6394,6 +6437,23 @@ export function App({
                   return webTerminalAvailable
                     ? { ...tab, initialized: false }
                     : undefined;
+                case 'trajectory': {
+                  if (!tab.sessionId) return undefined;
+                  // A stored tab outlives the host's opt-in, so a host that
+                  // has since stopped listing the item would get the panel
+                  // back — and fetching with it — through the browser profile
+                  // alone.
+                  if (!trajectoryAvailable) return undefined;
+                  // The loader is a function, so it cannot survive storage;
+                  // a restored tab is inert until it is rewired here.
+                  return {
+                    ...tab,
+                    loadPage: createTrajectoryPageLoader(
+                      workspace.client,
+                      tab.sessionId,
+                    ),
+                  };
+                }
                 case 'context_usage':
                 case 'token_usage': {
                   if (!tab.sessionId) return undefined;
@@ -6522,6 +6582,7 @@ export function App({
     resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
+    trajectoryAvailable,
     webTerminalAvailable,
     webPreviewAvailable,
     workspace.baseUrl,
@@ -18190,6 +18251,12 @@ export function App({
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
+    onOpenTrajectory: connection.sessionId
+      ? () => openTrajectoryPanel(connection.sessionId!)
+      : undefined,
+    trajectoryTabId: connection.sessionId
+      ? trajectoryTabId(connection.sessionId)
+      : undefined,
     items: rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,

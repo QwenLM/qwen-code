@@ -17,6 +17,13 @@ type MessageValue =
 
 type Messages = Record<string, MessageValue>;
 
+/** English count plus its noun, pluralised the regular way. */
+function plural(count: string | number | undefined, noun: string): string {
+  const value = typeof count === 'number' ? count : Number(count ?? 0);
+  const safe = Number.isFinite(value) ? value : 0;
+  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
+}
+
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
@@ -2970,6 +2977,38 @@ const EN: Messages = {
   'tokenUsage.tools': 'Tools',
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  'trajectory.title': 'Trajectory',
+  'trajectory.description': 'See where a run spent its time and tokens',
+  'trajectory.empty': 'No records in this session yet.',
+  'trajectory.noTiming':
+    'This session was written before per-request timing was recorded, so durations are unavailable.',
+  'trajectory.truncated': 'Showing the most recent records of this session.',
+  'trajectory.loadFailed': (v) =>
+    `Could not read the transcript: ${v?.message ?? ''}`,
+  'trajectory.partial':
+    'Part of this transcript could not be read, so some records are missing.',
+  'trajectory.totals': (v) =>
+    `${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
+  'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
+  'trajectory.turnSummary': (v) =>
+    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.request': 'Model request',
+  'trajectory.requestFailed': 'Request failed',
+  'trajectory.ttft': (v) => `TTFT ${v?.duration ?? ''}`,
+  'trajectory.subagentRollup': (v) =>
+    `subagent ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.badge.user': 'you',
+  'trajectory.badge.message': 'say',
+  'trajectory.badge.thought': 'think',
+  'trajectory.badge.tool': 'tool',
+  'trajectory.badge.subagent': 'sub',
+  'trajectory.badge.shell': 'shell',
+  'trajectory.badge.permission': 'ask',
+  'trajectory.badge.status': 'note',
+  'trajectory.badge.cancelled': 'stop',
+  'trajectory.badge.other': 'other',
+  'trajectory.cancelled': 'Turn cancelled',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -6701,6 +6740,35 @@ const ZH: Messages = {
   'tokenUsage.tools': '工具',
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  'trajectory.title': '轨迹',
+  'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
+  'trajectory.empty': '这个会话还没有记录。',
+  'trajectory.noTiming': '这个会话写于记录逐次耗时之前，因此没有耗时数据。',
+  'trajectory.truncated': '只显示这个会话最近的记录。',
+  'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
+  'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
+  'trajectory.totals': (v) =>
+    `${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
+  'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
+  'trajectory.turnSummary': (v) =>
+    `${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.request': '模型请求',
+  'trajectory.requestFailed': '请求失败',
+  'trajectory.ttft': (v) => `首字 ${v?.duration ?? ''}`,
+  'trajectory.subagentRollup': (v) =>
+    `子代理 ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.badge.user': '用户',
+  'trajectory.badge.message': '回复',
+  'trajectory.badge.thought': '思考',
+  'trajectory.badge.tool': '工具',
+  'trajectory.badge.subagent': '子代理',
+  'trajectory.badge.shell': '终端',
+  'trajectory.badge.permission': '询问',
+  'trajectory.badge.status': '提示',
+  'trajectory.badge.cancelled': '中断',
+  'trajectory.badge.other': '其他',
+  'trajectory.cancelled': '本轮已取消',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
