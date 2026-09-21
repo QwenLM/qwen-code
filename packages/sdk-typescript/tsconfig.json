@@ -45,6 +45,9 @@
     "paths": {
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../core/src/utils/transcript-records.ts"
+      ],
+      "@qwen-code/qwen-code-core/telemetryConstants": [
+        "../core/src/telemetry/constants.ts"
       ]
     }
   },

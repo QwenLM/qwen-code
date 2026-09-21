@@ -205,6 +205,38 @@ async function openSettingsPanel(page: Page): Promise<void> {
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('mobile composer controls', async ({ browser }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const context = await browser.newContext({
+        ...devices['Pixel 7'],
+        viewport: { width: 390, height: 844 },
+        baseURL,
+        reducedMotion: 'reduce',
+      });
+      try {
+        const page = await context.newPage();
+        const scenario = createWebShellDaemonScenario();
+        const daemon = await installScenario(page, scenario, baseURL);
+        await gotoSession(page, scenario, daemon, theme);
+        const textarea = page.locator(
+          'textarea[data-web-shell-composer-editor]',
+        );
+        await textarea.fill(
+          'Review the mobile layout\nKeep this working draft.',
+        );
+        await captureScreenshot(page, `mobile-composer-${theme}`);
+        await page
+          .getByRole('button', { name: 'Add to message', exact: true })
+          .tap();
+        await expect(
+          page.getByText('Reference file', { exact: true }),
+        ).toBeVisible();
+        await captureScreenshot(page, `mobile-composer-add-${theme}`);
+      } finally {
+        await context.close();
+      }
+    });
+
     test('context usage', async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         supportedCommands: {

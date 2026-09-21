@@ -10,6 +10,7 @@ import { realpath } from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
+  buildInheritedForkExecutionToolNames,
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from '../../agents/runtime/agent-core.js';
@@ -72,11 +73,14 @@ import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
+  getCurrentAgentConfiguredToolAllowlist,
+  getCurrentAgentDisallowedTools,
   getCurrentAgentId,
   isTopLevelSession,
   runWithAgentContext,
   spawnBlockReason,
 } from '../../agents/runtime/agent-context.js';
+import { matchesAgentToolBlocklist } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import { trace, context as otelContext } from '@opentelemetry/api';
 import {
   endSubagentSpan,
@@ -375,6 +379,29 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
 };
 
 /**
+ * `run_in_background` semantics that hold whatever the team feature is set
+ * to: the default, the foreground/inline switch, fork behaviour, and the
+ * three cases where an explicit value is rejected.
+ */
+const RUN_IN_BACKGROUND_DESCRIPTION =
+  'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true.';
+
+/**
+ * The teammate half, appended only when `isAgentTeamEnabled()`. It is about
+ * the `name` parameter, which is itself only declared under that flag — so
+ * sending it unconditionally told the model how to combine
+ * `run_in_background` with a parameter it had not been given.
+ */
+const TEAM_RUN_IN_BACKGROUND_NOTE =
+  ' Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.';
+
+function runInBackgroundDescription(teamEnabled: boolean): string {
+  return teamEnabled
+    ? `${RUN_IN_BACKGROUND_DESCRIPTION}${TEAM_RUN_IN_BACKGROUND_NOTE}`
+    : RUN_IN_BACKGROUND_DESCRIPTION;
+}
+
+/**
  * Resolves the effective permission mode for a sub-agent.
  *
  * Rules (matching claw-code):
@@ -569,7 +596,10 @@ export async function rebuildToolRegistryOnOverride(
     skipDiscovery: true,
     forSubAgent: true,
   });
-  if (!override.getExecutionEnvironment?.()) {
+  if (
+    !override.getExecutionEnvironment?.() &&
+    !base.getShellExecutionSandbox?.()
+  ) {
     agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   }
   ov.getToolRegistry = () => agentRegistry;
@@ -804,8 +834,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         run_in_background: {
           type: 'boolean',
           default: true,
-          description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
+          description: runInBackgroundDescription(config.isAgentTeamEnabled()),
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -889,15 +918,23 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         .join('\n');
     }
 
+    const teamEnabled = this.config.isAgentTeamEnabled();
     // Only advertise team coordination when the experimental
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
-    const teamGuidance = this.config.isAgentTeamEnabled()
+    const teamGuidance = teamEnabled
       ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Named teammates always run concurrently and report through team messaging; omit \`run_in_background\` when spawning one — an explicit \`run_in_background: false\` is rejected, so for an inline blocking result omit \`name\` and use a regular agent instead. Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const todoGuidance = this.config.isTodoWriteEnabled()
       ? '- When a user-visible todo plan exists, set `todo_id` to the ID of the plan node this top-level agent execution implements. Create the todo before launching the agent when practical. Omit `todo_id` for work that is not represented by the current plan.\n'
       : '';
+    // The worktree tail is about `name`, which the schema declares only when
+    // the team feature is on — the same gating `run_in_background`'s teammate
+    // note has. Sent unconditionally it told a non-team session how to
+    // combine `working_dir` with a parameter it had not been given.
+    const teammateWorktreeTail = teamEnabled
+      ? '; named teammates may use one, but must be shut down before it is removed.'
+      : '.';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -929,7 +966,7 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches; named teammates may use one, but must be shut down before it is removed.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches${teammateWorktreeTail}
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 
 ## Working with background agents
@@ -1006,10 +1043,18 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
         read_only?: typeof TEAM_AGENT_READ_ONLY_PROPERTY;
+        run_in_background?: { description: string };
       };
     };
     if (schema.properties) {
-      if (this.config.isAgentTeamEnabled()) {
+      // The teammate note tracks the flag read at the top of this method:
+      // every refresh re-reads it, so a mid-session toggle that adds or
+      // removes `name` has to move the note with it.
+      if (schema.properties.run_in_background) {
+        schema.properties.run_in_background.description =
+          runInBackgroundDescription(teamEnabled);
+      }
+      if (teamEnabled) {
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
         schema.properties.plan_mode_required =
           TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
@@ -1756,14 +1801,91 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       ? extractParentToolNames(generationConfig)
       : [];
     registerForkDisplayImageForCache(agentConfig, parentToolNames);
+    // A fork inherits the parent's tool surface, so the parent agent's own
+    // disallowedTools blocklist must survive one level down: the union with
+    // the live registry — or an explicit fork_tools request — would
+    // otherwise re-admit a tool prepareTools removed from the parent's
+    // declarations (e.g. `{ tools: ['*'], disallowedTools: ['mcp__slack']
+    // }`), and the bridge decouples execution from declaration. The
+    // blocklist is applied to the computed allowlist below and also handed
+    // to the fork's toolConfig, whose invocation-level re-check enforces it
+    // against wildcard fork_tools patterns a name filter cannot see (R24-1).
+    const parentDisallowedTools = getCurrentAgentDisallowedTools();
+    const parentConfiguredToolAllowlist =
+      getCurrentAgentConfiguredToolAllowlist();
+    const keepOffParentBlocklist = (toolName: string): boolean =>
+      !matchesAgentToolBlocklist(parentDisallowedTools, toolName);
+    const defaultExecutionToolNames = buildInheritedForkExecutionToolNames(
+      parentToolNames,
+      agentConfig.getToolRegistry().getAllToolNames(),
+      parentConfiguredToolAllowlist,
+    ).filter(keepOffParentBlocklist);
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
+    const isRequestedByFork = (toolName: string): boolean => {
+      if (requestedTools === undefined) return true;
+      if (requestedTools.includes(toolName)) return true;
+      if (!toolName.startsWith('mcp__')) return false;
+
+      const registeredTool = agentConfig.getToolRegistry().getTool(toolName) as
+        | { serverName?: unknown; serverToolName?: unknown }
+        | undefined;
+      if (
+        typeof registeredTool?.serverName !== 'string' ||
+        typeof registeredTool.serverToolName !== 'string'
+      ) {
+        return requestedTools.includes('mcp__*');
+      }
+
+      const serverName = registeredTool.serverName;
+      const serverToolName = registeredTool.serverToolName;
+      const serverPattern = `mcp__${serverName}`;
+      const rawToolName = `${serverPattern}__${serverToolName}`;
+      return requestedTools.some((pattern) => {
+        if (
+          pattern === 'mcp__*' ||
+          pattern === serverPattern ||
+          pattern === rawToolName
+        ) {
+          return true;
+        }
+        const toolPatternPrefix = `${serverPattern}__`;
+        return (
+          pattern.startsWith(toolPatternPrefix) &&
+          pattern.endsWith('*') &&
+          serverToolName.startsWith(pattern.slice(toolPatternPrefix.length, -1))
+        );
+      });
+    };
+    const buildParentBoundExecutionAllowlist = (
+      fallbackTools: readonly string[],
+    ): string[] => {
+      if (parentConfiguredToolAllowlist === undefined) {
+        return buildForkExecutionAllowlist(
+          requestedTools,
+          fallbackTools,
+          parentToolNames,
+        ).filter(keepOffParentBlocklist);
+      }
+      return fallbackTools.filter(
+        (toolName) =>
+          toolName !== ToolNames.ASK_USER_QUESTION &&
+          !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
+          keepOffParentBlocklist(toolName) &&
+          (isRequestedByFork(toolName) ||
+            (requestedTools !== undefined &&
+              requestedTools.length > 0 &&
+              (toolName === ToolNames.TOOL_SEARCH ||
+                toolName === ToolNames.TOOL_CALL) &&
+              parentToolNames.includes(toolName))),
+      );
+    };
     const requestedExecutionAllowedTools =
       requestedTools === undefined
         ? undefined
         : resolveForkExecutionAllowedTools(
             parentToolNames,
-            buildForkExecutionAllowlist(requestedTools, []),
+            buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
           );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
@@ -1869,16 +1991,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // current ToolRegistry. This preserves the parent's tool surface and
       // cache prefix when schemas are unchanged without letting a persisted or
       // stale declaration bypass the live registry.
-      const declaredExecutionToolNames =
-        parentToolNames.length > 0
-          ? parentToolNames
-          : agentConfig
-              .getToolRegistry()
-              .getAllToolNames()
-              .filter(
-                (toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName),
-              );
-
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
           | string
@@ -1889,17 +2001,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
         executionAllowedTools: resolveForkExecutionAllowedTools(
           parentToolNames,
-          buildForkExecutionAllowlist(
-            requestedTools,
-            declaredExecutionToolNames,
-          ),
+          buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(parentDisallowedTools?.length
+          ? { disallowedTools: [...parentDisallowedTools] }
+          : {}),
       };
     } else {
-      const registeredToolNames = agentConfig
-        .getToolRegistry()
-        .getAllToolNames()
-        .filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
@@ -1908,8 +2016,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         tools: ['*'],
         executionAllowedTools: resolveForkExecutionAllowedTools(
           parentToolNames,
-          buildForkExecutionAllowlist(requestedTools, registeredToolNames),
+          buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(parentDisallowedTools?.length
+          ? { disallowedTools: [...parentDisallowedTools] }
+          : {}),
       };
     }
 
@@ -2348,6 +2459,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         executionBackendError,
         executionBackendError,
       );
+    }
+    if (
+      this.config.getShellExecutionSandbox?.() &&
+      (this.params.isolation || this.params.working_dir || this.params.name)
+    ) {
+      const message =
+        'Tool execution sandbox supports only same-workspace in-process agents; worktrees, working_dir and teammates are unavailable.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
     }
     const sessionWorkflowAgent =
       this.config.getSessionWorkflowPlanRevision?.() !== undefined;
@@ -3537,6 +3660,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
               }
             : {}),
+          // Unlike the allowlist above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
+          ...(isFork && bgToolConfig?.disallowedTools?.length
+            ? { disallowedTools: [...bgToolConfig.disallowedTools] }
+            : {}),
           executor: subagentConfig.executor?.kind,
           persistedCliFlags:
             subagentConfig.executor !== undefined
@@ -4443,6 +4572,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             ? {
                 executionAllowedTools: [...toolConfig.executionAllowedTools],
               }
+            : {}),
+          // Unlike the allowlist above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
+          ...(isFork && toolConfig?.disallowedTools?.length
+            ? { disallowedTools: [...toolConfig.disallowedTools] }
             : {}),
           executor: subagentConfig.executor?.kind,
           persistedCliFlags:

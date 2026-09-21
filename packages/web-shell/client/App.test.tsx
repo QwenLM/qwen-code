@@ -131,6 +131,7 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  contextChipPlacement?: 'toolbar' | 'below' | 'header';
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -3723,6 +3724,34 @@ describe('task activity key', () => {
     expect(
       container.querySelector('aside[aria-label="Right panel"]'),
     ).not.toBeNull();
+  });
+
+  it('opens no panel for a cross-session message', async () => {
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    const panelBefore = container.querySelector(
+      'aside[aria-label="Right panel"]',
+    )?.textContent;
+
+    act(() =>
+      testState.backgroundDetails?.({
+        turnId: 'background-turn',
+        taskId: 'msg-1',
+        kind: 'peer',
+        label: 'qwen on api',
+        startedAt: 100,
+      }),
+    );
+    await flush();
+    await flush();
+
+    // A pending tab hydrates from the task registry, and a message id is
+    // not a task id: opening one would leave a tab that never loads.
+    expect(mockWorkspace.client.sessionTasks).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]')?.textContent,
+    ).toBe(panelBefore);
   });
 
   it.each(['transcript', 'task snapshot'])(
@@ -14825,6 +14854,29 @@ describe('App session callbacks', () => {
       await targetStatus.promise;
     });
     await flush();
+  });
+
+  it('hands workspace context from the welcome composer to the session header', async () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.contextChipPlacement).toBe('below');
+    expect(
+      container.querySelector('[data-testid="chat-header-workspace"]'),
+    ).toBeNull();
+
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.contextChipPlacement).toBe(
+      'header',
+    );
+    expect(
+      container
+        .querySelector('[data-testid="chat-header-workspace"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Workspace: project');
   });
 
   it('keeps the persistent chat header opt-in for existing integrations', () => {

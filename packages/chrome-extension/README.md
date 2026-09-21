@@ -168,6 +168,16 @@ to a GitHub prerelease for alpha side-loading, or to the Chrome Web Store
 Developer Dashboard for managed distribution. The `debugger` permission will
 draw manual review and must be justified in the store listing.
 
+**Extension id note:** the manifest's `key` fixes the id of an unpacked build.
+The store rejected that key on the first upload and assigned the listing its
+own id, so the two builds carry different ids. Nothing in this repo drops the
+key yet: `npm run package` zips the built manifest verbatim, so an upload needs
+the key removed by hand until the publish workflow in #12240 does it. Browser Use treats
+the id as a set (`CHROME_EXTENSION_IDS` in the Browser Use package): the Native
+Messaging registration lists every known origin and the handshake accepts any
+of them, so both builds reach the same Host. Adding an id there also means
+bumping the Host revision, so installed Hosts are replaced rather than reused.
+
 **Version note:** the manifest version is derived from this package's semver
 (e.g. `0.21.2.65535`), which is lower than the legacy side-loaded `1.0.0`
 alpha. Chrome refuses to update an extension to a lower version, so testers
