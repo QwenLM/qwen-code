@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
 import java.time.Clock;
@@ -14,6 +15,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -280,6 +282,77 @@ class InMemoryRepositoryTest {
                 () -> repository.compareAndSet(current, replacement));
         assertSame(current, repository.findById(SCOPE, "session"));
         assertNull(repository.findById(otherScope, "session"));
+    }
+
+    @Test
+    void executionIdempotencyAndDispatchClaimAreDurablePrimitives()
+            throws Exception {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+
+        List<ToolExecutionRecord> records = invokeConcurrently(() ->
+                repository.findOrCreate(execution(
+                        "execution-" + Thread.currentThread().threadId())));
+        Set<String> executionIds = records.stream()
+                .map(ToolExecutionRecord::getExecutionCallId)
+                .collect(Collectors.toSet());
+        assertEquals(1, executionIds.size());
+        String executionId = executionIds.iterator().next();
+
+        ToolExecutionRecord first = repository.claimDispatch(executionId,
+                "owner-a", Duration.ofSeconds(30));
+        assertEquals(1, first.getDispatchGeneration());
+        assertNull(repository.claimDispatch(executionId, "owner-b",
+                Duration.ofSeconds(30)));
+        assertTrue(repository.hasActiveByRuntimeSession("session"));
+
+        clock.advance(Duration.ofSeconds(31));
+        ToolExecutionRecord takeover = repository.claimDispatch(executionId,
+                "owner-b", Duration.ofSeconds(30));
+        assertEquals(2, takeover.getDispatchGeneration());
+        assertNull(repository.compareAndSet(first,
+                first.withResult(result("error"), 0, clock.instant())));
+
+        ToolExecutionRecord settled = repository.compareAndSet(takeover,
+                takeover.withResult(result("success"), 0,
+                        clock.instant()));
+        assertEquals("success", settled.getExecutionStatus());
+        assertFalse(repository.hasActiveByRuntimeSession("session"));
+        assertNull(repository.compareAndSet(settled,
+                settled.withState(ToolExecutionRecord.State.PREPARED,
+                        false)));
+    }
+
+    @Test
+    void executionIdempotencyReturnsOriginalIdentityForConflictChecking() {
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(new MutableClock(START));
+        ToolExecutionRecord original = execution("execution-a");
+        ToolExecutionRecord duplicate = new ToolExecutionRecord(
+                "execution-b", original.getIdempotencyKey(), "binding", 1,
+                "harness", "session", "turn", "tool", "changed",
+                reference("changed"), ToolExecutionRecord.State.PREPARED,
+                null, null, 0, false, null, null, 0, 0, null);
+
+        assertSame(original, repository.findOrCreate(original));
+        assertSame(original, repository.findOrCreate(duplicate));
+        assertFalse(original.sameRequest(duplicate));
+    }
+
+    private static ToolExecutionRecord execution(String executionCallId) {
+        return ToolExecutionRecord.prepared(executionCallId, "key",
+                "binding", 1, "harness", "session", "turn", "tool",
+                "digest", reference("digest"));
+    }
+
+    private static Map<String, Object> reference(String digest) {
+        return Map.of("sessionId", "session", "promptId", "turn",
+                "callId", "tool", "argsDigest", digest);
+    }
+
+    private static Map<String, Object> result(String status) {
+        return Map.of("executionStatus", status);
     }
 
     private static <T> List<T> invokeConcurrently(Callable<T> operation)
