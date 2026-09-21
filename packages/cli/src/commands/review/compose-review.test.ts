@@ -31,6 +31,7 @@ import {
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
+import { buildSelectionIdentity } from './lib/selection.js';
 import {
   LEDGER_MAX_CLOSED,
   LEDGER_MAX_FILE,
@@ -42,7 +43,6 @@ import {
   serializeLedger,
 } from './lib/ledger.js';
 import { countInlineFindings, readClaimHead } from './lib/inline-counts.js';
-import { buildSelectionIdentity } from './lib/selection.js';
 import {
   aboveChurnBar,
   CHURN_MIN_FRESH,
