@@ -4068,9 +4068,33 @@ async function runQwenServeImpl(
   // takes a hint that matches one of the live owners.
   // A workspace registering after boot adds its own request to this layer, so
   // every name it asks for keeps its hint through the commits the names before
-  // it cause.
+  // it cause — but only for a name no one else has claimed, because a hint is
+  // what decides an ambiguous owner and two claimants make the claim itself
+  // ambiguous.
   const bootChannelOwnerHints = new Map<string, string>();
   let channelOwnerHints: ReadonlyMap<string, string> = new Map();
+  const ownersOfGroups = (
+    groups: readonly ChannelWorkspaceGroup[] | undefined,
+  ): ReadonlyMap<string, string> =>
+    new Map(
+      (groups ?? []).flatMap((group) =>
+        group.selection.mode === 'names'
+          ? group.selection.names.map(
+              (name) => [name, group.workspaceCwd] as const,
+            )
+          : [],
+      ),
+    );
+  // The committed groups always layer over the boot hints, never the other way
+  // round: what the daemon is running outranks what a settings file asked for.
+  const rebuildChannelOwnerHints = (
+    groups: readonly ChannelWorkspaceGroup[] | undefined,
+  ): void => {
+    channelOwnerHints = new Map([
+      ...bootChannelOwnerHints,
+      ...ownersOfGroups(groups),
+    ]);
+  };
   // Names a non-primary workspace contributed, which may be dropped instead of
   // stranding the other workspaces. Empty for an explicit `--channel`
   // selection and for every runtime change, both of which stay fail-fast.
@@ -7548,10 +7572,35 @@ async function runQwenServeImpl(
         // it shares with another workspace is otherwise ambiguous, only the
         // workspace that listed it can settle that, and a runtime resolution
         // may race the startup below.
+        //
+        // A name someone else already claims is the exception, and it is the
+        // whole point of the resolver's rule that a multiply-claimed name must
+        // not be hinted at all. Overwriting the claim would hand a running
+        // channel to whichever workspace registered last: the reload this hook
+        // triggers below would resolve the name to the newcomer and reconcile
+        // would move the worker. So a second claim drops the hint instead, and
+        // ownership falls back to the channel config plus the groups the
+        // daemon already committed — which still name the workspace that is
+        // actually hosting it.
+        const hostedOwners = ownersOfGroups(channelWorkspaceGroups);
         for (const [name, owner] of startup?.ownerHints ?? []) {
+          const claimedBy =
+            bootChannelOwnerHints.get(name) ?? hostedOwners.get(name);
+          if (claimedBy !== undefined && claimedBy !== owner) {
+            bootChannelOwnerHints.delete(name);
+            daemonLog.warn(
+              `channel "${sanitizeLogText(name, 128)}" is listed by more than one workspace; its owner is resolved from the channel config alone`,
+              {
+                code: 'claimed_by_multiple_workspaces',
+                workspaceCwd: owner,
+                claimedBy,
+              },
+            );
+            continue;
+          }
           bootChannelOwnerHints.set(name, owner);
-          channelOwnerHints = new Map([...channelOwnerHints, [name, owner]]);
         }
+        rebuildChannelOwnerHints(channelWorkspaceGroups);
         if (!channelWorkerManager && pending.length === 0) return;
         const workspaceCwd = runtimeAdded.workspaceCwd;
         const trusted = runtimeAdded.trusted;
@@ -9403,16 +9452,7 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
-              channelOwnerHints = new Map([
-                ...bootChannelOwnerHints,
-                ...groups.flatMap((group) =>
-                  group.selection.mode === 'names'
-                    ? group.selection.names.map(
-                        (name) => [name, group.workspaceCwd] as const,
-                      )
-                    : [],
-                ),
-              ]);
+              rebuildChannelOwnerHints(groups);
               channelWebhookConfigVersion += 1;
               refreshChannelWebhookConfigs?.();
             },
