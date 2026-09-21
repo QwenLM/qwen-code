@@ -6,6 +6,8 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { AgentTool } from './agent.js';
+import { AGENT_DELEGATION_SKILL_NAME } from '../../skills/agent-delegation-skill.js';
+import { readBundledReference } from '../../skills/bundled-reference.js';
 import type { Config } from '../../config/config.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -56,7 +58,9 @@ interface Shape {
   /**
    * Whether the session can load a skill. A session that can gets a pointer
    * at the `agent-delegation` reference; one that cannot has the reference
-   * inlined, which is the largest shape this description ever takes (#12054).
+   * inlined, which is the largest this description gets for a session that has
+   * not opted the reference out (#12054). Not a floor: `withheld` is smaller
+   * than the pointer shape, and the optional blocks stack on either route.
    */
   skills?: boolean;
   /**
@@ -182,11 +186,18 @@ describe('AgentTool per-turn size budgets', () => {
   });
 
   /**
-   * The worst case, and the one no setting can shrink: a session that cannot
-   * load a skill has the delegation reference inlined, because a pointer
-   * would send the model at something it cannot reach. It is budgeted
-   * separately — and above the pointer shape — so that growth in the skill
-   * body is visible here rather than only in a session that has no skills.
+   * The largest description a session that has not opted out can reach, and
+   * the shape no setting turns into a pointer: a pointer there would send the
+   * model at something it cannot reach. Budgeted separately — and above the
+   * pointer shape — so growth in the skill body is visible here.
+   *
+   * Two things this row is not. It is not the worst case: `teamGuidance` and
+   * the todo clause are independent insertions, so they stack on the inlined
+   * reference rather than trade places with it, and that shape is 984
+   * characters larger (11,396 — its own row below). And it is not a floor
+   * nothing can go under: a user opt-out routes to `withheld`, which renders
+   * the section empty and measures 7,192, below even the pointer shape's
+   * 7,386. What is true of it is that no setting makes it a pointer.
    */
   it('keeps the description within its budget when the reference is inlined', async () => {
     // Default shape, no route to any skill. Measured at 10,412 — 682 more
@@ -202,20 +213,65 @@ describe('AgentTool per-turn size budgets', () => {
     expect(tool.description.length).toBeLessThanOrEqual(10_750);
   });
 
+  it('keeps the description within its budget when every block is on and the reference is inlined', async () => {
+    // The actual worst case, and the one nothing bounded before: 10,412 for
+    // the inlined reference, which already carries the todo clause, plus 984
+    // for the team guidance — measured at 11,396. That is above both the
+    // 10,710 the all-blocks-on shape measured and the 11,200 it was budgeted
+    // at before the move, which is why the optional blocks and the delegation
+    // route have to be measured together rather than each against the default
+    // shape. The blocks' own deltas are bounded above, so this row and the
+    // pointer-shape rows do not leave a gap between them.
+    const tool = await buildTool({ team: true, todo: true, skills: false });
+    expect(tool.description.length).toBeLessThanOrEqual(11_770);
+  });
+
   /**
    * The point of the move: a session that can load the skill pays a pointer
-   * instead of the reference, on every request. Asserted as a floor on the
-   * difference rather than an exact figure — editing the reference is normal,
-   * collapsing the gap means the guidance came back into the description.
+   * instead of the reference, on every request.
+   *
+   * Pinned on the mechanism rather than on a magnitude. A gap floor cannot
+   * detect the regression it names: guidance pasted back into the description
+   * grows both shapes together, so the gap barely moves and the pointer's
+   * 7,750 row is what fires — while the one change that reaches a gap floor on
+   * its own is a legitimate trim of the reference, which the row's own message
+   * then blames on the description. What has to fail loudly is the reference
+   * body turning up in the pointer shape.
    */
-  it('charges far less for the pointer than for the inlined reference', async () => {
+  it('keeps the reference body out of the pointer and in the inlined description', async () => {
     const [pointer, inlined] = await Promise.all([
       buildTool(),
       buildTool({ skills: false }),
     ]);
-    expect(
-      inlined.description.length - pointer.description.length,
-    ).toBeGreaterThan(2_000);
+    // Read from the reference itself rather than spelled out as a literal, so
+    // that editing the skill body — the normal thing to do to it — does not
+    // turn this row red. What is pinned is the wiring: the inline shape carries
+    // the body, and the pointer shape carries none of it.
+    const reference = readBundledReference(AGENT_DELEGATION_SKILL_NAME);
+    if (!reference) {
+      throw new Error('the agent-delegation reference is unreadable');
+    }
+    const body = reference.body.trim();
+    expect(inlined.description).toContain(body);
+    // Paragraph by paragraph, not just as a whole: one paragraph pasted back is
+    // the realistic regression, and at under the 364 characters of headroom the
+    // pointer row leaves it would slip past every magnitude budget above. The
+    // length floor keeps the shared `## Writing the prompt` heading — which the
+    // pointer legitimately carries — out of the check. The count floor is
+    // deliberately loose: it exists so an emptied or restructured body cannot
+    // make the loop vacuous, and must not trip on a legitimate trim.
+    const paragraphs = body
+      .split('\n\n')
+      .map((paragraph) => paragraph.trim())
+      .filter((paragraph) => paragraph.length >= 40);
+    expect(paragraphs.length).toBeGreaterThan(3);
+    for (const paragraph of paragraphs) {
+      expect(pointer.description).not.toContain(paragraph);
+    }
+    // The direction, kept as a record rather than as the gate.
+    expect(inlined.description.length).toBeGreaterThan(
+      pointer.description.length,
+    );
   });
 
   // The two optional blocks are the part a reader can lose track of,
@@ -365,5 +421,24 @@ describe('AgentTool per-turn size budgets', () => {
     // without teams.
     const tool = await buildTool();
     expect(surfaceLength(tool)).toBeLessThanOrEqual(11_750);
+  });
+
+  /**
+   * The row above measures the pointer shape, which is what almost every
+   * session sends — so on its own it would let the inline route's surface grow
+   * unbounded while the design doc presented 11,750 as bounding every shape.
+   * The inline surface is *above* the 13,374 every session paid before this
+   * PR: a reference that cannot be loaded costs more per turn than the prose
+   * it replaced did. That is the deliberate price for reaching skill-less
+   * sessions at all, and it is bounded here rather than only described there.
+   */
+  it('keeps the whole model-visible surface within its budget when the reference is inlined', async () => {
+    // Measured at 14,056 (10,412 description + 3,644 schema). The team shape
+    // sits 2,331 above this — 984 of description plus 1,347 of schema for the
+    // three parameters `isAgentTeamEnabled()` declares — and, exactly as
+    // before this PR, that combination is left to the per-part rows rather
+    // than to a surface total.
+    const tool = await buildTool({ skills: false });
+    expect(surfaceLength(tool)).toBeLessThanOrEqual(14_430);
   });
 });
