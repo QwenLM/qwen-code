@@ -5856,6 +5856,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).toBeLessThan(session.dispose.mock.invocationCallOrder[0]!);
     });
 
+    it('settles one session as it leaves, while the process carries on', async () => {
+      // The queue it never read goes with it, so the sweep has to happen
+      // before the dispose that empties the queue — and without the
+      // process's own teardown to fall back on.
+      const { agent, agentPromise, reportExpired } =
+        await startWithInbox('hosted-leaving');
+      const session = lastSessionMock!;
+      const unread = [peerDelivery('hosted-leaving', 'msg-unread')];
+      session.takeUnconsumedPeerDeliveries.mockReturnValue(unread);
+
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: 'hosted-leaving',
+      });
+
+      expect(reportExpired).toHaveBeenCalledWith(unread[0]);
+      expect(
+        session.takeUnconsumedPeerDeliveries.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(session.dispose.mock.invocationCallOrder[0]!);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('does not answer for a session that turned messaging off', async () => {
+      // It has no record, so nothing advertises it — but a sender that
+      // knows its id anyway must be told this process does not hold it,
+      // rather than have its message judged by that session's settings.
+      const setSubmitFn = vi.fn();
+      mockPeerMessagingStart.mockResolvedValue({
+        close: vi.fn().mockResolvedValue(undefined),
+        setSubmitFn,
+        reportExpired: vi.fn(),
+      });
+      const first = await setupSessionMocks('hosted-on');
+      const second = makeInnerConfig();
+      second.getSessionId = vi.fn().mockReturnValue('hosted-off');
+      vi.mocked(loadCliConfig)
+        .mockResolvedValueOnce(first as unknown as Config)
+        .mockResolvedValue(second as unknown as Config);
+      vi.mocked(loadSettings)
+        .mockReturnValueOnce(messagingOn())
+        .mockReturnValue(messagingOff());
+
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp/on', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      await agent.newSession({ cwd: '/tmp/off', mcpServers: [] });
+
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        resolveSessionId: (id: string) => string | undefined;
+      };
+      expect(options.resolveSessionId('hosted-on')).toBe('hosted-on');
+      expect(options.resolveSessionId('hosted-off')).toBeUndefined();
+      expect(
+        mockRegisterSession.mock.calls.map(([fields]) => fields.sessionId),
+      ).toEqual(['hosted-on']);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it('closes the inbox and stops advertising it when the sessions go', async () => {
       const close = vi.fn().mockResolvedValue(undefined);
       mockPeerMessagingStart.mockResolvedValue({
