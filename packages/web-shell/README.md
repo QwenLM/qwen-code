@@ -566,13 +566,30 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 />
 ```
 
-`WebShellSettingsOptions.excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。新增的上游设置默认仍然可见；未知的运行时 ID 会被忽略。
+也可以只开放少量条目，未列出的设置（包括上游新增设置）默认隐藏：
 
-前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control` 和 `builtin:model-management`。隐藏普通 Model 字段时，模型列表与选择仍然可用；如需隐藏模型管理块，需显式排除 `builtin:model-management`。浏览器通知与聊天宽度相互独立。既有的能力限制仍然适用。
+```tsx
+<WebShellWithProviders
+  settings={{
+    includeItems: ['setting:language', 'builtin:chat-width'],
+  }}
+/>
+```
 
-不传 `settings`、不传 `excludeItems` 或传入空列表，都会保持现有呈现。排除在两个设置作用域（工作区与用户）中都生效。被排空的分类会消失，分类导航回退到可用分类；排除全部条目则显示现有的空状态。从设置面板打开的选择器会在其来源条目被排除时关闭。
+`WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
-**呈现限制不是访问控制。** 排除不会改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供白名单、作用域策略、字段覆盖或条目级深链。
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+
+- 未传 `includeItems` 时保持现有展示逻辑，仅应用 `excludeItems`；新增的上游设置默认仍然可见。
+- `includeItems: []` 隐藏全部原生设置条目；它与未传入白名单不同。
+- 同时传入两个列表时，排除优先：仅展示白名单中且未被排除的条目。
+- 不传 `settings`、传入 `{}` 或仅传 `excludeItems: []` 时，保持默认呈现。
+
+过滤在工作区与用户两个作用域中都生效。被排空的分类会消失，分类导航回退到可用分类；全部隐藏则显示现有空状态。从设置面板打开的选择器会在来源条目不再可见时关闭，包括动态修改白名单的情况。
+
+**呈现限制不是访问控制。** 白名单与排除列表只影响原生设置页展示，不启用或关闭底层功能，不改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供作用域策略、字段覆盖或条目级深链。
+
+设计与验证范围见 [English](../../docs/design/web-shell-settings-allowlists.md) / [简体中文](../../docs/design/web-shell-settings-allowlists.zh-CN.md)。
 
 ## Markdown 图表接入
 

@@ -1391,6 +1391,38 @@ describe('BridgeClient — token usage accounting', () => {
     expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200, 0, 0);
   });
 
+  it('does not charge the metrics ring for a replayed timing frame', async () => {
+    // Paged transcript replay emits one empty-text frame per recorded request
+    // and tool call, carrying `_meta.timing` and deliberately no `_meta.usage`.
+    // A present `usage.durationMs` is what marks a frame as a live model round,
+    // so a timing frame must leave the token-burn and LLM-latency windows alone.
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:timing', onTokenUsage);
+
+    for (const timing of [
+      {
+        kind: 'request',
+        status: 'ok',
+        durationMs: 6544,
+        ttftMs: 2344,
+        startedAt: 1_760_000_000_000,
+        model: 'qwen3.8-max',
+      },
+      { kind: 'tool', durationMs: 16, callId: 'call-1', toolName: 'glob' },
+    ]) {
+      await client.sessionUpdate({
+        sessionId: 'sess:timing',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { timing },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+    }
+
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+
   it('forwards per-round model API error / retry increments from _meta', async () => {
     const onTokenUsage = vi.fn();
     const client = makeClientWithTokenHook('sess:apihealth', onTokenUsage);
