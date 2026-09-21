@@ -845,6 +845,8 @@ export function convertGeminiToolsToResponsesTools(
         type: 'function',
         name: func.name,
         description: func.description,
+        // Responses may otherwise normalize optional fields into required ones.
+        strict: false,
         parameters: normalizeResponsesParameters(
           // Prefer parametersJsonSchema (raw JSON Schema, e.g. MCP/extension
           // tools) and fall back to parameters, matching the Chat and
