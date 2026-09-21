@@ -12,6 +12,8 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 
+const DEBUG_LOG_FILE_SUFFIX = '.txt';
+
 const debugLogger = createDebugLogger('HOUSEKEEPING');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -36,6 +38,10 @@ export interface CleanupOptions {
 export interface SubagentCleanupOptions extends CleanupOptions {
   /** Project-scoped subagents root: `<projectDir>/subagents/`. */
   subagentsRoot: string;
+}
+
+export interface DebugLogCleanupOptions extends CleanupOptions {
+  isValidSessionId: (value: string) => boolean;
 }
 
 export interface OpenAILogCleanupOptions {
@@ -216,4 +222,56 @@ export async function cleanupOldOpenAILogs(
 
 function isENOENT(e: unknown): boolean {
   return (e as NodeJS.ErrnoException)?.code === 'ENOENT';
+}
+
+// Session debug logs live as flat `<sessionId>.txt` files in the shared debug
+// dir. Validating the stem skips unrelated files, the `latest` symlink, and
+// the independently rotated `daemon/` subdir.
+export async function cleanupOldDebugLogs(
+  opts: DebugLogCleanupOptions,
+): Promise<CleanupResult> {
+  const result: CleanupResult = { removed: 0, errors: 0 };
+  const root = Storage.getGlobalDebugDir();
+  const excludes = opts.excludeSessionIds ?? new Set<string>();
+
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (e) {
+    if (isENOENT(e)) return result;
+    debugLogger.error('readdir failed', e);
+    return result;
+  }
+
+  const logFiles = entries.flatMap((entry) => {
+    if (!entry.isFile() || !entry.name.endsWith(DEBUG_LOG_FILE_SUFFIX)) {
+      return [];
+    }
+    const sessionId = entry.name.slice(0, -DEBUG_LOG_FILE_SUFFIX.length);
+    if (!opts.isValidSessionId(sessionId) || excludes.has(sessionId)) {
+      return [];
+    }
+    return [join(root, entry.name)];
+  });
+
+  for (let i = 0; i < logFiles.length; i += SWEEP_CONCURRENCY) {
+    const batch = logFiles.slice(i, i + SWEEP_CONCURRENCY);
+    await Promise.all(
+      batch.map(async (filePath) => {
+        try {
+          const s = await stat(filePath);
+          if (s.mtime < opts.cutoffDate) {
+            await unlink(filePath);
+            result.removed++;
+          }
+        } catch (err) {
+          if (isENOENT(err)) return;
+          result.errors++;
+          debugLogger.error(`failed to sweep ${filePath}`, err);
+        }
+      }),
+    );
+  }
+
+  return result;
 }

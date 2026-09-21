@@ -18,6 +18,7 @@ import {
   _runHousekeepingForTesting,
   _runPassForTesting,
   _FILE_HISTORY_MARKER_FOR_TESTING,
+  _getDebugLogsMarkerPathForTesting,
   _getSubagentMarkerPathForTesting,
   _getOpenAILogsMarkerPathForTesting,
 } from './scheduler.js';
@@ -30,6 +31,10 @@ import {
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * MS_PER_HOUR;
 const FILE_HISTORY_DIR = 'file-history';
+const DEBUG_DIR = 'debug';
+const DEBUG_UUID_CURRENT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const DEBUG_UUID_STALE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const DEBUG_UUID_RECENT = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 // Past the 1-minute idle threshold so runPass doesn't take the defer branch.
 const PAST_IDLE_THRESHOLD = 2 * 60 * 1000;
 
@@ -501,6 +506,13 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
 
   it('uses the normal delay only when the OpenAI marker is fresh', async () => {
     fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(qwenHome, DEBUG_DIR),
+      ),
+      '',
+    );
     fs.writeFileSync(_getOpenAILogsMarkerPathForTesting(qwenHome, logDir), '');
 
     await expect(
@@ -544,6 +556,101 @@ describe('_runHousekeepingForTesting (openai-logs cleanup)', () => {
       _runHousekeepingForTesting(throwingConfig, makeModelSettings(7)),
     ).resolves.toBeUndefined();
     expect(fs.existsSync(fresh)).toBe(true);
+  });
+});
+
+describe('_runHousekeepingForTesting (debug-logs cleanup)', () => {
+  let qwenHome: string;
+  let debugRoot: string;
+
+  beforeEach(() => {
+    qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-test-'));
+    debugRoot = path.join(qwenHome, DEBUG_DIR);
+    vi.stubEnv('QWEN_HOME', qwenHome);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(qwenHome, { recursive: true, force: true });
+  });
+
+  function mkDebugLog(sessionId: string, mtime: Date): string {
+    fs.mkdirSync(debugRoot, { recursive: true });
+    const p = path.join(debugRoot, `${sessionId}.txt`);
+    fs.writeFileSync(p, 'log');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  it('sweeps old session debug logs, protecting the current session', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const recent = new Date(Date.now() - 1 * MS_PER_DAY);
+    const current = mkDebugLog(DEBUG_UUID_CURRENT, old); // protected (current)
+    const stale = mkDebugLog(DEBUG_UUID_STALE, old); // swept
+    const fresh = mkDebugLog(DEBUG_UUID_RECENT, recent); // kept (young)
+
+    await _runHousekeepingForTesting(
+      makeConfig(DEBUG_UUID_CURRENT),
+      makeSettings(30),
+    );
+
+    expect(fs.existsSync(current)).toBe(true);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+    expect(
+      fs.existsSync(_getDebugLogsMarkerPathForTesting(qwenHome, debugRoot)),
+    ).toBe(true);
+  });
+
+  it('throttles cleanup independently for different runtime directories', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const firstRuntimeDir = path.join(qwenHome, 'runtime-a');
+    const secondRuntimeDir = path.join(qwenHome, 'runtime-b');
+
+    vi.stubEnv('QWEN_RUNTIME_DIR', firstRuntimeDir);
+    debugRoot = path.join(firstRuntimeDir, DEBUG_DIR);
+    const first = mkDebugLog(DEBUG_UUID_STALE, old);
+    await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
+
+    vi.stubEnv('QWEN_RUNTIME_DIR', secondRuntimeDir);
+    debugRoot = path.join(secondRuntimeDir, DEBUG_DIR);
+    const second = mkDebugLog(DEBUG_UUID_RECENT, old);
+    await _runHousekeepingForTesting(makeConfig('current'), makeSettings(30));
+
+    expect(fs.existsSync(first)).toBe(false);
+    expect(fs.existsSync(second)).toBe(false);
+    expect(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(firstRuntimeDir, DEBUG_DIR),
+      ),
+    ).not.toBe(
+      _getDebugLogsMarkerPathForTesting(
+        qwenHome,
+        path.join(secondRuntimeDir, DEBUG_DIR),
+      ),
+    );
+  });
+
+  it('uses catch-up delay when the debug-logs marker is missing', async () => {
+    // file-history marker fresh so only the debug marker forces catch-up.
+    fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+
+    await expect(
+      _getFirstPassDelayForTesting(makeConfig('s'), makeSettings(30)),
+    ).resolves.toBe(60 * 1000);
+  });
+
+  it('uses the normal delay when both markers are fresh', async () => {
+    fs.writeFileSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING), '');
+    fs.writeFileSync(
+      _getDebugLogsMarkerPathForTesting(qwenHome, debugRoot),
+      '',
+    );
+
+    await expect(
+      _getFirstPassDelayForTesting(makeConfig('s'), makeSettings(30)),
+    ).resolves.toBe(10 * 60 * 1000);
   });
 });
 

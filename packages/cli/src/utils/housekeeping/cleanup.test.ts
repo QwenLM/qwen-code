@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { OpenAILogger } from '@qwen-code/qwen-code-core';
 import {
+  cleanupOldDebugLogs,
   cleanupOldFileHistoryBackups,
   cleanupOldOpenAILogs,
   cleanupOldSubagentTranscripts,
@@ -22,6 +23,17 @@ vi.mock('node:fs/promises', { spy: true });
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const FILE_HISTORY_DIR = 'file-history';
+const DEBUG_DIR = 'debug';
+const UUID_A = '11111111-1111-4111-8111-111111111111';
+const UUID_B = '22222222-2222-4222-8222-222222222222';
+const UUID_C = '33333333-3333-4333-8333-333333333333';
+const AGENT_SESSION_ID = `${UUID_C}-agent-Explore-g2tss0`;
+const VALID_DEBUG_SESSION_IDS = new Set([
+  UUID_A,
+  UUID_B,
+  UUID_C,
+  AGENT_SESSION_ID,
+]);
 
 // Use utimesSync (not vi.useFakeTimers) for mtime fixtures — fake timers
 // don't affect fs mtime. Day-scale windows avoid Windows FAT 2s resolution
@@ -486,6 +498,153 @@ describe('cleanupOldOpenAILogs', () => {
         ).rejects.toMatchObject({ code: 'EACCES' });
       } finally {
         fs.chmodSync(logDir, 0o700);
+      }
+    },
+  );
+});
+
+describe('cleanupOldDebugLogs', () => {
+  let qwenHome: string;
+  let debugRoot: string;
+  let cutoff: Date;
+
+  beforeEach(() => {
+    qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-debug-cleanup-'));
+    debugRoot = path.join(qwenHome, DEBUG_DIR);
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    cutoff = new Date(Date.now() - 30 * MS_PER_DAY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(qwenHome, { recursive: true, force: true });
+  });
+
+  function mkDebugLog(name: string, mtime: Date): string {
+    fs.mkdirSync(debugRoot, { recursive: true });
+    const p = path.join(debugRoot, name);
+    fs.writeFileSync(p, 'log');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  function cleanupDebugLogs(
+    opts: Omit<Parameters<typeof cleanupOldDebugLogs>[0], 'isValidSessionId'>,
+  ) {
+    return cleanupOldDebugLogs({
+      ...opts,
+      isValidSessionId: (sessionId) => VALID_DEBUG_SESSION_IDS.has(sessionId),
+    });
+  }
+
+  it('returns zero result when the debug dir does not exist', async () => {
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+  });
+
+  it('removes session logs older than the cutoff, keeping recent ones', async () => {
+    const old = mkDebugLog(
+      `${UUID_A}.txt`,
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const agent = mkDebugLog(
+      `${AGENT_SESSION_ID}.txt`,
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const fresh = mkDebugLog(
+      `${UUID_B}.txt`,
+      new Date(Date.now() - 1 * MS_PER_DAY),
+    );
+
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 2, errors: 0 });
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.existsSync(agent)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+    // The debug dir itself is never removed.
+    expect(fs.existsSync(debugRoot)).toBe(true);
+  });
+
+  it('preserves session ids listed in excludeSessionIds even if old', async () => {
+    const current = mkDebugLog(
+      `${UUID_A}.txt`,
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const other = mkDebugLog(
+      `${UUID_B}.txt`,
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+
+    const r = await cleanupDebugLogs({
+      cutoffDate: cutoff,
+      excludeSessionIds: new Set([UUID_A]),
+    });
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(current)).toBe(true);
+    expect(fs.existsSync(other)).toBe(false);
+  });
+
+  it('leaves the latest symlink and the daemon subdir untouched', async () => {
+    const old = mkDebugLog(
+      `${UUID_A}.txt`,
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+
+    // `latest` symlink → an old target: it must not be swept even though its
+    // target is aged, because it is a symlink, not a `<uuid>.txt` file.
+    const latest = path.join(debugRoot, 'latest');
+    fs.symlinkSync(path.basename(old), latest);
+
+    // `daemon/` subdir with an old file inside — size-rotated separately.
+    const daemonDir = path.join(debugRoot, 'daemon');
+    fs.mkdirSync(daemonDir);
+    const daemonLog = path.join(daemonDir, 'serve-1.log');
+    fs.writeFileSync(daemonLog, 'x');
+    const old2 = new Date(Date.now() - 60 * MS_PER_DAY);
+    fs.utimesSync(daemonLog, old2, old2);
+
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.lstatSync(latest).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(daemonLog)).toBe(true);
+  });
+
+  it('ignores invalid-session-id .txt files even when old', async () => {
+    const stray = mkDebugLog(
+      'notes.txt',
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const alsoStray = mkDebugLog(
+      'latest.txt',
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(fs.existsSync(stray)).toBe(true);
+    expect(fs.existsSync(alsoStray)).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'counts errors and continues when a file cannot be unlinked',
+    async () => {
+      const good = mkDebugLog(
+        `${UUID_A}.txt`,
+        new Date(Date.now() - 60 * MS_PER_DAY),
+      );
+      mkDebugLog(`${UUID_B}.txt`, new Date(Date.now() - 60 * MS_PER_DAY));
+      mkDebugLog(`${UUID_C}.txt`, new Date(Date.now() - 60 * MS_PER_DAY));
+
+      // Drop the write bit on the dir so unlink of any child fails (EACCES)
+      // while readdir/stat still work.
+      fs.chmodSync(debugRoot, 0o500);
+      try {
+        const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+        expect(r).toEqual({ removed: 0, errors: 3 });
+        expect(fs.existsSync(good)).toBe(true);
+      } finally {
+        fs.chmodSync(debugRoot, 0o700);
       }
     },
   );
