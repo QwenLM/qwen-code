@@ -1521,6 +1521,14 @@ function TaskDetail({
     task.kind === 'workflow' &&
     (!task.isHistorical ||
       (retryHistorical && !task.argsUnavailable && !task.argsOmitted));
+  // Withholding the buttons takes away the only place the daemon's reason
+  // used to appear: it arrived by pressing Retry and being refused. Say it
+  // without the failed round trip.
+  const restartWithheld =
+    task.kind === 'workflow' &&
+    task.isHistorical === true &&
+    retryHistorical === true &&
+    (task.argsUnavailable === true || task.argsOmitted === true);
   const canRetry = canRestart && task.status === 'failed';
   const canRerun =
     canRestart &&
@@ -1610,6 +1618,7 @@ function TaskDetail({
   const actionControls =
     !documentMode &&
     ((canCancel && onCancel) ||
+      restartWithheld ||
       ((canPause || canResume || canRetry || canRerun) && onWorkflowAction)) ? (
       <div className={styles.actionBar} data-plan-interactive>
         {showCancelConfirm ? (
@@ -1646,6 +1655,11 @@ function TaskDetail({
                   ? t('workflow.action.pause')
                   : t('workflow.action.resume')}
               </button>
+            )}
+            {restartWithheld && (
+              <span className={styles.actionHint}>
+                {t('workflow.action.argsUnavailable')}
+              </span>
             )}
             {canRetry && onWorkflowAction && (
               <button

@@ -16965,8 +16965,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    // The wire field and the refusal are the same answer read twice. If they
-    // ever disagree, a client renders a button this call always refuses.
+    // This end of the contract: the refusal is `snapshotArgsUnavailable` and
+    // nothing else. The other end -- that the projection puts the same
+    // predicate on the wire as `argsUnavailable` -- is pinned in
+    // `tasksSnapshot.test.ts` against the same exported function, because
+    // this file's core mock lists its exports one by one and cannot import
+    // the projection. Either end drifting fails its own suite.
     it.each([
       ['kept its args', {}, false],
       ['recorded that it had none', { args: undefined }, false],
@@ -16977,7 +16981,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         true,
       ],
     ])(
-      'refuses a retry of a run that %s exactly when the wire says so',
+      'refuses a retry of a run that %s exactly when the predicate says its args are gone',
       async (_case, fields, refused) => {
         const sdk = await actualSdk();
         const daemon = await startDaemon();
@@ -16989,9 +16993,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }
         mockReadWorkflowSnapshot.mockResolvedValue(snapshot);
 
-        // The projection reports this same predicate as `argsUnavailable`
-        // (pinned in tasksSnapshot.test.ts), so agreeing with it here is
-        // agreeing with the wire.
         const { snapshotArgsUnavailable } = await vi.importActual<
           typeof import('@qwen-code/qwen-code-core')
         >('@qwen-code/qwen-code-core');
@@ -17004,10 +17005,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           ) !== undefined,
         ).toBe(refused);
 
-        vi.mocked(RequestError.invalidParams).mockImplementationOnce(
-          sdk.RequestError.invalidParams,
-        );
         if (refused) {
+          // Only the refusing rows build a RequestError; installed for the
+          // others it would survive into whatever runs next.
+          vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+            sdk.RequestError.invalidParams,
+          );
           await expect(daemon.act('retry')).rejects.toMatchObject({
             data: { errorKind: 'workflow_args_unavailable' },
           });

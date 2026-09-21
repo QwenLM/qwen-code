@@ -15,6 +15,7 @@ import type {
   WorkflowSnapshot,
   WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import { snapshotArgsUnavailable } from '@qwen-code/qwen-code-core';
 import {
   buildSessionAgentsStatus,
   buildSessionTasksStatus,
@@ -844,6 +845,36 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(at('wf_omitted')).not.toHaveProperty('args');
     expect(at('wf_legacy')).toMatchObject({ argsUnavailable: true });
     expect(at('wf_legacy')).not.toHaveProperty('argsOmitted');
+  });
+
+  // The other end of the contract `acpAgent.test.ts` pins: the daemon
+  // refuses on `snapshotArgsUnavailable`, and what a client sees has to be
+  // that same answer rather than a second spelling of the question.
+  it('puts the daemon-side predicate on the wire, computed rather than restated', () => {
+    const snapshots = [
+      workflowSnapshot({ runId: 'wf_a', args: { q: 1 }, argsRecorded: true }),
+      workflowSnapshot({ runId: 'wf_b', argsRecorded: true }),
+      workflowSnapshot({ runId: 'wf_c', argsOmitted: true }),
+      workflowSnapshot({ runId: 'wf_d' }),
+    ];
+    const { tasks } = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      snapshots,
+      { includeWorkflows: true },
+    );
+
+    for (const snapshot of snapshots) {
+      const task = tasks.find((entry) => entry.id === snapshot.runId);
+      expect({
+        runId: snapshot.runId,
+        marked: (task as { argsUnavailable?: true }).argsUnavailable === true,
+      }).toEqual({
+        runId: snapshot.runId,
+        marked: snapshotArgsUnavailable(snapshot) !== undefined,
+      });
+    }
   });
 
   it('prefers the in-memory workflow task over a persisted duplicate', () => {
