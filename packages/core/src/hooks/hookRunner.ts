@@ -103,7 +103,7 @@ const removeInput = () => {
 };
 
 const signalGroup = (signal) => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   try {
     process.kill(-hook.pid, signal);
     return true;
@@ -117,7 +117,7 @@ const signalGroup = (signal) => {
 };
 
 const groupAlive = () => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   if (process.platform === 'win32') return hook.exitCode === null;
   try {
     process.kill(-hook.pid, 0);
@@ -273,6 +273,13 @@ function signalProcessGroup(
   pid: number,
   signal: NodeJS.Signals,
 ): 'sent' | 'gone' | 'failed' {
+  // Negating PID 1 broadcasts to every permitted process on POSIX.
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Refusing ${signal} for hook process group ${pid}: not a safe integer greater than 1`,
+    );
+    return 'gone';
+  }
   try {
     process.kill(-pid, signal);
     return 'sent';
@@ -288,6 +295,7 @@ function signalProcessGroup(
 }
 
 function isProcessGroupAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
   try {
     process.kill(-pid, 0);
     return true;
@@ -514,6 +522,12 @@ async function terminateSurvivingHookProcessGroup(
   pid: number,
   graceMs = HOOK_TERMINATE_GRACE_MS,
 ): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Skipping reap of surviving hook ${pid}: not a safe integer greater than 1`,
+    );
+    return;
+  }
   if (process.platform === 'win32') {
     // The surviving hook runs under a detached supervisor, so the parent's own
     // `terminateHookProcessTree` on the supervisor may miss it: the supervisor

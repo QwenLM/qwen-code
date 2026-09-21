@@ -44,6 +44,7 @@ import {
   LIVE_SESSION_SOURCE_PREFIX,
 } from '../../runtime/live-session-source.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { getErrorMessage } from '../../utils/errors.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
 export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
@@ -259,9 +260,11 @@ interface CollectedTurn {
 }
 
 function errorMessage(error: unknown): string {
-  return stripTerminalControlSequences(
-    error instanceof Error ? error.message : String(error),
-  ).slice(0, 500);
+  // The ACP bridge rejects with the JSON-RPC error object itself rather than an
+  // Error, and `String()` renders that as "[object Object]", hiding the cause
+  // from everything downstream: the call banner, the provider blocker and the
+  // daemon log. `getErrorMessage` reads `message` off such an object.
+  return stripTerminalControlSequences(getErrorMessage(error)).slice(0, 500);
 }
 
 type ProviderFailureBlocker =
