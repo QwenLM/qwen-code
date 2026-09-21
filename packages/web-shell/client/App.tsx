@@ -247,8 +247,8 @@ import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { McpAppHostContext } from './mcpAppHostContext';
 import {
-  isItemExcluded,
-  isSettingExcluded,
+  isItemVisible,
+  isSettingVisible,
   type WebShellSettingsOptions,
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
@@ -6676,6 +6676,11 @@ export function App({
       if (request.kind === 'background_task') {
         if (!request.sourceSessionId) return;
         const turn = request.backgroundTurn;
+        // A peer turn handled a message inside this session: what it did is
+        // the transcript already on screen, and no task registry entry can
+        // hydrate a pending tab for it. A rendering of its own is a
+        // follow-up; until then there is nothing to open.
+        if (turn.kind === 'peer') return;
         const tab: ArtifactPanelTab =
           turn.kind === 'workflow'
             ? {
@@ -11807,7 +11812,7 @@ export function App({
         ) &&
         (source === 'settings'
           ? activePanelRef.current === 'settings' &&
-            !isSettingExcluded('voiceModel', settingsPresentationRef.current)
+            isSettingVisible('voiceModel', settingsPresentationRef.current)
           : activePanelRef.current === null) &&
         mainViewRef.current === 'chat' &&
         modelDialogModeRef.current === null &&
@@ -17445,11 +17450,11 @@ export function App({
   useEffect(() => {
     const key = settingsDialogKeyRef.current;
     if (!key) return;
-    const excluded =
+    const visible =
       key === 'builtin:model-management'
-        ? isItemExcluded(key, settingsPresentation)
-        : isSettingExcluded(key, settingsPresentation);
-    if (excluded) {
+        ? isItemVisible(key, settingsPresentation)
+        : isSettingVisible(key, settingsPresentation);
+    if (!visible) {
       if (pendingVoicePickerSourceRef.current === 'settings') {
         voicePickerRequestRef.current++;
         pendingVoicePickerSourceRef.current = undefined;
@@ -19277,7 +19282,7 @@ export function App({
                           onDeleteModel: handleDeleteModel,
                           onAddModel: () => {
                             if (
-                              isItemExcluded(
+                              !isItemVisible(
                                 'builtin:model-management',
                                 settingsPresentation,
                               )
@@ -19289,7 +19294,7 @@ export function App({
                           },
                         }}
                         onSubDialog={(key, scope) => {
-                          if (isSettingExcluded(key, settingsPresentation)) return;
+                          if (!isSettingVisible(key, settingsPresentation)) return;
                           settingsDialogKeyRef.current = key;
                           // Record the persist scope only for model settings —
                           // the reset effect is gated on the dialog/fallback/auth

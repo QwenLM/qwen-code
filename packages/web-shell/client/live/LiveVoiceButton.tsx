@@ -267,7 +267,14 @@ export function LiveVoiceButton({
             })}
           </ul>
         ) : (
-          <div className={styles.liveStateGroup}>
+          <div
+            className={styles.liveStateGroup}
+            // Which capture path is live: the audio-thread worklet, or the
+            // main-thread fallback. Not shown; here for support and tests.
+            data-live-capture={
+              mode === 'self' ? browserHost.captureMode : undefined
+            }
+          >
             <div className={styles.liveState} data-state={status.state}>
               <span className={styles.liveStateOrb} />
               <span>{liveStateLabel(status, t)}</span>
