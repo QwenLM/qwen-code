@@ -1,5 +1,7 @@
 # macOS overlay title bar
 
+[English](2026-09-21-macos-overlay-titlebar.md) | [简体中文](2026-09-21-macos-overlay-titlebar.zh-CN.md)
+
 ## Problem
 
 The desktop shell creates its window programmatically with Tauri's default

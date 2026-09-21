@@ -1,5 +1,7 @@
 # macOS 覆盖式标题栏
 
+[English](2026-09-21-macos-overlay-titlebar.md) | [简体中文](2026-09-21-macos-overlay-titlebar.zh-CN.md)
+
 ## 问题
 
 桌面壳通过 Tauri 的默认可见标题栏以编程方式创建窗口。在 macOS 上，标题栏会占用 Web Shell 上方单独的一行，形成一条贯穿窗口的空白区域，与 Codex 等应用采用的一体化布局不一致。
