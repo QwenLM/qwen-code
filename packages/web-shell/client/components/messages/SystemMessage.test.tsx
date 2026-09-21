@@ -958,6 +958,38 @@ describe('background continuation', () => {
     act(() => container.querySelectorAll('button')[1]!.click());
     expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
   });
+  it('names a cross-session message and offers no details to open', () => {
+    const details = vi.fn();
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Ask the other session"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{
+            turnId: 'turn-1',
+            taskId: 'msg-1',
+            kind: 'peer',
+            startedAt: 100,
+            label: 'qwen on api',
+            backgroundTask: { status: 'completed' },
+          }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain(
+      'Cross-session message·qwen on api',
+    );
+    // Nothing in the task registry answers to a message id, so the details
+    // button would open a tab that can never load.
+    expect(
+      [...container.querySelectorAll('button')].map((button) =>
+        button.textContent?.trim(),
+      ),
+    ).not.toContain('View details');
+    expect(details).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['failed', 'Background task failed'],
     ['cancelled', 'Background task cancelled'],

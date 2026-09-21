@@ -330,7 +330,10 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'realtime_message'
-    | 'turn_result';
+    | 'turn_result'
+    | 'managed_session_header_v1'
+    | 'managed_session_event_v1'
+    | 'managed_session_commit_v1';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -438,7 +441,8 @@ export interface NotificationRecordPayload {
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+    /** `peer`: a message from another session; `taskId` is the message id. */
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
     toolUseId?: string;
     sourceTurnId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */
