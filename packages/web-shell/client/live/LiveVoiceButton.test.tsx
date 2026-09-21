@@ -23,6 +23,16 @@ const mocks = vi.hoisted(() => ({
       inputLevel: { current: { level: 0, at: 0, dropping: false } },
       connect: vi.fn(),
       disconnect: vi.fn(),
+      screenShare: {
+        supported: false,
+        sharing: false,
+        label: undefined,
+        errorMessage: undefined,
+        lastLookAt: undefined,
+        requestedWhileIdle: false,
+      },
+      startSharingScreen: vi.fn(async () => undefined),
+      stopSharingScreen: vi.fn(),
     },
     status: {
       v: 1 as const,
@@ -228,6 +238,16 @@ describe('LiveVoiceButton as a browser Host', () => {
       inputLevel: { current: { level: 0, at: 0, dropping: false } },
       connect: vi.fn(),
       disconnect: vi.fn(),
+      screenShare: {
+        supported: false,
+        sharing: false,
+        label: undefined,
+        errorMessage: undefined,
+        lastLookAt: undefined,
+        requestedWhileIdle: false,
+      },
+      startSharingScreen: vi.fn(async () => undefined),
+      stopSharingScreen: vi.fn(),
     };
   });
 
@@ -318,6 +338,104 @@ describe('LiveVoiceButton as a browser Host', () => {
         .querySelector('[data-live-level-meter]')
         ?.getAttribute('data-muted'),
     ).toBe('true');
+  });
+
+  it('offers the screen only where this tab is the endpoint and can share', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.browserHost.screenShare = {
+      ...mocks.result.browserHost.screenShare,
+      supported: true,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    const toggle = document.querySelector('[data-live-screen-share-toggle]');
+    expect(toggle?.textContent).toBe('live.browser.startScreenShare');
+    act(() => {
+      (toggle as HTMLButtonElement).click();
+    });
+    // Called straight from the click: getDisplayMedia needs the gesture.
+    expect(mocks.result.browserHost.startSharingScreen).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the screen out of the native remote-control form', () => {
+    mocks.result.browserHost.screenShare = {
+      ...mocks.result.browserHost.screenShare,
+      supported: true,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: {},
+    };
+    openDialog();
+
+    expect(document.querySelector('[data-live-screen-share]')).toBeNull();
+  });
+
+  it('names what is shared and announces each look', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.browserHost.screenShare = {
+      supported: true,
+      sharing: true,
+      label: 'Terminal',
+      errorMessage: undefined,
+      lastLookAt: 1234,
+      requestedWhileIdle: false,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'thinking',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    expect(
+      document.querySelector('[data-live-screen-share-label]')?.textContent,
+    ).toBe('live.browser.sharingNamed');
+    expect(
+      document.querySelector('[data-live-screen-share-toggle]')?.textContent,
+    ).toBe('live.browser.stopScreenShare');
+    // A look leaves no other trace: the transcript shows the reply, not what
+    // was read to produce it.
+    expect(document.querySelector('[data-live-looked]')?.textContent).toBe(
+      'live.browser.lookedAtScreen',
+    );
+  });
+
+  it('points at the share button when the model asked and nothing is shared', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.browserHost.screenShare = {
+      supported: true,
+      sharing: false,
+      label: undefined,
+      errorMessage: undefined,
+      lastLookAt: undefined,
+      requestedWhileIdle: true,
+    };
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    expect(
+      document.querySelector('[data-live-screen-share-requested]')?.textContent,
+    ).toBe('live.browser.screenRequested');
+    expect(document.querySelector('[data-live-looked]')?.textContent).toBe('');
   });
 
   it('records which capture path is live, for support', () => {
