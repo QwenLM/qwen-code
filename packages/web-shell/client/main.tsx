@@ -397,7 +397,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                   ],
                 },
                 rightPanel: {
-                  items: ['review', 'sideTask', 'terminal', 'webPreview'],
+                  items: [
+                    'review',
+                    'sideTask',
+                    'terminal',
+                    'webPreview',
+                    'trajectory',
+                  ],
                 },
                 environmentPanel: {
                   items: [

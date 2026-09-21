@@ -5147,6 +5147,112 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionContextUsage).not.toHaveBeenCalled();
   });
 
+  it('rewires a restored trajectory tab so it can read again', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'trajectory:session-1',
+          tabs: [
+            {
+              id: 'trajectory:session-1',
+              kind: 'trajectory',
+              title: 'Trajectory',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp({ rightPanel: { items: ['trajectory'] } });
+    await flush();
+    await flush();
+
+    // The page loader is a function, so storage cannot carry it. A restored
+    // tab that is not rewired renders forever without ever asking for a page.
+    expect(
+      container.querySelector('button[title="Trajectory"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({ direction: 'backward' }),
+    );
+  });
+
+  it('drops a restored trajectory tab when the host stopped listing it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'trajectory:session-1',
+          tabs: [
+            {
+              id: 'trajectory:session-1',
+              kind: 'trajectory',
+              title: 'Trajectory',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    // The same profile, in a host that no longer opts in. A stored tab must
+    // not be a second way in: it would render the panel and keep fetching
+    // transcript pages for a feature this host has turned off. `terminal` and
+    // `web_preview` gate their restore the same way.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
+    await flush();
+    await flush();
+
+    expect(container.querySelector('button[title="Trajectory"]')).toBeNull();
+    expect(
+      mockWorkspace.client.getSessionTranscriptPage,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('opens one trajectory tab from the panel and reuses it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': { open: true, activeTabId: null, tabs: [] },
+      }),
+    );
+    const { container } = renderApp({ rightPanel: { items: ['trajectory'] } });
+    await flush();
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="right-panel-open-trajectory"]',
+    );
+    expect(entry).not.toBeNull();
+    await act(async () => entry!.click());
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Trajectory"]'),
+    ).not.toBeNull();
+    const persisted = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    );
+    expect(
+      persisted['/tmp/project\0session-1'].tabs.filter(
+        (tab: { kind: string }) => tab.kind === 'trajectory',
+      ),
+    ).toEqual([
+      {
+        id: 'trajectory:session-1',
+        kind: 'trajectory',
+        title: 'Trajectory',
+        sessionId: 'session-1',
+      },
+    ]);
+  });
+
   it('reclaims pane-bound token usage tabs restored outside a split view', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
