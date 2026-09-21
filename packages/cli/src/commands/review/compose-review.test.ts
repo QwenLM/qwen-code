@@ -19560,6 +19560,172 @@ describe('Critical deferral by axes at the critical floor (#10291)', () => {
   });
 });
 
+describe('terminalState — how much of the diff the run read', () => {
+  const compose = (over: Record<string, unknown> = {}) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+    });
+
+  /** `coveredPlan()`'s roster, with only the chunk agents the test launches. */
+  function planWithChunkAgents(launch: () => void): string {
+    launch();
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+    return p;
+  }
+
+  it('is complete when every planned chunk was read', () => {
+    const r = compose({ planPath: coveredPlan() });
+    expect(r.terminalState).toBe('complete');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('is not moved by findings: a blocking review that read everything is complete', () => {
+    // The property that makes the field worth having. `event` says what
+    // should happen to the PR; this says how much of it was read, and a
+    // confirmed blocker says nothing about that.
+    const r = compose({
+      bodyCriticals: ['[build] `npm run build` failed: TS2345 in x.ts'],
+      planPath: coveredPlan(['reverse-audit']),
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.terminalState).toBe('complete');
+  });
+
+  it('is partial when a planned chunk went unread', () => {
+    const p = planWithChunkAgents(() => {
+      transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    });
+    const r = compose({ planPath: p });
+    expect(r.terminalState).toBe('partial');
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('is partial, not complete, when a chunk was declared unreachable', () => {
+    // "A disclosed gap, not coverage" is the coverage report's own position;
+    // a state that called this run complete would contradict it.
+    const p = planWithChunkAgents(() => {
+      transcript('a1', goodPrompt(1), { toolCalls: 3 });
+      transcript('a2', goodPrompt(2), {
+        toolCalls: 2,
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      });
+    });
+    expect(compose({ planPath: p }).terminalState).toBe('partial');
+  });
+
+  it('is failed when no planned chunk was read', () => {
+    const p = planWithChunkAgents(() => {
+      // An agent ran, so the transcripts are readable — it just read nothing.
+      transcript('a1', goodPrompt(1), { toolCalls: 0 });
+    });
+    const r = compose({ planPath: p });
+    expect(r.terminalState).toBe('failed');
+    // By the count, not by a throw: coverage was computed, and came to zero.
+    expect(r.body).not.toContain('the plan could not be used');
+    expect(r.body).not.toContain('could not read the agents');
+  });
+
+  it('is failed when coverage could not be computed', () => {
+    const p = join(dir, 'broken-plan.json');
+    writeFileSync(p, JSON.stringify({ diffPathAbsolute: DIFF, chunks: [] }));
+    const r = compose({ planPath: p });
+    expect(r.terminalState).toBe('failed');
+    expect(r.body).toContain('the plan could not be used');
+  });
+
+  it('is failed when coverage broke after its counts were read', () => {
+    // The run-level failure has to outrank the counts: a throw that lands
+    // after `plannedChunks`/`coveredChunks` were taken leaves numbers that
+    // look like a clean run beside a body saying coverage could not be shown.
+    const p = coveredPlan();
+    const real = coverageModule.coverageFromTranscripts(p, ENV);
+    expect(real.coveredChunks).toEqual([1, 2]);
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() =>
+        Object.defineProperty({ ...real }, 'missingChunks', {
+          get() {
+            throw new Error('probe — broke after the counts were read');
+          },
+        }),
+      );
+    try {
+      const r = compose({ planPath: p });
+      expect(r.body).toContain('probe — broke after the counts were read');
+      expect(r.terminalState).toBe('failed');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('is skipped, not failed, when no plan was given', () => {
+    // Coverage was never attempted, which is a different fact from
+    // attempting it and breaking — and the two must not persist alike.
+    const r = compose();
+    expect(r.terminalState).toBe('skipped');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+  });
+
+  it('is not moved by a whiffed dimension: every chunk was still read', () => {
+    // The nearest neighbour, and the one most likely to be folded in by
+    // mistake: it rides the same disclosure list and raises the same
+    // `unreviewed-dimension` cap, but it says a DIMENSION went unreviewed,
+    // not that lines went unread.
+    const r = compose({
+      planPath: coveredPlan(),
+      unreviewedDimensions: ['security'],
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.terminalState).toBe('complete');
+  });
+
+  it('is not moved by a cap that has nothing to do with coverage', () => {
+    const r = compose({ planPath: coveredPlan(), contextUnavailable: true });
+    expect(r.cappedBy.length).toBeGreaterThan(0);
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.terminalState).toBe('complete');
+  });
+});
+
+describe('deriveTerminalState', () => {
+  const state = (over: Partial<Parameters<typeof deriveTerminalState>[0]>) =>
+    deriveTerminalState({
+      attempted: true,
+      failed: false,
+      planned: 4,
+      covered: 4,
+      ...over,
+    });
+
+  it('reads the four states off the counts and the run-level failure', () => {
+    expect(state({})).toBe('complete');
+    expect(state({ covered: 3 })).toBe('partial');
+    expect(state({ covered: 1 })).toBe('partial');
+    expect(state({ covered: 0 })).toBe('failed');
+    expect(state({ failed: true })).toBe('failed');
+    expect(state({ attempted: false })).toBe('skipped');
+  });
+
+  it('lets a run-level failure outrank counts that look complete', () => {
+    // Counts left over from before the throw must not read as a clean run.
+    expect(state({ failed: true, covered: 4 })).toBe('failed');
+  });
+
+  it('never calls an unattempted run failed, whatever the counts say', () => {
+    expect(state({ attempted: false, failed: true, covered: 0 })).toBe(
+      'skipped',
+    );
+  });
+});
+
 describe('floor enforcement — the Critical arm (#10291)', () => {
   // The backstop's Critical arm reads the claim line's axis tags the way it
   // reads `[probe]`: the ONE combination the floor defers moves, and every
@@ -20173,171 +20339,5 @@ describe('the fix-induced marking behind a source tag (#10291, review round 2)',
       id: 'R3-2',
       title: '[probe] the fix opened a new gap',
     });
-  });
-});
-
-describe('terminalState — how much of the diff the run read', () => {
-  const compose = (over: Record<string, unknown> = {}) =>
-    composeReview({
-      criticalsInline: 0,
-      suggestionsInline: 0,
-      env: ENV,
-      modelId: MODEL,
-      ...over,
-    });
-
-  /** `coveredPlan()`'s roster, with only the chunk agents the test launches. */
-  function planWithChunkAgents(launch: () => void): string {
-    launch();
-    const p = plan({ step45: false });
-    recordBuilt(p, 1);
-    recordBuilt(p, 2);
-    recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit', '6d']);
-    return p;
-  }
-
-  it('is complete when every planned chunk was read', () => {
-    const r = compose({ planPath: coveredPlan() });
-    expect(r.terminalState).toBe('complete');
-    expect(r.event).toBe('APPROVE');
-  });
-
-  it('is not moved by findings: a blocking review that read everything is complete', () => {
-    // The property that makes the field worth having. `event` says what
-    // should happen to the PR; this says how much of it was read, and a
-    // confirmed blocker says nothing about that.
-    const r = compose({
-      bodyCriticals: ['[build] `npm run build` failed: TS2345 in x.ts'],
-      planPath: coveredPlan(['reverse-audit']),
-    });
-    expect(r.event).toBe('REQUEST_CHANGES');
-    expect(r.terminalState).toBe('complete');
-  });
-
-  it('is partial when a planned chunk went unread', () => {
-    const p = planWithChunkAgents(() => {
-      transcript('a1', goodPrompt(1), { toolCalls: 3 });
-    });
-    const r = compose({ planPath: p });
-    expect(r.terminalState).toBe('partial');
-    expect(r.event).not.toBe('APPROVE');
-  });
-
-  it('is partial, not complete, when a chunk was declared unreachable', () => {
-    // "A disclosed gap, not coverage" is the coverage report's own position;
-    // a state that called this run complete would contradict it.
-    const p = planWithChunkAgents(() => {
-      transcript('a1', goodPrompt(1), { toolCalls: 3 });
-      transcript('a2', goodPrompt(2), {
-        toolCalls: 2,
-        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
-      });
-    });
-    expect(compose({ planPath: p }).terminalState).toBe('partial');
-  });
-
-  it('is failed when no planned chunk was read', () => {
-    const p = planWithChunkAgents(() => {
-      // An agent ran, so the transcripts are readable — it just read nothing.
-      transcript('a1', goodPrompt(1), { toolCalls: 0 });
-    });
-    const r = compose({ planPath: p });
-    expect(r.terminalState).toBe('failed');
-    // By the count, not by a throw: coverage was computed, and came to zero.
-    expect(r.body).not.toContain('the plan could not be used');
-    expect(r.body).not.toContain('could not read the agents');
-  });
-
-  it('is failed when coverage could not be computed', () => {
-    const p = join(dir, 'broken-plan.json');
-    writeFileSync(p, JSON.stringify({ diffPathAbsolute: DIFF, chunks: [] }));
-    const r = compose({ planPath: p });
-    expect(r.terminalState).toBe('failed');
-    expect(r.body).toContain('the plan could not be used');
-  });
-
-  it('is failed when coverage broke after its counts were read', () => {
-    // The run-level failure has to outrank the counts: a throw that lands
-    // after `plannedChunks`/`coveredChunks` were taken leaves numbers that
-    // look like a clean run beside a body saying coverage could not be shown.
-    const p = coveredPlan();
-    const real = coverageModule.coverageFromTranscripts(p, ENV);
-    expect(real.coveredChunks).toEqual([1, 2]);
-    const spy = vi
-      .spyOn(coverageModule, 'coverageFromTranscripts')
-      .mockImplementation(() =>
-        Object.defineProperty({ ...real }, 'missingChunks', {
-          get() {
-            throw new Error('probe — broke after the counts were read');
-          },
-        }),
-      );
-    try {
-      const r = compose({ planPath: p });
-      expect(r.body).toContain('probe — broke after the counts were read');
-      expect(r.terminalState).toBe('failed');
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it('is skipped, not failed, when no plan was given', () => {
-    // Coverage was never attempted, which is a different fact from
-    // attempting it and breaking — and the two must not persist alike.
-    const r = compose();
-    expect(r.terminalState).toBe('skipped');
-    expect(r.cappedBy).toContain('unreviewed-dimension');
-  });
-
-  it('is not moved by a whiffed dimension: every chunk was still read', () => {
-    // The nearest neighbour, and the one most likely to be folded in by
-    // mistake: it rides the same disclosure list and raises the same
-    // `unreviewed-dimension` cap, but it says a DIMENSION went unreviewed,
-    // not that lines went unread.
-    const r = compose({
-      planPath: coveredPlan(),
-      unreviewedDimensions: ['security'],
-    });
-    expect(r.cappedBy).toContain('unreviewed-dimension');
-    expect(r.terminalState).toBe('complete');
-  });
-
-  it('is not moved by a cap that has nothing to do with coverage', () => {
-    const r = compose({ planPath: coveredPlan(), contextUnavailable: true });
-    expect(r.cappedBy.length).toBeGreaterThan(0);
-    expect(r.event).not.toBe('APPROVE');
-    expect(r.terminalState).toBe('complete');
-  });
-});
-
-describe('deriveTerminalState', () => {
-  const state = (over: Partial<Parameters<typeof deriveTerminalState>[0]>) =>
-    deriveTerminalState({
-      attempted: true,
-      failed: false,
-      planned: 4,
-      covered: 4,
-      ...over,
-    });
-
-  it('reads the four states off the counts and the run-level failure', () => {
-    expect(state({})).toBe('complete');
-    expect(state({ covered: 3 })).toBe('partial');
-    expect(state({ covered: 1 })).toBe('partial');
-    expect(state({ covered: 0 })).toBe('failed');
-    expect(state({ failed: true })).toBe('failed');
-    expect(state({ attempted: false })).toBe('skipped');
-  });
-
-  it('lets a run-level failure outrank counts that look complete', () => {
-    // Counts left over from before the throw must not read as a clean run.
-    expect(state({ failed: true, covered: 4 })).toBe('failed');
-  });
-
-  it('never calls an unattempted run failed, whatever the counts say', () => {
-    expect(state({ attempted: false, failed: true, covered: 0 })).toBe(
-      'skipped',
-    );
   });
 });
