@@ -891,10 +891,14 @@ describe('receipts', () => {
     expect(delivered).toEqual([parked]);
   });
 
-  it('releases nothing when the host cannot name the addressee', () => {
-    // The same question on the other release path: a mode change would
-    // free a parked message, but the host cannot say which session it is
-    // for. Nothing is released on an addressee nobody named.
+  it('releases nothing when the host cannot answer during a re-judge', () => {
+    // The same question on the other release path: a mode change frees a
+    // parked message, and the pin check throws while it is being let out.
+    //
+    // The policy is judged for the session the message was parked for,
+    // which the gate knows without asking. Whether that session is still
+    // here is a question only the host can answer, and an unanswered one
+    // is not a yes.
     let owns: (id: string) => string | undefined = (id) => id;
     let mode: ApprovalMode = ApprovalMode.DEFAULT;
     const delivered: PeerUserFrame[] = [];
@@ -917,10 +921,7 @@ describe('receipts', () => {
     expect(gate.reevaluate('approval-mode-changed')).toBe(0);
     expect(delivered).toEqual([]);
     expect(gate.getHeld()).toHaveLength(1);
-    // The message keeps the receipt it already has: it was never let out,
-    // so there is nothing new to tell its sender.
-    expect(statuses).toEqual(['held']);
-    expect(gate.getHeld()[0]?.cause).toBe('policy-unreadable');
+    expect(statuses).toEqual(['held', 'held']);
   });
 
   it('judges a parked frame against the sessions a host still holds', () => {
@@ -2807,6 +2808,80 @@ describe('a gate for a process hosting several sessions', () => {
       gate.admit(frame({ fromMode: 'prompting', toSessionId: 'chat-a' })),
     ).toBe('held');
     expect(lookups).toBe(1);
+  });
+
+  it('rolls its own refusal back under the scope it recorded', () => {
+    // `admit` rolls a body back on every path that is not a delivery or a
+    // hold, and by then the settings readers have run — a chance for the
+    // session map to have moved. Deriving the scope again there keys the
+    // rollback away from the record it means to undo, and the sender's
+    // honest retry comes back `duplicate`.
+    let answers = 0;
+    const gate = new InboundGate({
+      admission: new PeerAdmission({
+        limits: {
+          bucketCapacity: 1e6,
+          refillPerSecond: 1e6,
+          globalBucketCapacity: 1e6,
+          globalRefillPerSecond: 1e6,
+          dedupWindowMs: 30_000,
+        },
+      }),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      // The reader the resolver's answer is fetched for, which is where
+      // a host gets the chance to move its session map mid-admission.
+      getPolicySetting: () => 'refuse',
+      resolveSessionId: (id) => {
+        answers += 1;
+        return answers === 1 ? id : undefined;
+      },
+      deliver: () => {},
+    });
+    const line = (msgId: string) => ({
+      ...buildUserFrame({ content: 'stand by' }),
+      msgId,
+      fromMode: 'bypass' as const,
+      toSessionId: 'chat-a',
+    });
+
+    expect(gate.admit(line('m1'))).toBe('refused');
+    // A sender told its message was refused must keep hearing that.
+    expect(gate.admit(line('m2'))).toBe('refused');
+  });
+
+  it('re-judges a parked message for the session it was parked for', () => {
+    // One sweep must not read this message's lifetime for one session and
+    // its policy for another, and a resolver that throws mid-sweep must
+    // not rewrite an explicit hold into an unreadable one.
+    let resolverThrows = false;
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => 'hold',
+      getPolicyScope: () => 'workspace',
+      resolveSessionId: (id) => {
+        if (resolverThrows) throw new Error('the session map is moving');
+        return id;
+      },
+      deliver: () => {},
+    });
+
+    expect(
+      gate.admit(frame({ fromMode: 'bypass', toSessionId: 'chat-a' })),
+    ).toBe('held');
+    expect(gate.getHeld()[0]).toMatchObject({
+      cause: 'explicit-setting',
+      policyScope: 'workspace',
+    });
+
+    resolverThrows = true;
+    gate.reevaluate('settings-changed');
+
+    // Still the user's own explicit hold, with the scope that explains it.
+    expect(gate.getHeld()[0]).toMatchObject({
+      cause: 'explicit-setting',
+      policyScope: 'workspace',
+    });
   });
 
   it('counts a parked message against the allowance it was parked under', () => {

@@ -265,6 +265,33 @@ export class PeerMessaging {
   ) => Promise<void> = async () => {};
   private getSessionId: (() => string) | null = null;
   private resolveSessionId: ((id: string) => string | undefined) | null = null;
+
+  /**
+   * Whether this process holds the session `id` names, or `null` when the
+   * host could not say.
+   *
+   * This runs on the inbox's read callback, before the gate sees the
+   * frame. A resolver that throws there took the whole dispatch with it:
+   * the sender got no receipt at all, and the gate's own answer for an
+   * addressee nobody could name — park it, or refuse it where there is
+   * nobody to park it for — was never reached. An unanswered question is
+   * not a "no", so the frame goes to the gate and the gate decides.
+   */
+  private holdsSession(
+    resolveSessionId: (id: string) => string | undefined,
+    id: string,
+  ): boolean | null {
+    try {
+      return resolveSessionId(id) !== undefined;
+    } catch (error) {
+      debugLogger.debug(
+        `the session-name resolver threw while routing a peer message; leaving the verdict to the gate: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
   private settleSentMessage: (
     msgId: string,
     status: PeerDeliveryStatus,
@@ -904,7 +931,7 @@ export class PeerMessaging {
       ? // Hosting several sessions: a frame has to say which, and name one
         // this process still holds.
         frame.toSessionId === undefined ||
-        resolveSessionId(frame.toSessionId) === undefined
+        this.holdsSession(resolveSessionId, frame.toSessionId) === false
       : frame.toSessionId !== undefined &&
         ownSessionId !== undefined &&
         frame.toSessionId !== ownSessionId;

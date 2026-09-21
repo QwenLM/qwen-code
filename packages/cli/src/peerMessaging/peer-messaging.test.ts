@@ -537,6 +537,37 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     });
   });
 
+  it('leaves the verdict to the gate when the resolver throws', async () => {
+    // The routing check runs on the inbox's read callback, before the
+    // gate sees the frame. A resolver that threw there used to take the
+    // whole dispatch with it: no receipt reached the sender at all, and
+    // the gate's own answer for an addressee nobody could name was never
+    // reached. An unanswered question is not a "no".
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: () => {
+        throw new Error('the session map is being torn down');
+      },
+    });
+
+    const frame = peerFrame({
+      content: 'while the map is moving',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await send(m.socketPath!, frame);
+    await settle();
+
+    // Not delivered, and not silently dropped either: the gate holds a
+    // message whose addressee nobody could name, and says so.
+    expect(submitted).toHaveLength(0);
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'held',
+      origMsgId: frame.msgId,
+    });
+  });
+
   it('refuses an unpinned frame at a host of several sessions', async () => {
     // The one place the two rules differ. A process holding one session
     // takes an unpinned frame — it could only have meant that one. A
