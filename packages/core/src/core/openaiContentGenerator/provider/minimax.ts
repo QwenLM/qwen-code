@@ -48,15 +48,15 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
    * `generationConfig.toolParametersMandatory`, because the endpoints #10080
    * was written for (llama.cpp, LM Studio, vLLM) reject that shape.
    *
-   * Keep the unconditional injection out of the converter: it runs ahead of
-   * `relaxSchemaForFunctionCalling`, which strips empty `properties` and would
-   * emit the bare `{"type":"object"}` that #11410 reports as a 400.
+   * Keep the unconditional injection out of the converter: an injection placed
+   * there would run ahead of `relaxSchemaForFunctionCalling`, which strips empty
+   * `properties` and would emit the bare `{"type":"object"}` that #11410 reports
+   * as a 400.
    */
-  override buildRequest(
+  protected override emitMandatoryToolParameters(
     request: OpenAI.Chat.ChatCompletionCreateParams,
-    userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
-    return withEmptyToolParameters(super.buildRequest(request, userPromptId));
+    return withEmptyToolParameters(request);
   }
 
   override getResponseParsingOptions(): OpenAIResponseParsingOptions {

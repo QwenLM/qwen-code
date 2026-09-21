@@ -158,11 +158,14 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
 
 - 单元测试按路由固定线上形状。四条模型名路由 —— DeepSeek、Z.ai、MiMo 与
   Mistral 的模型 id 指向 `http://localhost:5000/v1` —— 断言厂商 provider 仍被选中
-  且 schema 已存在。无厂商判定的普通路由断言默认省略、开启后发出 schema，
-  以及完全没有声明 schema 的工具。DashScope 与 MiniMax 两种状态都断言。
-  已声明的 schema 原样透传，不含 tools 的请求仍然不带 tools。
-  关闭修复时，七个依赖开关的用例会变红，而 MiniMax 与省略类用例仍为绿，
-  因此测试套件区分的是开关，而不是 provider 类。
+  且 schema 已存在。另有两条用例在真实的 Z.ai 与 DeepSeek 主机名上让修复
+  穿过按主机名门控的 reasoning 重排。无厂商判定的普通路由断言默认省略、
+  条目显式设为 `false` 时的省略、开启后发出的 schema，以及完全没有声明
+  schema 的工具。DashScope 断言开启、显式 `false` 退出与默认省略三种状态；
+  MiniMax 断言开启与不开启开关时的注入。已声明的 schema 原样透传，
+  不含 tools 的请求仍然不带 tools。关闭修复时，每一个受开关门控的用例都会变红，
+  而 MiniMax、省略与透传类用例仍为绿，因此测试套件区分的是开关，
+  而不是 provider 类。
 - 既有 converter 测试仍然固定默认省略行为，包括
   `expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters')`。
 - 本豁免所推理的三种形状无需实时服务器即可在 converter 处确定：

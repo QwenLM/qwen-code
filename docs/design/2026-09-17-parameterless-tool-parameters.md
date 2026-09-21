@@ -184,13 +184,17 @@ hostname-gated, so it applies wherever the user opted in.
 
 - Unit tests pin the wire per route. The four model-name routes — DeepSeek, Z.ai,
   MiMo and Mistral ids at `http://localhost:5000/v1` — assert that the vendor
-  provider stays selected and the schema is present. The plain route asserts the
-  omission by default and the schema when opted in, including a tool that
-  declares no schema at all. DashScope and MiniMax assert both arms. A declared
-  schema passes through unchanged and a request without tools stays tool-free.
-  With the repair disabled the seven flag-dependent cases go red while the
-  MiniMax and omission cases stay green, so the suite discriminates on the flag
-  rather than on the provider class.
+  provider stays selected and the schema is present. Two further cases run the
+  repair through the hostname-gated reasoning reshapes on real Z.ai and DeepSeek
+  hostnames. The plain route asserts the omission by default, the omission when
+  the entry explicitly sets `false`, and the schema when opted in, including a
+  tool that declares no schema at all. DashScope asserts the opt-in, the
+  explicit `false` opt-out and the default omission; MiniMax asserts the
+  injection with and without the opt-in. A declared schema passes through
+  unchanged and a request without tools stays tool-free. With the repair
+  disabled every flag-gated case goes red while the MiniMax, omission and
+  passthrough cases stay green, so the suite discriminates on the flag rather
+  than on the provider class.
 - Existing converter tests still pin the default omission, including
   `expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters')`.
 - The three shapes this carve-out reasons about are settled at the converter

@@ -67,13 +67,15 @@ function outboundRequest(
   config: ContentGeneratorConfig,
   provider: OpenAICompatibleProvider,
   tools: OpenAI.Chat.ChatCompletionTool[] | null = [CONVERTER_SHAPE],
+  extra: Record<string, unknown> = {},
 ): OpenAI.Chat.ChatCompletionCreateParams {
   return provider.buildRequest(
     {
       model: config.model,
       messages: [{ role: 'user', content: 'Hello' }],
       ...(tools === null ? {} : { tools }),
-    },
+      ...extra,
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
     'prompt-id',
   );
 }
@@ -133,9 +135,74 @@ describe('generationConfig.toolParametersMandatory', () => {
     );
   });
 
+  describe('the vendor hostnames whose reasoning reshape runs', () => {
+    // The hostname-gated reshapes rebuild the request after the repair ran,
+    // and a loopback baseUrl — where the model-name cases above run — skips
+    // both branches, so survival of the injected field through the reshaped
+    // wire shape is pinned only here.
+    it('repairs on a Z.ai hostname while flattening nested reasoning.effort', () => {
+      const config = createConfig(
+        'glm-4.6',
+        'https://api.z.ai/api/paas/v4',
+        true,
+      );
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider).toBeInstanceOf(ZaiOpenAICompatibleProvider);
+      const request = outboundRequest(config, provider, [CONVERTER_SHAPE], {
+        reasoning: { effort: 'high' },
+      });
+
+      expect(outboundTool(request).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
+      );
+      expect(
+        (request as unknown as Record<string, unknown>)['reasoning_effort'],
+      ).toBe('high');
+    });
+
+    it('repairs on a DeepSeek hostname while translating nested reasoning.effort', () => {
+      const config = createConfig(
+        'deepseek-v4.1-flash',
+        'https://api.deepseek.com/v1',
+        true,
+      );
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider).toBeInstanceOf(DeepSeekOpenAICompatibleProvider);
+      const request = outboundRequest(config, provider, [CONVERTER_SHAPE], {
+        reasoning: { effort: 'high' },
+      });
+
+      expect(outboundTool(request).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
+      );
+      expect(
+        (request as unknown as Record<string, unknown>)['reasoning_effort'],
+      ).toBe('high');
+    });
+  });
+
   describe('routes with no vendor predicate', () => {
     it('omits the field by default', () => {
       const config = createConfig('local-model', 'http://localhost:5000/v1');
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider.constructor).toBe(DefaultOpenAICompatibleProvider);
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toBeUndefined();
+      expect(request.max_tokens).toBe(32_000);
+    });
+
+    // The documented per-entry opt-out accepts an explicit `false`; the
+    // omission case above cannot tell that arm from an absent key.
+    it('omits the field when the entry explicitly sets false', () => {
+      const config = createConfig(
+        'local-model',
+        'http://localhost:5000/v1',
+        false,
+      );
       const provider = determineProvider(config, mockCliConfig);
 
       expect(provider.constructor).toBe(DefaultOpenAICompatibleProvider);
@@ -361,6 +428,21 @@ describe('generationConfig.toolParametersMandatory', () => {
 
     it('leaves the DashScope omission intact without the opt-in', () => {
       const config = dashScopeConfig();
+      const provider = new DashScopeOpenAICompatibleProvider(
+        config,
+        mockCliConfig,
+      );
+
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toBeUndefined();
+      expect(request as unknown as Record<string, unknown>).toMatchObject(
+        EXTRA_BODY,
+      );
+    });
+
+    it('leaves the DashScope omission intact when explicitly set to false', () => {
+      const config = dashScopeConfig(false);
       const provider = new DashScopeOpenAICompatibleProvider(
         config,
         mockCliConfig,
