@@ -40,6 +40,7 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  testZoomHotkeyScript();
   await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
@@ -854,7 +855,52 @@ function testBootstrapBridgeConfiguration() {
     'core:event:allow-listen',
     'core:event:allow-unlisten',
     'core:window:allow-start-dragging',
+    'allow-bootstrap-state',
+    'allow-change-zoom',
+    'allow-choose-workspace',
+    'allow-install-update',
+    'allow-open-logs',
+    'allow-restart-runtime',
   ]);
+
+  // Declaring an app ACL manifest makes every app command opt-in, so one that
+  // is registered but missing from build.rs is denied at runtime with no build
+  // error to point at it.
+  const build = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'build.rs'),
+    'utf8',
+  );
+  const main = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
+    'utf8',
+  );
+  const commandsStart = build.indexOf('const COMMANDS');
+  const listed = [
+    ...build
+      .slice(commandsStart, build.indexOf('];', commandsStart))
+      .matchAll(/"([a-z_]+)"/g),
+  ].map(([, command]) => command);
+  const handlerStart = main.indexOf('generate_handler![');
+  const registered = [
+    ...main
+      .slice(handlerStart, main.indexOf('])', handlerStart))
+      .matchAll(/\b([a-z_]+),/g),
+  ].map(([, command]) => command);
+  assert.deepEqual(
+    [...listed].sort(),
+    [...registered].sort(),
+    'build.rs must list exactly the commands main.rs registers.',
+  );
+  for (const command of listed) {
+    assert.ok(
+      capability.permissions.includes(`allow-${command.replaceAll('_', '-')}`),
+      `The bootstrap capability must grant ${command}.`,
+    );
+  }
+  assert.ok(
+    registered.includes('change_zoom'),
+    'The zoom shortcut script invokes change_zoom; renaming the command means renaming it there too.',
+  );
 
   const webShellCapability = JSON.parse(
     fs.readFileSync(
@@ -872,21 +918,110 @@ function testBootstrapBridgeConfiguration() {
     urls: ['http://127.0.0.1:*'],
   });
   assert.deepEqual(webShellCapability.windows, ['main']);
+  // The daemon-served page reaches exactly two things: the external-URL opener
+  // and the zoom shortcut. The workspace, updater, and log commands stay
+  // bootstrap-only.
   assert.deepEqual(webShellCapability.permissions, [
     'core:window:allow-start-dragging',
     {
       identifier: 'opener:allow-open-url',
       allow: [{ url: 'http://*' }, { url: 'https://*' }, { url: 'mailto:*' }],
     },
+    'allow-change-zoom',
   ]);
 
+  assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
+  assert.match(main, /hidden_title\(true\)/);
+  assert.match(main, /initialization_script\(MACOS_TITLEBAR_INIT_SCRIPT\)/);
+}
+
+function testZoomHotkeyScript() {
   const main = fs.readFileSync(
     path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
     'utf8',
   );
-  assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
-  assert.match(main, /hidden_title\(true\)/);
-  assert.match(main, /initialization_script\(MACOS_TITLEBAR_INIT_SCRIPT\)/);
+  const script = /const ZOOM_HOTKEY_SCRIPT: &str = r#"([\s\S]*?)"#;/.exec(
+    main,
+  )?.[1];
+  assert.ok(script, 'main.rs must keep the zoom shortcut script.');
+
+  const listeners = [];
+  const invoked = [];
+  vm.runInNewContext(
+    script,
+    {
+      window: {
+        __TAURI__: {
+          core: {
+            invoke: async (command, args) => {
+              invoked.push({ command, args });
+            },
+          },
+        },
+        addEventListener: (event, listener, options) => {
+          listeners.push({ event, listener, options });
+        },
+      },
+    },
+    { timeout: 5000 },
+  );
+
+  const dispatch = (event, properties) => {
+    const registered = listeners.find((entry) => entry.event === event);
+    assert.ok(registered, `The script must listen for ${event}.`);
+    let prevented = false;
+    registered.listener({
+      preventDefault: () => {
+        prevented = true;
+      },
+      ...properties,
+    });
+    return prevented;
+  };
+
+  assert.equal(
+    listeners.find((entry) => entry.event === 'keydown').options,
+    true,
+    'The keydown listener must capture, so an editor that stops propagation cannot swallow the shortcut.',
+  );
+  // Read field by field: the options object comes from the vm realm, so it has
+  // a different Object.prototype than a literal here.
+  const wheel = listeners.find((entry) => entry.event === 'wheel').options;
+  assert.equal(wheel.capture, true);
+  assert.equal(
+    wheel.passive,
+    false,
+    'The wheel listener must stay non-passive to suppress the pinch gesture.',
+  );
+
+  for (const [properties, action] of [
+    [{ metaKey: true, key: '=' }, 'in'],
+    [{ ctrlKey: true, key: '+' }, 'in'],
+    [{ ctrlKey: true, key: '-' }, 'out'],
+    [{ metaKey: true, key: '0' }, 'reset'],
+  ]) {
+    assert.equal(dispatch('keydown', properties), true);
+    assert.equal(invoked.at(-1).command, 'change_zoom');
+    assert.equal(invoked.at(-1).args.action, action);
+  }
+
+  // Shortcuts the shell does not own must reach the page untouched.
+  const owned = invoked.length;
+  for (const properties of [
+    { ctrlKey: true, key: 'a' },
+    { key: '=' },
+    { altKey: true, metaKey: true, key: '=' },
+  ]) {
+    assert.equal(dispatch('keydown', properties), false);
+  }
+  assert.equal(invoked.length, owned);
+
+  // A trackpad pinch reaches the page as a ctrlKey wheel event.
+  assert.equal(dispatch('wheel', { ctrlKey: true, deltaY: -120 }), true);
+  assert.equal(invoked.at(-1).command, 'change_zoom');
+  assert.equal(invoked.at(-1).args.action, 'in');
+  assert.equal(dispatch('wheel', { deltaY: -120 }), false);
+  assert.equal(invoked.length, owned + 1);
 }
 
 function testResolveLogRoot() {

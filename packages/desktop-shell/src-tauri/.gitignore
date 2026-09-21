@@ -1,2 +1,5 @@
 /target/
 /gen/
+# tauri-build writes the allow-*/deny-* permissions for the commands build.rs
+# lists, on every build.
+/permissions/
