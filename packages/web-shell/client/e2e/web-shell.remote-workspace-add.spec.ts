@@ -186,7 +186,7 @@ test('the resumed browser lists the chosen computer directories @smoke', async (
   );
   await seedConnectedComputer(page);
 
-  await gotoSourceShell(page);
+  const sourceUrl = await gotoSourceShell(page);
   await openFolderBrowser(page);
   const sourceSelector = addWorkspaceDialog(page).getByRole('combobox', {
     name: 'Folder source',
@@ -198,10 +198,10 @@ test('the resumed browser lists the chosen computer directories @smoke', async (
   ).toBeVisible();
   await selectFolderSource(page, '127.0.0.1:5199');
 
-  // The tab really navigates to the chosen computer, marker and all.
-  await expect
-    .poll(() => new URL(page.url()).searchParams.get('daemon'))
-    .toBe(REMOTE_ORIGIN);
+  // Browsing the chosen computer no longer navigates the tab: the folder list
+  // is fetched through the source daemon's proxy route and shown in place.
+  await expect(page).toHaveURL(sourceUrl);
+  expect(new URL(page.url()).searchParams.has('daemon')).toBe(false);
 
   const dialog = addWorkspaceDialog(page);
   await expect(dialog).toBeVisible();
@@ -238,6 +238,11 @@ test('the resumed browser lists the chosen computer directories @smoke', async (
       (request) => request.method === 'POST' && request.path === '/workspaces',
     ),
   ).toEqual([]);
+
+  // Confirming the add is what hands the tab over to the chosen computer.
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get('daemon'))
+    .toBe(REMOTE_ORIGIN);
 });
 
 test('cancelling returns to the exact source tab @smoke', async ({
