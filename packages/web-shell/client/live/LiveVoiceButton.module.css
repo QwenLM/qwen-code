@@ -165,6 +165,20 @@
   }
 }
 
+.screenShare {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The share notice reads as ordinary status, not as the alarm the dropped-input
+   line is, so it reuses the region's layout but not its colour. */
+.screenShare .droppingStatus {
+  color: var(--muted-foreground, inherit);
+  flex-basis: 100%;
+}
+
 .browserActions {
   display: flex;
   flex-wrap: wrap;

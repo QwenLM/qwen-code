@@ -129,6 +129,7 @@ import {
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
+  peekSessionCatalogDisplayName,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
 } from './session-catalog/session-catalog-store';
 import {
@@ -3876,6 +3877,29 @@ export function App({
     setSessionStatusDisplayName(undefined);
     setCurrentSessionSummary(undefined);
   }, [logicalSessionKey]);
+  // Declared after the reset above so it wins in the same layout pass. A
+  // history session's name exists only in the session catalog — neither the
+  // load response nor the metadata events carry it — so seeding it from the
+  // cache here keeps the header from flashing the "New session" placeholder
+  // while the load round-trip is in flight.
+  useLayoutEffect(() => {
+    // `?? prev` keeps this from ever blanking a title the catalog already
+    // resolved; the reset above runs first in the same layout pass, so a
+    // session switch still starts from an empty title.
+    setSessionStatusDisplayName(
+      (prev) =>
+        peekSessionCatalogDisplayName(
+          workspace.client,
+          connection.sessionId,
+          connection.workspaceCwd,
+        ) ?? prev,
+    );
+  }, [
+    logicalSessionKey,
+    workspace.client,
+    connection.sessionId,
+    connection.workspaceCwd,
+  ]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
   // cleanup: connection.sessionId can cycle through several sessions during
@@ -3915,7 +3939,7 @@ export function App({
           }
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
-          setSessionStatusDisplayName(summary.displayName);
+          setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
           setCurrentSessionSummary(summary);
         })
         .catch(() => {
@@ -3924,7 +3948,8 @@ export function App({
             worktreeSessionKeyRef.current === sessionKey &&
             owner.isCurrent()
           ) {
-            setSessionStatusDisplayName(undefined);
+            // A failed refresh must not blank a title the catalog already
+            // resolved.
             setCurrentSessionSummary(undefined);
           }
         });
@@ -3941,7 +3966,7 @@ export function App({
           ) {
             setSessionWorktree(undefined);
             setSessionBranch(undefined);
-            setSessionStatusDisplayName(summary.displayName);
+            setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
             setCurrentSessionSummary(summary);
           }
           return;
@@ -3953,7 +3978,7 @@ export function App({
         ) {
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
-          setSessionStatusDisplayName(summary.displayName);
+          setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
           setCurrentSessionSummary(summary);
         }
         return loadSessionCatalogOnce(
@@ -3977,7 +4002,8 @@ export function App({
               (session) => session.sessionId === sid,
             );
             setSessionStatusDisplayName(
-              listedSession?.displayName ?? summary.displayName,
+              (prev) =>
+                listedSession?.displayName ?? summary.displayName ?? prev,
             );
             setCurrentSessionSummary(listedSession ?? summary);
           })
@@ -3989,9 +4015,11 @@ export function App({
           worktreeSessionKeyRef.current === sessionKey &&
           owner.isCurrent()
         ) {
+          // The live summary does not carry a history session's name, and a
+          // failed refresh must not blank a title the catalog already
+          // resolved.
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
-          setSessionStatusDisplayName(undefined);
           setCurrentSessionSummary(undefined);
         }
       });
