@@ -835,6 +835,69 @@ describe('DiscoveredMCPTool', () => {
       });
     });
 
+    it('still bounds when omni is enabled but no upload channel resolves', async () => {
+      // The gate's predicate is `isOmniDeliveryActive`, not
+      // `Config.isOmniEnabled`: omni can be enabled (QWEN_CODE_ENABLE_OMNI /
+      // omni.enabled) with no resolvable upload channel — no dedicated
+      // omni.delivery.upload block and no legacy DashScope inference config —
+      // in which case the funnel returns immediately and bounding must NOT
+      // be skipped. The existing omni test satisfies every leg of the gate's
+      // conjunction at once, so only this case reds when the predicate is
+      // mutated to `this.cliConfig?.isOmniEnabled?.()`.
+      const omniEnabledNoUploadConfig = {
+        isOmniEnabled: () => true,
+        isTrustedFolder: () => true,
+        getTruncateToolOutputThreshold: () => 500_000,
+        getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      const noUploadTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        omniEnabledNoUploadConfig,
+      );
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      const oversized = await sharp({
+        create: {
+          width: 3840,
+          height: 2160,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .png()
+        .toBuffer();
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'image',
+                  data: oversized.toString('base64'),
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await noUploadTool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      expect(bound).toHaveBeenCalled();
+      const parts = result.llmContent as Part[];
+      expect(parts[1]!.inlineData!.mimeType).toBe('image/jpeg');
+    });
+
     it('bounds images sequentially', async () => {
       const mockBoundImageBuffer = vi.spyOn(imageView, 'boundImageBuffer');
       let releaseFirst!: () => void;
