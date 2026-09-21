@@ -981,9 +981,10 @@ describe('BackgroundTaskRegistry', () => {
 
       await expect(
         registry.waitForBackgroundSlot(abortController.signal),
-      ).rejects.toThrow(
-        'Agent launch cancelled while waiting for a background slot.',
-      );
+      ).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'Agent launch cancelled while waiting for a background slot.',
+      });
       expect(registry.getQueuedCount()).toBe(0);
     });
 
@@ -2505,9 +2506,10 @@ describe('BackgroundTaskRegistry', () => {
       );
 
       abortController.abort();
-      await expect(reservationPromise).rejects.toThrow(
-        'Agent launch cancelled while waiting for a background slot.',
-      );
+      await expect(reservationPromise).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'Agent launch cancelled while waiting for a background slot.',
+      });
       registry.complete('completed', 'done');
 
       expect(callback.mock.calls[0]![1]).toContain('<remaining>0</remaining>');

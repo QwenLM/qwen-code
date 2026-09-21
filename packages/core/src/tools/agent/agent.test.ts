@@ -642,26 +642,30 @@ describe('AgentTool', () => {
       expect(unregister).toHaveBeenCalledOnce();
     });
 
-    it('does not launch a background task after cancellation during construction', async () => {
-      const abort = new AbortController();
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockImplementation(
-        async () => {
-          abort.abort();
-          return {
-            subagent: mockAgent,
-            dispose: vi.fn().mockResolvedValue(undefined),
-          };
-        },
-      );
-      await (agentTool as AgentToolWithProtectedMethods)
-        .createInvocation({ ...params, run_in_background: true })
-        .execute(abort.signal);
-      expect(mockAgent.execute).not.toHaveBeenCalled();
-      expect(
-        config.getBackgroundTaskRegistry().register,
-      ).not.toHaveBeenCalled();
-      expect(environment.dispose).toHaveBeenCalledOnce();
-    });
+    it.each([undefined, 'preempted'])(
+      'does not launch a background task after cancellation during construction (%s)',
+      async (reason) => {
+        const abort = new AbortController();
+        vi.mocked(mockSubagentManager.createAgentHeadless).mockImplementation(
+          async () => {
+            abort.abort(reason);
+            return {
+              subagent: mockAgent,
+              dispose: vi.fn().mockResolvedValue(undefined),
+            };
+          },
+        );
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({ ...params, run_in_background: true })
+          .execute(abort.signal);
+        expect(mockAgent.execute).not.toHaveBeenCalled();
+        expect(
+          config.getBackgroundTaskRegistry().register,
+        ).not.toHaveBeenCalled();
+        expect(environment.dispose).toHaveBeenCalledOnce();
+        expect(result.aborted).toBe(true);
+      },
+    );
 
     it('waits for environment disposal before returning a completed result', async () => {
       let release: () => void = () => {};
@@ -2585,6 +2589,7 @@ describe('AgentTool', () => {
         expect(partToString(result.llmContent)).toContain(
           'spawn aborted before "writer" was registered',
         );
+        expect(result.aborted).toBe(true);
       } finally {
         for (const spy of spies) spy.mockRestore();
       }

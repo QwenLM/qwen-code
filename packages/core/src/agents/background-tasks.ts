@@ -627,7 +627,7 @@ export class BackgroundTaskRegistry {
     ownerId?: string | null,
   ): Promise<BackgroundSlotReservation> {
     if (signal?.aborted) {
-      throw new Error(BACKGROUND_SLOT_WAIT_CANCELLED);
+      throw new DOMException(BACKGROUND_SLOT_WAIT_CANCELLED, 'AbortError');
     }
     const reservation = this.tryReserveBackgroundSlot(model, ownerId);
     if (reservation) {
@@ -640,7 +640,7 @@ export class BackgroundTaskRegistry {
         if (index !== -1) {
           this.waitQueue.splice(index, 1);
         }
-        reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
+        reject(new DOMException(BACKGROUND_SLOT_WAIT_CANCELLED, 'AbortError'));
       };
       const waiter: BackgroundSlotWaiter = {
         signal,
@@ -1388,7 +1388,9 @@ export class BackgroundTaskRegistry {
       this.waitQueue.splice(i, 1);
       waiter.signal?.removeEventListener('abort', waiter.onAbort);
       if (waiter.signal?.aborted) {
-        waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
+        waiter.reject(
+          new DOMException(BACKGROUND_SLOT_WAIT_CANCELLED, 'AbortError'),
+        );
         continue;
       }
       waiter.resolve(this.reserveBackgroundSlot(waiter.model, waiter.ownerId));
@@ -1399,7 +1401,9 @@ export class BackgroundTaskRegistry {
     const waiters = this.waitQueue.splice(0);
     for (const waiter of waiters) {
       waiter.signal?.removeEventListener('abort', waiter.onAbort);
-      waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
+      waiter.reject(
+        new DOMException(BACKGROUND_SLOT_WAIT_CANCELLED, 'AbortError'),
+      );
     }
     this.reservedBackgroundSlots.clear();
   }

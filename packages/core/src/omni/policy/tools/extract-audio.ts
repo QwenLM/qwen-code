@@ -22,6 +22,7 @@ import {
   describeChannels,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -183,7 +184,7 @@ class ExtractAudioInvocation extends BaseMediaPolicyToolInvocation<ExtractAudioP
         { signal, timeoutMs: this.timeoutMs },
       );
       if (signal.aborted) {
-        return mediaPolicyToolError('audio extraction aborted');
+        return mediaPolicyToolAborted('audio extraction aborted');
       }
       if (run.code !== 0) {
         return mediaPolicyToolError(
@@ -212,7 +213,7 @@ class ExtractAudioInvocation extends BaseMediaPolicyToolInvocation<ExtractAudioP
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

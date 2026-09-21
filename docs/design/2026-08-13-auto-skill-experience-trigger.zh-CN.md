@@ -77,6 +77,12 @@ error 或数字/null 的 shell 退出码也仍视为取消。Web search 将后�
 为准，即使外层 signal 仍有效也必须携带该标志。真正的运行失败不添加此标志，
 仍可与后续成功形成 retry arc。
 
+Agent 启动及 omni 媒体策略工具在生产者处保留中断证据：显式取消返回设置
+`aborted: true`，共享 catch 识别 AbortError 或与已取消 signal 的 reason 完全相同的
+异常。ffprobe、agent 槽位等待和容器启动保留取消错误类型。晚到的取消不得将无关
+失败改判为中断，provider 自身超时仍为失败。回归测试让真实音频提取工具经过调度器
+及 history 接受路径，分别验证取消和真实失败后的恢复。
+
 ### 门控逻辑（`MemoryManager.scheduleSkillReview`）
 
 ```

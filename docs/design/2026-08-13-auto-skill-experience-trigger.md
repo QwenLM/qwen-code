@@ -94,6 +94,14 @@ the same contract. Mid-run cancellation uses the registry's `cancelled` status,
 even when the outer signal remains live. Genuine execution failures do not add
 this flag and can still form a retry arc with a later success.
 
+Agent startup and omni media-policy tools preserve interruption evidence at the
+producer: explicit cancellation returns set `aborted: true`, while shared catch
+paths recognize AbortError or the exact aborted signal reason. ffprobe, agent
+slot waits, and container startup preserve the abort error type. A late abort
+must not reclassify an unrelated failure; provider timeouts remain failures.
+Regression coverage follows a real extraction through the scheduler and history
+acceptance, checking both cancellation and genuine failure followed by recovery.
+
 ### Gate logic (`MemoryManager.scheduleSkillReview`)
 
 ```text

@@ -59,6 +59,20 @@ afterEach(() => {
 });
 
 describe('availability checks', () => {
+  it('preserves cancellation when ffprobe settles after an abort', async () => {
+    const controller = new AbortController();
+    mockExecResult(() => {
+      controller.abort();
+      return { error: new DOMException('cancelled', 'AbortError') };
+    });
+    await expect(
+      probeMediaMetadata('/video.mp4', 'video', controller.signal),
+    ).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'ffprobe aborted for video.mp4',
+    });
+  });
+
   it('returns true when the binary exits 0 and caches the result', async () => {
     mockExecResult(() => ({ stdout: 'ffmpeg version 7' }));
     await expect(isFfmpegAvailable()).resolves.toBe(true);

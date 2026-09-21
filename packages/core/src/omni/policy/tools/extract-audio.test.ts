@@ -10,6 +10,13 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MediaProbeResult } from '../../ffmpeg.js';
 import type { ToolResult } from '../../../tools/tools.js';
+import { ApprovalMode, Config } from '../../../config/config.js';
+import {
+  CoreToolScheduler,
+  type CompletedToolCall,
+} from '../../../core/coreToolScheduler.js';
+import { LlmChat } from '../../../core/llm-chat.js';
+import { ToolRegistry } from '../../../tools/tool-registry.js';
 import { DEFAULT_POLICY_TOOL_TIMEOUT_MS } from './media-policy-tool.js';
 import {
   EXTRACT_AUDIO_DEFAULTS,
@@ -186,6 +193,7 @@ describe('OmniExtractAudioTool', () => {
     expect(result.error?.message).toMatch(/ffmpeg failed \(exit 1\)/);
     expect(result.error?.message).toContain('does not contain any stream');
     expect(result.artifacts).toBeUndefined();
+    expect(result.aborted).toBeUndefined();
   });
 
   it('reports an aborted run', async () => {
@@ -198,7 +206,123 @@ describe('OmniExtractAudioTool', () => {
     const invocation = tool.build({ inputPath, outputDir });
     const result = await invocation.execute(controller.signal);
     expect(result.error?.message).toBe('audio extraction aborted');
+    expect(result.aborted).toBe(true);
   });
+
+  it.each(['cancelled', 'failed'] as const)(
+    'only forms a retry arc for a genuine failure after a %s extraction',
+    async (firstOutcome) => {
+      const config = new Config({
+        cwd: root,
+        targetDir: root,
+        model: 'test-model',
+        approvalMode: ApprovalMode.YOLO,
+        debugMode: false,
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+        telemetry: { enabled: false },
+        disableAllHooks: true,
+        overrideExtensions: [],
+      });
+      const client = config.getLlmClient();
+      client['chat'] = new LlmChat(config);
+      const registry = new ToolRegistry(config);
+      const registrySpy = vi
+        .spyOn(config, 'getToolRegistry')
+        .mockReturnValue(registry);
+      const settingsSpy = vi
+        .spyOn(config, 'getOmniPolicyToolsSettings')
+        .mockReturnValue({
+          [tool.name]: { modelAccess: { enabled: true } },
+        });
+      registry.registerTool(new OmniExtractAudioTool(config));
+      let completed: CompletedToolCall | undefined;
+      const scheduler = new CoreToolScheduler({
+        config,
+        getPreferredEditor: () => undefined,
+        onEditorClose: () => {},
+        onAllToolCallsComplete: async (calls) => {
+          completed = calls[0];
+        },
+      });
+      const controller = new AbortController();
+      probe({ durationMs: 63_000 });
+      mocks.runFfmpeg.mockImplementation(async () => {
+        if (firstOutcome === 'cancelled') controller.abort();
+        return { code: 1, stderr: 'failed' };
+      });
+      try {
+        for (const callId of ['first', 'recovery']) {
+          completed = undefined;
+          if (callId === 'recovery') ffmpegSucceeds();
+          const args = { inputPath, outputDir };
+          await client.addHistory({
+            role: 'model',
+            parts: [{ functionCall: { id: callId, name: tool.name, args } }],
+          });
+          await scheduler.schedule(
+            [
+              {
+                callId,
+                name: tool.name,
+                args,
+                isClientInitiated: false,
+                prompt_id: callId,
+              },
+            ],
+            callId === 'first'
+              ? controller.signal
+              : new AbortController().signal,
+          );
+          await vi.waitFor(() => expect(completed).toBeDefined());
+          const call = completed!;
+          if (callId === 'first') {
+            expect(call.status).toBe(
+              firstOutcome === 'cancelled' ? 'cancelled' : 'error',
+            );
+            expect(call.response.executionStatus).toBe(
+              firstOutcome === 'cancelled' ? 'cancelled' : 'error',
+            );
+            if (firstOutcome === 'cancelled') {
+              const text = JSON.stringify(call.response.responseParts);
+              expect(text).toContain(
+                'User intentionally cancelled this tool call.',
+              );
+              expect(text).not.toContain('had already completed');
+            }
+          } else {
+            expect(call.status).toBe('success');
+          }
+          client.recordCompletedToolCall(tool.name, args, {
+            callId,
+            status: call.status,
+            executionStatus: call.response.executionStatus,
+            errorType: call.response.errorType,
+          });
+          const failureCount = firstOutcome === 'failed' ? 1 : 0;
+          expect(client['toolCallCount']).toBe(
+            failureCount + (callId === 'recovery' ? 1 : 0),
+          );
+          expect(client['pendingExperienceOutcomes'].size).toBe(
+            callId === 'first' ? failureCount : 1,
+          );
+          await client.addHistory({
+            role: 'user',
+            parts: call.response.responseParts,
+          });
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          expect(client['experienceSignalsSinceReview'].retryArc).toBe(
+            callId === 'recovery' && firstOutcome === 'failed',
+          );
+        }
+      } finally {
+        registrySpy.mockRestore();
+        settingsSpy.mockRestore();
+        await registry.stop();
+        await config.shutdown({ shutdownTelemetry: false });
+      }
+    },
+  );
 
   it('threads policyTools.<tool>.runtime.timeoutMs into runFfmpeg', async () => {
     probe({ durationMs: 63_000 });

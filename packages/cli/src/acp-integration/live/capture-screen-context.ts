@@ -17,6 +17,7 @@ import {
   type ToolInvocation,
   type ToolResult,
 } from '@qwen-code/qwen-code-core';
+import { isAbortError } from '@qwen-code/qwen-code-core/utils/errors.js';
 
 const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -34,11 +35,15 @@ export interface ScreenContextCapture {
 export type ScreenContextCapturer = () => Promise<ScreenContextCapture>;
 export type CaptureScreenContextParams = Record<string, never>;
 
-function failure(message: string): ToolResult {
+function failure(error: unknown, signal: AbortSignal): ToolResult {
+  const message = error instanceof Error ? error.message : String(error);
   return {
     llmContent: `Screen context capture failed: ${message}`,
     returnDisplay: message,
     error: { message },
+    ...(isAbortError(error) || (signal.aborted && error === signal.reason)
+      ? { aborted: true }
+      : {}),
   };
 }
 
@@ -102,7 +107,7 @@ class CaptureScreenContextInvocation extends BaseToolInvocation<
     try {
       result = await this.capture();
     } catch (error) {
-      return failure(error instanceof Error ? error.message : String(error));
+      return failure(error, signal);
     }
 
     let screenshotPath: string;
@@ -112,7 +117,7 @@ class CaptureScreenContextInvocation extends BaseToolInvocation<
         this.captureDirectory,
       );
     } catch (error) {
-      return failure(error instanceof Error ? error.message : String(error));
+      return failure(error, signal);
     }
 
     try {
@@ -147,7 +152,7 @@ class CaptureScreenContextInvocation extends BaseToolInvocation<
         }`,
       };
     } catch (error) {
-      return failure(error instanceof Error ? error.message : String(error));
+      return failure(error, signal);
     } finally {
       await unlink(screenshotPath).catch(() => undefined);
     }

@@ -21,6 +21,7 @@ import {
   BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -193,7 +194,7 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
         timeoutMs: remainingTimeoutMs(),
       });
       if (signal.aborted) {
-        return mediaPolicyToolError('video downscaling aborted');
+        return mediaPolicyToolAborted('video downscaling aborted');
       }
       if (run.code !== 0) {
         run = await runFfmpeg(argsFor(['-c:a', 'aac', '-b:a', '64k']), {
@@ -201,7 +202,7 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
           timeoutMs: remainingTimeoutMs(),
         });
         if (signal.aborted) {
-          return mediaPolicyToolError('video downscaling aborted');
+          return mediaPolicyToolAborted('video downscaling aborted');
         }
         if (run.code !== 0) {
           return mediaPolicyToolError(
@@ -241,7 +242,7 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

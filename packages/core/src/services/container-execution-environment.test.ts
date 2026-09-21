@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import * as childProcess from 'node:child_process';
 import {
   access,
   mkdir,
@@ -12,6 +13,7 @@ import {
   realpath,
   rm,
   symlink,
+  writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +28,11 @@ import {
 import type { ExecutionWorkerOptions } from './execution-environment.js';
 import { ExecutionCleanupError } from './execution-environment.js';
 import type { ToolResult } from '../tools/tools.js';
+
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  execFile: vi.fn(),
+}));
 
 describe('container execution boundary', () => {
   it('preserves preparation errors and cleanup ownership when release fails', async () => {
@@ -188,6 +195,42 @@ describe('container execution boundary', () => {
     truncateToolOutputThreshold: 10000,
     fileReadCacheDisabled: false,
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves runtime cancellation errors',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'execution-abort-'));
+      const workspace = join(root, 'workspace');
+      const bundle = join(root, 'bundle');
+      await mkdir(workspace);
+      await mkdir(bundle);
+      await writeFile(join(bundle, 'execution-worker.js'), '');
+      const error = new DOMException('cancelled', 'AbortError');
+      const exec = vi
+        .spyOn(childProcess, 'execFile')
+        .mockImplementation((...args) => {
+          const callback = args.at(-1) as (
+            error: Error,
+            stdout: string,
+            stderr: string,
+          ) => void;
+          callback(error, '', '');
+          return {} as childProcess.ChildProcess;
+        });
+      try {
+        await expect(
+          ContainerExecutionEnvironment.create(
+            { getWorkingDir: () => workspace } as Config,
+            { ...options, bundleDirectory: bundle },
+            new AbortController().signal,
+          ),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+      } finally {
+        exec.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it
     .skipIf(process.platform === 'win32')

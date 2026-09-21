@@ -19,6 +19,7 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ImageGenTool } from './image-gen.js';
 import { ToolErrorType } from './tool-error.js';
+import { generateImage as generateConfiguredImage } from '../services/image-generation-service.js';
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const workspaces: string[] = [];
@@ -179,6 +180,7 @@ describe('ImageGenTool', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
     expect(generateImage).not.toHaveBeenCalled();
+    expect(result.aborted).toBe(true);
   });
 
   it('rejects an unsafe output directory before starting generation', async () => {
@@ -213,31 +215,64 @@ describe('ImageGenTool', () => {
     expect(generateImage).not.toHaveBeenCalled();
   });
 
-  it('does not write an image when cancellation wins before persistence', async () => {
-    const workspace = await mkdtemp(path.join(os.tmpdir(), 'image-gen-'));
-    workspaces.push(workspace);
-    process.env['TEST_IMAGE_API_KEY'] = 'secret';
-    const controller = new AbortController();
-    const tool = new ImageGenTool(
-      createConfig(workspace, true) as Config,
-      vi.fn().mockImplementation(async () => {
-        controller.abort();
-        return {
-          bytes: PNG_BYTES,
-          mimeType: 'image/png',
-          requestId: 'request-3',
-        };
-      }),
-    );
-    const invocation = tool.build({ prompt: 'A poster' });
-    const outputPath = invocation.toolLocations()[0]?.path;
+  it.each([undefined, 'preempted'])(
+    'does not write an image when cancellation wins before persistence (%s)',
+    async (reason) => {
+      const workspace = await mkdtemp(path.join(os.tmpdir(), 'image-gen-'));
+      workspaces.push(workspace);
+      process.env['TEST_IMAGE_API_KEY'] = 'secret';
+      const controller = new AbortController();
+      const tool = new ImageGenTool(
+        createConfig(workspace, true) as Config,
+        vi.fn().mockImplementation(async () => {
+          controller.abort(reason);
+          return {
+            bytes: PNG_BYTES,
+            mimeType: 'image/png',
+            requestId: 'request-3',
+          };
+        }),
+      );
+      const invocation = tool.build({ prompt: 'A poster' });
+      const outputPath = invocation.toolLocations()[0]?.path;
 
-    const result = await invocation.execute(controller.signal);
+      const result = await invocation.execute(controller.signal);
 
-    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
-    expect(outputPath).toBeDefined();
-    await expect(access(outputPath!)).rejects.toThrow();
-  });
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+      expect(result.aborted).toBe(true);
+      expect(outputPath).toBeDefined();
+      await expect(access(outputPath!)).rejects.toThrow();
+    },
+  );
+
+  it.each([
+    [new DOMException('cancelled', 'AbortError'), true],
+    ['preempted', true],
+    [new Error('provider failed'), undefined],
+    [new DOMException('timed out', 'TimeoutError'), undefined],
+  ])(
+    'preserves wrapped provider interruption evidence for %s',
+    async (error, aborted) => {
+      const workspace = await mkdtemp(path.join(os.tmpdir(), 'image-gen-'));
+      workspaces.push(workspace);
+      process.env['TEST_IMAGE_API_KEY'] = 'secret';
+      const controller = new AbortController();
+      const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () => {
+        controller.abort(typeof error === 'string' ? error : undefined);
+        throw error;
+      });
+      const tool = new ImageGenTool(
+        createConfig(workspace, true) as Config,
+        (request) => generateConfiguredImage({ ...request, fetchFn }),
+      );
+      const result = await tool
+        .build({ prompt: 'A poster' })
+        .execute(controller.signal);
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+      expect(result.aborted).toBe(aborted);
+      expect(result.artifacts).toBeUndefined();
+    },
+  );
 
   it('does not leak signed URLs from the error cause chain', async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), 'image-gen-'));

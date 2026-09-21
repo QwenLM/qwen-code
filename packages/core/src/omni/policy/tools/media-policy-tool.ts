@@ -20,7 +20,7 @@ import {
 } from '../../../tools/tools.js';
 import type { PermissionDecision } from '../../../permissions/types.js';
 import { ToolErrorType } from '../../../tools/tool-error.js';
-import { getErrorMessage } from '../../../utils/errors.js';
+import { getErrorMessage, isAbortError } from '../../../utils/errors.js';
 import { SchemaValidator } from '../../../utils/schemaValidator.js';
 import { projectMediaPolicyToolDeclaration } from '../model-access.js';
 import { isPlainRecord } from '../types.js';
@@ -415,10 +415,20 @@ export function mediaPolicyToolError(message: string): ToolResult {
   };
 }
 
+export function mediaPolicyToolAborted(message: string): ToolResult {
+  return { ...mediaPolicyToolError(message), aborted: true };
+}
+
 /** Shared catch-tail: turn whatever a policy tool threw into the uniform
  * error ToolResult. */
-export function mediaPolicyToolFailure(error: unknown): ToolResult {
-  return mediaPolicyToolError(getErrorMessage(error));
+export function mediaPolicyToolFailure(
+  error: unknown,
+  signal?: AbortSignal,
+): ToolResult {
+  const message = getErrorMessage(error);
+  return isAbortError(error) || (signal?.aborted && error === signal.reason)
+    ? mediaPolicyToolAborted(message)
+    : mediaPolicyToolError(message);
 }
 
 /** Uniform "ffmpeg failed" message: exit code, the action underway, the

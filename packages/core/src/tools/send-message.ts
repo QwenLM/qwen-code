@@ -352,6 +352,7 @@ class SendMessageInvocation extends BaseToolInvocation<
           return {
             llmContent: `Error: ${message}`,
             returnDisplay: message,
+            aborted: true,
             error: {
               message,
               type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,

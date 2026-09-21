@@ -20,6 +20,7 @@ import {
   ffmpegFailureMessage,
   BaseMediaPolicyToolInvocation,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -205,7 +206,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
         { signal, timeoutMs: this.timeoutMs },
       );
       if (signal.aborted) {
-        return mediaPolicyToolError('video clipping aborted');
+        return mediaPolicyToolAborted('video clipping aborted');
       }
       if (run.code !== 0) {
         return mediaPolicyToolError(
@@ -274,7 +275,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
         llmContent: `${success.llmContent}。用 read_file 打开 ${outputPath} 查看该片段${clipBrake}`,
       };
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

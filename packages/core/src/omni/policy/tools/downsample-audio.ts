@@ -22,6 +22,7 @@ import {
   describeChannels,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -165,7 +166,7 @@ class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<Downsample
         { signal, timeoutMs: this.timeoutMs },
       );
       if (signal.aborted) {
-        return mediaPolicyToolError('audio downsampling aborted');
+        return mediaPolicyToolAborted('audio downsampling aborted');
       }
       if (run.code !== 0) {
         return mediaPolicyToolError(
@@ -215,7 +216,7 @@ class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<Downsample
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

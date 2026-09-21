@@ -30,6 +30,7 @@ import {
   BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   policyOutputFileName,
@@ -508,7 +509,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         artifacts,
       };
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 
@@ -576,7 +577,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         { signal, timeoutMs: remainingTimeoutMs() },
       );
       if (signal.aborted) {
-        return mediaPolicyToolError('keyframe extraction aborted');
+        return mediaPolicyToolAborted('keyframe extraction aborted');
       }
       if (sceneRun.code === 0 && (await fileExists(outputPath))) {
         const pts = parseShowinfoTimestamps(sceneRun.stderr)[0];
@@ -616,7 +617,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         { signal, timeoutMs: remainingTimeoutMs() },
       );
       if (signal.aborted) {
-        return mediaPolicyToolError('keyframe extraction aborted');
+        return mediaPolicyToolAborted('keyframe extraction aborted');
       }
       if (midpointRun.code === 0 && (await fileExists(outputPath))) {
         frames.push({ fileName, timeSeconds: midpoint });
@@ -734,7 +735,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       Array.from({ length: Math.min(SEEK_CONCURRENCY, nframes) }, worker),
     );
     if (signal.aborted) {
-      return mediaPolicyToolError('keyframe extraction aborted');
+      return mediaPolicyToolAborted('keyframe extraction aborted');
     }
     const frames = outcomes.filter((f): f is ExtractedFrame => f !== undefined);
     if (frames.length === 0) {
@@ -808,7 +809,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       { signal, timeoutMs: remainingTimeoutMs() },
     );
     if (signal.aborted) {
-      return mediaPolicyToolError('keyframe extraction aborted');
+      return mediaPolicyToolAborted('keyframe extraction aborted');
     }
     if (scenePass.code !== 0) {
       return mediaPolicyToolError(

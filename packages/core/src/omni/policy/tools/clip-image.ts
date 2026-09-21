@@ -19,6 +19,7 @@ import {
   BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -129,7 +130,7 @@ class ClipImageInvocation extends BaseMediaPolicyToolInvocation<ClipImageParams>
         );
       }
       if (signal.aborted) {
-        return mediaPolicyToolError('image clipping aborted');
+        return mediaPolicyToolAborted('image clipping aborted');
       }
 
       // Second, independent animated-input gate (same rationale as
@@ -192,7 +193,7 @@ class ClipImageInvocation extends BaseMediaPolicyToolInvocation<ClipImageParams>
         .png()
         .toFile(outputPath);
       if (signal.aborted) {
-        return mediaPolicyToolError('image clipping aborted');
+        return mediaPolicyToolAborted('image clipping aborted');
       }
 
       const original =
@@ -215,7 +216,7 @@ class ClipImageInvocation extends BaseMediaPolicyToolInvocation<ClipImageParams>
         role: 'clip',
       });
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

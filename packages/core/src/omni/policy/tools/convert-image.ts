@@ -19,6 +19,7 @@ import {
   BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -183,7 +184,7 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
         );
       }
       if (signal.aborted) {
-        return mediaPolicyToolError('image conversion aborted');
+        return mediaPolicyToolAborted('image conversion aborted');
       }
 
       // Second, independent animated-input gate (same rationale as
@@ -213,7 +214,7 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
         .rotate();
       const info = await output.encode(pipeline, quality).toFile(outputPath);
       if (signal.aborted) {
-        return mediaPolicyToolError('image conversion aborted');
+        return mediaPolicyToolAborted('image conversion aborted');
       }
 
       const originalLabel =
@@ -233,7 +234,7 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

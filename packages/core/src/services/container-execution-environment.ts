@@ -31,6 +31,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasRootlessMarker } from '../utils/container-runtime.js';
+import { isAbortError } from '../utils/errors.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type {
   ToolConfirmationOutcome,
@@ -97,16 +98,16 @@ function runtimeCommand(
         encoding: 'utf8',
       },
       (error, stdout, stderr) => {
-        if (error)
-          reject(
-            new Error(
-              `${options.runtime} ${args[0]} failed: ${stderr || error.message}` +
-                (args[0] === 'create' && !signal?.aborted
-                  ? ` Check image ${options.image}; try ${options.runtime} pull ${options.image}.`
-                  : ''),
-            ),
+        if (error) {
+          const failure = new Error(
+            `${options.runtime} ${args[0]} failed: ${stderr || error.message}` +
+              (args[0] === 'create' && !signal?.aborted
+                ? ` Check image ${options.image}; try ${options.runtime} pull ${options.image}.`
+                : ''),
           );
-        else resolveResult(stdout);
+          if (isAbortError(error)) failure.name = 'AbortError';
+          reject(failure);
+        } else resolveResult(stdout);
       },
     );
   });

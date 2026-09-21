@@ -21,6 +21,7 @@ import {
   BaseMediaPolicyToolInvocation,
   createPolicyToolTimeoutBudget,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -371,7 +372,7 @@ class CaptionAudioInvocation extends BaseMediaPolicyToolInvocation<CaptionAudioP
           `caption request timed out after ${this.timeoutMs}ms`,
         );
       }
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 
@@ -416,7 +417,7 @@ class CaptionAudioInvocation extends BaseMediaPolicyToolInvocation<CaptionAudioP
       Array.from({ length: Math.min(CHUNK_CONCURRENCY, segmentCount) }, worker),
     );
     if (signal.aborted) {
-      return mediaPolicyToolError('audio captioning aborted');
+      return mediaPolicyToolAborted('audio captioning aborted');
     }
 
     if (outcomes.every((o) => o.text === undefined)) {

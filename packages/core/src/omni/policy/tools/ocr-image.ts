@@ -269,7 +269,7 @@ class OcrImageInvocation extends BaseMediaPolicyToolInvocation<OcrImageParams> {
           `OCR request timed out after ${this.timeoutMs}ms`,
         );
       }
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

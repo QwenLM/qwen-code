@@ -19,6 +19,7 @@ import {
   BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -161,7 +162,7 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
         );
       }
       if (signal.aborted) {
-        return mediaPolicyToolError('image downsampling aborted');
+        return mediaPolicyToolAborted('image downsampling aborted');
       }
 
       // Second, independent animated-input gate: ffprobe cannot always
@@ -239,7 +240,7 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
           });
       const info = await pipeline.jpeg({ quality }).toFile(outputPath);
       if (signal.aborted) {
-        return mediaPolicyToolError('image downsampling aborted');
+        return mediaPolicyToolAborted('image downsampling aborted');
       }
 
       // Disclosure (decision D8): dimensions/bytes plus the OUTPUT quality
@@ -266,7 +267,7 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

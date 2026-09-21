@@ -20,6 +20,7 @@ import {
   ffmpegFailureMessage,
   BaseMediaPolicyToolInvocation,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -225,7 +226,7 @@ class ClipAudioInvocation extends BaseMediaPolicyToolInvocation<ClipAudioParams>
         { signal, timeoutMs: this.timeoutMs },
       );
       if (signal.aborted) {
-        return mediaPolicyToolError('audio clipping aborted');
+        return mediaPolicyToolAborted('audio clipping aborted');
       }
       if (run.code !== 0) {
         return mediaPolicyToolError(
@@ -259,7 +260,7 @@ class ClipAudioInvocation extends BaseMediaPolicyToolInvocation<ClipAudioParams>
         role: 'clip',
       });
     } catch (error) {
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

@@ -17,12 +17,38 @@ import {
   DEFAULT_POLICY_TOOL_TIMEOUT_MS,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolFailure,
   resolvePolicyToolTimeoutMs,
   policyOutputFileName,
   validateMediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 import { BaseToolInvocation } from '../../../tools/tools.js';
+
+describe('mediaPolicyToolFailure', () => {
+  it.each([
+    [new DOMException('cancelled', 'AbortError'), true],
+    [new Error('ffmpeg failed'), undefined],
+    [new DOMException('timed out', 'TimeoutError'), undefined],
+  ])('preserves interruption evidence for %s', (error, aborted) => {
+    const result = mediaPolicyToolFailure(error);
+    expect(result.error?.message).toBe(error.message);
+    expect(result.aborted).toBe(aborted);
+  });
+
+  it('recognizes a custom abort reason without misclassifying a raced failure', () => {
+    const controller = new AbortController();
+    controller.abort('preempted');
+    expect(
+      mediaPolicyToolFailure(controller.signal.reason, controller.signal)
+        .aborted,
+    ).toBe(true);
+    expect(
+      mediaPolicyToolFailure(new Error('ffmpeg failed'), controller.signal)
+        .aborted,
+    ).toBeUndefined();
+  });
+});
 
 describe('formatBytesShort', () => {
   it.each([

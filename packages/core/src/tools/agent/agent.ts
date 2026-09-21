@@ -6,6 +6,7 @@
 
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
+import { isAbortError } from '../../utils/errors.js';
 import { realpath } from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
@@ -4728,6 +4729,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
     } catch (error) {
       releaseBackgroundSlotReservation();
+      const aborted =
+        isAbortError(error) || (signal?.aborted && error === signal.reason);
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);
@@ -4777,6 +4780,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           message: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
         },
         returnDisplay: errorDisplay,
+        ...(aborted ? { aborted: true } : {}),
       };
     }
   }
@@ -4815,6 +4819,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         llmContent: `Teammate spawn aborted before "${name}" was registered.`,
         returnDisplay: `Teammate spawn aborted.`,
         error: { message: 'Aborted.' },
+        aborted: true,
       };
     }
 
@@ -4847,6 +4852,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           llmContent: `Teammate spawn aborted before "${name}" was registered.`,
           returnDisplay: `Teammate spawn aborted.`,
           error: { message: 'Aborted.' },
+          aborted: true,
         };
       }
 

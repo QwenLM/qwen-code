@@ -21,6 +21,7 @@ import {
   BaseMediaPolicyToolInvocation,
   createPolicyToolTimeoutBudget,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+  mediaPolicyToolAborted,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
@@ -346,7 +347,7 @@ class UnderstandVideoSegmentsInvocation extends BaseMediaPolicyToolInvocation<Un
           `video understanding timed out after ${this.timeoutMs}ms`,
         );
       }
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 
@@ -393,7 +394,7 @@ class UnderstandVideoSegmentsInvocation extends BaseMediaPolicyToolInvocation<Un
       ),
     );
     if (signal.aborted) {
-      return mediaPolicyToolError('video understanding aborted');
+      return mediaPolicyToolAborted('video understanding aborted');
     }
 
     if (outcomes.every((o) => o.text === undefined)) {

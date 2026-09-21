@@ -260,7 +260,7 @@ class CaptionImageInvocation extends BaseMediaPolicyToolInvocation<CaptionImageP
           `caption request timed out after ${this.timeoutMs}ms`,
         );
       }
-      return mediaPolicyToolFailure(error);
+      return mediaPolicyToolFailure(error, signal);
     }
   }
 }

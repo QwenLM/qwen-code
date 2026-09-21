@@ -360,6 +360,29 @@ describe('SendMessageTool — background-task mode', () => {
     );
   });
 
+  it('marks cancellation while waiting for a finishing task without delivering the message', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    registry.beginFinishing('agent-1');
+    const controller = new AbortController();
+    const pending = tool
+      .build({ task_id: 'agent-1', message: 'late correction' })
+      .execute(controller.signal);
+    controller.abort();
+    const result = await pending;
+    expect(result.aborted).toBe(true);
+    expect(result.error?.message).toContain('was cancelled');
+    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+  });
+
   it('returns error for non-existent task', async () => {
     const result = await tool.validateBuildAndExecute(
       { task_id: 'nope', message: 'hello' },

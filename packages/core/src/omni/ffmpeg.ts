@@ -272,7 +272,10 @@ export async function probeMediaMetadata(
     { timeout: 15_000, maxBuffer: 4 * 1024 * 1024, ...(signal && { signal }) },
   );
   if (signal?.aborted) {
-    throw new Error(`ffprobe aborted for ${path.basename(filePath)}`);
+    throw new DOMException(
+      `ffprobe aborted for ${path.basename(filePath)}`,
+      'AbortError',
+    );
   }
   if (code !== 0) {
     throw new Error(

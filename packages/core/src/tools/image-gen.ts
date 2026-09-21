@@ -15,7 +15,7 @@ import {
   type GenerateImage,
 } from '../services/image-generation-service.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
@@ -154,9 +154,19 @@ class ImageGenInvocation extends BaseToolInvocation<
         ],
       };
     } catch (error) {
-      return failureResult(
-        error instanceof Error ? error.message : getErrorMessage(error),
-      );
+      // Generation/download errors wrap their cause to hide provider details.
+      const cause = error instanceof Error ? error.cause : undefined;
+      const aborted =
+        isAbortError(error) ||
+        isAbortError(cause) ||
+        (signal.aborted &&
+          (error === signal.reason || cause === signal.reason));
+      return {
+        ...failureResult(
+          error instanceof Error ? error.message : getErrorMessage(error),
+        ),
+        ...(aborted ? { aborted: true } : {}),
+      };
     }
   }
 }

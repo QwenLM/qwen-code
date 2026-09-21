@@ -140,6 +140,43 @@ describe('CaptureScreenContextTool', () => {
     await expect(readFile(outside.path)).resolves.toEqual(PNG);
   });
 
+  it.each([undefined, 'preempted'])(
+    'marks cancellation before reading the screenshot and still cleans it up (%s)',
+    async (reason) => {
+      const file = await captureFile();
+      const controller = new AbortController();
+      const tool = new CaptureScreenContextTool(async () => {
+        controller.abort(reason);
+        return {
+          appName: 'Finder',
+          accessibilityText: '',
+          screenshotPath: file.path,
+        };
+      }, file.directory);
+      const result = await tool.build({}).execute(controller.signal);
+      expect(result.aborted).toBe(true);
+      expect(result.error).toBeDefined();
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+      await expect(readFile(file.path)).rejects.toThrow();
+    },
+  );
+
+  it.each([
+    [new DOMException('cancelled', 'AbortError'), true],
+    ['preempted', true],
+    [new Error('capture failed'), undefined],
+    [new DOMException('timed out', 'TimeoutError'), undefined],
+  ])('preserves host interruption evidence for %s', async (error, aborted) => {
+    const controller = new AbortController();
+    const tool = new CaptureScreenContextTool(async () => {
+      controller.abort(typeof error === 'string' ? error : undefined);
+      throw error;
+    });
+    const result = await tool.build({}).execute(controller.signal);
+    expect(result.error).toBeDefined();
+    expect(result.aborted).toBe(aborted);
+  });
+
   it('never starts capture for an already-cancelled turn', async () => {
     const capture = vi.fn();
     const controller = new AbortController();
