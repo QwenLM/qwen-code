@@ -95,6 +95,22 @@ describe('workflow parameter errors', () => {
     });
   });
 
+  it('answers workflow_not_recorded with 503 and its message', () => {
+    const source = RequestError.invalidParams(
+      { errorKind: 'workflow_not_recorded' },
+      'Could not record that workflow run wf_1234abcd is running again',
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: 'workflow_not_recorded',
+    });
+  });
+
   it.each([
     new Error('Unexpected workflow failure'),
     RequestError.invalidParams(undefined, 'Unclassified parameter error'),

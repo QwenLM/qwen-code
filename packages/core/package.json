@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.24.1",
+  "version": "0.24.2",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -84,9 +84,14 @@
     "./package.json": "./package.json",
     "./*": "./dist/src/*",
     "./dist/*": "./dist/*",
-    "./src/*": "./src/*"
+    "./src/*": "./src/*",
+    "./shellResult": {
+      "types": "./dist/src/utils/shell-result.d.ts",
+      "import": "./dist/src/utils/shell-result.js"
+    }
   },
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').accessSync('../browser-use/dist/index.js')\" || npm --prefix ../browser-use run build",
     "build": "node ../../scripts/build_package.js",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",

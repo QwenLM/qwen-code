@@ -38,6 +38,180 @@ const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
+/** Fixed so the subagent prompt ids below can name it before it is built. */
+const TRAJECTORY_SESSION_ID = 'web-shell-trajectory-session';
+
+function trajectoryUpdate(update: Record<string, unknown>): DaemonEvent {
+  return {
+    v: 1,
+    type: 'session_update',
+    data: update,
+  } as unknown as DaemonEvent;
+}
+
+function trajectoryRecordMeta(recordId: string): Record<string, unknown> {
+  return {
+    qwenTranscript: { sourceRecordIds: [recordId], segmentId: `${recordId}:0` },
+    'qwen.session.recordId': recordId,
+  };
+}
+
+/**
+ * A transcript page in the shape paged replay produces, covering what the
+ * table has to say something about: a request that failed and was retried, a
+ * tool with its own duration, and a delegated round rolled up onto the call
+ * that spawned it.
+ */
+function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
+  const agentCallId = 'call_delegate01';
+  const subagentId = `general-purpose-${agentCallId}`;
+  return [
+    trajectoryUpdate({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: 'Audit the config loader and fix it.' },
+      _meta: trajectoryRecordMeta('rec-1-user'),
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 1840,
+          status: 'error',
+          model: 'qwen3.8-max',
+        },
+        'qwen.session.recordId': 'rec-1-failed',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 7823,
+          ttftMs: 3908,
+          status: 'ok',
+          model: 'qwen3.8-max',
+        },
+        'qwen.session.recordId': 'rec-1-timing',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: {
+        type: 'text',
+        text: 'Reading the loader before changing anything.',
+      },
+      _meta: {
+        usage: { inputTokens: 21_309, outputTokens: 252, totalTokens: 21_561 },
+        ...trajectoryRecordMeta('rec-1-answer'),
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call_read01',
+      status: 'in_progress',
+      title: 'ReadFile: config.ts',
+      kind: 'read',
+      _meta: { toolName: 'read_file', ...trajectoryRecordMeta('rec-1-call') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 16,
+          callId: 'call_read01',
+          toolName: 'read_file',
+          toolStatus: 'success',
+        },
+        'qwen.session.recordId': 'rec-1-tooltiming',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call_read01',
+      status: 'completed',
+      _meta: { toolName: 'read_file', ...trajectoryRecordMeta('rec-1-result') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call',
+      toolCallId: agentCallId,
+      status: 'in_progress',
+      title: 'Agent: map the call sites',
+      kind: 'think',
+      _meta: { toolName: 'agent', ...trajectoryRecordMeta('rec-1-agentcall') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 4879,
+          ttftMs: 1102,
+          status: 'ok',
+          model: 'qwen3.8-max',
+          subagentId,
+          promptId: `${sessionId}#${subagentId}#0`,
+        },
+        'qwen.session.recordId': 'rec-1-subreq',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 31,
+          callId: 'call_subglob01',
+          toolName: 'glob',
+          toolStatus: 'success',
+          promptId: `${sessionId}#${subagentId}#0`,
+        },
+        'qwen.session.recordId': 'rec-1-subtool',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: agentCallId,
+      status: 'completed',
+      _meta: { toolName: 'agent', ...trajectoryRecordMeta('rec-1-agentdone') },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: 'Now run the tests.' },
+      _meta: trajectoryRecordMeta('rec-2-user'),
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'request',
+          durationMs: 3972,
+          ttftMs: 1030,
+          status: 'ok',
+          model: 'qwen3.8-max',
+        },
+        'qwen.session.recordId': 'rec-2-timing',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Tests pass.' },
+      _meta: {
+        usage: { inputTokens: 12_307, outputTokens: 214, totalTokens: 12_521 },
+        ...trajectoryRecordMeta('rec-2-answer'),
+      },
+    }),
+  ];
+}
+
 function createTerminalTurnErrorScenario(sessionId: string) {
   return createWebShellDaemonScenario({
     sessionId,
@@ -303,6 +477,29 @@ for (const theme of THEMES) {
         panel.getByRole('button', { name: 'Compress context', exact: true }),
       ).toBeEnabled();
       await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
+    test('trajectory', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        transcriptPage: {
+          events: trajectoryTranscriptEvents(TRAJECTORY_SESSION_ID),
+        },
+        sessionId: TRAJECTORY_SESSION_ID,
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'Toggle right panel' }).click();
+      await page.getByTestId('right-panel-open-trajectory').click();
+      const rows = page.getByTestId('trajectory-rows');
+      await expect(rows).toBeVisible();
+      await expect(
+        page.locator('[data-testid="trajectory-row-request"]').first(),
+      ).toContainText('qwen3.8-max');
+      await captureScreenshot(page, `trajectory-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {

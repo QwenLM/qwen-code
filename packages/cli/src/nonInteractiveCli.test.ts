@@ -70,7 +70,11 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
-import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import {
+  _resetCleanupFunctionsForTest,
+  runExitCleanup,
+} from './utils/cleanup.js';
+import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 import {
   AlreadyReportedError,
   _resetExitLatchForTest,
@@ -84,6 +88,9 @@ const getActiveInteractionSpanSpy = vi.hoisted(() => vi.fn());
 const addAgentOutputMessageAttributesSpy = vi.hoisted(() => vi.fn());
 const interactionSpan = vi.hoisted(() => ({}));
 vi.mock('./ui/hooks/atCommandProcessor.js');
+vi.mock('./services/review-worktree-lease.js', () => ({
+  cleanupReviewWorktreeLeases: vi.fn(),
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -497,6 +504,48 @@ describe('runNonInteractive', () => {
       yield event;
     }
   }
+
+  it.each([false, true])(
+    'scopes review lease cleanup to the ordinary runtime (sandbox=%s)',
+    async (sandbox) => {
+      setupMetricsMock();
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue(
+        sandbox
+          ? {
+              workspace: '/test/project',
+              installation: '/test/installation',
+              state: '/test/state',
+              filesystem: 'workspace-write',
+              network: 'closed',
+            }
+          : undefined,
+      );
+      vi.mocked(cleanupReviewWorktreeLeases).mockClear();
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        await runExitCleanup();
+        yield { type: LlmEventType.Content, value: 'Done' };
+      });
+
+      await runNonInteractive(mockConfig, mockSettings, 'Hello', 'test-prompt');
+
+      if (sandbox) {
+        expect(cleanupReviewWorktreeLeases).not.toHaveBeenCalled();
+      } else {
+        expect(cleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt',
+          repositoryRoot: '/test/project',
+          gitTimeout: 1_000,
+        });
+        expect(cleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt',
+          repositoryRoot: '/test/project',
+          gitTimeout: undefined,
+        });
+      }
+    },
+  );
 
   type GoalControlCase = {
     name: string;

@@ -87,6 +87,10 @@ export interface SettingDefinition {
   label: string;
   category: string;
   requiresRestart: boolean;
+  // Required even when there is no fixed default (use
+  // `default: undefined as <type> | undefined`): it is load-bearing for the
+  // `satisfies SettingsSchema` constraint and `InferSettings` below, and at
+  // runtime it feeds only display and reset paths, never the load path.
   default: SettingsValue;
   description?: string;
   parentKey?: string;
@@ -2920,9 +2924,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: true,
+            default: undefined as boolean | undefined,
             description:
-              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
+              'Use node-pty for an interactive shell experience. Explicit one-shot prompts default to child_process when this setting is unset; interactive and input-driven modes default to PTY.',
             showInDialog: true,
           },
           pager: {

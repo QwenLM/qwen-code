@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../../utils/shell-result.js';
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
@@ -596,7 +597,10 @@ export async function rebuildToolRegistryOnOverride(
     skipDiscovery: true,
     forSubAgent: true,
   });
-  if (!override.getExecutionEnvironment?.()) {
+  if (
+    !override.getExecutionEnvironment?.() &&
+    !base.getShellExecutionSandbox?.()
+  ) {
     agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   }
   ov.getToolRegistry = () => agentRegistry;
@@ -1609,8 +1613,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(preserveProtocolPayloads && event.responseParts !== undefined
             ? { responseParts: event.responseParts }
             : {}),
-          ...(typeof event.resultDisplay === 'string'
-            ? { resultDisplay: event.resultDisplay }
+          ...(shellResultText(event.resultDisplay) !== undefined
+            ? { resultDisplay: shellResultText(event.resultDisplay)! }
             : {}),
           ...(preserveProtocolPayloads && event.boundaryArtifact
             ? { boundaryArtifact: event.boundaryArtifact }
@@ -2456,6 +2460,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         executionBackendError,
         executionBackendError,
       );
+    }
+    if (
+      this.config.getShellExecutionSandbox?.() &&
+      (this.params.isolation || this.params.working_dir || this.params.name)
+    ) {
+      const message =
+        'Tool execution sandbox supports only same-workspace in-process agents; worktrees, working_dir and teammates are unavailable.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
     }
     const sessionWorkflowAgent =
       this.config.getSessionWorkflowPlanRevision?.() !== undefined;
