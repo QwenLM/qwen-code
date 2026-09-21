@@ -837,24 +837,16 @@ Daemon-managed channel worker startup from an explicit `qwen serve --channel
 A flagless boot restores `serve.channels` from every trusted registered
 workspace, each contributing the list in its own workspace-scope settings. The
 restored names form one selection whose owners are resolved as usual, with the
-workspace that listed a name breaking an otherwise ambiguous ownership tie. A
-name a non-primary workspace contributed is dropped, with a log identifying it,
-when it cannot be resolved, so one workspace's stale entry does not strand the
-others. A name only the primary workspace asks for still fails the restore as
-a whole; a name any other workspace also asks for is droppable, because the
-attribution that makes it droppable comes from the workspace that asked.
-`all` remains primary-only: it is ignored, and reported, anywhere else. A
-workspace registered after boot restores its own `serve.channels` through the
-same path, loading the channel runtime if nothing else has, and one name it
-cannot host does not stop the rest of its list. Registration answers before
-those channels are up: the restore runs after the response, so a worker that
-never becomes ready cannot hold the runtime-topology gate that registrations
-and trust reconciles share. An explicit `--channel` selection bounds what the
-daemon hosts for its whole life, so no workspace registered later adds to it; a
-channel stopped through `POST /workspaces/:workspace/channels/:name/stop`, and
-every channel once `DELETE /workspace/channel` has stopped hosting, is left
-alone until something enables it again or the daemon restarts. With no explicit or configured selection, channel runtime
-loading stays lazy.
+workspace that listed a name breaking an otherwise ambiguous ownership tie.
+That boot attribution lasts as long as the daemon runs: a `PUT
+/workspace/channel` re-enabling such a name resolves it the way boot did, even
+after the selection was stopped in between. A name a non-primary workspace
+contributed is dropped, with a log identifying it, when it cannot be resolved,
+so one workspace's stale entry does not strand the others; a name the primary
+workspace listed still fails the restore as a whole, whether or not another
+workspace lists it too.
+`all` remains primary-only: it is ignored, and reported, anywhere else. With no
+explicit or configured selection, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
@@ -2332,7 +2324,11 @@ with `args` too large to keep, so neither action applies to it. Neither does a
 snapshot written before `args` were kept, which carries neither `argsOmitted`
 nor `argsRecorded`: a run's journal is keyed from a hash of its `args`, so
 restarting one whose `args` its history cannot name would replay nothing and
-re-dispatch every agent. Both refusals are `workflow_args_unavailable`.
+re-dispatch every agent. Both refusals are `workflow_args_unavailable`, and
+`GET /session/:id/tasks` reports both as `argsUnavailable` on the entry, so a
+client can withhold the two actions instead of discovering the refusal by
+making the call. `argsOmitted` stays beside it as the reason, for a client
+that wants to say which. The `args` themselves are never put on the wire.
 
 `run-script` passes no definition name, so the run is labelled by the script's own
 `export const meta` — a compiled script should declare one, or the run shows
@@ -2367,7 +2363,7 @@ not be written.
 | `code` / `errorKind`           | HTTP  | When                                                                                                                                                          | What to do                                                     |
 | ------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | `workflow_journal_unavailable` | `409` | a `retry` whose run has no journal on disk, or one that cannot be read                                                                                        | `rerun` it, which starts it from the beginning                 |
-| `workflow_args_unavailable`    | `409` | a `retry` or `rerun` of a history entry that carries `argsOmitted`                                                                                            | start it again with `run-saved` or `run-script` and its `args` |
+| `workflow_args_unavailable`    | `409` | a `retry` or `rerun` of a history entry marked `argsUnavailable`: its `args` were too large to keep, or its snapshot predates keeping them                    | start it again with `run-saved` or `run-script` and its `args` |
 | `workflow_run_live_elsewhere`  | `409` | a `retry` of a run whose checkpoint records a process that has not been seen to exit — one still running, one on another machine, or one whose pid was reused | `rerun` it, which takes a new run id                           |
 | `workflow_not_recorded`        | `503` | a `retry` whose record that the run is running again could not be written, so it did not start                                                                | make the same call again; the run is untouched                 |
 

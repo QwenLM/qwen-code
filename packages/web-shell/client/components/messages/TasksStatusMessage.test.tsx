@@ -1050,6 +1050,7 @@ describe('TasksStatusMessage workflow details', () => {
         id: 'workflow-saved',
         isHistorical: true,
         argsOmitted: true,
+        argsUnavailable: true,
         status: 'failed',
         startTime: 500,
         endTime: 1_000,
@@ -1064,6 +1065,82 @@ describe('TasksStatusMessage workflow details', () => {
     expect(container.textContent).toContain('Saved run');
     expect(container.textContent).not.toContain('Retry failed path');
     expect(container.textContent).not.toContain('Rerun all');
+  });
+
+  // An older daemon sends the reason and not the answer. Reading only the
+  // answer would put back a Retry this client had learned to hide.
+  it('offers no restart for a restored run a daemon older than argsUnavailable refused', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-old-daemon',
+        isHistorical: true,
+        argsOmitted: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
+    // Hiding the buttons takes away where the daemon's reason used to
+    // appear, so the reason has to stand on its own.
+    expect(container.textContent).toContain(
+      'No restart: its history does not have the args it was launched with.',
+    );
+  });
+
+  // Written before the daemon kept args: it cannot say whether the run had
+  // any, so a restart is refused -- and `argsOmitted` is not set to say why.
+  it('offers no restart for a restored run recorded before args were kept', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-legacy',
+        isHistorical: true,
+        argsUnavailable: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
+    expect(container.textContent).toContain(
+      'No restart: its history does not have the args it was launched with.',
+    );
+  });
+
+  it('says nothing about args for a restored run that can be restarted', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-restartable',
+        isHistorical: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Retry failed path');
+    expect(container.textContent).not.toContain('No restart:');
   });
 
   it('does not group workflow history by a shared display label', () => {

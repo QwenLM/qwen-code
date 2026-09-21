@@ -2119,6 +2119,12 @@ export interface RunQwenServeDeps {
    */
   bootSettings?: ServeFastPathSettings;
   /**
+   * Reads one registered workspace's settings summary. Only the boot-time
+   * `serve.channels` restore needs it, to read the workspaces the fast path
+   * did not already load for `bootSettings`.
+   */
+  loadWorkspaceBootSettings?: (workspaceCwd: string) => ServeFastPathSettings;
+  /**
    * Pre-resolved daemon debug directory. The full CLI/exported API can pass
    * Storage.getGlobalDebugDir(); the serve fast path intentionally avoids
    * importing core before listen and instead derives this from bootSettings.
@@ -4053,40 +4059,21 @@ async function runQwenServeImpl(
   });
   loggerLifecycle.initialized(daemonLog);
   let channelSelectionFromSettings = false;
-  // An explicit `--channel` selection bounds what this daemon hosts, at boot
-  // and afterwards, so it has to be remembered before the settings restore
-  // below can overwrite `opts.channelSelection` with its own.
-  const channelSelectionFromFlag = opts.channelSelection !== undefined;
   // Which workspace a channel name belongs to when ownership is otherwise
-  // ambiguous. Two sources, because they answer different questions.
-  //
-  // `requestedChannelOwners` is what the settings asked for: the workspace
-  // that listed the name in its own `serve.channels`. It accumulates at boot
-  // and whenever a workspace registers, and is never rebuilt, so a name that
-  // is not committed yet still resolves — the second name of a late
-  // registration, or a channel started by hand after hosting was stopped.
-  // A hint only ever picks among workspaces that already own the name, so a
-  // stale entry cannot misroute a channel.
-  const requestedChannelOwners = new Map<string, string>();
-  // `committedChannelOwners` is what the daemon actually hosts, rebuilt from
-  // the committed groups on every commit, so a runtime change resolves the
-  // way this daemon already resolved.
-  let committedChannelOwners: ReadonlyMap<string, string> = new Map();
-  const channelOwnerHints = (): ReadonlyMap<string, string> =>
-    new Map([...requestedChannelOwners, ...committedChannelOwners]);
+  // ambiguous. Two layers: the boot hints record the workspace that listed the
+  // name in its own `serve.channels` and never change, and the committed groups
+  // layer over them so a later runtime change resolves the way the running
+  // groups do. A commit only overrides the names it carries, so a channel
+  // toggled off and back on still resolves the way it did at boot instead of
+  // turning ambiguous until the next restart. A boot hint naming a workspace
+  // that is no longer registered is inert: `resolveChannelWorkspaceGroups` only
+  // takes a hint that matches one of the live owners.
+  let bootChannelOwnerHints: ReadonlyMap<string, string> = new Map();
+  let channelOwnerHints: ReadonlyMap<string, string> = new Map();
   // Names a non-primary workspace contributed, which may be dropped instead of
   // stranding the other workspaces. Empty for an explicit `--channel`
   // selection and for every runtime change, both of which stay fail-fast.
   let channelStartupTolerantNames: ReadonlySet<string> = new Set();
-  // Channels an operator explicitly stopped in this process, and whether they
-  // stopped channel hosting outright. A workspace registered after boot
-  // restores its own `serve.channels`, and neither decision may be undone by
-  // that restore. Both are per-process: the next boot reads the settings
-  // again, which is exactly what the setting means.
-  const channelsStoppedByOperator = new Set<string>();
-  let channelHostingStoppedByOperator = false;
-  const operatorStopKey = (workspaceCwd: string, name: string) =>
-    `${workspaceCwd}\u0000${name}`;
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       redactLogCredentials(
@@ -4116,6 +4103,19 @@ async function runQwenServeImpl(
       daemonLog.warn(detail, { workspaceCwd: diagnostic.workspaceCwd });
       return;
     }
+    if (diagnostic.code === 'claimed_by_multiple_workspaces') {
+      // Two workspaces listing the same name is what the per-workspace toggle
+      // produces, and ownership still resolves from the channel config alone,
+      // so the channel usually starts exactly as configured. Only a resolution
+      // that actually fails costs the operator a channel, and that reports
+      // itself; this one stays out of the boot banner.
+      daemonLog.warn(detail, {
+        code: diagnostic.code,
+        workspaceCwd: diagnostic.workspaceCwd,
+        ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
+      });
+      return;
+    }
     writeStderrLine(
       `qwen serve: workspace ${JSON.stringify(
         diagnostic.workspaceCwd,
@@ -4131,35 +4131,6 @@ async function runQwenServeImpl(
     workspaceCwd: workspace.cwd,
     primary: index === 0,
   }));
-  const loadStartupChannelsFor = (workspaceCwd: string): unknown =>
-    (workspaceCwd === boundWorkspace
-      ? bootSettings
-      : loadServeFastPathSettings(workspaceCwd)
-    )?.serve?.channels;
-  /**
-   * One workspace's own startup channels, for a workspace whose runtime was
-   * activated after boot. `primary` is passed through rather than assumed:
-   * activation also fires for the primary workspace when its trust is
-   * re-materialized, and a primary `all` must not be reported as a workspace
-   * that "was not restored".
-   */
-  const startupChannelsForWorkspace = (
-    workspaceCwd: string,
-    primary: boolean,
-  ) => {
-    const restored = resolveStartupChannelSelection({
-      workspaces: [{ workspaceCwd, primary }],
-      loadStartupChannels: loadStartupChannelsFor,
-    });
-    for (const diagnostic of restored.diagnostics) {
-      reportStartupChannelDiagnostic(diagnostic);
-    }
-    return {
-      names:
-        restored.selection?.mode === 'names' ? restored.selection.names : [],
-      ownerHints: restored.ownerHints,
-    };
-  };
   if (
     !opts.channelSelection &&
     (bootSettings?.serve?.channels !== undefined ||
@@ -4172,7 +4143,13 @@ async function runQwenServeImpl(
         // registered workspace is read here, through the same loader, so a
         // secondary workspace contributes exactly what it would contribute if
         // it were the one the daemon bound to.
-        loadStartupChannels: loadStartupChannelsFor,
+        loadStartupChannels: (workspaceCwd) =>
+          (workspaceCwd === boundWorkspace
+            ? bootSettings
+            : (deps.loadWorkspaceBootSettings ?? loadServeFastPathSettings)(
+                workspaceCwd,
+              )
+          )?.serve?.channels,
       });
       for (const diagnostic of restored.diagnostics) {
         reportStartupChannelDiagnostic(diagnostic);
@@ -4180,9 +4157,8 @@ async function runQwenServeImpl(
       opts.channelSelection = restored.selection;
       if (opts.channelSelection) {
         channelSelectionFromSettings = true;
-        for (const [name, owner] of restored.ownerHints) {
-          requestedChannelOwners.set(name, owner);
-        }
+        bootChannelOwnerHints = restored.ownerHints;
+        channelOwnerHints = restored.ownerHints;
         channelStartupTolerantNames = restored.tolerantNames;
         channelRuntime = await ensureChannelRuntime();
         daemonLog.info('restoring channels from workspace serve.channels', {
@@ -4698,7 +4674,6 @@ async function runQwenServeImpl(
       await manager.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
-    channelHostingStoppedByOperator = false;
     return manager.setSelection(selection);
   };
   const stopChannelWorker = async (): Promise<ChannelWorkerStopResult> => {
@@ -4709,7 +4684,6 @@ async function runQwenServeImpl(
       await manager?.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
-    channelHostingStoppedByOperator = true;
     if (!manager) {
       return { changed: false, state: getChannelWorkerControl() };
     }
@@ -7511,82 +7485,22 @@ async function runQwenServeImpl(
         );
         channelWebhookConfigVersion += 1;
         refreshChannelWebhookConfigs?.();
-        // A workspace that registers after boot restores its own
-        // `serve.channels` the way a workspace present at boot does, minus
-        // anything the operator has since stopped on purpose. An explicit
-        // `--channel` selection bounds what this daemon hosts at boot, so it
-        // bounds this too.
-        const startup =
-          runtimeAdded.trusted &&
-          !channelSelectionFromFlag &&
-          !channelHostingStoppedByOperator
-            ? startupChannelsForWorkspace(
-                runtimeAdded.workspaceCwd,
-                runtimeAdded.primary,
-              )
-            : undefined;
-        const committed = channelWorkerManager?.committedChannelNames() ?? [];
-        const pending = (startup?.names ?? []).filter(
-          (name) =>
-            !committed.includes(name) &&
-            !channelsStoppedByOperator.has(
-              operatorStopKey(runtimeAdded.workspaceCwd, name),
-            ),
-        );
-        // Seed ownership synchronously, before this hook returns: a definition
-        // this workspace shares with another one is otherwise ambiguous, only
-        // the workspace that listed it can settle that, and every name needs
-        // its hint to survive the commits the names before it cause.
-        for (const [name, owner] of startup?.ownerHints ?? []) {
-          requestedChannelOwners.set(name, owner);
-        }
-        if (!channelWorkerManager && pending.length === 0) return;
-        const workspaceCwd = runtimeAdded.workspaceCwd;
-        const trusted = runtimeAdded.trusted;
-        // Bringing channels up is not part of registering a workspace. This
-        // hook runs under the daemon-wide runtime-topology gate, so awaiting a
-        // worker here holds that gate for as long as the worker takes to
-        // become ready — up to the 30s startup budget — and every other
-        // registration and trust reconcile queues behind it, including
-        // workspaces that configure no channels at all.
-        void (async () => {
-          try {
-            if (channelWorkerManager) {
-              if (trusted) {
-                await channelWorkerManager.restoreWorkspace(workspaceCwd);
-              }
-              await channelWorkerManager.refreshWorkspaces();
-            }
-            if (pending.length === 0) return;
-            const manager =
-              channelWorkerManager ?? (await ensureChannelWorkerManager?.());
-            if (!manager) return;
-            daemonLog.info(
-              'restoring serve.channels for a workspace registered after boot',
-              { workspaceCwd, channels: pending },
+        if (!channelWorkerManager) return;
+        try {
+          if (runtimeAdded.trusted) {
+            await channelWorkerManager.restoreWorkspace(
+              runtimeAdded.workspaceCwd,
             );
-            for (const name of pending) {
-              try {
-                await manager.setChannelEnabled({ name, workspaceCwd }, true);
-              } catch (err) {
-                // One name that cannot be hosted must not strand the rest of
-                // this workspace's list, the same way boot drops such a name
-                // and keeps the others.
-                daemonLog.error(
-                  `channel "${sanitizeLogText(name, 128)}" was not restored for a workspace registered after boot`,
-                  err instanceof Error ? err : null,
-                );
-              }
-            }
-          } catch (err) {
-            daemonLog.error(
-              'workspace channel worker startup error',
-              err instanceof Error ? err : null,
-            );
-          } finally {
-            writeChannelWorkerPidfile();
           }
-        })();
+          await channelWorkerManager.refreshWorkspaces();
+        } catch (err) {
+          daemonLog.error(
+            'workspace channel worker startup error',
+            err instanceof Error ? err : null,
+          );
+        } finally {
+          writeChannelWorkerPidfile();
+        }
       },
       beginDrain(runtimeToDrain: WorkspaceRuntime): void {
         if (runtimeToDrain.primary) {
@@ -7883,15 +7797,6 @@ async function runQwenServeImpl(
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
           manager: await ensureChannelWorkerManager(),
-          onRuntimeIntent: (name, enabled) => {
-            const key = operatorStopKey(targetRuntime.workspaceCwd, name);
-            if (!enabled) {
-              channelsStoppedByOperator.add(key);
-              return;
-            }
-            channelsStoppedByOperator.delete(key);
-            channelHostingStoppedByOperator = false;
-          },
         });
       })();
       channelManagementServices.set(targetRuntime, pending);
@@ -8601,7 +8506,7 @@ async function runQwenServeImpl(
         if (!settings) return {};
         return channelRuntime!.loadChannelsConfig(cwd, settings);
       },
-      preferredOwners: channelOwnerHints(),
+      preferredOwners: channelOwnerHints,
       tolerant: channelStartupTolerantNames,
     });
     if (!grouping.ok) {
@@ -9197,7 +9102,7 @@ async function runQwenServeImpl(
           // already resolved it; without the hint a name that only boot could
           // disambiguate would start failing every PUT as ambiguous. Runtime
           // changes stay fail-fast, so no name is tolerated here.
-          preferredOwners: channelOwnerHints(),
+          preferredOwners: channelOwnerHints,
         });
         if (!grouping.ok) {
           throw Object.assign(new Error(grouping.error.message), {
@@ -9391,15 +9296,16 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
-              committedChannelOwners = new Map(
-                groups.flatMap((group) =>
+              channelOwnerHints = new Map([
+                ...bootChannelOwnerHints,
+                ...groups.flatMap((group) =>
                   group.selection.mode === 'names'
                     ? group.selection.names.map(
                         (name) => [name, group.workspaceCwd] as const,
                       )
                     : [],
                 ),
-              );
+              ]);
               channelWebhookConfigVersion += 1;
               refreshChannelWebhookConfigs?.();
             },
