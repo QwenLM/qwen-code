@@ -15,6 +15,20 @@ import {
   type UseLiveBrowserHostResult,
 } from './useLiveBrowserHost';
 
+// The capture pipeline itself (video element, canvas, JPEG ladder) is covered
+// in screen-share.test.ts; here only what crosses the Host socket matters.
+const shareHandle = {
+  label: 'Terminal',
+  stop: vi.fn(),
+  grab: vi.fn(),
+};
+const canShare = vi.fn(() => true);
+const startShare = vi.fn();
+vi.mock('./screen-share', () => ({
+  canShareScreen: () => canShare(),
+  startScreenShare: (onEnded: () => void) => startShare(onEnded),
+}));
+
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -88,8 +102,36 @@ type Processor = ReturnType<typeof node> & {
   onaudioprocess: ((event: AudioProcessingEvent) => void) | null;
 };
 
+class MockWorkletNode {
+  static instances: MockWorkletNode[] = [];
+  static failConstruction = false;
+  connect = vi.fn();
+  disconnect = vi.fn();
+  port: {
+    onmessage: ((event: MessageEvent) => void) | null;
+    close: ReturnType<typeof vi.fn>;
+  } = { onmessage: null, close: vi.fn() };
+
+  constructor(
+    readonly context: unknown,
+    readonly name: string,
+    readonly options: Record<string, unknown>,
+  ) {
+    if (MockWorkletNode.failConstruction) throw new Error('not registered');
+    MockWorkletNode.instances.push(this);
+  }
+
+  /** A frame as the audio thread posts it. */
+  post(samples: number[], level: number): void {
+    const pcm = Int16Array.from(samples).buffer;
+    this.port.onmessage?.({ data: { pcm, level } } as MessageEvent);
+  }
+}
+
 class MockAudioContext {
   static instances: MockAudioContext[] = [];
+  /** `undefined`: the browser has no AudioWorklet (the default here). */
+  static addModule: ((url: string) => Promise<void>) | undefined;
   static processor: Processor | undefined;
   static sources: Array<{
     start: ReturnType<typeof vi.fn>;
@@ -100,6 +142,13 @@ class MockAudioContext {
   currentTime = 0;
   readonly sampleRate: number;
   readonly destination = {};
+  get audioWorklet():
+    | { addModule: (url: string) => Promise<void> }
+    | undefined {
+    return MockAudioContext.addModule
+      ? { addModule: MockAudioContext.addModule }
+      : undefined;
+  }
   createMediaStreamSource = vi.fn(() => node());
   createScriptProcessor = vi.fn((size: number) => {
     const processor = { ...node(), onaudioprocess: null, size };
@@ -140,6 +189,8 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let host: UseLiveBrowserHostResult | undefined;
 let token: string | undefined;
+/** The `onended` the hook handed to the share, i.e. the browser's own stop. */
+let shareEnded: (() => void) | undefined;
 
 function TestHost() {
   host = useLiveBrowserHost({
@@ -197,10 +248,32 @@ beforeEach(() => {
     getTracks: () => [track],
     getAudioTracks: () => [track],
   });
+  canShare.mockReset();
+  canShare.mockReturnValue(true);
+  shareHandle.stop.mockReset();
+  shareHandle.grab.mockReset();
+  shareHandle.grab.mockResolvedValue({
+    image: 'ZmFrZS1qcGVn',
+    width: 1920,
+    height: 1080,
+  });
+  startShare.mockReset();
+  startShare.mockImplementation((onEnded: () => void) => {
+    shareEnded = onEnded;
+    return Promise.resolve(shareHandle);
+  });
+  shareEnded = undefined;
   MockWebSocket.instances = [];
   MockAudioContext.instances = [];
   MockAudioContext.processor = undefined;
   MockAudioContext.sources = [];
+  MockAudioContext.addModule = undefined;
+  MockWorkletNode.instances = [];
+  MockWorkletNode.failConstruction = false;
+  Object.defineProperty(globalThis, 'AudioWorkletNode', {
+    value: MockWorkletNode,
+    configurable: true,
+  });
   Object.defineProperty(globalThis, 'WebSocket', {
     value: MockWebSocket,
     configurable: true,
@@ -243,7 +316,7 @@ describe('useLiveBrowserHost', () => {
       bundleId: 'com.alibaba.qwen-code.web-shell',
       instanceNonce: expect.any(String),
       permissions: { microphone: 'granted' },
-      selfChecks: { audioInput: true, audioOutput: true },
+      selfChecks: { audioInput: true, audioOutput: true, screenShare: true },
     });
     expect(host!.phase).toBe('connected');
     expect(onStatus).toHaveBeenCalledWith(status('idle'));
@@ -254,6 +327,196 @@ describe('useLiveBrowserHost', () => {
     expect(MockAudioContext.instances.map((c) => c.sampleRate)).toEqual([
       16_000, 24_000,
     ]);
+  });
+
+  it('answers a screen request with one frame from the shared screen', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-1',
+        epoch: 0,
+        source: 'screen',
+      });
+    });
+
+    expect(shareHandle.grab).toHaveBeenCalledOnce();
+    expect(ws.text().at(-1)).toEqual({
+      type: 'host.visual_capture_result',
+      requestId: 'req-1',
+      success: true,
+      source: 'screen',
+      image: 'ZmFrZS1qcGVn',
+      width: 1920,
+      height: 1080,
+      appName: 'Shared screen',
+      windowTitle: 'Terminal',
+      accessibilityText: '',
+    });
+    expect(host!.screenShare.lastLookAt).toBeTypeOf('number');
+  });
+
+  it('answers at once when nothing is shared, and says so in the dialog', async () => {
+    await render();
+    const ws = await connected();
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-2',
+        epoch: 0,
+        source: 'screen',
+      });
+    });
+
+    // A silent drop would leave the daemon waiting out its Appshot timeout
+    // while the model has nothing to tell the user.
+    expect(ws.text().at(-1)).toEqual({
+      type: 'host.visual_capture_result',
+      requestId: 'req-2',
+      success: false,
+      error: 'The user is not sharing a screen.',
+    });
+    expect(host!.screenShare.requestedWhileIdle).toBe(true);
+    expect(host!.screenShare.lastLookAt).toBeUndefined();
+  });
+
+  it('refuses to read the screen for a call that has moved on', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-stale',
+        epoch: 7,
+        source: 'screen',
+      });
+    });
+
+    expect(ws.text().at(-1)).toMatchObject({
+      requestId: 'req-stale',
+      success: false,
+    });
+    // The daemon would discard the result anyway, but only after the frame
+    // had left the machine.
+    expect(shareHandle.grab).not.toHaveBeenCalled();
+  });
+
+  it('refuses a source it cannot be', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-3',
+        epoch: 0,
+        source: 'camera',
+      });
+    });
+
+    expect(ws.text().at(-1)).toMatchObject({
+      requestId: 'req-3',
+      success: false,
+      error: 'This Host can only share a screen.',
+    });
+    expect(shareHandle.grab).not.toHaveBeenCalled();
+  });
+
+  it('reports a capture that failed instead of going quiet', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+    shareHandle.grab.mockRejectedValue(
+      new Error('The screen was too detailed to send.'),
+    );
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.capture_visual',
+        requestId: 'req-4',
+        epoch: 0,
+        source: 'screen',
+      });
+    });
+
+    expect(ws.text().at(-1)).toMatchObject({
+      requestId: 'req-4',
+      success: false,
+      error: 'The screen was too detailed to send.',
+    });
+  });
+
+  it('follows the browser\u2019s own stop-sharing control', async () => {
+    await render();
+    await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+    expect(host!.screenShare.sharing).toBe(true);
+
+    await act(async () => {
+      shareEnded?.();
+    });
+
+    expect(host!.screenShare.sharing).toBe(false);
+    expect(host!.screenShare.label).toBeUndefined();
+  });
+
+  it('treats a dismissed picker as a choice, not an error', async () => {
+    await render();
+    await connected();
+    startShare.mockRejectedValue(
+      new DOMException('Permission denied', 'NotAllowedError'),
+    );
+
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    expect(host!.screenShare.sharing).toBe(false);
+    expect(host!.screenShare.errorMessage).toBeUndefined();
+  });
+
+  it('ends the share when the Host connection goes', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      await host!.startSharingScreen();
+    });
+
+    await act(async () => {
+      ws.serverClose(4010, 'Qwen Live Host took over.');
+    });
+
+    // No page keeps a screen open that nothing can look at.
+    expect(shareHandle.stop).toHaveBeenCalled();
+    expect(host!.screenShare.sharing).toBe(false);
+  });
+
+  it('never offers the share where getDisplayMedia is missing', async () => {
+    canShare.mockReturnValue(false);
+    await render();
+    const ws = await connected();
+
+    expect(host!.screenShare.supported).toBe(false);
+    expect(
+      (ws.text()[0]['selfChecks'] as Record<string, unknown>)['screenShare'],
+    ).toBe(false);
   });
 
   it('asks for the lease back only when told to take over', async () => {
@@ -320,6 +583,159 @@ describe('useLiveBrowserHost', () => {
     });
     speak();
     expect(ws.audio()).toHaveLength(1);
+  });
+
+  it('measures the microphone before the call starts, so it can be checked', async () => {
+    await render();
+    const ws = await connected();
+
+    // Idle: nothing is sent yet, but the meter answers "will it hear me?".
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeCloseTo(0.5, 3);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    expect(ws.audio()).toHaveLength(0);
+
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeCloseTo(0.5, 3);
+    expect(ws.audio()).toHaveLength(1);
+  });
+
+  it('stamps every frame, so a meter can tell a stalled callback from silence', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    await connected();
+    now.mockReturnValue(1_000);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.at).toBe(1_000);
+    now.mockReturnValue(1_064);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.at).toBe(1_064);
+    now.mockRestore();
+  });
+
+  it('drops the meter to zero when input is muted', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeGreaterThan(0);
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.state',
+        epoch: 1,
+        status: status('listening', { inputMuted: true }),
+      });
+    });
+    // Not frozen at the last level before the mute.
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBe(0);
+  });
+
+  it('reads zero, not the last level, once the socket is no longer open', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeGreaterThan(0);
+
+    ws.readyState = 2; // CLOSING: the capture callback can still fire
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBe(0);
+  });
+
+  it('flags frames it drops during a call, instead of looking healthy', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+
+    // The microphone works and the daemon still is not hearing it.
+    expect(ws.audio()).toHaveLength(0);
+    expect(host!.inputLevel.current).toMatchObject({ dropping: true });
+    expect(host!.inputLevel.current.level).toBeGreaterThan(0);
+
+    // Sending resumes at once; the report itself is held (see below).
+    ws.bufferedAmount = 0;
+    speak([0.5, -0.5]);
+    expect(ws.audio()).toHaveLength(1);
+  });
+
+  it('holds the dropping report instead of flickering with the socket buffer', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+
+    // bufferedAmount hovering around the limit: over, under, over, under...
+    now.mockReturnValue(1_000);
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+    expect(ws.audio()).toHaveLength(0);
+
+    // The very next frame goes out again — but the report does not flip back
+    // 64 ms later, or the flag would strobe at the audio frame rate.
+    now.mockReturnValue(1_064);
+    ws.bufferedAmount = 0;
+    speak([0.5, -0.5]);
+    expect(ws.audio()).toHaveLength(1);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    now.mockReturnValue(1_400);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    // Half a second after the last dropped frame it clears.
+    now.mockReturnValue(1_501);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    expect(ws.audio()).toHaveLength(3);
+    now.mockRestore();
+  });
+
+  it('ends the dropping report with the call', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    now.mockReturnValue(1_000);
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    // The call stops inside the hold window: nothing is being sent by design
+    // now, and that is not a fault to keep reporting.
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 2, status: status('idle') });
+    });
+    now.mockReturnValue(1_064);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    now.mockRestore();
+  });
+
+  it('does not call a backed-up socket "dropping" before the call has started', async () => {
+    await render();
+    const ws = await connected();
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    // Nothing is sent while idle anyway; that is not a fault to report.
+    expect(host!.inputLevel.current.dropping).toBe(false);
   });
 
   it('drops microphone frames rather than queue them behind a stalled socket', async () => {
@@ -437,5 +853,137 @@ describe('useLiveBrowserHost', () => {
     expect(MockWebSocket.instances).toHaveLength(0);
     expect(track.stop).toHaveBeenCalled();
     expect(host!.phase).toBe('idle');
+  });
+
+  describe('capture path', () => {
+    it('captures on the audio thread when the worklet module loads', async () => {
+      const addModule = vi.fn(async () => {});
+      MockAudioContext.addModule = addModule;
+      await render();
+      const ws = await connected();
+
+      expect(host!.captureMode).toBe('worklet');
+      expect(addModule).toHaveBeenCalledOnce();
+      // A same-origin asset URL: the CSP refuses blob: and data: modules.
+      expect(addModule.mock.calls[0]![0]).toMatch(/capture-worklet/);
+      const [node] = MockWorkletNode.instances;
+      expect(node!.name).toBe('qwen-live-capture');
+      expect(node!.options).toMatchObject({
+        processorOptions: { frameSize: 1024 },
+      });
+      // No main-thread capture node alongside it.
+      expect(
+        MockAudioContext.instances[0]!.createScriptProcessor,
+      ).not.toHaveBeenCalled();
+
+      await act(async () => {
+        ws.receive({
+          type: 'host.state',
+          epoch: 7,
+          status: status('listening'),
+        });
+      });
+      node!.post([100, -200], 0.25);
+      const [frame] = ws.audio();
+      const view = new DataView(frame!);
+      expect(Number(view.getBigUint64(0))).toBe(7);
+      expect(view.getInt16(8, true)).toBe(100);
+      expect(view.getInt16(10, true)).toBe(-200);
+      expect(host!.inputLevel.current.level).toBe(0.25);
+    });
+
+    it('applies the same gates to worklet frames: not before the call, not while muted', async () => {
+      MockAudioContext.addModule = async () => {};
+      await render();
+      const ws = await connected();
+      const [node] = MockWorkletNode.instances;
+
+      node!.post([1, 2], 0.5);
+      expect(ws.audio()).toHaveLength(0);
+      expect(host!.inputLevel.current.level).toBe(0.5);
+
+      await act(async () => {
+        ws.receive({
+          type: 'host.state',
+          epoch: 1,
+          status: status('listening', { inputMuted: true }),
+        });
+      });
+      node!.post([1, 2], 0.5);
+      expect(ws.audio()).toHaveLength(0);
+      expect(host!.inputLevel.current.level).toBe(0);
+    });
+
+    it.each([
+      ['the browser has no AudioWorklet', undefined, false],
+      [
+        'the module cannot be loaded (a data: URL under the CSP)',
+        async () => {
+          throw new Error('Refused to load the script');
+        },
+        false,
+      ],
+      ['the processor cannot be constructed', async () => {}, true],
+    ] as const)(
+      'falls back to the main-thread node when %s',
+      async (_label, addModule, failConstruction) => {
+        MockAudioContext.addModule = addModule;
+        MockWorkletNode.failConstruction = failConstruction;
+        await render();
+        const ws = await connected();
+
+        expect(host!.captureMode).toBe('script-processor');
+        expect(host!.phase).toBe('connected');
+        await act(async () => {
+          ws.receive({
+            type: 'host.state',
+            epoch: 1,
+            status: status('listening'),
+          });
+        });
+        speak([1, -1]);
+        expect(ws.audio()).toHaveLength(1);
+      },
+    );
+
+    it('shuts the worklet down with the connection', async () => {
+      MockAudioContext.addModule = async () => {};
+      await render();
+      await connected();
+      const [node] = MockWorkletNode.instances;
+      await act(async () => {
+        host!.disconnect();
+      });
+
+      expect(node!.port.onmessage).toBeNull();
+      expect(node!.port.close).toHaveBeenCalledOnce();
+      expect(node!.disconnect).toHaveBeenCalled();
+      expect(host!.captureMode).toBeUndefined();
+    });
+
+    it('builds nothing for a connect abandoned while the module was loading', async () => {
+      let loaded: () => void = () => {};
+      MockAudioContext.addModule = () =>
+        new Promise<void>((resolve) => {
+          loaded = resolve;
+        });
+      await render();
+      await act(async () => {
+        host!.connect();
+      });
+      await act(async () => {
+        host!.disconnect();
+      });
+      await act(async () => {
+        loaded();
+      });
+
+      // A node parked in the shared resources now would belong to the next
+      // connect, and nothing would ever release it.
+      expect(MockWorkletNode.instances).toHaveLength(0);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(host!.phase).toBe('idle');
+      expect(host!.captureMode).toBeUndefined();
+    });
   });
 });

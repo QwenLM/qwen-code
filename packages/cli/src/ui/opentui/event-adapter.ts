@@ -297,7 +297,8 @@ export function renderResultDisplay(display: unknown): string {
         .join('\n');
     }
     if (
-      o['type'] === 'ask_user_question_answers' &&
+      (o['type'] === 'ask_user_question_answers' ||
+        o['type'] === 'shell_result') &&
       typeof o['text'] === 'string'
     ) {
       return o['text'];

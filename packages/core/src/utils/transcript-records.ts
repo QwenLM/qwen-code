@@ -109,6 +109,17 @@ const ARTIFACT_RECORD_SUBTYPES = new Set([
   'session_artifact_snapshot',
 ]);
 
+const MANAGED_SESSION_RECORD_SUBTYPES = new Set([
+  'managed_session_header_v1',
+  'managed_session_event_v1',
+  'managed_session_commit_v1',
+]);
+
+const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
+  'session_sources_snapshot',
+  ...MANAGED_SESSION_RECORD_SUBTYPES,
+]);
+
 const KNOWN_RECORD_SUBTYPES = new Set([
   'session_notes',
   'chat_compression',
@@ -139,6 +150,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'goal_turn_end',
   'turn_result',
   ...ARTIFACT_RECORD_SUBTYPES,
+  ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -264,7 +276,11 @@ export function isTranscriptConversationRecord(
 ): boolean {
   return (
     !isTranscriptArtifactRecord(record) &&
-    !(record.type === 'system' && record.subtype === 'session_sources_snapshot')
+    !(
+      record.type === 'system' &&
+      typeof record.subtype === 'string' &&
+      NON_CONVERSATION_RECORD_SUBTYPES.has(record.subtype)
+    )
   );
 }
 

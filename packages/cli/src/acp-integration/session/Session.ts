@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
@@ -100,6 +101,9 @@ import {
   Kind,
   ToolNames,
   ToolErrorType,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
   firePermissionRequestHook,
@@ -721,6 +725,7 @@ type PendingToolResultRecord = {
   sequence: number;
   callId: string;
   toolName: string;
+  toolArgs: Record<string, unknown>;
   responseParts: Part[];
   persistedOutputFiles?: string[];
   policyToolName?: string;
@@ -737,7 +742,7 @@ type PendingToolResultRecord = {
 
 type QueueToolResultRecord = (
   fc: FunctionCall,
-  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
+  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence' | 'toolArgs'>,
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -1834,11 +1839,12 @@ function collectMcpServerMentionRefs(
  * every call fails with JSON-RPC -32601.
  *
  * Applies the same registration-status check as that gate. Disabled tools stay
- * out of the registry; permission-deferred tools stay behind ToolSearch instead
- * of being revealed by this late registration path. Being session-scoped, the
- * tool is absent from the workspace tools inventory the daemon serves from its
- * bootstrap registry — that panel lists workspace tools, and a daemon-only tool
- * that exists per session is deliberately not one.
+ * out of the registry; permission-deferred tools stay behind ToolSearch +
+ * ToolCall instead of being revealed by this late registration path. Being
+ * session-scoped, the tool is absent from the workspace tools inventory the
+ * daemon serves from its bootstrap registry — that panel lists workspace
+ * tools, and a daemon-only tool that exists per session is deliberately not
+ * one.
  */
 export async function registerCreateSubSessionTool(
   config: Config,
@@ -12197,6 +12203,7 @@ export class Session implements SessionContext {
           : pendingToolResultRecords;
       target.push({
         ...record,
+        toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
       });
@@ -12232,7 +12239,10 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        const goalProvenance = ambientGoalToolResultProvenance(record.toolName);
+        const goalProvenance = ambientGoalToolResultProvenance(
+          record.toolName,
+          record.toolArgs,
+        );
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
           {
@@ -12936,6 +12946,7 @@ export class Session implements SessionContext {
     finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
+    const modelFacingToolName = fc.name ?? 'unknown_tool';
     let args = (fc.args ?? {}) as Record<string, unknown>;
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
@@ -13003,6 +13014,15 @@ export class Session implements SessionContext {
       errorType: ToolErrorType | undefined,
     ) => {
       const durationMs = Date.now() - startTime;
+      const modelFacingError =
+        status === 'cancelled' && modelFacingToolName === ToolNames.TOOL_CALL
+          ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${error.message}`
+          : status === 'error' &&
+              modelFacingToolName === ToolNames.TOOL_CALL &&
+              toolName === ToolNames.TOOL_CALL &&
+              !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
+            ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
+            : error.message;
       try {
         logToolCall(this.config, {
           'event.name': 'tool_call',
@@ -13041,8 +13061,8 @@ export class Session implements SessionContext {
         {
           functionResponse: {
             id: callId,
-            name: toolName,
-            response: { error: error.message },
+            name: modelFacingToolName,
+            response: { error: modelFacingError },
           },
         },
       ];
@@ -13056,6 +13076,7 @@ export class Session implements SessionContext {
         errorType: ToolErrorType | undefined;
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
+        invalidToolParamsName?: string;
         stopAfterPermissionCancel?: boolean;
         skipPersistence?: boolean;
         settledMetadata?: {
@@ -13148,7 +13169,7 @@ export class Session implements SessionContext {
           this.config,
           promptId,
           toolLoopState,
-          toolName,
+          opts.invalidToolParamsName ?? toolName,
           error,
         );
       return {
@@ -13195,7 +13216,7 @@ export class Session implements SessionContext {
       );
     }
 
-    const toolName = fc.name;
+    let toolName = fc.name;
     if (
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
       !isCodeModeToolCallAllowed(toolName, codeModeContext?.source ?? 'model')
@@ -13213,7 +13234,63 @@ export class Session implements SessionContext {
       );
     }
     const toolRegistry = this.config.getToolRegistry();
-    const tool = toolRegistry.getTool(toolName);
+    const pm = this.config.getPermissionManager?.();
+    let tool = toolRegistry.getTool(toolName);
+
+    if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
+      let bridgeEnabled = true;
+      try {
+        bridgeEnabled = !pm || (await pm.isToolEnabled(ToolNames.TOOL_CALL));
+      } catch (error) {
+        const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
+        if (enablementCancellation) return enablementCancellation;
+        return earlyErrorResponse(
+          error instanceof Error ? error : new Error(String(error)),
+          toolName,
+          {
+            status: 'error',
+            errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+            executionStatus: 'not_started',
+          },
+        );
+      }
+      const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
+      if (enablementCancellation) return enablementCancellation;
+      if (!bridgeEnabled) {
+        return earlyErrorResponse(
+          new Error(`Tool "${toolName}" is disabled.`),
+          toolName,
+          {
+            status: 'error',
+            errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+          },
+        );
+      }
+      const resolution = await resolveDeferredToolCall(toolRegistry, args, {
+        // Thread the real configured depth so the ACP frontend applies the
+        // same depth-gated AgentTool re-admission as the terminal scheduler
+        // and tool_search — the exclusion contract must be consistent across
+        // all three frontends (wenshao triage follow-up). Omitting it would
+        // fail closed, not open, but the corner case should agree everywhere.
+        maxSubagentDepth: this.config.getMaxSubagentDepth(),
+      });
+      const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
+      if (bridgeCancellation) return bridgeCancellation;
+      if ('error' in resolution) {
+        return earlyErrorResponse(resolution.error, toolName, {
+          status: 'error',
+          errorType: resolution.errorType,
+          executionStatus: 'not_started',
+          recordInvalidToolParams:
+            resolution.errorType === ToolErrorType.INVALID_TOOL_PARAMS,
+          invalidToolParamsName: resolution.targetName,
+        });
+      }
+      toolName = resolution.tool.name;
+      args = resolution.arguments;
+      tool = resolution.tool;
+    }
 
     if (!tool) {
       const optInToolMessage = await getOptInToolNotFoundMessage(
@@ -13294,7 +13371,6 @@ export class Session implements SessionContext {
           tool as LiveTaskTool,
         );
         const isTrustedLiveSpeakToUserTool = tool === this.liveSpeakToUserTool;
-        const pm = this.config.getPermissionManager?.();
         const isTrustedLiveTool =
           isTrustedLiveScreenContextTool ||
           isTrustedLiveTaskTool ||
@@ -14863,11 +14939,11 @@ export class Session implements SessionContext {
               ],
               values: () => [
                 ...toolResultPartDiagnosticValues(toolResult.llmContent),
-                ...(typeof toolResult.returnDisplay === 'string'
+                ...(shellResultText(toolResult.returnDisplay) !== undefined
                   ? [
                       {
                         representation: 'display' as const,
-                        value: toolResult.returnDisplay,
+                        value: shellResultText(toolResult.returnDisplay)!,
                       },
                     ]
                   : []),
@@ -14897,20 +14973,20 @@ export class Session implements SessionContext {
           // Create response parts first (needed for emitResult and recordToolResult)
           let responseParts = aborted
             ? convertToFunctionErrorResponse(
-                toolName,
+                modelFacingToolName,
                 callId,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
               )
             : toolResult.error
               ? convertToFunctionErrorResponse(
-                  toolName,
+                  modelFacingToolName,
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
                 )
               : convertToFunctionResponse(
-                  toolName,
+                  modelFacingToolName,
                   callId,
                   toolResult.llmContent,
                 );
@@ -15133,7 +15209,7 @@ export class Session implements SessionContext {
           ) {
             status = 'cancelled';
             responseParts = convertToFunctionErrorResponse(
-              toolName,
+              modelFacingToolName,
               callId,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
