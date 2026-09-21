@@ -557,3 +557,105 @@ describe('conversation search', () => {
     expect(createConversationSearchSnippet('ordinary', '.*')).toBeUndefined();
   });
 });
+it('publishes recovery when a full-window search finds its result in live', async () => {
+  const { store, client, second } = fixture(1);
+  await ready(store);
+  const hit = (
+    await store.scanConversation('Newest answer', { isCurrent: () => true })
+  ).hits[0]!;
+  const original = await store.locateOrdinal(0);
+  store.setViewportAnchor('reader', original.pageId);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let reads = 0;
+  vi.mocked(client.getTranscriptPage).mockImplementation(async () => {
+    if (++reads === 2) await gate;
+    return {
+      v: 1,
+      sessionId: 'session',
+      targetRecordId: 'u2',
+      events: second.map((data) => ({ v: 1, type: 'test', data })),
+      hasMore: false,
+    };
+  });
+  const pending = store.locateViewportSearchHit(
+    hit,
+    { isCurrent: () => true },
+    () => store.setViewportAnchor('reader'),
+  );
+  await vi.waitFor(() => expect(reads).toBe(2));
+  store.observeLiveBlocks([second[1]!]);
+  release();
+  expect(await pending).toMatchObject({ view: 'live', blockId: 'a2' });
+  expect.soft(store.getSnapshot().selected?.status).toBe('ready');
+  expect(store.getSnapshot().error).toBeUndefined();
+});
+it('clears abandoned boundary failure after historical fallback succeeds', async () => {
+  const { store, client, second } = fixture(2);
+  await ready(store);
+  const hit = (
+    await store.scanConversation('Newest answer', { isCurrent: () => true })
+  ).hits[0]!;
+  const original = await store.locateOrdinal(0);
+  store.setViewportAnchor('reader', original.pageId);
+  vi.mocked(client.getTranscriptPage).mockImplementation(async (options) => ({
+    v: 1,
+    sessionId: 'session',
+    targetRecordId: 'u2',
+    events: (options.cursor ? [second[1]!] : [second[0]!]).map((data) => ({
+      v: 1,
+      type: 'test',
+      data,
+    })),
+    hasMore: !options.cursor,
+    ...(options.cursor ? {} : { nextCursor: 'target' }),
+  }));
+  const located = await store.locateViewportSearchHit(
+    hit,
+    { isCurrent: () => true },
+    () => store.setViewportAnchor('reader'),
+  );
+  expect(located.view).toBe('historical');
+  const later = await store.locateOrdinal(1);
+  const retained = store
+    .getViewportSnapshot()
+    .ranges.find((range) => range.id === later.rangeId)!;
+  expect(retained.newer.kind).toBe('loadable');
+  expect(store.getSnapshot().error).toBeUndefined();
+});
+
+it('preserves a real network boundary failure during search navigation', async () => {
+  const { store, client, second } = fixture(2);
+  await ready(store);
+  const hit = (
+    await store.scanConversation('Newest answer', { isCurrent: () => true })
+  ).hits[0]!;
+  const original = await store.locateOrdinal(0);
+  store.setViewportAnchor('reader', original.pageId);
+  vi.mocked(client.getTranscriptPage).mockImplementation(async (options) => {
+    if (options.cursor) throw new Error('offline');
+    return {
+      v: 1,
+      sessionId: 'session',
+      targetRecordId: 'u2',
+      events: [{ v: 1, type: 'test', data: second[0]! }],
+      hasMore: true,
+      nextCursor: 'target',
+    };
+  });
+  await expect(
+    store.locateViewportSearchHit(hit, { isCurrent: () => true }, () =>
+      store.setViewportAnchor('reader'),
+    ),
+  ).rejects.toThrow('offline');
+  expect(store.getSnapshot().error).toMatchObject({
+    operation: 'newer',
+    message: 'offline',
+  });
+  expect(
+    store
+      .getViewportSnapshot()
+      .ranges.find((range) => range.id === store.getSnapshot().error?.rangeId)
+      ?.newer,
+  ).toMatchObject({ kind: 'error', retryable: true });
+});

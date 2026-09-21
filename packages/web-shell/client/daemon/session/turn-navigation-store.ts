@@ -1065,8 +1065,25 @@ export function createDaemonTurnNavigationStore(
       const liveBlock = lastLiveBlocks?.find((block) =>
         block.sourceRecordIds?.includes(hit.recordId),
       );
-      if (liveBlock)
-        return { turnId: hit.turnId, blockId: liveBlock.id, view: 'live' };
+      if (liveBlock) {
+        const location: DaemonTurnLocation = {
+          turnId: hit.turnId,
+          blockId: liveBlock.id,
+          view: 'live',
+        };
+        publish({
+          selected: {
+            ordinal: hit.turnOrdinal,
+            turnId: hit.turnId,
+            status: 'ready',
+            location,
+          },
+          ...(snapshot.error?.operation === 'locate'
+            ? { error: undefined }
+            : {}),
+        });
+        return location;
+      }
       const materialized = activeClient.materializeTranscriptEvents(
         response.events,
         1,
@@ -1343,6 +1360,12 @@ export function createDaemonTurnNavigationStore(
     } catch (error) {
       if (
         generation === selectionGeneration &&
+        request?.isCurrent() === false
+      ) {
+        publish({ selected: undefined });
+      }
+      if (
+        generation === selectionGeneration &&
         request?.isCurrent() !== false
       ) {
         if (isTranscriptTooLarge(error)) {
@@ -1524,6 +1547,14 @@ export function createDaemonTurnNavigationStore(
         .getSnapshot()
         .ranges.find((item) => item.id === rangeId);
       if (!currentRange || currentRange[direction].kind !== 'loading') return;
+      if (
+        viewportRequest &&
+        error instanceof HistoricalTranscriptWindowFullError
+      ) {
+        pageTable.cancelBoundaryLoad(rangeId, direction, request);
+        publish(clearBoundaryError());
+        throw error;
+      }
       if (isTranscriptTooLarge(error)) {
         enterTooLargeFallback();
       } else {

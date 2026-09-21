@@ -1639,6 +1639,69 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getSnapshot().error).toBeUndefined();
   });
 
+  it.each(['loading', 'ready'] as const)(
+    'does not clear a newer %s selection when an older viewport request is cancelled',
+    async (status) => {
+      const store = createDaemonTurnNavigationStore();
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0', 'turn-1']));
+      let resolveFirst!: (page: DaemonSessionTranscriptPage) => void;
+      let resolveSecond!: (page: DaemonSessionTranscriptPage) => void;
+      getTranscriptPage
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveFirst = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveSecond = resolve;
+            }),
+        );
+      store.configure({ sessionId: 'session-1', supported: true, client });
+      await flushInitialHead(store);
+      let firstCurrent = true;
+      const first = store.locateViewportOrdinal(
+        0,
+        { isCurrent: () => firstCurrent },
+        () => {},
+      );
+      await vi.waitFor(() =>
+        expect(getTranscriptPage).toHaveBeenCalledTimes(1),
+      );
+      const second = store.locateViewportOrdinal(
+        1,
+        { isCurrent: () => true },
+        () => {},
+      );
+      await vi.waitFor(() =>
+        expect(getTranscriptPage).toHaveBeenCalledTimes(2),
+      );
+      if (status === 'ready') {
+        resolveSecond(transcriptPage('turn-1'));
+        await second;
+      }
+      firstCurrent = false;
+      resolveFirst(transcriptPage('turn-0'));
+      await expect(first).rejects.toThrow('Selection changed');
+      expect(store.getSnapshot().selected).toMatchObject({
+        ordinal: 1,
+        status,
+      });
+      expect(store.getSnapshot().error).toBeUndefined();
+      if (status === 'loading') {
+        resolveSecond(transcriptPage('turn-1'));
+        await second;
+      }
+      expect(store.getSnapshot().selected).toMatchObject({
+        ordinal: 1,
+        status: 'ready',
+      });
+    },
+  );
+
   it('drops an older locate result after a later selection wins', async () => {
     const store = createDaemonTurnNavigationStore();
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();

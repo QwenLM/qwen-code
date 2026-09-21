@@ -626,5 +626,6 @@ it('returns cancelled when scrolling supersedes an in-flight search navigation',
   settle();
   expect(await navigation).toBe('cancelled');
   expect(mode()).toBe('live');
+  expect(store.getSnapshot().selected?.status).not.toBe('loading');
   expect(container!.querySelector('[role="alert"]')).toBeNull();
 });
