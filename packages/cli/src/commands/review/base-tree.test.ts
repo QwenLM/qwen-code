@@ -327,18 +327,20 @@ describe('runBaseTree', () => {
     }
   };
 
-  /**
-   * Run `fn` with `dir` as HOME — the way a throwaway GLOBAL git config
-   * reaches the spawns under test: `GIT_CONFIG_GLOBAL` would not survive
-   * `sanitizedGitEnv`, by design.
-   */
+  /** Run `fn` with `dir` as both HOME and git's explicit GLOBAL config. */
   const withHome = <T>(dir: string, fn: () => T): T => {
-    const saved = process.env['HOME'];
+    const savedHome = process.env['HOME'];
+    const savedGlobalConfig = process.env['GIT_CONFIG_GLOBAL'];
     process.env['HOME'] = dir;
+    process.env['GIT_CONFIG_GLOBAL'] = join(dir, '.gitconfig');
     try {
       return fn();
     } finally {
-      process.env['HOME'] = saved;
+      if (savedHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = savedHome;
+      if (savedGlobalConfig === undefined)
+        delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = savedGlobalConfig;
     }
   };
 
