@@ -331,7 +331,10 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'realtime_message'
-    | 'turn_result';
+    | 'turn_result'
+    | 'managed_session_header_v1'
+    | 'managed_session_event_v1'
+    | 'managed_session_commit_v1';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */

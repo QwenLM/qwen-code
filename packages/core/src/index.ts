@@ -150,6 +150,7 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
+export * from './managed-runtime/managed-session-records.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {
@@ -502,7 +503,10 @@ export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export * from './agents/workflow-checkpoint.js';
-export { WorkflowJournalUnavailableError } from './agents/runtime/workflow-runner.js';
+export {
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
+} from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
