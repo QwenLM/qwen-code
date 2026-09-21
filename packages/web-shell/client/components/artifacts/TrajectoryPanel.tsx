@@ -59,9 +59,26 @@ type VisualRow =
   | { kind: 'turn'; key: string; turnKey: string; turn: TrajectoryTurn }
   | { kind: 'row'; key: string; row: TrajectoryRow };
 
-/** Stable across re-projection: turn numbers shift when an older page lands. */
+/**
+ * Identity for collapse state, which must survive a re-projection: turn
+ * numbers shift as soon as an older page lands.
+ *
+ * The anchor is the turn's *last* row. An older page only ever adds rows to
+ * the front of the window, so every turn keeps its last row — including the
+ * one the window started in the middle of, whose first row changes and whose
+ * `userRowKey` appears out of nowhere once its prompt is finally loaded. Both
+ * of those made the reader's collapsed turn spring back open.
+ *
+ * A refresh rebuilds the window from the newest page and is not covered: the
+ * in-progress turn can gain rows there. Turns already finished keep their last
+ * row, so only that one can reopen.
+ */
 function turnKeyOf(turn: TrajectoryTurn): string {
-  return turn.userRowKey ?? turn.rowKeys[0] ?? `ordinal:${turn.index}`;
+  return (
+    turn.rowKeys[turn.rowKeys.length - 1] ??
+    turn.userRowKey ??
+    `ordinal:${turn.index}`
+  );
 }
 
 function compactTokens(value: number): string {
@@ -513,16 +530,12 @@ export function TrajectoryPanel({
             </div>
           )
         ) : (
-          <div
-            ref={scrollRef}
-            className={styles.scroll}
-            role="grid"
-            tabIndex={0}
-            aria-label={t('trajectory.title')}
-            aria-rowcount={visualRows.length}
-            onKeyDown={handleKeyDown}
-            data-testid="trajectory-rows"
-          >
+          <>
+            {/* Outside the scrolled box on purpose. Inside it, its height
+                would offset every virtual row from the coordinates the
+                virtualizer computes, and the bar disappearing when the last
+                page lands would shift the content under the reader by its own
+                height on top of the prepend correction. */}
             {(hasOlder || loadingOlder || atCapacity) && (
               <div className={styles.olderBar}>
                 {atCapacity ? (
@@ -534,7 +547,7 @@ export function TrajectoryPanel({
                     type="button"
                     className={styles.olderButton}
                     onClick={loadOlder}
-                    disabled={loadingOlder}
+                    disabled={loadingOlder || status === 'loading'}
                     data-testid="trajectory-load-older"
                   >
                     {loadingOlder
@@ -545,44 +558,55 @@ export function TrajectoryPanel({
               </div>
             )}
             <div
-              className={styles.virtualBody}
-              style={{ height: `${virtualizer.getTotalSize()}px` }}
+              ref={scrollRef}
+              className={styles.scroll}
+              role="grid"
+              tabIndex={0}
+              aria-label={t('trajectory.title')}
+              aria-rowcount={visualRows.length}
+              onKeyDown={handleKeyDown}
+              data-testid="trajectory-rows"
             >
-              {virtualizer.getVirtualItems().map((item) => {
-                const entry = visualRows[item.index]!;
-                return (
-                  <div
-                    key={item.key}
-                    className={styles.virtualRow}
-                    style={{
-                      height: `${ROW_HEIGHT}px`,
-                      transform: `translateY(${item.start}px)`,
-                    }}
-                    role="row"
-                    aria-rowindex={item.index + 1}
-                  >
-                    {entry.kind === 'turn' ? (
-                      <TurnHeaderRow
-                        turn={entry.turn}
-                        collapsed={collapsed.has(entry.turnKey)}
-                        selected={entry.key === selectedKey}
-                        onToggle={() => {
-                          setSelectedKey(entry.key);
-                          toggleTurn(entry.turnKey);
-                        }}
-                      />
-                    ) : (
-                      <RecordRow
-                        row={entry.row}
-                        selected={entry.key === selectedKey}
-                        onSelect={() => setSelectedKey(entry.key)}
-                      />
-                    )}
-                  </div>
-                );
-              })}
+              <div
+                className={styles.virtualBody}
+                style={{ height: `${virtualizer.getTotalSize()}px` }}
+              >
+                {virtualizer.getVirtualItems().map((item) => {
+                  const entry = visualRows[item.index]!;
+                  return (
+                    <div
+                      key={item.key}
+                      className={styles.virtualRow}
+                      style={{
+                        height: `${ROW_HEIGHT}px`,
+                        transform: `translateY(${item.start}px)`,
+                      }}
+                      role="row"
+                      aria-rowindex={item.index + 1}
+                    >
+                      {entry.kind === 'turn' ? (
+                        <TurnHeaderRow
+                          turn={entry.turn}
+                          collapsed={collapsed.has(entry.turnKey)}
+                          selected={entry.key === selectedKey}
+                          onToggle={() => {
+                            setSelectedKey(entry.key);
+                            toggleTurn(entry.turnKey);
+                          }}
+                        />
+                      ) : (
+                        <RecordRow
+                          row={entry.row}
+                          selected={entry.key === selectedKey}
+                          onSelect={() => setSelectedKey(entry.key)}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          </>
         )}
       </div>
     </div>

@@ -241,6 +241,39 @@ describe('useTrajectoryWindow', () => {
     expect(view.latest().loadingOlder).toBe(false);
   });
 
+  it('refuses to page while a refresh is still in flight', async () => {
+    const pending = deferred<TrajectoryPageResult>();
+    let served = 0;
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) => {
+      if (opts.cursor) return page([userText('older', 'rec-0')]);
+      served += 1;
+      return served === 1
+        ? page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          })
+        : pending.promise;
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+
+    await act(async () => {
+      view.latest().refresh();
+    });
+    act(() => {
+      view.latest().loadOlder();
+    });
+
+    // Paging bumps the generation, so letting it through here would throw
+    // away the refresh reply and leave the reader with no sign of it.
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      pending.resolve(page([userText('refreshed', 'rec-2')]));
+    });
+    const rows = view.latest().trajectory!.rows;
+    expect(rows[0]!.kind === 'user' && rows[0]!.block.text).toBe('refreshed');
+  });
+
   it('rebuilds the window from the newest page on refresh', async () => {
     let body = 'first';
     const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>

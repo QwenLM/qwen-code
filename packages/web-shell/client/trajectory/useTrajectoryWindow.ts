@@ -138,11 +138,13 @@ export function useTrajectoryWindow(
   // is dropped instead of writing a window its caller no longer owns.
   const generationRef = useRef(0);
   const olderInFlightRef = useRef(false);
+  const newestInFlightRef = useRef(false);
 
   const loadNewest = useCallback(() => {
     if (!loadPage) return;
     const generation = ++generationRef.current;
     olderInFlightRef.current = false;
+    newestInFlightRef.current = true;
     setState((previous) => ({
       ...previous,
       status: 'loading',
@@ -152,6 +154,7 @@ export function useTrajectoryWindow(
     loadPage({ limit: pageSize }).then(
       (page) => {
         if (generationRef.current !== generation) return;
+        newestInFlightRef.current = false;
         const failure = pageFailure(page);
         if (failure !== undefined) {
           // Keep whatever is already on screen: a failed refresh should not
@@ -176,6 +179,7 @@ export function useTrajectoryWindow(
       },
       (error: unknown) => {
         if (generationRef.current !== generation) return;
+        newestInFlightRef.current = false;
         setState((previous) => ({
           ...previous,
           status: 'error',
@@ -187,7 +191,12 @@ export function useTrajectoryWindow(
   }, [loadPage, pageSize]);
 
   const loadOlder = useCallback(() => {
-    if (!loadPage || olderInFlightRef.current) return;
+    // Refusing while the newest page is still in flight is the point, not a
+    // nicety: paging bumps the generation, which would discard that reply and
+    // silently drop a refresh the reader had asked for.
+    if (!loadPage || olderInFlightRef.current || newestInFlightRef.current) {
+      return;
+    }
     const current = stateRef.current;
     const cursor = current.olderCursor;
     if (!current.hasOlder || cursor === undefined) return;
@@ -238,6 +247,7 @@ export function useTrajectoryWindow(
     if (!loadPage) {
       generationRef.current += 1;
       olderInFlightRef.current = false;
+      newestInFlightRef.current = false;
       setState(EMPTY_STATE);
       return;
     }
@@ -245,6 +255,7 @@ export function useTrajectoryWindow(
     return () => {
       generationRef.current += 1;
       olderInFlightRef.current = false;
+      newestInFlightRef.current = false;
     };
   }, [loadPage, loadNewest]);
 

@@ -573,6 +573,55 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('shell_output');
   });
 
+  it('keeps the load-older control out of the scrolled rows', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page(REAL_EVENTS, { hasMore: true, nextCursor: 'older-1' }),
+    );
+    const container = await render(loadPage);
+    const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+    const older = container.querySelector(
+      '[data-testid="trajectory-load-older"]',
+    ) as HTMLButtonElement;
+
+    // Inside the scrolled box its height would offset every virtual row from
+    // the coordinates the virtualizer hands out, and the bar vanishing with
+    // the last page would move the rows again on top of the prepend
+    // correction.
+    expect(older).not.toBeNull();
+    expect(scroll.contains(older)).toBe(false);
+    expect(scroll.children).toHaveLength(1);
+  });
+
+  it('keeps a collapsed turn closed when the page it started in arrives', async () => {
+    // The window opens mid-turn, so the first turn is partial: its first row
+    // and its `userRowKey` both change once the prompt is finally loaded.
+    const head = REAL_EVENTS.slice(4);
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page(REAL_EVENTS.slice(0, 4))
+        : page(head, { hasMore: true, nextCursor: 'older-1' }),
+    );
+    const container = await render(loadPage);
+    const turn = () =>
+      container.querySelector(
+        '[data-testid="trajectory-turn"]',
+      ) as HTMLButtonElement;
+    await act(async () => turn().click());
+    expect(turn().getAttribute('aria-expanded')).toBe('false');
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+
+    expect(turn().getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('numbers every rendered row for assistive technology', async () => {
     const container = await render(async () => page(REAL_EVENTS));
     const grid = container.querySelector('[role="grid"]') as HTMLElement;
