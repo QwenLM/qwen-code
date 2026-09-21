@@ -44,6 +44,14 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     'Another Web Shell tab is the microphone and speaker for Live Voice.',
   'live.browser.headphonesHint':
     'Headphones give the best result: they keep the reply out of the microphone.',
+  'live.browser.startScreenShare': 'Share screen',
+  'live.browser.stopScreenShare': 'Stop sharing screen',
+  'live.browser.sharing': 'Sharing your screen. Qwen looks only when asked.',
+  'live.browser.sharingNamed': (v) =>
+    `Sharing ${v?.target ?? ''}. Qwen looks only when asked.`,
+  'live.browser.screenRequested':
+    'Qwen asked to see your screen. Share one to let it look.',
+  'live.browser.lookedAtScreen': 'Qwen looked at your screen.',
   'live.browser.closed.occupied':
     'Another Live Voice endpoint is already connected.',
   'live.browser.closed.supersededNative':
@@ -167,6 +175,13 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
     '另一个 Web Shell 标签页正作为实时语音的麦克风和扬声器。',
   'live.browser.headphonesHint':
     '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
+  'live.browser.startScreenShare': '共享屏幕',
+  'live.browser.stopScreenShare': '停止共享屏幕',
+  'live.browser.sharing': '正在共享屏幕，Qwen 只在需要时查看。',
+  'live.browser.sharingNamed': (v) =>
+    `正在共享${v?.target ?? ''}，Qwen 只在需要时查看。`,
+  'live.browser.screenRequested': 'Qwen 想看你的屏幕，共享后它才能查看。',
+  'live.browser.lookedAtScreen': 'Qwen 查看了你的屏幕。',
   'live.browser.closed.occupied': '已有其他实时语音端连接。',
   'live.browser.closed.supersededNative':
     'Qwen Live Host 已从此标签页接管实时语音。',
