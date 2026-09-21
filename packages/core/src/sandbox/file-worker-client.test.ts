@@ -77,6 +77,15 @@ describe('sandbox file worker client', () => {
       writeSandboxFile(policy, request, new AbortController().signal),
     ).resolves.toBeUndefined();
   });
+  it.each([
+    ['invalid JSON', 'not json'],
+    ['negative reply', '{"ok":false,"error":"partial write"}'],
+  ])('rejects a zero exit with %s', async (_name, reply) => {
+    result({}, reply);
+    await expect(
+      writeSandboxFile(policy, request, new AbortController().signal),
+    ).rejects.toThrow();
+  });
   it('reports a confirmed nonzero exit before parsing an invalid reply', async () => {
     result(
       {
