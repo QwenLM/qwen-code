@@ -46,7 +46,11 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 | 改动后，被 `skills.disabled` 关掉                                | 7,192  | 1,798  |
 | 改动后，内联（完全没有 skill 通路）                              | 10,412 | 2,603  |
 
-即常见情形下每次请求省下 **2,344 字符 ≈ 586 token**，代价是 192 字符的指针。新 skill 会在 `<available_skills>` 清单里增加一条，而该清单是由会话启动前奏（session-start prelude）以 **user 角色消息**携带的，不在系统提示词里。这一条渲染后是 **371 字符、≈93 token**——由 `renderAvailableSkillsBlock` 实测得到，不是 frontmatter 里 `description` 那 247 字符，因为渲染还会加上 `<skill>` / `<name>` / `<description>` / `<location>` 外壳、一个 ` (bundled)` 后缀，并把 "the Agent tool's" 里的撇号转义成 `&apos;`。因此净收益是**每次请求 ≈493 token**，且在每个会话的每一轮都成立，包括那些从不委派的轮次。
+即常见情形下每次请求省下 **2,344 字符 ≈ 586 token**，代价是 192 字符的指针。新 skill 会在 `<available_skills>` 清单里增加一条，而该清单是由会话启动前奏（session-start prelude）以 **user 角色消息**携带的，不在系统提示词里。这一条渲染后是 **371 字符、≈93 token**——由 `renderAvailableSkillsBlock` 实测得到，不是 frontmatter 里 `description` 那 247 字符，因为渲染还会加上 `<skill>` / `<name>` / `<description>` / `<location>` 外壳、一个 ` (bundled)` 后缀，并把 "the Agent tool's" 里的撇号转义成 `&apos;`。因此**对从不加载该 skill 的会话**，净收益是**每次请求 ≈493 token**——这类会话占多数，也正是本次改动的目标。
+
+**而加载过它的会话反而更贵，这一点我上一版藏起来了。** Skill 工具把整篇正文作为 `llmContent` 返回，于是那约 3,270 字符进入对话、并在之后每一轮被重新发送；重复加载只回一句「is already loaded in context」；虽然 `skill` 在 `COMPACTABLE_TOOLS` 里，但要清掉它需要至少一小时的空闲间隔、或上下文超过 500,000 字符。加载之后每轮的账：−2,344（描述）+ 371（清单项）+ 约 3,270（正文留在历史里）= **+1,297 字符 ≈ 比改动前每轮贵 324 token**。
+
+所以这是一个**押注于会话构成**的取舍，不是白赚：交代类散文过去由**每一个**会话承担，现在只由**会派活的**会话承担——一次，然后在该会话余下的轮次里持续。在「多数会话从不委派」的部署里这个注押对了；在「几乎每个会话都要交代 agent」的部署里就押错了。它所效仿的 `workflow-authoring` 参考适用同一笔账，只是那边从未写出来。
 
 桥接那一形态比纯指针多 118 字符：一句话告诉模型，先用 `tool_search` 查看 Skill 工具的 schema，再用 `tool_call` 调用它。（这句话还写作 "reveal it with ToolSearch first" 时只占 77 字符；main 后来把它改成同时点名桥接的两半，因为 `tool_search` 只能查看 schema、无法调用，而这份参考复用同一份共享措辞。）
 
@@ -74,8 +78,8 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 ## 5. 影响面
 
 - **每次请求**携带的 Agent 声明都变短了。嵌套的 agent 启动与 fork 继承同一份描述。
-- **#12142 的预算测试**按新测量值下调，每条都取"实测长度 + ~350"，与该 PR 自己那次收紧的口径一致（默认形态 10,200 → 7,750；无 subagent 9,900 → 7,450；所有可选块打开 11,200 → 8,750；模型可见总面 14,200 → 11,750），并新增两条：内联形态的上限，以及"指针 vs 内联"的下限差值，防止这个差距被悄悄抹平。
-- **`agent.test.ts`** 有五处断言锚在搬走的文本上。其中三处本来会"碰巧"继续通过，因为该文件的 stub `Config` 没有 skill manager、从而拿到内联形态——它们已改锚到描述在任何形态下都保留的事实（fork 上不要设 `model`、fork 默认继承完整对话、传一个简短的 `name`）。
+- **#12142 的预算测试**按新测量值下调，四条描述行各取「实测长度 + 364～380」、总面那行 + 720（#12142 自己的余量是 430～490，所以「与该 PR 同口径」这句话也是错的），并新增两条：内联形态的上限，以及"指针 vs 内联"的下限差值，防止这个差距被悄悄抹平。
+- **`agent.test.ts`** 有**六处**断言锚在搬走的文本上，而且**六处全都**会继续通过——因为该文件的 stub `Config` 没有 `getSkillManager`，路由落到 `inline`，描述里嵌入了整篇 `SKILL.md`，每一个搬走的锚点都还在里面。它们已改锚到描述在任何形态下都保留的事实（fork 上不要设 `model`、fork 默认继承完整对话、传一个简短的 `name`，以及「需要大量父会话上下文时才选 fork」）。
 - **skills 清单**多出一条内置项，会出现在 `/skills` 中，并与其他 skill 一样受 `skills.disabled` / `skills.enabled` 控制。它是通过会话启动前奏里的 `<available_skills>` 块到达模型的——一条 user 角色消息，不是系统提示词——代价就是 §3 里算过的渲染后 371 字符。
 - **打包**无需额外改动：`scripts/copy_bundle_assets.js` 与 `scripts/copy_files.js` 都递归拷贝 `skills/bundled/**`，而 `bundled-skills.integration.test.ts` 会解析每一份随包发布的 `SKILL.md`，新目录因此同时被两者覆盖。
 - **没有任何提示词、快照或 ACP 面**引用被搬走的文本：全仓库只有 `agent.ts` 和 `agent.test.ts` 提到它。
@@ -84,7 +88,7 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 
 **从不加载该 skill 的模型会写出更差的提示词。** 这是本次接受的权衡，其边界由"留下来的常驻内容"决定：启动规则、安全规则，以及决定调用形状的 fork 事实都还在描述里，所以跳过这份参考的会话仍然能正确调用工具，只是对 agent 的交代不够好。skill 自己的 description 会说明它装了什么，这正是模型判断"本轮是否需要它"的依据。
 
-**召回率回退不会被单测发现。** 模型是否真的会在写委派提示词前加载这份参考，是评测问题而不是断言问题，它属于 #12028 已经承担的"路由未命中率"测量。
+**召回率回退不会被单测发现。** 模型是否真的会在写委派提示词前加载这份参考，是评测问题而不是断言问题，而且没有任何仪器在量它：闸门跟踪在 #12333，而那一单**没有归属**——伞 issue #12028 并不承担它。
 
 **常驻的"把 agent 的输出当证据看"这条仍未加限定。** 优先级规则在这份参考里，所以从不加载它的会话读到的仍然是那条 bullet，没有任何一句说明"定义本身就让结果具有权威性的 subagent"是另一种情形。要在描述里加这个限定，就得让每个会话的每一轮都付出只有派发轮次才需要的成本——而这正是本次改动要撤销的权衡——所以那一半留给 #12142 的线程。
 
@@ -92,5 +96,5 @@ Workflow 工具此前是同样的形状，并在 [#11013](https://github.com/Qwe
 
 - `packages/core/src/skills/bundled/agent-delegation/SKILL.test.ts` —— 双向分界表、指针措辞、优先级规则、内联形态、被关掉（withheld）形态（在 Skill 工具已注册与不存在两种情况下都断言，因为用户的退出选择优先于"没有通路"），以及"不要编造结果"那句的去重。
 - `packages/core/src/tools/agent/agent-description-budget.test.ts` —— 下调后的预算、内联上限、指针与内联的差值下限。
-- `packages/core/src/skills/workflow-authoring-skill.test.ts` 与 `workflow-description.test.ts` —— 未改动，它们正是"抽取没有改变 #11013 行为"的钉子。
+- `packages/core/src/skills/workflow-authoring-skill.test.ts` 与 `packages/core/src/tools/workflow/workflow-description.test.ts` —— 未改动，它们正是"抽取没有改变 #11013 行为"的钉子。
 - `packages/core/src/skills/bundled-skills.integration.test.ts` —— 新 `SKILL.md` 能被解析，且 `name` 与目录名一致。
