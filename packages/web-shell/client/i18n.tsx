@@ -2987,6 +2987,8 @@ const EN: Messages = {
     'Earlier records are beyond the window this panel keeps.',
   'trajectory.loadFailed': (v) =>
     `Could not read the transcript: ${v?.message ?? ''}`,
+  'trajectory.partial':
+    'Part of this transcript could not be read, so some records are missing.',
   'trajectory.collapseAll': 'Collapse all',
   'trajectory.expandAll': 'Expand all',
   'trajectory.totals': (v) =>
@@ -6749,6 +6751,7 @@ const ZH: Messages = {
   'trajectory.loadOlder': '加载更早的记录',
   'trajectory.atCapacity': '更早的记录超出了本面板保留的范围。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
+  'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.collapseAll': '全部折叠',
   'trajectory.expandAll': '全部展开',
   'trajectory.totals': (v) =>

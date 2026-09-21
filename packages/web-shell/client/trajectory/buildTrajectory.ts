@@ -122,11 +122,26 @@ export function buildTrajectory(
     return created;
   };
 
-  const uniqueKey = (candidate: string): string => {
-    if (!rowIndexByKey.has(candidate)) return candidate;
+  /**
+   * Keys that describe where a row sits rather than what it is. The window is
+   * re-folded from scratch whenever an older page lands, so these are renamed
+   * by that page and cannot anchor anything that must outlive it.
+   */
+  const positionalKeys = new Set<string>();
+
+  const uniqueKey = (candidate: string, derived = true): string => {
+    if (!rowIndexByKey.has(candidate)) {
+      if (!derived) positionalKeys.add(candidate);
+      return candidate;
+    }
     for (let n = 2; ; n += 1) {
       const suffixed = `${candidate}#${n}`;
-      if (!rowIndexByKey.has(suffixed)) return suffixed;
+      if (!rowIndexByKey.has(suffixed)) {
+        // The suffix counts collisions in window order, so a duplicate id in
+        // the prepended page renumbers every later one.
+        positionalKeys.add(suffixed);
+        return suffixed;
+      }
     }
   };
 
@@ -134,14 +149,18 @@ export function buildTrajectory(
     const index = rows.length;
     rows.push(row);
     rowIndexByKey.set(row.key, index);
-    (turn ?? openTurn(true)).rowKeys.push(row.key);
+    const active = turn ?? openTurn(true);
+    active.rowKeys.push(row.key);
+    if (!positionalKeys.has(row.key)) active.anchorKey = row.key;
     return index;
   };
 
-  const blockKey = (prefix: string, block: DaemonTranscriptBlock): string =>
-    uniqueKey(
-      `${prefix}:${block.segmentId ?? block.sourceRecordIds?.[0] ?? block.id}`,
-    );
+  const blockKey = (prefix: string, block: DaemonTranscriptBlock): string => {
+    // `block.id` is the reducer's ordinal, renumbered on every re-fold, so it
+    // names the row well enough to render but cannot anchor collapse state.
+    const derived = block.segmentId ?? block.sourceRecordIds?.[0];
+    return uniqueKey(`${prefix}:${derived ?? block.id}`, derived !== undefined);
+  };
 
   const summaryFor = (
     parentCallId: string,
@@ -168,7 +187,10 @@ export function buildTrajectory(
     };
     const row: TrajectoryRequestRow = {
       kind: 'request',
-      key: uniqueKey(`req:${recordId ?? timing.responseId ?? rows.length}`),
+      key: uniqueKey(
+        `req:${recordId ?? timing.responseId ?? rows.length}`,
+        recordId !== undefined || timing.responseId !== undefined,
+      ),
       turnIndex: active.index,
       depth: subagentId !== undefined ? 1 : 0,
       status: timing.status ?? 'unknown',

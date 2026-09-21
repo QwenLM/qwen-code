@@ -352,6 +352,99 @@ describe('useTrajectoryWindow', () => {
     );
   });
 
+  it("drops the previous loader's pages when the loader changes", async () => {
+    const first: TrajectoryPageLoader = vi.fn(async () =>
+      page([userText('first session', 'rec-1')]),
+    );
+    const failing = deferred<TrajectoryPageResult>();
+    const second: TrajectoryPageLoader = vi.fn(async () => failing.promise);
+    const view = render(first);
+    await act(async () => {});
+    expect(view.latest().trajectory!.rows).toHaveLength(1);
+
+    view.rerender(second);
+    await act(async () => {
+      failing.reject(new Error('second session is unreadable'));
+    });
+
+    // A different loader is a different session. Holding the old rows is what
+    // `refresh` does, and doing it here would leave one session's trajectory
+    // on screen underneath another session's error.
+    expect(view.latest().trajectory).toBeUndefined();
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'second session is unreadable',
+    });
+  });
+
+  it('retries the older page at its cursor instead of rebuilding', async () => {
+    let olderCalls = 0;
+    const loadPage: TrajectoryPageLoader = vi.fn(async ({ cursor }) => {
+      if (cursor === undefined) {
+        return page([userText('newest', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'older-1',
+        });
+      }
+      olderCalls += 1;
+      return olderCalls === 1
+        ? page([], { replayError: 'flaky' })
+        : page([userText('older', 'rec-1')]);
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+    await act(async () => view.latest().loadOlder());
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'flaky',
+    });
+
+    await act(async () => view.latest().retry());
+
+    // Rebuilding from the newest page would discard every older page already
+    // paged back through, which is the opposite of what the reader asked for.
+    expect(loadPage).toHaveBeenCalledTimes(3);
+    expect(loadPage.mock.calls[2]![0].cursor).toBe('older-1');
+    expect(view.latest().pageCount).toBe(2);
+    expect(view.latest().error).toBeUndefined();
+  });
+
+  it('retries the newest page when that is what failed', async () => {
+    let calls = 0;
+    const loadPage: TrajectoryPageLoader = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('down');
+      return page([userText('recovered', 'rec-1')]);
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'down',
+    });
+
+    await act(async () => view.latest().retry());
+
+    expect(view.latest().trajectory!.rows).toHaveLength(1);
+    expect(loadPage.mock.calls[1]![0].cursor).toBeUndefined();
+  });
+
+  it('reports no older history when the page gave no cursor for it', async () => {
+    const loadPage: TrajectoryPageLoader = vi.fn(async () =>
+      page([userText('only', 'rec-1')], { hasMore: true }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    // `loadOlder` needs a cursor, so history reported without one is history
+    // this view cannot reach — saying otherwise offers an inert control and,
+    // at the window's ceiling, a notice about records it never had.
+    expect(view.latest().hasOlder).toBe(false);
+    expect(view.latest().atCapacity).toBe(false);
+    await act(async () => view.latest().loadOlder());
+    expect(loadPage).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the held window when a page cannot be read', async () => {
     let fail = false;
     const loadPage = vi.fn(async () =>

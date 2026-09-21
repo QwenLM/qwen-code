@@ -62,13 +62,23 @@ export interface TrajectoryWindow {
    * apart from any other change that lengthens the list.
    */
   pageCount: number;
-  /** More history exists and the window has room for it. */
+  /**
+   * Older history exists, is reachable — the page that reported it handed back
+   * a cursor — and the window has room for it.
+   */
   hasOlder: boolean;
   loadingOlder: boolean;
   /** True when older history exists but the window is full. */
   atCapacity: boolean;
   loadOlder: () => void;
   refresh: () => void;
+  /**
+   * Re-run whichever read failed. Not the same as `refresh`: a failed older
+   * page has to be re-fetched at its own cursor, because rebuilding from the
+   * newest page would throw away every older page the reader already paged
+   * back through.
+   */
+  retry: () => void;
 }
 
 interface WindowState {
@@ -78,6 +88,8 @@ interface WindowState {
   hasOlder: boolean;
   status: TrajectoryWindow['status'];
   error?: TrajectoryWindowFailure;
+  /** Which read produced `error`, so a retry can repeat that one. */
+  errorFrom?: 'newest' | 'older';
   loadingOlder: boolean;
 }
 
@@ -163,6 +175,7 @@ export function useTrajectoryWindow(
             ...previous,
             status: 'error',
             error: failure,
+            errorFrom: 'newest',
             loadingOlder: false,
           }));
           return;
@@ -172,7 +185,10 @@ export function useTrajectoryWindow(
           ...(page.nextCursor !== undefined
             ? { olderCursor: page.nextCursor }
             : {}),
-          hasOlder: page.hasMore,
+          // A cursor is what `loadOlder` actually needs, so a page claiming
+          // more history without one has none this view can reach. Reporting
+          // it as older history would offer a button that does nothing.
+          hasOlder: page.hasMore && page.nextCursor !== undefined,
           status: 'ready',
           loadingOlder: false,
         });
@@ -184,6 +200,7 @@ export function useTrajectoryWindow(
           ...previous,
           status: 'error',
           error: { kind: 'unreadable', message: errorMessage(error) },
+          errorFrom: 'newest',
           loadingOlder: false,
         }));
       },
@@ -214,6 +231,7 @@ export function useTrajectoryWindow(
             ...previous,
             status: 'error',
             error: failure,
+            errorFrom: 'older',
             loadingOlder: false,
           }));
           return;
@@ -224,9 +242,10 @@ export function useTrajectoryWindow(
           ...(page.nextCursor !== undefined
             ? { olderCursor: page.nextCursor }
             : { olderCursor: undefined }),
-          hasOlder: page.hasMore,
+          hasOlder: page.hasMore && page.nextCursor !== undefined,
           status: 'ready',
           error: undefined,
+          errorFrom: undefined,
           loadingOlder: false,
         }));
       },
@@ -237,11 +256,22 @@ export function useTrajectoryWindow(
           ...previous,
           status: 'error',
           error: { kind: 'unreadable', message: errorMessage(error) },
+          errorFrom: 'older',
           loadingOlder: false,
         }));
       },
     );
   }, [loadPage, maxPages, pageSize]);
+
+  // The cursor and the page count both survive a failed read, so repeating it
+  // is a matter of calling the same thing again.
+  const retry = useCallback(() => {
+    if (stateRef.current.errorFrom === 'older') {
+      loadOlder();
+      return;
+    }
+    loadNewest();
+  }, [loadNewest, loadOlder]);
 
   useEffect(() => {
     if (!loadPage) {
@@ -251,6 +281,10 @@ export function useTrajectoryWindow(
       setState(EMPTY_STATE);
       return;
     }
+    // A different loader is a different session, so the pages on screen are
+    // not this loader's to keep. Only the effect resets; `refresh` reloads the
+    // same session and deliberately holds the window until the reply lands.
+    setState(EMPTY_STATE);
     loadNewest();
     return () => {
       generationRef.current += 1;
@@ -279,5 +313,6 @@ export function useTrajectoryWindow(
     atCapacity,
     loadOlder,
     refresh: loadNewest,
+    retry,
   };
 }

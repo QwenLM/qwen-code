@@ -396,6 +396,13 @@ interface ArtifactPanelProps {
   onOpenTerminal?: () => void;
   /** Open this session's trajectory tab (shown as an empty-state action). */
   onOpenTrajectory?: () => void;
+  /**
+   * Id of the tab `onOpenTrajectory` opens. Tabs can belong to other sessions
+   * — split view opens one per pane, and a restored tab keeps the session it
+   * was opened for — so the entry has to look for this session's tab rather
+   * than for any trajectory tab at all.
+   */
+  trajectoryTabId?: string;
   onOpenWebPreview?: () => void;
   onWebPreviewChange?: (tabId: string, state: WebPreviewState) => void;
   items?: readonly WebShellRightPanelItem[];
@@ -470,6 +477,7 @@ export function ArtifactPanel({
   onOpenLatestReview,
   onOpenTerminal,
   onOpenTrajectory,
+  trajectoryTabId,
   onOpenWebPreview,
   onWebPreviewChange,
   items = DEFAULT_RIGHT_PANEL_ITEMS,
@@ -563,7 +571,7 @@ export function ArtifactPanel({
   const showTrajectoryMenuItem =
     items.includes('trajectory') &&
     Boolean(onOpenTrajectory) &&
-    !tabs.some((tab) => tab.kind === 'trajectory');
+    !tabs.some((tab) => tab.id === trajectoryTabId);
   const showAddMenu =
     Boolean(activeTab) &&
     (showReviewMenuItem ||

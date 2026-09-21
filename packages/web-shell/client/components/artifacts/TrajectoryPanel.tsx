@@ -7,6 +7,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -63,26 +64,32 @@ type VisualRow =
  * Identity for collapse state, which must survive a re-projection: turn
  * numbers shift as soon as an older page lands.
  *
- * The anchor is the turn's *last* row. An older page only ever adds rows to
- * the front of the window, so every turn keeps its last row — including the
- * one the window started in the middle of, whose first row changes and whose
- * `userRowKey` appears out of nowhere once its prompt is finally loaded. Both
- * of those made the reader's collapsed turn spring back open.
+ * The anchor is the turn's *last* row whose key names the record it came from.
+ * An older page only ever adds rows to the front of the window, so every turn
+ * keeps its last row — including the one the window started in the middle of,
+ * whose first row changes and whose `userRowKey` appears out of nowhere once
+ * its prompt is finally loaded. Both of those made the reader's collapsed turn
+ * spring back open.
+ *
+ * `anchorKey` skips the rows whose key is positional — the reducer's block
+ * ordinal, a timing frame with neither record nor response id, a de-duplication
+ * suffix — because the prepended page renames exactly those. The remaining
+ * fallbacks are for a turn that has nothing else, and reopen with it.
  *
  * A refresh rebuilds the window from the newest page and is not covered: the
  * in-progress turn can gain rows there. Turns already finished keep their last
  * row, so only that one can reopen.
  */
 function turnKeyOf(turn: TrajectoryTurn): string {
-  return (
-    turn.rowKeys[turn.rowKeys.length - 1] ??
-    turn.userRowKey ??
-    `ordinal:${turn.index}`
-  );
+  return turn.anchorKey ?? turn.userRowKey ?? `ordinal:${turn.index}`;
 }
 
+/**
+ * Thresholds are the rounded boundary, not the raw one: 999,950 tokens is
+ * `1.0M`, because `999.9k` is what the next unit down rounds away from.
+ */
 function compactTokens(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 999_950) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
   return String(value);
 }
@@ -189,21 +196,22 @@ function labelOf(
       };
     case 'request': {
       const agent = subagentLabel(row);
+      const failed = row.status === 'error';
+      const name =
+        agent !== undefined
+          ? `${agent}${row.model ? ` · ${row.model}` : ''}`
+          : (row.model ?? t('trajectory.request'));
       return {
         badge:
           agent !== undefined
             ? t('trajectory.badge.subagent')
             : `#${row.requestIndex ?? '?'}`,
-        ...(row.status === 'error' ? { badgeTone: styles.toneError } : {}),
-        text:
-          agent !== undefined
-            ? `${agent}${row.model ? ` · ${row.model}` : ''}`
-            : (row.model ??
-              t(
-                row.status === 'error'
-                  ? 'trajectory.requestFailed'
-                  : 'trajectory.request',
-              )),
+        ...(failed ? { badgeTone: styles.toneError } : {}),
+        // Said in words, not only in the badge's colour. A failed request
+        // almost always names its model, so putting the failure *instead of*
+        // the name meant the sentence never rendered and the red `#N` was the
+        // whole signal — which a reader who cannot see it never receives.
+        text: failed ? `${name} · ${t('trajectory.requestFailed')}` : name,
       };
     }
     case 'message':
@@ -302,6 +310,7 @@ export function TrajectoryPanel({
     pageCount,
     loadOlder,
     refresh,
+    retry,
   } = useTrajectoryWindow(loadPage, windowOptions ?? {});
 
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
@@ -312,6 +321,23 @@ export function TrajectoryPanel({
   const previousPagesRef = useRef(0);
   const previousCountRef = useRef(0);
   const settledOnceRef = useRef(false);
+  /** Last offset this panel knows the reader at; see the resize effect. */
+  const scrollTopRef = useRef(0);
+  const gridId = useId();
+  const rowDomId = useCallback(
+    (index: number) => `${gridId}-row-${index}`,
+    [gridId],
+  );
+
+  /**
+   * Set the offset and remember it in the same breath. Every write goes
+   * through here because the scroll event that would otherwise update the ref
+   * arrives a frame later, and a resize can land in between.
+   */
+  const scrollTo = useCallback((element: HTMLElement, top: number) => {
+    element.scrollTop = top;
+    scrollTopRef.current = element.scrollTop;
+  }, []);
 
   const visualRows = useMemo<VisualRow[]>(() => {
     if (!trajectory) return [];
@@ -354,9 +380,39 @@ export function TrajectoryPanel({
     const delta = count - previousCount;
     const element = scrollRef.current;
     if (pageCount > previousPages && delta > 0 && element) {
-      element.scrollTop += delta * ROW_HEIGHT;
+      scrollTo(element, element.scrollTop + delta * ROW_HEIGHT);
     }
-  }, [pageCount, visualRows]);
+  }, [pageCount, scrollTo, visualRows]);
+
+  // Hiding an element resets its scroll offset to zero without a scroll event,
+  // and the right panel's fullscreen toggle does exactly that to the dock on
+  // its way through. The virtualizer goes on rendering rows for the offset it
+  // last saw, so every one of them lands below the viewport and the reader is
+  // left with a blank table under a header still reporting the run's totals.
+  //
+  // Put the offset back when the box regains a size. The reset can land either
+  // side of the resize callback, so restoring once is not enough — the second
+  // attempt on the next frame is what makes it stick.
+  const hasRows = visualRows.length > 0;
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    let frame = 0;
+    const restore = () => {
+      if (element.scrollTop === 0 && scrollTopRef.current > 0) {
+        element.scrollTop = scrollTopRef.current;
+      }
+    };
+    const observer = new ResizeObserver(() => {
+      restore();
+      frame = requestAnimationFrame(restore);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, [hasRows]);
 
   // The tail is what a reader wants first: the newest turn is the one they
   // just watched run.
@@ -365,8 +421,8 @@ export function TrajectoryPanel({
       return;
     settledOnceRef.current = true;
     const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [status, visualRows.length]);
+    if (element) scrollTo(element, element.scrollHeight);
+  }, [scrollTo, status, visualRows.length]);
 
   const toggleTurn = useCallback((turnKey: string) => {
     setCollapsed((previous) => {
@@ -408,6 +464,16 @@ export function TrajectoryPanel({
     [virtualizer, visualRows],
   );
 
+  /**
+   * Pointer selection. The scrolled box is the grid's only tab stop, so a
+   * click has to hand focus back to it: the rows themselves are not focusable,
+   * and leaving focus on the document would strand the arrow keys.
+   */
+  const selectRow = useCallback((key: string) => {
+    setSelectedKey(key);
+    scrollRef.current?.focus({ preventScroll: true });
+  }, []);
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (visualRows.length === 0) return;
@@ -426,10 +492,11 @@ export function TrajectoryPanel({
         moveSelection(visualRows.length - 1);
       } else if (event.key === ' ' || event.key === 'Enter') {
         const row = visualRows[current];
-        if (row?.kind === 'turn') {
-          event.preventDefault();
-          toggleTurn(row.turnKey);
-        }
+        if (row === undefined) return;
+        // Consumed either way once a row is selected: Space would otherwise
+        // page-scroll the box out from under the selection.
+        event.preventDefault();
+        if (row.kind === 'turn') toggleTurn(row.turnKey);
       }
     },
     [moveSelection, selectedIndex, toggleTurn, visualRows],
@@ -502,14 +569,10 @@ export function TrajectoryPanel({
         <div className={styles.error} role="alert">
           <span>
             {error.kind === 'partial'
-              ? t('rightPanel.savedContentUnavailable')
+              ? t('trajectory.partial')
               : t('trajectory.loadFailed', { message: error.message })}
           </span>
-          <button
-            type="button"
-            className={styles.headerButton}
-            onClick={refresh}
-          >
+          <button type="button" className={styles.headerButton} onClick={retry}>
             {t('common.retry')}
           </button>
         </div>
@@ -564,7 +627,13 @@ export function TrajectoryPanel({
               tabIndex={0}
               aria-label={t('trajectory.title')}
               aria-rowcount={visualRows.length}
+              aria-activedescendant={
+                selectedIndex >= 0 ? rowDomId(selectedIndex) : undefined
+              }
               onKeyDown={handleKeyDown}
+              onScroll={(event) => {
+                scrollTopRef.current = event.currentTarget.scrollTop;
+              }}
               data-testid="trajectory-rows"
             >
               <div
@@ -576,6 +645,7 @@ export function TrajectoryPanel({
                   return (
                     <div
                       key={item.key}
+                      id={rowDomId(item.index)}
                       className={styles.virtualRow}
                       style={{
                         height: `${ROW_HEIGHT}px`,
@@ -590,7 +660,7 @@ export function TrajectoryPanel({
                           collapsed={collapsed.has(entry.turnKey)}
                           selected={entry.key === selectedKey}
                           onToggle={() => {
-                            setSelectedKey(entry.key);
+                            selectRow(entry.key);
                             toggleTurn(entry.turnKey);
                           }}
                         />
@@ -598,7 +668,7 @@ export function TrajectoryPanel({
                         <RecordRow
                           row={entry.row}
                           selected={entry.key === selectedKey}
-                          onSelect={() => setSelectedKey(entry.key)}
+                          onSelect={() => selectRow(entry.key)}
                         />
                       )}
                     </div>
@@ -626,12 +696,18 @@ function TurnHeaderRow({
 }) {
   const { t } = useI18n();
   const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
+  // Deliberately not a <button>. The grid keeps a single tab stop and drives
+  // Space and Enter from the selected row, so a focusable header would let DOM
+  // focus and the selection drift apart: Enter would then collapse whichever
+  // turn the pointer last touched rather than the selected one, and Space on a
+  // focused header would toggle twice — once on the grid's keydown, once on
+  // the button's own click.
   return (
-    <button
-      type="button"
+    <div
       className={`${styles.turnHeader} ${selected ? styles.selected : ''}`}
       onClick={onToggle}
       aria-expanded={!collapsed}
+      aria-selected={selected}
       data-selected={selected ? 'true' : undefined}
       role="gridcell"
       data-testid="trajectory-turn"
@@ -649,7 +725,7 @@ function TurnHeaderRow({
           duration: turn.requestMs > 0 ? formatDuration(turn.requestMs) : '—',
         })}
       </span>
-    </button>
+    </div>
   );
 }
 

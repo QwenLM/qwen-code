@@ -5178,6 +5178,39 @@ describe('task activity key', () => {
     );
   });
 
+  it('drops a restored trajectory tab when the host stopped listing it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'trajectory:session-1',
+          tabs: [
+            {
+              id: 'trajectory:session-1',
+              kind: 'trajectory',
+              title: 'Trajectory',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    // The same profile, in a host that no longer opts in. A stored tab must
+    // not be a second way in: it would render the panel and keep fetching
+    // transcript pages for a feature this host has turned off. `terminal` and
+    // `web_preview` gate their restore the same way.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
+    await flush();
+    await flush();
+
+    expect(container.querySelector('button[title="Trajectory"]')).toBeNull();
+    expect(
+      mockWorkspace.client.getSessionTranscriptPage,
+    ).not.toHaveBeenCalled();
+  });
+
   it('opens one trajectory tab from the panel and reuses it', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',

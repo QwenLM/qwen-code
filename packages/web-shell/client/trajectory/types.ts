@@ -132,6 +132,13 @@ export interface TrajectoryTurn {
   index: number;
   /** Absent when the window starts inside the turn. */
   userRowKey?: string;
+  /**
+   * The turn's last row whose key is derived from the record it describes,
+   * rather than from its position in the window. Absent when the turn has no
+   * such row. This is the identity collapse state is keyed on, so it has to
+   * survive an older page landing; a positional key does not.
+   */
+  anchorKey?: string;
   rowKeys: string[];
   requestCount: number;
   /** Top-level tool rows; subagent tools are in the parent's summary. */

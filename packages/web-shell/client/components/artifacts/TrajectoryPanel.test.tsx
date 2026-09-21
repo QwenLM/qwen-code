@@ -253,6 +253,28 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).toContain('Request failed');
   });
 
+  it('says a request failed even when it names its model', async () => {
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        timingFrame(
+          {
+            kind: 'request',
+            durationMs: 400,
+            status: 'error',
+            model: 'qwen3-coder-plus',
+          },
+          'rec-2',
+        ),
+      ]),
+    );
+
+    // Which is the ordinary case: a failed round still reports its model, and
+    // the red badge alone does not reach a reader who cannot see colour.
+    expect(container.textContent).toContain('qwen3-coder-plus');
+    expect(container.textContent).toContain('Request failed');
+  });
+
   it('collapses a turn down to its header and expands it again', async () => {
     const container = await render(async () => page(REAL_EVENTS));
     const before = rowsOf(container).length;
@@ -546,8 +568,209 @@ describe('TrajectoryPanel', () => {
     );
 
     const alert = container.querySelector('[role="alert"]');
-    expect(text(alert)).toContain('Saved panel content is unavailable');
+    // Its own sentence, not the one written for a restored right-panel tab:
+    // what failed here is a transcript read, and saying otherwise tells the
+    // reader their saved panel content is gone when it is not.
+    expect(text(alert)).toContain('Part of this transcript could not be read');
+    expect(text(alert)).not.toContain('Saved panel content');
     expect(container.textContent).not.toContain(': partial');
+  });
+
+  it('keeps the grid the only tab stop, so a click cannot outrank the selection', async () => {
+    const container = await render(async () => page(REAL_EVENTS));
+    const grid = container.querySelector('[role="grid"]') as HTMLElement;
+
+    // A focusable turn header is what let DOM focus and the selection point at
+    // different turns: Enter would collapse whichever header the pointer last
+    // touched, and Space on a focused one would toggle twice — the grid's
+    // keydown, then the button's own click.
+    expect(
+      container.querySelector('button[data-testid="trajectory-turn"]'),
+    ).toBeNull();
+    expect(
+      container.querySelectorAll('[role="grid"] button, [role="grid"] a'),
+    ).toHaveLength(0);
+    expect(grid.getAttribute('tabindex')).toBe('0');
+
+    // Clicking hands focus back, so the arrow keys keep working afterwards.
+    const rows = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid^="trajectory-row-"]'),
+      ) as HTMLElement[];
+    const clicked = rows()[1]!;
+    await act(async () => clicked.click());
+    expect(document.activeElement).toBe(grid);
+    // The row the assistive technology is told about is the row under the
+    // pointer, so focus and the selection cannot name different rows.
+    expect(grid.getAttribute('aria-activedescendant')).toBe(
+      clicked.closest('[role="row"]')!.id,
+    );
+  });
+
+  it('acts on the selected turn rather than on whatever was clicked', async () => {
+    const container = await render(async () => page(REAL_EVENTS));
+    const grid = container.querySelector('[role="grid"]') as HTMLElement;
+    const headers = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="trajectory-turn"]'),
+      ) as HTMLElement[];
+
+    // Click one turn, then move the selection off it. The key has to follow
+    // the selection, which is what the reader can see.
+    await act(async () => headers()[0]!.click());
+    await act(async () => headers()[0]!.click());
+    await act(async () => {
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+    });
+    const before = rowsOf(container).length;
+    await act(async () => {
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: ' ', bubbles: true }),
+      );
+    });
+
+    // The selection is a record row, not the clicked header, so Space collapses
+    // nothing — and above all does not re-collapse the turn behind the pointer.
+    expect(rowsOf(container).length).toBe(before);
+    expect(headers()[0]!.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('puts the reader back where they were when the box is resized', async () => {
+    const callbacks = new Set<ResizeObserverCallback>();
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe() {
+        callbacks.add(this.callback);
+      }
+      unobserve() {}
+      disconnect() {
+        callbacks.delete(this.callback);
+      }
+    } as unknown as typeof ResizeObserver;
+    try {
+      const container = await render(async () => page(REAL_EVENTS));
+      const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+      await act(async () => {
+        scroll.scrollTop = 400;
+        scroll.dispatchEvent(new Event('scroll'));
+      });
+
+      // Hiding the box — which is what the right panel's fullscreen toggle
+      // does on its way through — zeroes the offset without a scroll event,
+      // leaving the virtualizer rendering rows for an offset nobody is at.
+      scroll.scrollTop = 0;
+      await act(async () => {
+        for (const callback of callbacks) {
+          callback([], undefined as unknown as ResizeObserver);
+        }
+      });
+
+      expect(scroll.scrollTop).toBe(400);
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
+
+  it('retries the page that failed instead of rebuilding from the newest', async () => {
+    let olderCalls = 0;
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) => {
+      if (!opts.cursor) {
+        return page([userText('newest', 'rec-1')], {
+          hasMore: true,
+          nextCursor: 'older-1',
+        });
+      }
+      olderCalls += 1;
+      return olderCalls === 1
+        ? page([], { replayError: 'flaky' })
+        : page([userText('older', 'rec-0')], { hasMore: false });
+    });
+    const container = await render(loadPage);
+    const older = () =>
+      container.querySelector(
+        '[data-testid="trajectory-load-older"]',
+      ) as HTMLButtonElement | null;
+
+    await act(async () => older()!.click());
+    expect(text(container.querySelector('[role="alert"]'))).toContain('flaky');
+
+    await act(async () =>
+      (
+        container.querySelector('[role="alert"] button') as HTMLButtonElement
+      ).click(),
+    );
+
+    // The retry re-read the cursor rather than the newest page, so the pages
+    // already paged back through are still here — a rebuild would have thrown
+    // them away and put the reader back at the end.
+    expect(loadPage.mock.calls.filter(([opts]) => opts.cursor).length).toBe(2);
+    expect(loadPage.mock.calls.filter(([opts]) => !opts.cursor).length).toBe(1);
+    expect(container.textContent).toContain('older');
+    expect(container.textContent).toContain('newest');
+  });
+
+  it('does not offer history the page gave no cursor for', async () => {
+    const container = await render(async () =>
+      // `hasMore` without a cursor is history this view cannot reach; offering
+      // it would be a button that does nothing at all when pressed.
+      page([userText('only', 'rec-1')], { hasMore: true }),
+    );
+
+    expect(
+      container.querySelector('[data-testid="trajectory-load-older"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain('beyond the window');
+  });
+
+  it('keeps a collapsed turn closed when its last row key is positional', async () => {
+    // A timing frame with neither a record id nor a response id is keyed by
+    // its index in the window, so the prepended page renames it. The anchor
+    // has to skip those or the reader's collapsed turn springs back open.
+    const positional = () =>
+      ({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            timing: { kind: 'request', durationMs: 10, status: 'success' },
+          },
+        },
+      }) as unknown as DaemonEvent;
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0'), positional()])
+        : page([userText('newest', 'rec-1'), positional()], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const container = await render(loadPage);
+    const turns = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="trajectory-turn"]'),
+      ) as HTMLElement[];
+    await act(async () => turns()[0]!.click());
+    expect(turns()[0]!.getAttribute('aria-expanded')).toBe('false');
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+
+    const collapsed = turns().filter(
+      (turn) => turn.getAttribute('aria-expanded') === 'false',
+    );
+    expect(turns().length).toBe(2);
+    expect(collapsed).toHaveLength(1);
+    expect(text(collapsed[0]!)).toContain('Turn 2');
   });
 
   it('shows what an other-kind row actually says', async () => {

@@ -3867,6 +3867,7 @@ describe('ArtifactPanel trajectory entry', () => {
   function renderPanel(props: {
     items?: readonly WebShellRightPanelItem[];
     onOpenTrajectory?: () => void;
+    trajectoryTabId?: string;
     tabs?: ArtifactPanelTab[];
     activeTabId?: string | null;
   }) {
@@ -3890,6 +3891,9 @@ describe('ArtifactPanel trajectory entry', () => {
             {...(props.items ? { items: props.items } : {})}
             {...(props.onOpenTrajectory
               ? { onOpenTrajectory: props.onOpenTrajectory }
+              : {})}
+            {...(props.trajectoryTabId
+              ? { trajectoryTabId: props.trajectoryTabId }
               : {})}
           />
         </I18nProvider>,
@@ -3928,6 +3932,7 @@ describe('ArtifactPanel trajectory entry', () => {
     const container = renderPanel({
       items: ['trajectory'],
       onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-1',
       tabs: [
         {
           id: 'trajectory:s-1',
@@ -3939,6 +3944,42 @@ describe('ArtifactPanel trajectory entry', () => {
       activeTabId: 'trajectory:s-1',
     });
     expect(entry(container)).toBeNull();
+  });
+
+  it('keeps the entry when the open tab belongs to another session', () => {
+    // Tabs outlive the session they were opened for — split view opens one per
+    // pane, and a restored tab keeps its own. Hiding this session's entry
+    // because some other session's tab is open leaves no way in at all.
+    //
+    // The trajectory is the only item this host lists, so the add menu's
+    // trigger stands in for the item inside it: Radix does not render the
+    // content until it is opened.
+    const otherSessionTab: ArtifactPanelTab = {
+      id: 'trajectory:s-1',
+      kind: 'trajectory',
+      title: 'Trajectory',
+      sessionId: 's-1',
+    };
+    const addButton = (container: HTMLElement) =>
+      container.querySelector('[aria-label="Add panel"]');
+
+    const other = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-2',
+      tabs: [otherSessionTab],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(addButton(other)).not.toBeNull();
+
+    const own = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-1',
+      tabs: [otherSessionTab],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(addButton(own)).toBeNull();
   });
 
   it('renders the trajectory tab body', () => {
