@@ -31,12 +31,18 @@ const {
   cancelTaskMock: vi.fn(),
   controlWorkflowTaskMock: vi.fn(),
 }));
+let retryHistorical: boolean | undefined = true;
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => ({
     getTasks: getTasksMock,
     getWorkflowTasks: getWorkflowTasksMock,
     cancelTask: cancelTaskMock,
     controlWorkflowTask: controlWorkflowTaskMock,
+  }),
+  useConnection: () => ({
+    supportedCommands: {
+      workflowToolFeatures: { retryHistorical },
+    },
   }),
 }));
 
@@ -58,6 +64,7 @@ afterEach(() => {
   getWorkflowTasksMock.mockReset();
   cancelTaskMock.mockReset();
   controlWorkflowTaskMock.mockReset();
+  retryHistorical = true;
   vi.useRealTimers();
 });
 
@@ -880,7 +887,7 @@ describe('TasksStatusMessage workflow details', () => {
     expect(container.textContent).not.toContain('Retry failed path');
   });
 
-  it('shows saved workflow history while keeping restored runs read-only', () => {
+  it('shows saved workflow history and offers to restart a restored failed run', () => {
     const current = workflowTask({ id: 'workflow-current' });
     const historical = workflowTask({
       id: 'workflow-saved',
@@ -910,9 +917,153 @@ describe('TasksStatusMessage workflow details', () => {
     )?.parentElement;
     act(() => savedRow?.click());
 
-    expect(savedContainer.textContent).toContain('Saved run · read-only');
-    expect(savedContainer.textContent).not.toContain('Retry failed path');
-    expect(savedContainer.textContent).not.toContain('Rerun all');
+    expect(savedContainer.textContent).toContain('Saved run');
+    // A restart from history is how a run a daemon restart interrupted is
+    // picked up again.
+    expect(savedContainer.textContent).toContain('Retry failed path');
+    expect(savedContainer.textContent).toContain('Rerun all');
+  });
+
+  // An older daemon answers `retry` / `rerun` for history with
+  // `{changed: false}`. Without reading the capability the panel would offer
+  // a button that cannot work.
+  // A refusal the daemon explains — the run is live in another process, its
+  // args were not kept — says what to do instead. The generic message threw
+  // that away.
+  it('shows the daemon reason for a refused restart, and keeps the generic message for anything else', async () => {
+    const refusal = Object.assign(new Error('Conflict'), {
+      status: 409,
+      body: {
+        code: 'workflow_run_live_elsewhere',
+        error:
+          'Workflow run wf_1234abcd is recorded as running in another process (host builder-07, pid 4242). Rerun it instead.',
+      },
+    });
+    const historical = () =>
+      workflowTask({
+        id: 'wf_1234abcd',
+        isHistorical: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      });
+    const clickRetry = async (container: HTMLElement) => {
+      const row = Array.from(container.querySelectorAll('span')).find((node) =>
+        node.textContent?.includes('review-and-fix'),
+      )?.parentElement;
+      act(() => row?.click());
+      const retry = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Retry failed path',
+      );
+      await act(async () => retry?.click());
+    };
+
+    controlWorkflowTaskMock.mockRejectedValue(refusal);
+    const explained = renderPanel([historical()]);
+    await clickRetry(explained);
+    expect(explained.textContent).toContain('host builder-07, pid 4242');
+    expect(explained.textContent).not.toContain(
+      'Could not update the workflow',
+    );
+
+    controlWorkflowTaskMock.mockRejectedValue(new Error('socket hang up'));
+    const generic = renderPanel([historical()]);
+    await clickRetry(generic);
+    expect(generic.textContent).toContain('Could not update the workflow');
+    expect(generic.textContent).not.toContain('socket hang up');
+
+    // Nothing started because the record that keeps a second runner off the
+    // journal could not be written. It arrives as a 503, and it is the one
+    // refusal whose advice is to make the same call again.
+    controlWorkflowTaskMock.mockRejectedValue(
+      Object.assign(new Error('Service Unavailable'), {
+        status: 503,
+        body: {
+          code: 'workflow_not_recorded',
+          error:
+            'Could not record that workflow run wf_1234abcd is running again, so another process could start it a second time. Nothing was started; try again.',
+        },
+      }),
+    );
+    const unrecorded = renderPanel([historical()]);
+    await clickRetry(unrecorded);
+    expect(unrecorded.textContent).toContain('Nothing was started; try again.');
+    expect(unrecorded.textContent).not.toContain(
+      'Could not update the workflow',
+    );
+
+    // A conflict from somewhere else in the daemon is not a sentence about
+    // this action.
+    controlWorkflowTaskMock.mockRejectedValue(
+      Object.assign(new Error('Conflict'), {
+        status: 409,
+        body: { code: 'session_busy', error: 'The session is busy.' },
+      }),
+    );
+    const unrelated = renderPanel([historical()]);
+    await clickRetry(unrelated);
+    expect(unrelated.textContent).toContain('Could not update the workflow');
+    expect(unrelated.textContent).not.toContain('The session is busy');
+  });
+
+  it('offers no restart for a restored run when the daemon does not take history restarts', () => {
+    retryHistorical = undefined;
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-saved',
+        isHistorical: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
+  });
+
+  // A live run is not history: its controls never depended on the flag.
+  it('still offers a restart for a live failed run without the capability', () => {
+    retryHistorical = undefined;
+    const container = renderPanel([
+      workflowTask({ status: 'failed', endTime: 9_000 }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Retry failed path');
+    expect(container.textContent).toContain('Rerun all');
+  });
+
+  it('offers no restart for a restored run whose args were not kept', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-saved',
+        isHistorical: true,
+        argsOmitted: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
   });
 
   it('does not group workflow history by a shared display label', () => {
@@ -1016,7 +1167,7 @@ describe('TasksStatusMessage workflow details', () => {
     );
     expect(getWorkflowTasksMock).toHaveBeenCalledOnce();
     expect(getTasksMock).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('Saved run · read-only');
+    expect(container.textContent).not.toContain('Saved run');
   });
 });
 

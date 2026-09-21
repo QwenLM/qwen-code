@@ -47,12 +47,11 @@ import {
 } from './workflow-snapshot.js';
 import { WorkflowJournal } from './runtime/workflow-journal.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
-import { isSymlinkedRoot } from './runtime/workflow-saved.js';
+import { isSymlinkedRoot, isWorkflowRunId } from './runtime/workflow-saved.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_CHECKPOINT');
 
 const CHECKPOINT_FILE = 'checkpoint.json';
-const RUN_ID_PATTERN = /^wf_[0-9a-f]+$/;
 
 /** The error a claimed run's snapshot carries. */
 export const INTERRUPTED_WORKFLOW_ERROR =
@@ -83,6 +82,7 @@ export interface WorkflowCheckpoint {
   tokenBudgetTotal: number | null;
   args?: unknown;
   argsOmitted?: true;
+  argsRecorded?: true;
 }
 
 /** A run a claim found interrupted, with what its notice needs. */
@@ -93,9 +93,35 @@ export interface InterruptedWorkflowRun {
   hasJournal: boolean;
 }
 
-/** The checkpoint for a registered run. */
+/**
+ * What a checkpoint needs from a run. A registered `WorkflowTask` satisfies
+ * it, and so does the registration the runner is about to hand the registry
+ * -- which is what lets a resume record its checkpoint before it registers.
+ */
+export type WorkflowCheckpointSource = Pick<
+  WorkflowTask,
+  'runId' | 'startTime'
+> &
+  Partial<
+    Pick<
+      WorkflowTask,
+      | 'script'
+      | 'scriptPath'
+      | 'description'
+      | 'workflowName'
+      | 'resumeName'
+      | 'sourceRef'
+      | 'toolUseId'
+      | 'sourceRunId'
+      | 'startMode'
+      | 'tokenBudgetTotal'
+      | 'args'
+    >
+  >;
+
+/** The checkpoint for a run about to start, or one already registered. */
 export function checkpointFromTask(
-  task: WorkflowTask,
+  task: WorkflowCheckpointSource,
   context: { sessionId: string; meta: WorkflowMeta | null },
 ): WorkflowCheckpoint {
   return {
@@ -108,7 +134,7 @@ export function checkpointFromTask(
     script: task.script ?? '',
     ...(task.scriptPath ? { scriptPath: task.scriptPath } : {}),
     meta: context.meta,
-    description: context.meta?.name ?? task.description,
+    description: context.meta?.name ?? task.description ?? task.runId,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     ...(task.resumeName ? { resumeName: task.resumeName } : {}),
     ...(task.sourceRef ? { sourceRef: { ...task.sourceRef } } : {}),
@@ -122,7 +148,7 @@ export function checkpointFromTask(
 
 function checkpointPath(config: Config, runId: string): string | undefined {
   const storage = config.storage;
-  if (!storage || !RUN_ID_PATTERN.test(runId)) return undefined;
+  if (!storage || !isWorkflowRunId(runId)) return undefined;
   return path.join(
     path.dirname(storage.getWorkflowRunJournalPath(runId)),
     CHECKPOINT_FILE,
@@ -141,30 +167,43 @@ async function isRunDirSymlinked(
 }
 
 /**
- * Write a run's checkpoint. Best-effort: without one an interrupted run is
- * only invisible, which is how every run behaved before checkpoints, so a
- * failed write must not fail the run.
+ * What writing a run's checkpoint did.
+ *
+ * `unavailable` is not a failure: with no storage, or a run directory reached
+ * through a symlink, there is nowhere a checkpoint could live -- and nowhere
+ * another process would look for one either.
+ */
+export type WorkflowCheckpointWrite = 'written' | 'unavailable' | 'failed';
+
+/**
+ * Write a run's checkpoint.
+ *
+ * For a fresh run this is best-effort: without one an interrupted run is only
+ * invisible, which is how every run behaved before checkpoints, so a failed
+ * write must not fail the run. A resume is the exception -- see the caller in
+ * `WorkflowRunner.start` -- which is why the outcome is reported in three
+ * parts rather than as a boolean.
  */
 export async function writeWorkflowCheckpoint(
   config: Config,
   checkpoint: WorkflowCheckpoint,
-): Promise<boolean> {
+): Promise<WorkflowCheckpointWrite> {
   const file = checkpointPath(config, checkpoint.runId);
-  if (!file) return false;
+  if (!file) return 'unavailable';
   try {
-    if (await isRunDirSymlinked(config, file)) return false;
+    if (await isRunDirSymlinked(config, file)) return 'unavailable';
     await atomicWriteFile(file, JSON.stringify(checkpoint), {
       encoding: 'utf8',
       mode: 0o600,
       forceMode: true,
       noFollow: true,
     });
-    return true;
+    return 'written';
   } catch (error) {
     debugLogger.warn(
       `writeWorkflowCheckpoint failed for ${checkpoint.runId}: ${error}`,
     );
-    return false;
+    return 'failed';
   }
 }
 
@@ -237,7 +276,8 @@ function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoint {
       startMode === 'rerun') &&
     (budget === null ||
       (typeof budget === 'number' && Number.isFinite(budget))) &&
-    (value['argsOmitted'] === undefined || value['argsOmitted'] === true)
+    (value['argsOmitted'] === undefined || value['argsOmitted'] === true) &&
+    (value['argsRecorded'] === undefined || value['argsRecorded'] === true)
   );
 }
 
@@ -324,9 +364,10 @@ async function claimOne(
     ...(checkpoint.startMode ? { startMode: checkpoint.startMode } : {}),
     ...(checkpoint.argsOmitted
       ? { argsOmitted: true as const }
-      : checkpoint.args !== undefined
-        ? { args: checkpoint.args }
-        : {}),
+      : {
+          ...(checkpoint.args !== undefined ? { args: checkpoint.args } : {}),
+          ...(checkpoint.argsRecorded ? { argsRecorded: true as const } : {}),
+        }),
     meta: checkpoint.meta,
     status: 'failed',
     script: checkpoint.script,
@@ -370,29 +411,59 @@ export async function claimInterruptedWorkflowRuns(
   try {
     if (await isSymlinkedRoot(runsDir)) return [];
     names = (await fs.readdir(runsDir, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory() && RUN_ID_PATTERN.test(entry.name))
+      .filter((entry) => entry.isDirectory() && isWorkflowRunId(entry.name))
       .map((entry) => entry.name);
   } catch {
     return [];
   }
   const claimed: InterruptedWorkflowRun[] = [];
   for (const runId of names) {
-    const seen = await readWorkflowCheckpoint(config, runId);
-    if (!seen || !writerHasExited(seen, isRunning)) continue;
-    // A session here has the run, or holds its lock to start a resume of it.
-    // Checked with no await before the lock is taken below, and a resume
-    // cannot start while it is held.
-    if (isWorkflowRunPersistenceActive(config, runId)) continue;
-    try {
-      const attempt = await tryWithWorkflowTaskMutation(
-        getWorkflowTaskMutationKey(config, runId),
-        () => claimOne(config, seen),
-      );
-      if (attempt.acquired && attempt.value) claimed.push(attempt.value);
-    } catch (error) {
-      debugLogger.warn(`claiming interrupted run ${runId} failed: ${error}`);
-    }
+    const run = await claimIfInterrupted(config, runId, isRunning);
+    if (run) claimed.push(run);
   }
   claimed.sort((a, b) => b.snapshot.startTime - a.snapshot.startTime);
   return claimed;
+}
+
+/**
+ * {@link claimInterruptedWorkflowRuns} for one run: turn it into a `failed`
+ * snapshot if the process running it exited before it settled, and return
+ * it; otherwise leave it alone and return `undefined`. For a caller about to
+ * act on one run from its history, whose snapshot is otherwise older than
+ * the attempt that was interrupted. An id that is not a run id has no
+ * checkpoint path, so nothing is read for it.
+ */
+export async function claimInterruptedWorkflowRun(
+  config: Config,
+  runId: string,
+  options: { isProcessRunning?: (pid: number) => boolean } = {},
+): Promise<InterruptedWorkflowRun | undefined> {
+  return claimIfInterrupted(
+    config,
+    runId,
+    options.isProcessRunning ?? isProcessRunning,
+  );
+}
+
+async function claimIfInterrupted(
+  config: Config,
+  runId: string,
+  isRunning: (pid: number) => boolean,
+): Promise<InterruptedWorkflowRun | undefined> {
+  const seen = await readWorkflowCheckpoint(config, runId);
+  if (!seen || !writerHasExited(seen, isRunning)) return undefined;
+  // A session here has the run, or holds its lock to start a resume of it.
+  // Checked with no await before the lock is taken below, and a resume
+  // cannot start while it is held.
+  if (isWorkflowRunPersistenceActive(config, runId)) return undefined;
+  try {
+    const attempt = await tryWithWorkflowTaskMutation(
+      getWorkflowTaskMutationKey(config, runId),
+      () => claimOne(config, seen),
+    );
+    return attempt.acquired ? attempt.value : undefined;
+  } catch (error) {
+    debugLogger.warn(`claiming interrupted run ${runId} failed: ${error}`);
+    return undefined;
+  }
 }

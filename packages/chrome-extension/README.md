@@ -152,7 +152,8 @@ Packaging (`npm run package`) and the release test require the POSIX `zip`
 utility.
 
 ```bash
-npm run package      # -> chrome-extension.zip (manifest at the zip root)
+npm run package        # -> chrome-extension.zip (manifest at the zip root)
+npm run package:store  # -> chrome-extension-store.zip, without the manifest key
 ```
 
 Run the complete release check from the repository root. It builds the main npm
@@ -163,10 +164,25 @@ generated payloads for external Chrome DevTools MCP source signatures:
 npm run test:chrome-extension:release
 ```
 
-The generated manifest version follows this package's version. Upload the zip
-to a GitHub prerelease for alpha side-loading, or to the Chrome Web Store
-Developer Dashboard for managed distribution. The `debugger` permission will
+The generated manifest version follows this package's version. `Release Chrome
+Extension` (`.github/workflows/release-chrome-extension.yml`) packages and
+uploads it on a published stable release, and can be dispatched by hand; its
+`dry_run` default packages and scans without uploading anything. Automatic
+publishing pauses while the repository variable `RELEASE_CHROME_SYNC_PUBLISH`
+is `false`. Nightly and preview builds are not published to the store, because
+every upload takes a version bump and a review; upload the zip to a GitHub
+prerelease for alpha side-loading instead. The `debugger` permission will
 draw manual review and must be justified in the store listing.
+
+**Extension id note:** the manifest's `key` fixes the id of an unpacked build.
+The store rejected that key on the first upload and assigned the listing its
+own id, so the two builds carry different ids. `npm run package` zips the built
+manifest verbatim, for side-loading; `npm run package:store` stages a copy
+without the key, which is what the release workflow uploads. Browser Use treats
+the id as a set (`CHROME_EXTENSION_IDS` in the Browser Use package): the Native
+Messaging registration lists every known origin and the handshake accepts any
+of them, so both builds reach the same Host. Adding an id there also means
+bumping the Host revision, so installed Hosts are replaced rather than reused.
 
 **Version note:** the manifest version is derived from this package's semver
 (e.g. `0.21.2.65535`), which is lower than the legacy side-loaded `1.0.0`
