@@ -34,6 +34,11 @@ try {
 // membership check have to be reduced to that form first.
 const packPath = (target) => relative(root, target).split(sep).join('/');
 
+// A `.`/`..` path segment (also percent-encoded, which Node rejects the same
+// way) anywhere in a declared `exports` target. Deliberately not `_`: Node
+// resolves `./dist/_/*.js` normally.
+const invalidTargetSegment = /(^|\/)(\.|%2e)(\.|%2e)?(\/|$)/i;
+
 const entryPoints = Object.entries(pkg.exports).flatMap(([key, entry]) =>
   typeof entry === 'string'
     ? [[key, entry]]
@@ -47,6 +52,19 @@ for (const [key, entry] of entryPoints) {
   // sharing one target must both be checked.
   if (seen.has(key + '\0' + entry)) continue;
   seen.add(key + '\0' + entry);
+  // Node resolves an `exports` target only when it is a `./`-relative path
+  // whose segments are all real names. A bare (`dist/*`), rooted (`/dist/*`)
+  // or dot-segment (`./dist/../dist/*.js`) target throws
+  // `ERR_INVALID_PACKAGE_TARGET` for every specifier through that key, so the
+  // family it names is unresolvable no matter what the tarball ships. Check
+  // the DECLARED string: `join` below normalizes dot segments away, and
+  // matching the normalized path would certify a target Node refuses to
+  // resolve. The segment test runs after the `./` prefix is stripped, or
+  // `(^|\/)` would match that prefix itself and reject every valid target.
+  if (!entry.startsWith('./') || invalidTargetSegment.test(entry.slice(2))) {
+    problems.push(`${entry} is not a valid "exports" target`);
+    continue;
+  }
   // A subpath pattern (`"./*": "./dist/*"`) names a family of files, not a
   // path: statting it literally would report a false `missing`. Hold the
   // family against the packed list instead — at least one packed file must
@@ -54,13 +72,23 @@ for (const [key, entry] of entryPoints) {
   // Node gives `*` pattern meaning only when the KEY carries it, so gate on
   // both sides: a `*` target under a literal key is a literal path and keeps
   // the checks below, and a pattern key with a literal target still needs the
-  // relative-import chunk scan the `continue` would skip. Node honours a
-  // pattern key only when it carries exactly one `*`, and substitutes that
-  // one capture into every `*` in the target — so the gate counts stars on
-  // the key, and the regex captures on the first `*` and back-references
-  // that capture for every later `*` instead of matching each star
-  // independently.
-  if (key.split('*').length === 2 && entry.includes('*')) {
+  // relative-import chunk scan the `continue` would skip. A pattern key also
+  // has to be a `./`-prefixed subpath key — `"dist/*"` and `"*"` are not, and
+  // mixing them with `"."` makes Node reject the whole manifest with
+  // `ERR_INVALID_PACKAGE_CONFIG`, root specifier included — and Node honours
+  // it only when it carries exactly one `*`, substituting that one capture
+  // into every `*` in the target. So the gate requires the prefix and counts
+  // stars on the key, and the regex captures on the first `*` and
+  // back-references that capture for every later `*` instead of matching each
+  // star independently. That back-reference has to be named: `\1` followed
+  // immediately by a digit (`./dist/*/*1.js`) compiles as the Annex B octal
+  // escape U+0009 rather than as a reference, leaving a pattern no packed
+  // path can satisfy — which would refuse a manifest Node resolves fine.
+  if (
+    key.startsWith('./') &&
+    key.split('*').length === 2 &&
+    entry.includes('*')
+  ) {
     if (packed) {
       const escaped = packPath(join(root, entry)).replace(
         /[.+?^${}()|[\]\\]/g,
@@ -69,7 +97,9 @@ for (const [key, entry] of entryPoints) {
       const [first, ...rest] = escaped.split('*');
       const pattern =
         first +
-        rest.map((part, i) => (i === 0 ? '(.*)' : '\\1') + part).join('');
+        rest
+          .map((part, i) => (i === 0 ? '(?<s>.*)' : '\\k<s>') + part)
+          .join('');
       if (![...packed].some((file) => new RegExp(`^${pattern}$`).test(file))) {
         problems.push(`${entry} matches no file in the npm package`);
       }
