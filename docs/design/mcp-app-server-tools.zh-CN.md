@@ -37,7 +37,7 @@ Daemon 的 `/mcp-app-sandbox` 路由现在只返回不缓存的重定向。按�
 
 验证 App-only 发现及对模型隐藏、同服务端查找、model-only/禁用/排除工具拒绝、原始结果保真，以及持久化输出不包含模拟令牌标记。验证审批允许/拒绝、hooks、取消、会话销毁与客户端/运行时归属。提交前完成构建、类型检查、相关测试和连续两轮无发现自审。
 
-当前验证结果：独立沙箱 HTTP 探针 12/12 通过，完整 daemon 来源防护探针 14/14 通过，CLI 沙箱测试 14 项通过，Web App 测试 17 项通过。全量 build、typecheck 和 bundle 均通过。这些检查覆盖一次性来源、拒绝策略覆盖和 API/WS 路径、关闭竞态，以及真实 daemon 拒绝沙箱来源请求；它们不能证明 Tableau 图表已成功显示。还需验证 attachment 替换、模型完成后的 App 成功/失败，同时保留普通模型工具的活动状态。
+当前验证结果：独立沙箱 HTTP 探针 12/12 通过，完整 daemon 来源防护探针 14/14 通过，CLI 沙箱测试 13 项通过，Web App 测试 17 项通过。全量 build、typecheck 和 bundle 均通过。这些检查覆盖一次性来源、拒绝策略覆盖和 API/WS 路径、关闭竞态，以及真实 daemon 拒绝沙箱来源请求；它们不能证明 Tableau 图表已成功显示。还需验证 attachment 替换、模型完成后的 App 成功/失败，同时保留普通模型工具的活动状态。
 
 在用户的 Chrome 与实际构建的 Qwen WebShell 中使用未修改的官方 Tableau HTML。官方 Tableau 4.8.1 App 已在实际构建的 Qwen WebShell 和用户的 Chrome 中成功显示经认证的 Tableau Cloud 图表。只有模型工具选择采用确定性方式；MCP HTML、OAuth、数据和嵌入的 Tableau 图表均为真实内容。先前使用无效令牌的 fixture 仅证明调用通路，与此次经认证的结果分开记录。更改 Region 筛选后图表成功更新，完整重载 Qwen 页面后，图表在新的隔离来源下恢复，Qwen 输入仍可使用。分别报告这些验证范围，并在对应行为验证后才将截图及载入观察补入 PR #12258。
 

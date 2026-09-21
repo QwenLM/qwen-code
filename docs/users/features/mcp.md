@@ -523,7 +523,7 @@ A limit failure preserves the successful tool result and displays a warning
 with the applicable configuration key. Larger HTML stays outside model context,
 while increasing retained transcript and replay size. The size check happens
 **after** the SDK reads the response; it does not cap network transfer or peak
-memory. Sandbox and CSP protections are unchanged.
+memory. These two limit settings do not change the sandbox or CSP.
 
 App HTML is mounted only in a daemon-backed WebShell session and in replay of
 a recorded transcript. Terminal and headless sessions render the fallback text

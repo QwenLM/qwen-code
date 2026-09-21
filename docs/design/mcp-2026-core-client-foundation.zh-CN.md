@@ -91,15 +91,23 @@ MCP App 展示的 `html` 整体丢弃（回放只在 `html` 非空时挂载 ifra
 HTML 并重试入队，保留完整文字结果。正常消费的订阅者和回放环仍保留原始 App。
 若文字回退也超出队列预算，仍按原规则断开；帧数限制和强制回放交付语义不变。
 
-守护进程在 bearer 认证之前提供静态沙箱代理，不包含会话数据或凭据。
-WebShell 在不带 `allow-same-origin` 的外层 iframe 中加载代理，所以即使加载同 URL
-的 `localhost` 也使用不透明源，无法读取 WebShell `sessionStorage`。
-若守护进程位于 `127.0.0.1` 或 `[::1]`，宿主还会切换到 `localhost`，形成第二个回环源。
-AppBridge 和 postMessage 向内层沙箱 iframe 传递已校验 HTML、工具输入及结果。
-代理校验父子来源，以 HTTP 响应头应用资源 CSP，并在两个 iframe 之间转发 AppBridge
-postMessage 流量。宿主 AppBridge 按 schema 校验入站消息；代理本身不筛选载荷结构。
-内层 App iframe 同样省略 `allow-same-origin`，使不可信 HTML 使用不透明源，
-无法作为同源客户端调用守护进程回环 API。首版宿主不声明特权 App 能力。
+守护进程未认证的 `/mcp-app-sandbox` 路由返回不缓存的重定向，目标为绑定到
+`127.0.0.1` 随机端口的专用静态监听器。每次渲染获得新的 `<uuid>.localhost` 源。
+监听器仅响应已注册的 Host、GET 方法和资源路径，在唯一一次成功响应前删除注册，
+且不提供守护进程 API 或 WebSocket 端点。注册固定经校验的宿主来源和资源 CSP，
+查询参数不能替换该策略。
+
+两层 iframe 均授予 `allow-same-origin`。App 与其代理共享每次渲染的源，可互相访问
+DOM 和该源的存储；二者构成同一个信任边界。它们与 WebShell、守护进程及其他 App
+均不同源，因此不能读取 WebShell `sessionStorage`，也不能作为同源客户端调用
+守护进程 API。`Origin-Agent-Cluster: ?1` 防止通过 `document.domain` 放宽每次渲染的
+来源边界。顶层导航、弹窗及其他未授予的沙箱能力仍受限制。
+
+AppBridge 和 postMessage 向内层 iframe 传递 HTML、工具输入及结果。代理校验父子
+来源，以 HTTP 响应头应用资源 CSP，并转发消息。宿主 AppBridge 按 schema 校验
+入站消息；代理本身不筛选载荷结构。已绑定的 daemon 会话在现有权限策略下声明
+受限的 App 服务器工具调用能力。来源生命周期、能力边界及验证限制详见
+[MCP App 服务器工具调用](mcp-app-server-tools.zh-CN.md)。
 
 ## 兼容性与安全
 
@@ -110,8 +118,9 @@ postMessage 流量。宿主 AppBridge 按 schema 校验入站消息；代理本�
 - 授权和 Qwen Code 的 MCP 权限边界不变。
 - 现代缓存为每个客户端实例私有，不跨工作区或授权主体共享结果。
 - MCP App HTML 默认限制为 1 MiB，可按服务器调到最多 4 MiB，且从不进入模型上下文。
-- App HTML 在双层 iframe 沙箱中运行。两层均省略 `allow-same-origin`，
-  若可用，外层还采用不同的回环源。服务器声明的 CSP 由守护进程响应强制执行。
+- App HTML 在双层 iframe 沙箱中运行，两层均带 `allow-same-origin`。
+  隔离依赖专用静态回环监听器上的每次渲染独立来源、一次性注册和
+  `Origin-Agent-Cluster: ?1`。隔离响应强制执行服务器声明的资源 CSP。
 - 隔离源不可用时，WebShell 显示普通工具文本，不渲染 App。
 - 压缩按用途区分。终端交互历史保留 `type: 'mcp_app'`，但将 `html` 置空并保留原
   `fallbackText`，TUI 渲染文本而不挂载空沙箱。持久化会话记录在配置的资源限制内

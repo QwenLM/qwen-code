@@ -120,7 +120,8 @@ export class HistoricalTranscriptWindowFullError extends Error {
  * the documented degrade path — replay mounts the iframe only for non-empty
  * `html` and never re-fetches the `ui://` resource, so the document must be
  * dropped whole (never truncated); the block then renders its
- * `fallbackText`. Returns the block unchanged when nothing was dropped.
+ * `fallbackText`, or an explanation when that text is empty. Returns the block
+ * unchanged when nothing was dropped.
  */
 function dropMcpAppHtml(block: DaemonTranscriptBlock): DaemonTranscriptBlock {
   if (block.kind !== 'tool') return block;
@@ -136,7 +137,13 @@ function dropMcpAppHtml(block: DaemonTranscriptBlock): DaemonTranscriptBlock {
   }
   return {
     ...block,
-    rawOutput: { ...(rawOutput as Record<string, unknown>), html: '' },
+    rawOutput: {
+      ...(rawOutput as Record<string, unknown>),
+      html: '',
+      fallbackText:
+        (rawOutput as Record<string, unknown>)['fallbackText'] ||
+        'MCP App HTML omitted because the historical page exceeds its size limit.',
+    },
   };
 }
 
