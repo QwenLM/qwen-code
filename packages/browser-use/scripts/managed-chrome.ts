@@ -80,8 +80,9 @@ export async function launchManagedChrome(
         description: 'Qwen Browser Use managed Chrome',
         path: launcher,
         type: 'stdio',
-        // Every id the bridge trusts, so a store-keyed build loaded here
-        // reaches the Host instead of failing as an unknown origin.
+        // Every id the bridge trusts. The extension loaded below carries the
+        // manifest key, so today this only ever matches that id; listing the
+        // set keeps the harness usable with a store-keyed build as well.
         allowed_origins: CHROME_EXTENSION_IDS.map(
           (id) => 'chrome-extension://' + id + '/',
         ),

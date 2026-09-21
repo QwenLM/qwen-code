@@ -193,7 +193,13 @@ jobs:
             shift
             status=$(curl --silent --show-error --output response.json \
               --retry 5 --retry-delay 10 --retry-all-errors --retry-max-time 300 \
-              --max-time 600 --write-out '%{http_code}' "$@") || return 1
+              --max-time 120 --write-out '%{http_code}' "$@") || {
+              # Retries exhausted at the transport layer: curl printed its own
+              # reason to stderr, but say which endpoint it was talking to.
+              echo "::error::Could not reach ${what}."
+              cat response.json 2>/dev/null
+              return 1
+            }
             if [[ "${status}" != 2?? ]]; then
               # Naming the endpoint matters: an expired refresh token fails at
               # Google's OAuth service, not at the store's dashboard.
@@ -244,9 +250,13 @@ jobs:
           ITEM_ID: '${{ secrets.CHROME_WEBSTORE_ITEM_ID }}'
           RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
         run: |-
+          # Without --retry-all-errors, unlike the calls above: this is the one
+          # request that is not safe to repeat blindly. A connection reset can
+          # arrive after the store accepted the submission, and asking it to
+          # publish an item already in review would fail a release that worked.
           status_code=$(curl --silent --show-error --output response.json \
-            --retry 5 --retry-delay 10 --retry-all-errors --retry-max-time 300 \
-            --max-time 600 --write-out '%{http_code}' \
+            --retry 5 --retry-delay 10 --retry-max-time 300 \
+            --max-time 120 --write-out '%{http_code}' \
             --request POST \
             --header "Authorization: Bearer ${QWEN_CHROME_TOKEN}" \
             --header 'x-goog-api-version: 2' \

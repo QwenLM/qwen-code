@@ -8,6 +8,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -86,26 +87,66 @@ describe.skipIf(!zipAvailable())('packageExtension', () => {
     }
   });
 
-  it('refuses a missing source without touching the staged build', async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-miss-'));
+  // Everything stageStoreBuild does after these checks is destructive, so a
+  // source that is not a build has to be refused before the staged copy goes.
+  it.each([
+    ['missing', (root) => path.join(root, 'never-built')],
+    [
+      'empty',
+      (root) => mkdirSync(path.join(root, 'empty')) ?? path.join(root, 'empty'),
+    ],
+    [
+      'a file',
+      (root) =>
+        writeFileSync(path.join(root, 'plain'), 'x') ??
+        path.join(root, 'plain'),
+    ],
+  ])(
+    'refuses a source that is %s without touching the staged build',
+    async (_label, makeSource) => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-miss-'));
+      const staged = path.join(root, 'store-extension');
+      try {
+        mkdirSync(staged, { recursive: true });
+        writeFileSync(path.join(staged, 'keep.js'), 'previous build');
+
+        await expect(
+          packageExtension({
+            source: makeSource(root),
+            archive: path.join(root, 'extension.zip'),
+            store: true,
+            staged,
+          }),
+        ).rejects.toThrow(/Nothing to package: .* has no manifest\.json/);
+
+        // The previous build survives: the failure must not be destructive.
+        expect(readFileSync(path.join(staged, 'keep.js'), 'utf8')).toBe(
+          'previous build',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses to stage a build onto itself', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-self-'));
     const staged = path.join(root, 'store-extension');
     try {
       mkdirSync(staged, { recursive: true });
-      writeFileSync(path.join(staged, 'keep.js'), 'previous build');
+      writeFileSync(path.join(staged, 'manifest.json'), '{"key":"PUB"}');
 
       await expect(
         packageExtension({
-          source: path.join(root, 'never-built'),
+          source: staged,
           archive: path.join(root, 'extension.zip'),
           store: true,
           staged,
         }),
-      ).rejects.toThrow(/Nothing to package: .*never-built/);
+      ).rejects.toThrow(/Refusing to stage .* onto itself/);
 
-      // The previous build survives: the failure must not be destructive.
-      expect(readFileSync(path.join(staged, 'keep.js'), 'utf8')).toBe(
-        'previous build',
-      );
+      // Aliasing used to delete the build and then fail on the copy.
+      expect(existsSync(path.join(staged, 'manifest.json'))).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -24,12 +24,17 @@ const packageRoot = path.resolve(
  * its own path rather than writing into the package's build tree.
  */
 async function stageStoreBuild(source, staged) {
-  // Checked before the staging directory is removed: this script is the only
-  // one here that does not follow EXTENSION_OUT_DIR, so a caller that redirects
-  // the build leaves `source` missing. Failing first turns that into a named
-  // error instead of deleting the previous build on the way to an ENOENT.
-  if (!existsSync(source)) {
-    throw new Error('Nothing to package: ' + source + ' does not exist');
+  // Checked before the staging directory is removed, because everything below
+  // is destructive: this script is the only one here that does not follow
+  // EXTENSION_OUT_DIR, so a caller that redirects the build leaves `source`
+  // unbuilt. The manifest is what makes a directory a build, so a missing,
+  // empty or non-directory source all fail the same named way rather than
+  // deleting the staged copy on the way to an ENOENT.
+  if (!existsSync(path.join(source, 'manifest.json'))) {
+    throw new Error('Nothing to package: ' + source + ' has no manifest.json');
+  }
+  if (path.resolve(source) === path.resolve(staged)) {
+    throw new Error('Refusing to stage ' + source + ' onto itself');
   }
   await rm(staged, { recursive: true, force: true });
   await cp(source, staged, { recursive: true });
