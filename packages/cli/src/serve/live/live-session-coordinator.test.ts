@@ -88,7 +88,7 @@ function makeHarness(
   options: {
     recent?: SessionListItem[];
     enqueueAccepted?: boolean;
-    providerError?: QwenRealtimeError;
+    providerError?: unknown;
     transcriptTail?: RealtimeTranscriptEntry[];
     transcriptPersistenceError?: Error;
     pendingInteractions?: BridgePendingInteraction[];
@@ -1526,6 +1526,39 @@ describe('LiveSessionCoordinator', () => {
     ).resolves.toEqual({
       error: 'Live Voice could not persist the final transcript.',
     });
+  });
+
+  it('reports the message of a rejection that is not an Error', async () => {
+    const harness = makeHarness({
+      providerError: {
+        code: -32000,
+        message: 'Authentication required: authenticate first.',
+      },
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+
+    expect(harness.host.failCall).toHaveBeenCalledWith(
+      1,
+      'Live Voice failed to start: Authentication required: authenticate first.',
+    );
+  });
+
+  it('describes a rejection that carries no message at all', async () => {
+    const harness = makeHarness({ providerError: { code: -32603 } });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+
+    expect(harness.host.failCall).toHaveBeenCalledWith(
+      1,
+      'Live Voice failed to start: {"code":-32603}',
+    );
   });
 
   it('reports provider configuration failures without retrying', async () => {
