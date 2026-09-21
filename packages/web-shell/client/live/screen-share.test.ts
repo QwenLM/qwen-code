@@ -166,8 +166,8 @@ describe('startScreenShare', () => {
     expect(Math.max(frame.width, frame.height)).toBeLessThanOrEqual(2560);
   });
 
-  it('gives back a frame within the daemon limit and stops there', async () => {
-    // Dense enough that the first attempt overshoots.
+  it('spends quality, not pixels, when the screen does not fit', async () => {
+    // Dense enough that native resolution overshoots at the top quality.
     bytesFor = (width, height, quality) =>
       Math.round(width * height * quality * 0.25);
     const share = await startScreenShare(() => {});
@@ -177,10 +177,44 @@ describe('startScreenShare', () => {
     const last = attempts.at(-1)!;
     expect(last.bytes).toBeLessThanOrEqual(MAX_IMAGE_BYTES);
     expect(frame.width).toBe(last.width);
-    // Aimed by the overshoot rather than walked down a fixed ladder.
-    expect(attempts.length).toBeLessThanOrEqual(3);
-    expect(attempts[1]!.width).toBeLessThan(attempts[0]!.width);
-    expect(attempts[1]!.quality).toBeLessThan(attempts[0]!.quality);
+    // The budget is there to be used: measured against real encoders, a frame
+    // delivered at half the limit loses stack-trace detail that the same bytes
+    // at more pixels keep.
+    expect(last.bytes / MAX_IMAGE_BYTES).toBeGreaterThan(0.85);
+    // Quality went to the bottom of the ladder so the pixels did not have to.
+    expect(last.quality).toBe(0.45);
+    // More pixels than the old coupled ladder, which dropped scale and quality
+    // together and landed near half the budget.
+    const coupled = attempts.find((a) => a.quality === 0.75);
+    expect(coupled).toBeUndefined();
+    expect(frame.width * frame.height).toBeGreaterThan(1_000_000);
+  });
+
+  it('takes quality back when the bottom step never had to shrink', async () => {
+    // Overshoots at the top quality by a hair, fits easily lower down.
+    bytesFor = (width, height, quality) =>
+      Math.round(width * height * quality * 0.1097);
+    const share = await startScreenShare(() => {});
+
+    const frame = await share.grab();
+
+    // Full resolution, because the limit was never about pixels here.
+    expect(frame).toMatchObject({ width: 1920, height: 1080 });
+    const last = attempts.at(-1)!;
+    expect(last.bytes).toBeLessThanOrEqual(MAX_IMAGE_BYTES);
+    // ...and not at the bottom quality, which would have been given away for
+    // nothing.
+    expect(last.quality).toBeGreaterThan(0.45);
+  });
+
+  it('keeps the number of encodes bounded', async () => {
+    bytesFor = (width, height, quality) =>
+      Math.round(width * height * quality * 0.25);
+    const share = await startScreenShare(() => {});
+
+    await share.grab();
+
+    expect(attempts.length).toBeLessThanOrEqual(8);
   });
 
   it('refuses rather than sending a screen nothing could read', async () => {
