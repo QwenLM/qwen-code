@@ -42,13 +42,28 @@ binding generation、Harness Session、Runtime Session、Turn、Tool call、请�
 ## 生命周期与 fencing
 
 记录提供 `PREPARED`、`DISPATCHING`、`EXECUTING`、`CANCEL_REQUESTED`、
-`SETTLED` 和 `UNKNOWN` 状态。Repository 更新使用完整不可变身份和记录 version
-执行 compare-and-set。
+`SETTLED` 和 `UNKNOWN` 状态。Repository 更新分为受隔离的派发路径和开放的
+取消路径。
 
-派发 claim 包含 owner、过期时间和 generation。有效 claim 会阻止其他 owner；
-过期后新 owner 必须递增 generation，从而使旧 owner 的更新失效。续租保持
-generation 不变并递增记录 version。`UNKNOWN` 记录在调用方通过原执行身份解决
-不明确结果前不能再次 claim。
+受隔离路径是 `compareAndSet`。除不可变身份和记录 version 外，调用方还必须
+持有有效的派发 claim：owner、未过期租约和 generation 必须与存储的 claim
+一致。replacement 必须重复 claim 字段，因此 compare-and-set 不能转移或抹掉
+派发所有权，也不能清除已记录的取消意图。结算（`withResult`）、dispatcher
+状态迁移和 dispatcher 上报的 `UNKNOWN` 结果都走这条路径，因此租约过期或被
+接管后的旧 owner 无法结算或修改执行。
+
+派发所有权只能通过 `claimDispatch` 和 `renewDispatch` 转移。有效 claim 排斥
+其他 owner；过期后新 owner 递增 generation，使旧 owner 的更新失效。接管
+`EXECUTING` 或 `CANCEL_REQUESTED` 记录不会重新派发：物理 Tool 调用可能仍在
+运行，因此记录转为 `UNKNOWN`，保留过期 claim 供对账，且不授予所有权。
+`UNKNOWN` 记录不能 claim 或续租，只能由恢复流程通过 `resolveUnknown` 按原
+执行身份结算。续租保持 generation 不变并递增记录 version。
+
+开放路径是 `requestCancel`，只凭记录 version 即可记录取消意图，因为取消来自
+派发所有权之外。`PREPARED` 执行立即以 `cancelled` 结算，因为不存在能观察到
+该意图的 dispatcher。`DISPATCHING` 记录保持原状态，使 claim 持有者看到标记
+后不得开始物理执行。`EXECUTING` 记录转为 `CANCEL_REQUESTED`。在 claim 持有
+者以真实结果或物理停止证据结算之前，取消意图只是建议性的。
 
 已结算记录必须包含允许的 execution status、结果和结算时间，并且结算后不可变。
 结果 sequence 不能倒退。活跃 execution 查询以 Runtime Session 为范围，并排除
@@ -70,6 +85,12 @@ workspace 值。调用引用与结果属于 Broker 私有载荷；若没有独�
 
 - 同一幂等键的并发创建收敛为一次 execution。
 - 有效派发 claim 排斥其他 owner；claim 过期后只能使用更高 generation 接管。
+- 结算要求调用方持有有效派发 claim；即使 version 匹配，旧 owner 或无 claim
+  的调用方也会被拒绝。
+- 接管已过期的 `EXECUTING` claim 会将 execution 标记为 `UNKNOWN`，而不是重新
+  派发；只有 `resolveUnknown` 能将其结算。
+- 取消意图不依赖派发 claim，未派发的 execution 立即结算，且后续 replacement
+  不能清除该意图。
 - 过期 version 不能结算当前 execution。
 - execution 结算后从活跃 Session 计数中移除。
 - 重复幂等键返回原身份，供调用方检测冲突。
@@ -79,6 +100,9 @@ workspace 值。调用引用与结果属于 Broker 私有载荷；若没有独�
 
 - Repository 不会为一个幂等键创建两条记录。
 - 不能使用过期 generation 续租或修改派发所有权。
+- 旧的或外部的派发 claim 不能结算或修改 execution。
+- 已过期的 `EXECUTING` claim 转为 `UNKNOWN`，而不是新的派发。
+- 不持有派发 claim 也能记录取消意图，且意图在所有权接管后保留。
 - 不可变 execution 身份不能通过 compare-and-set 被替换。
 - 已结算 execution 不能再被修改或重新激活。
 - 结果状态、sequence 和结算约束失败关闭。

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** Durable identity, ownership, and result for one Tool execution. */
@@ -250,9 +251,11 @@ public final class ToolExecutionRecord {
     }
 
     public ToolExecutionRecord withUnknown() {
+        // The last claim stays on the record so recovery can attest which
+        // dispatcher and lease may still be executing physically.
         return copy(State.UNKNOWN, null, null, lastSequence,
-                cancelRequested, null, null, dispatchGeneration, version,
-                null);
+                cancelRequested, dispatchOwner, dispatchLeaseUntil,
+                dispatchGeneration, version, null);
     }
 
     public ToolExecutionRecord resolveUnknown(
@@ -299,6 +302,18 @@ public final class ToolExecutionRecord {
                 && toolCallId.equals(other.toolCallId)
                 && requestDigest.equals(other.requestDigest)
                 && reference.equals(other.reference);
+    }
+
+    boolean sameDispatch(ToolExecutionRecord other) {
+        return other != null
+                && Objects.equals(dispatchOwner, other.dispatchOwner)
+                && Objects.equals(dispatchLeaseUntil,
+                        other.dispatchLeaseUntil)
+                && dispatchGeneration == other.dispatchGeneration;
+    }
+
+    boolean hasLiveDispatchAt(Instant now) {
+        return dispatchOwner != null && dispatchLeaseUntil.isAfter(now);
     }
 
     boolean sameRequest(ToolExecutionRecord other) {
