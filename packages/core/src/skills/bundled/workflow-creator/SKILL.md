@@ -19,7 +19,7 @@ Create and maintain saved Dynamic Workflows for the current workspace.
 2. Choose a lower-case name containing only letters, digits, and hyphens. It must start with a letter and be at most 41 characters.
 3. Create the smallest script that captures the requested phases, dependencies, and final result. Do not add speculative branches, retries, or agents.
 4. Read the saved file back and verify its name, metadata, phase order, dependency flow, and final return value. Do not execute it unless the user also asks to run it.
-5. Report the saved path and slash command. In the interactive TUI, the slash command starts a background run: progress is in `/workflows`, and completion returns to the conversation. In Web Shell, tell the user to return to Workflows and refresh the Saved tab if it is already open.
+5. Report the saved path and slash command. In the interactive TUI, the slash command runs in the foreground: progress stays in the tool card and `/workflows`, and completion displays the result and notifies the model. In Web Shell, tell the user to return to Workflows and refresh the Saved tab if it is already open.
 
 ## Script contract
 

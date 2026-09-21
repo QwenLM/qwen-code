@@ -39,17 +39,26 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
 
     it.each([
       {
+        source: 'slash',
         status: 'completed',
         script:
           'return { marker: "WORKFLOW_PARTIAL_RESULT_12176", failed: ["fr"] };',
         marker: 'WORKFLOW_PARTIAL_RESULT_12176',
       },
       {
+        source: 'slash',
         status: 'failed',
         script: 'throw new Error("WORKFLOW_RUN_ERROR_12176");',
         marker: 'WORKFLOW_RUN_ERROR_12176',
       },
-    ])('delivers a $status run to the model once', async (testCase) => {
+      {
+        source: 'model',
+        status: 'completed',
+        script: 'return { marker: "WORKFLOW_MODEL_RESULT_12176" };',
+        marker: 'WORKFLOW_MODEL_RESULT_12176',
+      },
+    ])('delivers a $source $status run to the model once', async (testCase) => {
+      const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
       await rig.setup(`workflow-completion-${testCase.status}`, {
@@ -82,11 +91,30 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       server = await startFakeOpenAIServer(({ body }) => {
         if (body['stream'] !== true) return { content: '{}' };
         const messages = JSON.stringify(body['messages']);
+        if (!isSlash && !messages.includes(testCase.marker)) {
+          return {
+            toolCalls: [
+              {
+                id: 'model-workflow-call',
+                type: 'function',
+                function: {
+                  name: 'workflow',
+                  arguments: JSON.stringify({ name: 'report-probe' }),
+                },
+              },
+            ],
+          };
+        }
+        const expectedReply = messages.includes(
+          'What did that workflow return?',
+        )
+          ? `${reply}_FOLLOWUP`
+          : reply;
         return {
           content:
-            messages.includes('<kind>workflow</kind>') &&
+            (!isSlash || messages.includes('<kind>workflow</kind>')) &&
             messages.includes(testCase.marker)
-              ? reply
+              ? expectedReply
               : 'WORKFLOW_RESULT_MISSING',
         };
       }, fakeServerHostOptions());
@@ -133,7 +161,9 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       ).toHaveLength(0);
 
       await session.idle(500);
-      await session.send('/report-probe');
+      await session.send(
+        isSlash ? '/report-probe' : 'Run the saved report-probe workflow.',
+      );
       await session.waitForScreen(
         (screen) => screen.includes(reply),
         'model reply based on the workflow completion, without a follow-up prompt',
@@ -142,19 +172,47 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       await session.idle(1_000);
 
       const screen = await session.screen();
-      expect(screen).toContain('started in the background');
-      expect(screen).toContain('Background Tasks');
+      expect(screen).not.toContain('started in the background');
+      expect(screen).toContain(testCase.marker);
+      if (isSlash) expect(screen).toContain('Run ID: wf_');
+      if (isSlash && testCase.status === 'completed') {
+        expect(screen).toContain('Reported failed:');
+        expect(screen).toContain('fr');
+      }
       const requests = server.requests.filter(
         ({ body }) => body['stream'] === true,
       );
-      expect(requests).toHaveLength(1);
-      const messages = JSON.stringify(requests[0].body['messages']);
-      expect(messages).toContain(`<status>${testCase.status}</status>`);
-      expect(messages.match(/<kind>workflow<\/kind>/g)).toHaveLength(1);
+      expect(requests).toHaveLength(isSlash ? 1 : 2);
+      const messages = JSON.stringify(requests.at(-1)!.body['messages']);
+      if (isSlash)
+        expect(messages).toContain(`<status>${testCase.status}</status>`);
+      expect(messages.match(/<kind>workflow<\/kind>/g) ?? []).toHaveLength(
+        isSlash ? 1 : 0,
+      );
       expect(messages).toContain(testCase.marker);
-      if (testCase.status === 'completed') {
+      if (isSlash && testCase.status === 'completed') {
         expect(messages).toContain('&quot;failed&quot;:[&quot;fr&quot;]');
       }
+
+      await session.idle(500);
+      await session.send('What did that workflow return?');
+      await session.waitForScreen(
+        (text) => text.includes(`${reply}_FOLLOWUP`),
+        'follow-up result',
+        30_000,
+      );
+      await session.idle(1_000);
+      const followUpRequests = server.requests.filter(
+        ({ body }) => body['stream'] === true,
+      );
+      expect(followUpRequests).toHaveLength(isSlash ? 2 : 3);
+      const followUp = JSON.stringify(
+        followUpRequests.at(-1)!.body['messages'],
+      );
+      expect(followUp).toContain(testCase.marker);
+      expect(followUp.match(/<kind>workflow<\/kind>/g) ?? []).toHaveLength(
+        isSlash ? 1 : 0,
+      );
     });
   },
 );

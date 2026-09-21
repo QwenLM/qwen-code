@@ -6,66 +6,34 @@ Status: proposed fix for [#12176](https://github.com/QwenLM/qwen-code/issues/121
 
 ## Problem
 
-The interactive saved-workflow command dispatches a client-initiated foreground
-tool call. Client-initiated tools do not send their results to the model, while
-the workflow completion callback serves background runs only. The run can
-finish and persist a result without sending that result to the conversation.
+A saved-workflow slash command starts a client-initiated tool call. Its foreground result does not continue the model turn, and the registry emits completion notifications only for background runs. The result can exist on disk without reaching the conversation.
 
 ## Decision
 
-Set `run_in_background: true` on the interactive command's workflow arguments.
-Use the existing run acknowledgement, workflow registry completion callback,
-and TUI notification queue. Preserve script-path versus name-only dispatch and
-the supplied arguments.
+Keep saved slash commands in the foreground. Separate completion delivery from execution mode: the scheduler passes an internal notification flag to notification-aware invocations for client-initiated calls, excluding nested code-mode calls whose results return to their parent. The Workflow invocation passes that flag to its runner and registry entry. It is not a model-facing tool parameter or a persisted execution-mode setting. Both initial scheduling and rebuilding an invocation after an argument edit preserve the flag.
 
-The acknowledgement identifies the run and points to Background Tasks. The
-`/workflows` dialog provides its phase tree, usage, pause/resume, and cancellation
-controls. Completion or failure enters the conversation through the existing
-notification channel, including the returned value and recorded agent failures.
+A completed or failed client-started run uses the existing completion callback and notification queue. Model-started foreground runs retain their tool-result return path; background runs retain their existing notification path. Cancellation produces no completion notification. Terminal-state guards prevent a run from reporting twice.
+
+Foreground progress stays in the live tool card, with a run ID and guidance pointing to the card and `/workflows`. Its completion notice displays the run ID, status, a bounded result preview or error, recorded subagent failures, and explicit lines for nonempty top-level `failed`, `errors`, or `error` values reported by the script. These fields are displayed as reported data, not used to reinterpret a completed run as a runtime failure. Arbitrary application-specific result schemas remain uninterpreted.
+
+The TUI displays this foreground notice when the callback arrives, before waiting for model admission or a response. The same notification is then delivered through the existing queue and recorded in the conversation. A later question has the returned result in model context. The slash-command dispatch record may still have empty `outputHistoryItems`: the completion has its own notification record.
 
 ## Alternatives and tradeoff
 
-Keeping the foreground mode would require either a client-origin discriminator
-in the workflow registry or an exception in the tool-result continuation path.
-Both would introduce new delivery rules for a case the existing background mode
-already handles. Removing the foreground notification guard would deliver
-model-initiated foreground results twice.
+Removing the foreground guard for every run would add notifications to model-started runs that already return a tool result. Forcing slash commands into background mode would change inline progress and foreground cancellation. The internal delivery flag preserves those behaviors while reusing the notification channel.
 
-Another option is to expand interactive commands into model prompts, as headless
-and ACP commands do. The model could then invoke a foreground workflow and keep
-inline progress. This adds a model turn before execution and gives the model
-control over whether to invoke the tool and how to pass the arguments. Background
-dispatch preserves the user's explicit invocation and arguments without that
-extra launch step.
+Letting client tools through the normal tool-result continuation would also require handling their missing model-authored tool call, turn ownership, and cancellation. Expanding the command into a model prompt would add an invocation before execution and give the model control over the requested arguments. Neither is needed for this fix.
 
-The chosen change moves inline live progress to Background Tasks and
-`/workflows`, and releases the prompt after launch. Completion also starts a model
-turn, consuming tokens even for a short script whose result previously stayed in
-the local tool card. Maintainers should assess both the progress presentation and
-the added completion cost. The change introduces no protocol or persisted-schema
-change and does not alter model-initiated, headless, or ACP execution.
+The existing notification channel starts a model response and consumes tokens; this proposal preserves that report-back behavior requested by the issue. A configurable silent-context update or optional automatic summary is a separate feature, not implied by preserving foreground execution. The visible result does not depend on the model successfully generating a summary.
 
 ## Scope
 
-The change covers interactive saved-workflow commands, including user, project,
-and extension sources. Tool approval, trust checks, the workflow runner, and
-notification admission remain owned by their existing components. Headless and
-ACP commands continue to expand into model prompts.
+Interactive saved workflow commands keep their script-path/name-only choice, arguments, approvals, foreground progress, and cancellation. Headless and ACP commands retain prompt expansion. Code-mode nested calls return to their parent; ordinary model calls do not gain notifications. No public tool schema, configuration option, or persisted-schema migration is added.
 
-OpenTUI's separate unwired `schedule_tool` handler and adding a persisted-result
-viewer to workflow history are outside this fix.
+OpenTUI's separate unwired `schedule_tool` handler and a new persisted-result viewer in workflow history remain outside this change.
 
 ## Validation
 
-Use an isolated interactive session with a synthetic model endpoint. Prove that
-a slash-command run writes its result and that the model receives that result
-once without another user prompt. Cover successful results, a result describing
-partial failure, and a thrown workflow error. Verify the start acknowledgement
-and the model's completion response in the terminal.
+Use an isolated interactive session and a recording synthetic model endpoint. Verify foreground progress before a controlled agent finishes, visible completion data and real subagent failures, exactly one result notification, persistence, and result retention on a follow-up question. Exercise thrown script errors, cancellation, and approval refusal. Use model-initiated foreground execution as a control: one tool response and no completion notification. Preserve loader coverage for arguments, name-only dispatch, headless, and ACP.
 
-Keep foreground model-tool execution as a control: its result uses the normal
-tool response and produces no background completion notification. Preserve the
-existing cancellation, approval, argument, name-only, headless, and ACP checks.
-
-Execution evidence belongs in the PR's before/after report; this document states
-the acceptance criteria, not a completed-test claim.
+Run targeted unit and terminal regressions, build/type checks, and checks for changed files. No local repository-wide test suite is part of this revision. Evidence belongs in the PR verification report and must distinguish synthetic transport checks from real-model summary quality and the reporter's original nine-agent workload.

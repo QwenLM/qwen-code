@@ -1980,6 +1980,70 @@ describe('WorkflowRunRegistry', () => {
     expect(cb).toHaveBeenCalledTimes(2);
   });
 
+  it('reports client-started foreground results and partial failures once', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_client', { notifyOnCompletion: true }));
+    r.complete('wf_client', { answer: 42, failed: ['fr'] }, 1_000);
+    r.complete('wf_client', 'duplicate', 2_000);
+    r.fail('wf_client', 'late error', 3_000);
+
+    expect(r.get('wf_client')?.isBackgrounded).toBe(false);
+    expect(completion).toHaveBeenCalledOnce();
+    const [display, model, meta] = completion.mock.calls[0];
+    expect(display).toContain('completed. Run ID: wf_client');
+    expect(display).toContain('Result: {"answer":42,"failed":["fr"]}');
+    expect(display).toContain('Reported failed: ["fr"]');
+    expect(display).not.toContain('Background');
+    expect(model).toContain('<task-id>wf_client</task-id>');
+    expect(model).toContain('&quot;failed&quot;:[&quot;fr&quot;]');
+    expect(meta.isBackgrounded).toBe(false);
+  });
+
+  it('reports a foreground error but never a cancelled run', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_error', { notifyOnCompletion: true }));
+    r.fail('wf_error', 'failed to load fr', 1_000);
+    expect(completion.mock.calls[0][0]).toContain('Error: failed to load fr');
+    expect(completion.mock.calls[0][1]).toContain('<status>failed</status>');
+    r.register(reg('wf_cancelled', { notifyOnCompletion: true }));
+    r.cancel('wf_cancelled', 2_000);
+    expect(completion).toHaveBeenCalledOnce();
+  });
+
+  it('keeps reported failures visible when a large foreground result is previewed', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_large', { notifyOnCompletion: true }));
+    r.complete('wf_large', { rows: 'x'.repeat(10_000), failed: ['fr'] }, 1_000);
+    const [display, model] = completion.mock.calls[0];
+    expect(display).toContain('… (truncated)');
+    expect(display).toContain('Reported failed: ["fr"]');
+    expect(display.length).toBeLessThan(4_300);
+    expect(model).toContain('x'.repeat(10_000));
+  });
+
+  it('shows recorded agent failures even when the returned value hides them', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_partial', { notifyOnCompletion: true }));
+    r.onDispatchQueued('wf_partial', {
+      id: 'fr',
+      prompt: 'check French',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchSettled('wf_partial', 'fr', 'French agent failed', 2);
+    r.complete('wf_partial', { answer: 'partial' }, 3);
+    expect(completion.mock.calls[0][0]).toContain('French agent failed');
+    expect(completion.mock.calls[0][1]).toContain('<failures>');
+  });
+
   it('keeps terminal bell and background model completion channels independent', () => {
     const r = new WorkflowRunRegistry();
     const bell = vi.fn();

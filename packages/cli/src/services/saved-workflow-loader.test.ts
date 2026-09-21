@@ -125,10 +125,7 @@ describe('SavedWorkflowLoader', () => {
     expect(await extensionCmd.action!(ctx, '')).toEqual({
       type: 'tool',
       toolName: 'workflow',
-      toolArgs: {
-        run_in_background: true,
-        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
-      },
+      toolArgs: { scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js' },
     });
     // Project and user workflows keep their existing shape.
     expect(projectCmd.description).toBe(
@@ -177,7 +174,7 @@ describe('SavedWorkflowLoader', () => {
     );
   });
 
-  it('dispatches saved workflows in background mode for conversational completion', async () => {
+  it('action dispatches the workflow tool with the scriptPath', async () => {
     listMock.mockResolvedValue([entry()]);
     const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
       signal,
@@ -186,10 +183,7 @@ describe('SavedWorkflowLoader', () => {
     expect(result).toEqual({
       type: 'tool',
       toolName: 'workflow',
-      toolArgs: {
-        run_in_background: true,
-        scriptPath: '/proj/.qwen/workflows/deep-research.js',
-      },
+      toolArgs: { scriptPath: '/proj/.qwen/workflows/deep-research.js' },
     });
   });
 
@@ -249,11 +243,7 @@ describe('SavedWorkflowLoader', () => {
     expect(await locked.action!(ctx, '{"scope":"src"}')).toEqual({
       type: 'tool',
       toolName: 'workflow',
-      toolArgs: {
-        run_in_background: true,
-        name: 'gcp:audit',
-        args: { scope: 'src' },
-      },
+      toolArgs: { name: 'gcp:audit', args: { scope: 'src' } },
     });
 
     const [unlocked] = await new SavedWorkflowLoader(
@@ -263,7 +253,6 @@ describe('SavedWorkflowLoader', () => {
       type: 'tool',
       toolName: 'workflow',
       toolArgs: {
-        run_in_background: true,
         scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
       },
     });

@@ -258,6 +258,14 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   WorkflowToolResult
 > {
   private callId?: string;
+  private notifyOnCompletion = false;
+
+  setCompletionNotificationEnabled(enabled: boolean): void {
+    this.notifyOnCompletion =
+      enabled &&
+      this.config.isInteractive?.() === true &&
+      this.config.getExperimentalZedIntegration?.() !== true;
+  }
 
   /**
    * The failure hint, when the failing script is one this call authored.
@@ -544,6 +552,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         resumeFromRunId: this.params.resumeFromRunId,
         dispatch: this.toolOptions.dispatch,
         runInBackground,
+        notifyOnCompletion: this.notifyOnCompletion,
         ...(!this.sessionOwned && this.config.isWorkflowNameOnly?.() === true
           ? { restrictNestedScriptPaths: true }
           : {}),
@@ -983,7 +992,11 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
     };
   }
   try {
-    return '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
+    const guidance =
+      entry.notifyOnCompletion && !entry.isBackgrounded
+        ? `Workflow ${entry.runId}: watch progress in this tool card or /workflows ${entry.runId}.\n`
+        : '';
+    return guidance + '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
   } catch {
     return `Workflow ${entry.runId} — ${entry.status} — ${entry.phases.length} phase(s)`;
   }

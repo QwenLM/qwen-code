@@ -348,9 +348,9 @@ Runs appear in the background-tasks view and the `/workflows` dialog (live
 phase tree, token usage, cooperative pause/resume, cancel);
 `run_in_background: true` returns a run handle immediately in the interactive
 TUI and delivers completion through the conversation.
-Saved `/<name>` commands typed in the interactive TUI use this background mode:
-watch progress in `/workflows` and wait for the completion notification instead
-of polling the run or launching it again.
+Saved `/<name>` commands typed in the interactive TUI stay in the foreground:
+watch the live tool card or `/workflows`. Completion displays the result and
+delivers it to the model through a notification, without another user prompt.
 
 ## Worked example
 

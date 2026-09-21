@@ -1303,6 +1303,84 @@ await agent('scan package.json')
     expect(updateOutput).not.toHaveBeenCalled();
   });
 
+  it('keeps a client-started workflow in the foreground and reports its completion', async () => {
+    const registry = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const tool = new WorkflowTool(config, {
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    const invocation = tool.build({
+      script: `phase('audit'); return { result: await agent('check fr') };`,
+    });
+    (
+      invocation as unknown as {
+        setCompletionNotificationEnabled: (enabled: boolean) => void;
+      }
+    ).setCompletionNotificationEnabled(true);
+    const updateOutput = vi.fn();
+    let settled = false;
+    const execution = invocation
+      .execute(new AbortController().signal, updateOutput)
+      .then((value) => {
+        settled = true;
+        return value;
+      });
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    expect(settled).toBe(false);
+    expect(registry.list()[0].isBackgrounded).toBe(false);
+    expect(
+      updateOutput.mock.calls.some(([text]) =>
+        text.includes('watch progress in this tool card or /workflows'),
+      ),
+    ).toBe(true);
+    expect(completion).not.toHaveBeenCalled();
+    resolveDispatch?.('French checked');
+    const result = await execution;
+    expect(JSON.stringify(result.llmContent)).toContain('French checked');
+    expect(completion).toHaveBeenCalledOnce();
+    expect(completion.mock.calls[0][0]).toContain('French checked');
+    expect(completion.mock.calls[0][1]).toContain('French checked');
+  });
+
+  it.each([
+    { interactive: false, acp: false },
+    { interactive: true, acp: true },
+  ])(
+    'keeps completion routing unchanged outside the TUI: %j',
+    async ({ interactive, acp }) => {
+      const registry = new WorkflowRunRegistry();
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      const config = {
+        isInteractive: () => interactive,
+        getExperimentalZedIntegration: () => acp,
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      const invocation = new WorkflowTool(config).build({
+        script: 'return 42;',
+      });
+      (
+        invocation as unknown as {
+          setCompletionNotificationEnabled: (enabled: boolean) => void;
+        }
+      ).setCompletionNotificationEnabled(true);
+      const result = await invocation.execute(new AbortController().signal);
+      expect(JSON.stringify(result.llmContent)).toContain('42');
+      expect(completion).not.toHaveBeenCalled();
+    },
+  );
+
   it('run_in_background=false preserves the foreground ToolResult byte-for-byte', async () => {
     const run = async (runInBackground: false | undefined) => {
       const registry = new WorkflowRunRegistry();

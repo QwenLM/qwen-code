@@ -21493,6 +21493,11 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ToolResult
   > {
     capturedPromptId?: string;
+    notifyOnCompletion = false;
+
+    setCompletionNotificationEnabled(enabled: boolean): void {
+      this.notifyOnCompletion = enabled;
+    }
 
     constructor(params: Record<string, unknown>) {
       super(params);
@@ -21512,7 +21517,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 
     async execute(): Promise<ToolResult> {
       return {
-        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}`,
+        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}; notify=${this.notifyOnCompletion}`,
         returnDisplay: '',
       };
     }
@@ -21543,82 +21548,95 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     }
   }
 
-  it('passes request.prompt_id to invocation.setPromptId via buildInvocation', async () => {
-    const tool = new PromptIdAwareTool();
-    const mockToolRegistry = {
-      getTool: () => tool,
-      ensureTool: async () => tool,
-      getFunctionDeclarations: () => [],
-      tools: new Map(),
-      discovery: {},
-      registerTool: () => {},
-      getToolByName: () => tool,
-      getToolByDisplayName: () => tool,
-      getTools: () => [],
-      discoverTools: async () => {},
-      getAllTools: () => [],
-      getToolsByServer: () => [],
-    } as unknown as ToolRegistry;
+  it.each([
+    { isClientInitiated: false, source: undefined, notify: false },
+    { isClientInitiated: true, source: undefined, notify: true },
+    { isClientInitiated: true, source: 'code_mode' as const, notify: false },
+  ])(
+    'passes request provenance to the executing invocation: %j',
+    async ({ isClientInitiated, source, notify }) => {
+      const tool = new PromptIdAwareTool();
+      const mockToolRegistry = {
+        getTool: () => tool,
+        ensureTool: async () => tool,
+        getFunctionDeclarations: () => [],
+        tools: new Map(),
+        discovery: {},
+        registerTool: () => {},
+        getToolByName: () => tool,
+        getToolByDisplayName: () => tool,
+        getTools: () => [],
+        discoverTools: async () => {},
+        getAllTools: () => [],
+        getToolsByServer: () => [],
+      } as unknown as ToolRegistry;
 
-    const mockConfig = {
-      getSessionId: () => 'test-session-id',
-      getUsageStatisticsEnabled: () => true,
-      getDebugMode: () => false,
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getPermissionsAllow: () => [],
-      getContentGeneratorConfig: () => ({
-        model: 'test-model',
-        authType: 'gemini',
-      }),
-      getShellExecutionConfig: () => ({
-        terminalWidth: 90,
-        terminalHeight: 30,
-      }),
-      storage: {
-        getProjectTempDir: () => '/tmp',
-      },
-      getToolRegistry: () => mockToolRegistry,
-      getUseModelRouter: () => false,
-      getLlmClient: () => null,
-      isInteractive: () => true,
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getChatRecordingService: () => undefined,
-      getMessageBus: vi.fn().mockReturnValue(undefined),
-      getDisableAllHooks: vi.fn().mockReturnValue(true),
-    } as unknown as Config;
-
-    const onAllToolCallsComplete = vi.fn();
-    const scheduler = new CoreToolScheduler({
-      config: mockConfig,
-      onAllToolCallsComplete,
-      onToolCallsUpdate: vi.fn(),
-      getPreferredEditor: () => 'vscode',
-      onEditorClose: vi.fn(),
-    });
-
-    const abortController = new AbortController();
-    await scheduler.schedule(
-      [
-        {
-          callId: 'call-1',
-          name: 'promptIdAwareTool',
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'expected-prompt-id-xyz',
+      const mockConfig = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getTruncateToolOutputThreshold: () => 100_000,
+        getTruncateToolOutputLines: () => 1_000,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getPermissionsAllow: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'gemini',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: {
+          getProjectTempDir: () => '/tmp',
         },
-      ],
-      abortController.signal,
-    );
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        isInteractive: () => true,
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getChatRecordingService: () => undefined,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
 
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-    });
+      const onAllToolCallsComplete = vi.fn();
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate: vi.fn(),
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
 
-    expect(tool.lastBuiltInvocation?.capturedPromptId).toBe(
-      'expected-prompt-id-xyz',
-    );
-  });
+      const abortController = new AbortController();
+      await scheduler.schedule(
+        [
+          {
+            callId: 'call-1',
+            name: 'promptIdAwareTool',
+            args: {},
+            isClientInitiated,
+            source,
+            prompt_id: 'expected-prompt-id-xyz',
+          },
+        ],
+        abortController.signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      expect(tool.lastBuiltInvocation?.capturedPromptId).toBe(
+        'expected-prompt-id-xyz',
+      );
+      expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0])).toContain(
+        `notify=${notify}`,
+      );
+    },
+  );
 
   it('buildInvocation calls setPromptId when promptId is provided (covers both setArgs and schedule call sites)', () => {
     // Directly exercises the private buildInvocation method so that both

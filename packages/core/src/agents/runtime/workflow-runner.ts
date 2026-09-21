@@ -100,6 +100,8 @@ export interface WorkflowRunnerOptions {
   dispatch?: WorkflowAgentDispatch;
   onUpdate?: (entry: WorkflowTask) => void;
   runInBackground?: boolean;
+  /** Client-started tools have no model tool-result continuation. */
+  notifyOnCompletion?: boolean;
   /**
    * Where this session's authoring reference is, sent with a failed background
    * run's completion notification. Omitted for a script the model did not
@@ -566,6 +568,7 @@ export class WorkflowRunner {
             }
           : {}),
         isBackgrounded: runInBackground,
+        notifyOnCompletion: options.notifyOnCompletion,
         resumeInBackground:
           runInBackground &&
           config.isInteractive?.() === true &&

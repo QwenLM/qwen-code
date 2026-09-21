@@ -323,6 +323,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   status: WorkflowStatus;
   /** Whether the tool returned before this run reached a terminal state. */
   isBackgrounded?: boolean;
+  /** Deliver client-started foreground results through the notification queue. */
+  notifyOnCompletion?: boolean;
   /** Whether a model-visible resume may preserve background execution. */
   resumeInBackground?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
@@ -504,6 +506,7 @@ export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
  */
 export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
 export interface WorkflowRunCompletionMeta {
+  isBackgrounded?: boolean;
   runId: string;
   status: Extract<WorkflowStatus, 'completed' | 'failed'>;
   todoWorkChainId?: string;
@@ -656,18 +659,40 @@ export class WorkflowRunRegistry {
   }
 
   private emitCompletion(entry: WorkflowTask): void {
-    if (!entry.isBackgrounded || !this.completionCallback) return;
+    if (
+      (!entry.isBackgrounded && !entry.notifyOnCompletion) ||
+      !this.completionCallback
+    )
+      return;
     if (entry.status !== 'completed' && entry.status !== 'failed') return;
 
     const statusText = entry.status === 'completed' ? 'completed' : 'failed';
     const label = stripAnsiAndControl(entry.description) || entry.runId;
-    const displayText = `Background workflow "${label}" ${statusText}.`;
+    const summary = `${entry.isBackgrounded ? 'Background workflow' : 'Workflow'} "${label}" ${statusText}.`;
+    const failures = buildFailureLines(entry);
+    const displayText = entry.isBackgrounded
+      ? summary
+      : [
+          `${summary} Run ID: ${entry.runId}`,
+          entry.status === 'failed'
+            ? `Error: ${entry.error ?? ''}`
+            : `Result: ${stringifyCompletionResult(entry.result)}`,
+          ...failures,
+          ...reportedFailureLines(entry.result),
+        ]
+          .map((line) => {
+            const text = stripAnsiAndControl(line);
+            return text.length > 4_096
+              ? `${text.slice(0, 4_096)}… (truncated)`
+              : text;
+          })
+          .join('\n');
     const modelParts = [
       '<task-notification>',
       '<kind>workflow</kind>',
       `<task-id>${escapeXml(entry.runId)}</task-id>`,
       `<status>${entry.status}</status>`,
-      `<summary>Background workflow "${escapeXml(label)}" ${statusText}.</summary>`,
+      `<summary>${escapeXml(summary)}</summary>`,
     ];
     if (entry.status === 'completed' && entry.result !== undefined) {
       modelParts.push(
@@ -688,7 +713,6 @@ export class WorkflowRunRegistry {
     // slots — and the count alone gives the reader no way to judge whether
     // the result is thin because the work was thin or because the agents
     // failed. These are the errors the registry already recorded.
-    const failures = buildFailureLines(entry);
     if (failures.length > 0) {
       modelParts.push(
         `<failures>${escapeXmlElementText(failures.join('\n'))}</failures>`,
@@ -712,6 +736,7 @@ export class WorkflowRunRegistry {
     modelParts.push('</task-notification>');
 
     const meta: WorkflowRunCompletionMeta = {
+      ...(!entry.isBackgrounded ? { isBackgrounded: false } : {}),
       runId: entry.runId,
       status: entry.status,
       todoWorkChainId: entry.todoWorkChainId,
@@ -1873,6 +1898,21 @@ function stringifyCompletionResult(result: unknown): string {
     return JSON.stringify(result) ?? String(result);
   } catch {
     return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
+  }
+}
+
+function reportedFailureLines(result: unknown): string[] {
+  try {
+    const value: unknown = JSON.parse(stringifyCompletionResult(result));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    return ['failed', 'errors', 'error'].flatMap((key) => {
+      const failure = (value as Record<string, unknown>)[key];
+      if (!failure || (Array.isArray(failure) && failure.length === 0))
+        return [];
+      return [`Reported ${key}: ${stringifyCompletionResult(failure)}`];
+    });
+  } catch {
+    return [];
   }
 }
 
