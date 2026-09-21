@@ -352,8 +352,12 @@ import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
-import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import {
+  PeerMessaging,
+  type PeerQueuedDelivery,
+} from '../peerMessaging/peer-messaging.js';
 import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -3765,6 +3769,11 @@ class QwenAgent implements Agent {
   // teardown ran.
   private peerMessagingClosed = false;
   /**
+   * The bound inbox, once it is. Kept beside the promise above because a
+   * session leaving settles its unread messages without suspending.
+   */
+  private peerMessaging: PeerMessaging | null = null;
+  /**
    * Sessions already given a record. A session is published once, but a
    * reload can hand the same id back through the same path, and two
    * records for one session would be two names for it in every listing.
@@ -4447,6 +4456,14 @@ class QwenAgent implements Agent {
     options: { shutdownConfig?: boolean } = {},
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) return;
+    // Ahead of the dispose that empties the queue, and without an await
+    // in between: a message accepted in that gap would be receipted
+    // `delivered` and then thrown away with the queue.
+    try {
+      this.expireUnreadPeerMessages(session);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
     try {
       session.dispose();
     } catch (error) {
@@ -4857,31 +4874,35 @@ class QwenAgent implements Agent {
     this.peerMessagingStart = (async () => {
       try {
         const messaging = await PeerMessaging.start({
-          // Inbound is refused outright, so neither the approval mode nor
-          // the parity rule it feeds is ever consulted. Stated rather than
-          // left to a default: what a daemon-managed session may be told
-          // is settled here and nowhere else.
-          getApprovalMode: () => null,
-          getPolicySetting: () => 'refuse',
+          // Each reader answers for the session the message is addressed
+          // to, by the name `resolveSessionId` gave it. A session this
+          // process no longer holds is refused rather than judged by
+          // someone else's settings: it is an answer about a session, and
+          // there is none.
+          getApprovalMode: (name) =>
+            this.hostedSession(name)?.getConfig().getApprovalMode() ?? null,
+          getPolicySetting: (name) => {
+            const session = this.hostedSession(name);
+            if (!session) return 'refuse';
+            const settings = session.getSettings();
+            return isCrossSessionMessagingEnabled(settings.merged)
+              ? settings.merged.agents?.crossSessionInbound
+              : 'refuse';
+          },
+          getPolicyScope: (name) => {
+            const settings = this.hostedSession(name)?.getSettings();
+            return settings ? inboundPolicyScope(settings) : undefined;
+          },
+          // Nothing here can put a parked message in front of anyone: a
+          // session a program drives has no `/peers` to read and nobody
+          // watching it. A message that would wait for a decision is
+          // refused, which tells its sender to stop rather than leaving
+          // it holding a `held` that promises a review that cannot
+          // happen. Presenting them is a separate piece of work.
+          presentsHolds: false,
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             this.publishInboxAddress(ipcPath, ipcToken),
-          ownsSessionId: (id) => {
-            // The map key froze when the session was published, while
-            // the record a sender reads follows the Config's live id —
-            // /clear swaps the id under a running session. Test both, so
-            // a frame pinned to either spelling is answered by the
-            // session that holds it.
-            const wanted = normalizeSessionIdForLookup(id);
-            return (
-              this.sessions.has(wanted) ||
-              [...this.sessions.values()].some(
-                (session) =>
-                  normalizeSessionIdForLookup(
-                    session.getConfig().getSessionId(),
-                  ) === wanted,
-              )
-            );
-          },
+          resolveSessionId: (id) => this.resolveHostedSessionId(id),
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
@@ -4895,6 +4916,18 @@ class QwenAgent implements Agent {
         ) {
           this.peerMessagingStart = null;
         }
+        // Held as well as awaited: a session leaving has to settle the
+        // messages it never read before it disposes, and there is no
+        // point in that sequence where it can wait on a promise.
+        this.peerMessaging = messaging;
+        // Wired here rather than by a later caller: the transport buffers
+        // accepted messages until it has somewhere to put them, and a
+        // message that sits in that buffer has already been receipted
+        // `delivered`. Binding the socket and knowing where messages go
+        // are one step.
+        messaging?.setSubmitFn((modelText, displayText, delivery) =>
+          this.deliverPeerMessage(messaging, modelText, displayText, delivery),
+        );
         return messaging;
       } catch (error) {
         debugLogger.error(
@@ -4907,6 +4940,120 @@ class QwenAgent implements Agent {
     })();
   }
 
+  /**
+   * The session `name` addresses, when this process holds it and it can
+   * still be addressed.
+   *
+   * `name` is what `resolveSessionId` returned, so it is a key of the
+   * session map; the argument is optional only because the gate's readers
+   * are shaped for a host of one session, which passes nothing.
+   */
+  private hostedSession(name: string | undefined): Session | undefined {
+    if (name === undefined) return undefined;
+    if (!this.registeredSessions.has(name)) return undefined;
+    const session = this.sessions.get(name);
+    return session?.isOpenForPeerMessages() ? session : undefined;
+  }
+
+  /**
+   * The one name this process keeps for the session `id` names.
+   *
+   * A session answers to two spellings: the key it was published under,
+   * which never changes, and the id its Config holds now, which `/clear`
+   * and a resume swap underneath it — and the record a sender reads
+   * follows the latter. Both resolve to the key, so every later step
+   * (the gate's settings lookups, the hold bookkeeping, the queue) works
+   * on one name for one session instead of two for the same one.
+   *
+   * A session whose settings leave cross-session messaging off has no
+   * record and is not addressable; it is not resolved either, so a
+   * sender that knows its id anyway is answered as misaddressed.
+   */
+  private resolveHostedSessionId(id: string): string | undefined {
+    const wanted = normalizeSessionIdForLookup(id);
+    if (this.hostedSession(wanted)) return wanted;
+    for (const [key, session] of this.sessions) {
+      if (
+        normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
+          wanted &&
+        this.hostedSession(key)
+      ) {
+        return key;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Hand an accepted message to the session it is addressed to.
+   *
+   * Returning false means "not now": the gate turns the sender away with
+   * a receipt that says the queue is full and does not settle the id, so
+   * an honest retry can land once the session has read what it has.
+   */
+  private deliverPeerMessage(
+    messaging: PeerMessaging,
+    modelText: string,
+    displayText: string,
+    delivery: PeerQueuedDelivery | undefined,
+  ): boolean {
+    if (!delivery) return false;
+    const session = this.hostedSession(delivery.toSessionId);
+    if (!session || !session.hasRoomForPeerMessage()) return false;
+    void session.enqueuePeerMessage({ delivery, modelText, displayText }).then(
+      ({ accepted }) => {
+        // The transcript write was refused, or the session started
+        // closing while it ran. Either way nothing will read this
+        // message, and its sender is holding a `delivered`.
+        if (!accepted) messaging.reportExpired(delivery);
+      },
+      (error) => {
+        debugLogger.warn(
+          `[ACP] queuing peer message ${delivery.msgId} failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        messaging.reportExpired(delivery);
+      },
+    );
+    return true;
+  }
+
+  /**
+   * Tell the senders of everything `session` was handed and never read
+   * that their messages expired.
+   *
+   * Only this process knows: its sessions' queues drain independently,
+   * so the order messages were handed over in says nothing about which
+   * are still waiting.
+   */
+  private expireUnreadPeerMessages(session: Session): void {
+    const messaging = this.peerMessaging;
+    if (!messaging) return;
+    for (const delivery of session.takeUnconsumedPeerDeliveries()) {
+      messaging.reportExpired(delivery);
+    }
+  }
+
+  /**
+   * The same for every session, on the way out. A session that cannot
+   * answer costs its senders a correction, which is best-effort anyway;
+   * it must not cost the process the socket close that follows.
+   */
+  private expireUnreadPeerMessagesEverywhere(): void {
+    for (const session of this.sessions.values()) {
+      try {
+        this.expireUnreadPeerMessages(session);
+      } catch (error) {
+        debugLogger.debug(
+          `[ACP] settling unread peer messages failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
   /** Close the inbox and stop advertising it. Safe to call more than once. */
   async closePeerMessaging(): Promise<void> {
     this.peerMessagingClosed = true;
@@ -4914,7 +5061,14 @@ class QwenAgent implements Agent {
     if (!pending) return;
     this.peerMessagingStart = null;
     try {
-      await (await pending)?.close();
+      const messaging = await pending;
+      // Before the inbox goes: the process is on its way out, and every
+      // message still waiting in a session's queue was receipted
+      // `delivered` to a sender that will otherwise never learn it went
+      // unread.
+      this.expireUnreadPeerMessagesEverywhere();
+      this.peerMessaging = null;
+      await messaging?.close();
     } catch (error) {
       debugLogger.debug(
         `[ACP] closing cross-session messaging failed: ${

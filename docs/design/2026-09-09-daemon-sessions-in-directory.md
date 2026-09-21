@@ -89,6 +89,12 @@ to learn nothing. `refused` says so immediately. Where a held message
 _should_ surface for these sessions — the ACP client, the daemon's own
 API — is a real question, and answering it is separate work.
 
+> Superseded in part (2026-09-21): these sessions now take a message
+> their gate accepts, and refuse only what it would have held. The
+> reasoning above is why the holds are refused rather than parked; see
+> [Accepted cross-session messages reach a session a program
+> drives](2026-09-21-acp-accepted-peer-delivery.md).
+
 **Register when the session's own settings turn messaging on.** The
 interactive UI registers unconditionally, because its record also
 answers "what is running right now". A hosted session's record exists

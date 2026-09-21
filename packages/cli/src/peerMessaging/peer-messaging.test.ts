@@ -210,7 +210,8 @@ async function start(
   mode: ApprovalMode | null = ApprovalMode.DEFAULT,
   extra: {
     getSessionId?: () => string;
-    ownsSessionId?: (id: string) => boolean;
+    resolveSessionId?: (id: string) => string | undefined;
+    presentsHolds?: boolean;
     settleSentMessage?: (
       msgId: string,
       status: string,
@@ -237,9 +238,17 @@ async function start(
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
-  submitted: Array<{ modelText: string; displayText: string }>;
+  submitted: Array<{
+    modelText: string;
+    displayText: string;
+    delivery?: PeerQueuedDelivery;
+  }>;
 }> {
-  const submitted: Array<{ modelText: string; displayText: string }> = [];
+  const submitted: Array<{
+    modelText: string;
+    displayText: string;
+    delivery?: PeerQueuedDelivery;
+  }> = [];
   const started = await PeerMessaging.start({
     socketPath: path.join(tmpDir, 'socks', 'self.sock'),
     getApprovalMode: () => mode,
@@ -262,8 +271,8 @@ async function start(
   });
   if (!started) throw new Error('peer messaging failed to start');
   messaging = started;
-  started.setSubmitFn((modelText, displayText) => {
-    submitted.push({ modelText, displayText });
+  started.setSubmitFn((modelText, displayText, delivery) => {
+    submitted.push({ modelText, displayText, delivery });
     return true;
   });
   return { messaging: started, submitted };
@@ -508,7 +517,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const sender = await startSenderInbox();
     const hosted = new Set(['session-a', 'session-b']);
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
-      ownsSessionId: (id) => hosted.has(id),
+      resolveSessionId: (id) => (hosted.has(id) ? id : undefined),
     });
 
     const mine = peerFrame({
@@ -544,7 +553,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     // protocol page tells senders to always pin for exactly this reason.
     const sender = await startSenderInbox();
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
-      ownsSessionId: () => true,
+      resolveSessionId: (id) => id,
     });
     const unpinned = peerFrame({
       content: 'to whom it may concern',
@@ -567,9 +576,184 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await expect(
       start(ApprovalMode.DEFAULT, {
         getSessionId: () => 'session-now',
-        ownsSessionId: () => true,
+        resolveSessionId: (id) => id,
       }),
-    ).rejects.toThrow('getSessionId or ownsSessionId');
+    ).rejects.toThrow('getSessionId or resolveSessionId');
+  });
+
+  it('hands the gate the host name, not the spelling the sender used', async () => {
+    // A session answers to more than one id — the key it was published
+    // under and the id it holds now. Resolving once here is what keeps
+    // everything downstream from seeing two sessions where there is one:
+    // whatever spelling arrives, what travels on is the host's name.
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: (id) =>
+        id === 'session-was' || id === 'session-now'
+          ? 'session-key'
+          : undefined,
+    });
+
+    for (const spelling of ['session-was', 'session-now']) {
+      await send(
+        m.socketPath!,
+        peerFrame({
+          content: `addressed as ${spelling}`,
+          from: sender.socketPath,
+          fromMode: 'prompting',
+          toSessionId: spelling,
+        }),
+      );
+      await settle();
+    }
+
+    expect(submitted.map((entry) => entry.delivery?.toSessionId)).toEqual([
+      'session-key',
+      'session-key',
+    ]);
+  });
+
+  it('leaves a frame misaddressed when the host cannot say whose it is', async () => {
+    // Mid-teardown a host can throw rather than answer. Delivering to an
+    // address nobody confirmed is the one outcome that cannot be taken
+    // back, so the frame is answered misaddressed — which tells the
+    // sender its directory may be stale and lets it try again.
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: () => {
+        throw new Error('sessions are being torn down');
+      },
+    });
+    const frame = peerFrame({
+      content: 'anyone there',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await send(m.socketPath!, frame);
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'misaddressed',
+      origMsgId: frame.msgId,
+    });
+  });
+
+  it('names the sender beside the message, for a queue entry that shows one', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: (id) => id,
+    });
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'ready when you are',
+        from: sender.socketPath,
+        fromName: 'the other window',
+        fromMode: 'prompting',
+        toSessionId: 'session-a',
+      }),
+    );
+    await settle();
+
+    expect(submitted[0]?.delivery?.senderLabel).toBe('the other window');
+  });
+
+  it('refuses what it would have held when the host cannot present a hold', async () => {
+    // Nothing would ever release it: the receipt would say `held`, which
+    // promises a person will look, and nobody can.
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: (id) => id,
+      presentsHolds: false,
+    });
+    const frame = peerFrame({
+      content: 'a message the modes disagree about',
+      from: sender.socketPath,
+      fromMode: 'bypass',
+      toSessionId: 'session-a',
+    });
+    await send(m.socketPath!, frame);
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(0);
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'refused',
+      origMsgId: frame.msgId,
+    });
+  });
+
+  it('corrects the receipt of a message a session took but never read', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: (id) => id,
+    });
+    const frame = peerFrame({
+      content: 'read me later',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await send(m.socketPath!, frame);
+    await settle();
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'delivered',
+      origMsgId: frame.msgId,
+    });
+
+    const delivery = submitted[0]?.delivery;
+    if (!delivery) throw new Error('the message was never handed over');
+    m.reportExpired(delivery);
+    await settle();
+
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'expired',
+      origMsgId: frame.msgId,
+    });
+  });
+
+  it('settles what never reached a session at close, and nothing else', async () => {
+    // The tail of what was handed over is not the tail of what is
+    // unread when several sessions read at their own pace, so a host of
+    // several settles its own; what is still buffered here reached no
+    // session at all and is this transport's to settle.
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: (id) => id,
+    });
+    const read = peerFrame({
+      content: 'this one was read',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await send(m.socketPath!, read);
+    await settle();
+    expect(submitted).toHaveLength(1);
+
+    await m.close();
+    messaging = null;
+    await settle();
+
+    expect(
+      receipts.filter(
+        (frame) =>
+          frame.type === 'control' &&
+          'status' in frame &&
+          frame.status === 'expired',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('refuses a queued-peer counter from a host of several sessions', async () => {
+    // The counter answers "how many of the last N are unread", which only
+    // means something for one queue draining in order.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      resolveSessionId: (id) => id,
+    });
+    expect(() => m.setQueuedPeerCount(() => 0)).toThrow('reportExpired');
   });
 
   it('admits a pinned message when it has no session id to judge it against', async () => {
@@ -800,6 +984,8 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         admissionKey: `peer:${sender.socketPath}`,
         from: sender.socketPath,
         toSessionId: 'session-a',
+        // No name of its own, so it is named by the address it answers on.
+        senderLabel: sender.socketPath,
       },
     ]);
 
@@ -1390,7 +1576,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     // the approval mode. One message each covers all four readers.
     let policy: InboundPolicy | undefined = 'hold';
     const { submitted } = await start(null, {
-      ownsSessionId: (id) => id === 'hosted-1',
+      resolveSessionId: (id) => (id === 'hosted-1' ? id : undefined),
       getPolicySetting: (id) => {
         asked['policy']!.push(id);
         return policy;

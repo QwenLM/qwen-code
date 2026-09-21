@@ -86,6 +86,7 @@ function harness(
     scope?: PolicyScope;
     isControllerValid?: (id: string) => boolean;
     admission?: PeerAdmission;
+    presentsHolds?: boolean;
   } = {},
 ): Harness {
   let mode: ApprovalMode | null =
@@ -142,6 +143,9 @@ function harness(
     },
     ...(initial.isControllerValid
       ? { isControllerValid: initial.isControllerValid }
+      : {}),
+    ...(initial.presentsHolds !== undefined
+      ? { presentsHolds: initial.presentsHolds }
       : {}),
     deliver: (frame, origin) => {
       if (deliveryFails) throw new Error('accepted-message backlog is full');
@@ -2522,5 +2526,112 @@ describe('a gate for a process hosting several sessions', () => {
       msgId: forStrict.msgId,
       status: 'misaddressed',
     });
+  });
+});
+
+describe('a host that cannot present a held message', () => {
+  // Every reason a message is held, refused instead. A host with no way
+  // to ask — no hold list to read, nobody watching — would otherwise
+  // park it on a decision that can never be made, having told its sender
+  // `held`, which promises that someone will look.
+  const heldCauses: Array<{
+    name: string;
+    hold: (h: Harness) => void;
+    frame: () => PeerUserFrame;
+  }> = [
+    {
+      name: 'an explicit setting',
+      hold: (h) => h.setPolicy('hold'),
+      frame: () => frame({ fromMode: 'prompting' }),
+    },
+    {
+      name: 'a setting it could not read',
+      hold: (h) => h.throwOnPolicy(),
+      frame: () => frame({ fromMode: 'prompting' }),
+    },
+    {
+      name: 'an approval mode it could not read',
+      hold: (h) => h.setMode(null),
+      frame: () => frame({ fromMode: 'prompting' }),
+    },
+    {
+      name: 'a sender that asserted no mode',
+      hold: () => {},
+      frame: () => frame({ fromMode: undefined }),
+    },
+    {
+      name: 'a sender whose class differs',
+      hold: (h) => h.setMode(ApprovalMode.DEFAULT),
+      frame: () => frame({ fromMode: 'bypass' }),
+    },
+  ];
+
+  for (const cause of heldCauses) {
+    it(`refuses what ${cause.name} would have held`, () => {
+      const h = harness({ presentsHolds: false });
+      cause.hold(h);
+      const f = cause.frame();
+
+      expect(h.gate.admit(f)).toBe('refused');
+      expect(h.gate.getHeld()).toHaveLength(0);
+      expect(h.delivered).toHaveLength(0);
+      expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'refused' });
+    });
+  }
+
+  it('leaves the same message admissible again', () => {
+    // A hold this host could not present is refused for want of a
+    // reviewer, and some of the reasons are momentary — an approval mode
+    // that could not be read while a session was still settling reads as
+    // unknown. Settling the id would refuse that exact message for good.
+    const h = harness({ presentsHolds: false, mode: null });
+    const f = frame({ fromMode: 'prompting' });
+    expect(h.gate.admit(f)).toBe('refused');
+
+    h.setMode(ApprovalMode.DEFAULT);
+    expect(h.gate.admit(f)).toBe('accept');
+    expect(h.delivered).toEqual([f]);
+  });
+
+  it('still settles a message the policy itself refused', () => {
+    // Nothing momentary about it: the session refuses peer messages, and
+    // repeating the verdict is the answer to a re-send.
+    const h = harness({ presentsHolds: false });
+    h.setPolicy('refuse');
+    const f = frame({ fromMode: 'prompting' });
+    expect(h.gate.admit(f)).toBe('refused');
+
+    h.setPolicy('accept');
+    expect(h.gate.admit(f)).toBe('refused');
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  it('still accepts what it would have accepted', () => {
+    const h = harness({ presentsHolds: false, mode: ApprovalMode.DEFAULT });
+    const peer = frame({ fromMode: 'prompting' });
+    expect(h.gate.admit(peer)).toBe('accept');
+
+    // A trusted controller and this session's own processes are not
+    // judged by the parity rule at all, so a mode that would hold a
+    // stranger's message does not touch theirs.
+    const own = frame({ fromMode: 'bypass' });
+    expect(h.gate.admit(own, { selfSent: true })).toBe('accept');
+    const controlled = frame({ fromMode: 'bypass' });
+    expect(
+      h.gate.admit(controlled, {
+        selfSent: false,
+        controller: { id: 'grant-1', label: 'the deploy script' },
+      }),
+    ).toBe('accept');
+    expect(h.delivered).toEqual([peer, own, controlled]);
+  });
+
+  it('parks a message when the host says nothing about presenting holds', () => {
+    const h = harness();
+    h.setPolicy('hold');
+    const f = frame({ fromMode: 'prompting' });
+
+    expect(h.gate.admit(f)).toBe('held');
+    expect(h.gate.getHeld()).toHaveLength(1);
   });
 });

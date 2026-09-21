@@ -235,6 +235,28 @@ function authorityNotice(fields: {
 }
 
 /**
+ * Who a message is from, in one flattened phrase.
+ *
+ * A controller is named by the label its user gave it, never by the
+ * `fromName` in the frame: the point of naming it is to say which grant
+ * let this through, and a sender that could choose that string could
+ * impersonate another grant. Anyone else is named by the name they
+ * chose, or by their address when they chose none.
+ *
+ * Flattened for the same reason the envelope flattens: this reaches a
+ * terminal, and it is the part of the line its sender controls.
+ */
+export function peerSenderLabel(fields: {
+  fromName?: string;
+  from: string;
+  controller?: PeerControllerIdentity;
+}): string {
+  if (fields.controller) return flattenPeerLabel(fields.controller.label);
+  const name = flattenPeerLabel(fields.fromName ?? '');
+  return name.length > 0 ? name : flattenPeerLabel(fields.from);
+}
+
+/**
  * One-line form for the transcript and the queue preview, where the full
  * envelope would be noise.
  */
@@ -245,18 +267,7 @@ export function formatPeerDisplay(fields: {
   selfSent?: boolean;
   controller?: PeerControllerIdentity;
 }): string {
-  // Same flattening as the envelope: this line goes to the terminal, and
-  // a peer-chosen name is the one part of it the peer fully controls.
-  const name = flattenPeerLabel(fields.fromName ?? '');
-  // A controller is named by the label its user gave it, never by the
-  // `fromName` in the frame: the whole point of the line is to say which
-  // grant let this through, and a sender that could choose that string
-  // could impersonate another grant.
-  const who = fields.controller
-    ? flattenPeerLabel(fields.controller.label)
-    : name.length > 0
-      ? name
-      : flattenPeerLabel(fields.from);
+  const who = peerSenderLabel(fields);
   const oneLine = flattenPeerLabel(fields.content).replace(/\s+/g, ' ').trim();
   const preview = oneLine.length > 120 ? `${oneLine.slice(0, 119)}…` : oneLine;
   const sender = fields.controller

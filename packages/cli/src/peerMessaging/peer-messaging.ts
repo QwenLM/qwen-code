@@ -55,6 +55,7 @@ import {
   type PeerInbox,
   type PeerOrigin,
   peerSenderKey,
+  peerSenderLabel,
   type PeerUserFrame,
   readPeerControllerRegistrySync,
   refundSendPacerMessage,
@@ -74,7 +75,14 @@ export interface PeerQueuedDelivery {
   admissionKey?: string;
   from?: string;
   replyToken?: string;
+  /**
+   * The addressee, as the host names it. A host of several sessions
+   * resolves the sender's spelling to its own name before the gate sees
+   * the frame, so this is the name to look the session up by.
+   */
   toSessionId?: string;
+  /** Who it is from, for a queue entry that shows a sender. */
+  senderLabel?: string;
 }
 
 export {
@@ -195,15 +203,31 @@ export interface PeerMessagingOptions {
    */
   getSessionId?: () => string;
   /**
-   * For a process hosting several sessions: whether `id` is one of them.
+   * For a process hosting several sessions: the one name this host keeps
+   * for the session `id` names, or undefined when it holds no such
+   * session.
    *
    * Wired instead of `getSessionId` — the two are mutually exclusive,
-   * because a process either has one session to name or a set to test
+   * because a process either has one session to name or a set to resolve
    * against. With this set, a frame naming no session at all is
    * misaddressed: an unpinned frame could have meant the one session a
    * single-session process holds, and here it could mean any of several.
+   *
+   * It answers with a name rather than a yes, because a host can answer
+   * to more than one spelling of one session — `/clear` swaps the id
+   * under a running session, and both the old and the new spelling are
+   * addressed to it. Every part of the pipeline that groups, compares or
+   * looks up by addressee uses the name this returns, resolved once here
+   * and carried on the frame, so no two of them can disagree.
+   *
+   * The name it returns must resolve to itself.
    */
-  ownsSessionId?: (id: string) => boolean;
+  resolveSessionId?: (id: string) => string | undefined;
+  /**
+   * Whether this host can put a parked message in front of a person.
+   * Default true; see the gate option of the same name.
+   */
+  presentsHolds?: boolean;
   socketPath?: string;
   /**
    * Overrides the generated inbox token. A test seam like `socketPath`:
@@ -256,7 +280,7 @@ export class PeerMessaging {
     ipcToken?: string,
   ) => Promise<void> = async () => {};
   private getSessionId: (() => string) | null = null;
-  private ownsSessionId: ((id: string) => boolean) | null = null;
+  private resolveSessionId: ((id: string) => string | undefined) | null = null;
   private settleSentMessage: (
     msgId: string,
     status: PeerDeliveryStatus,
@@ -308,19 +332,22 @@ export class PeerMessaging {
   static async start(
     options: PeerMessagingOptions,
   ): Promise<PeerMessaging | null> {
-    if (options.getSessionId && options.ownsSessionId) {
+    if (options.getSessionId && options.resolveSessionId) {
       // A configuration mistake rather than a runtime condition: one asks
       // which session this process is, the other which sessions it hosts,
       // and a process that answered both would judge pins against
       // whichever happened to be checked first.
       throw new Error(
-        'PeerMessaging: pass getSessionId or ownsSessionId, not both',
+        'PeerMessaging: pass getSessionId or resolveSessionId, not both',
       );
     }
     const messaging = new PeerMessaging();
     const controllerRegistryPath =
       options.controllerRegistryPath ?? getPeerControllerRegistryPath();
     messaging.controllerRegistryPath = controllerRegistryPath;
+    // Ahead of the gate below, which resolves names through this rather
+    // than through a second copy of the option.
+    messaging.resolveSessionId = options.resolveSessionId ?? null;
 
     // Reads `messaging.inbox` at send time rather than capturing it: the
     // socket is bound below, and a drop can happen before it resolves.
@@ -360,8 +387,18 @@ export class PeerMessaging {
       isControllerValid: (id) => messaging.validControllerIds?.has(id) ?? true,
       ...(options.admission ? { admission: options.admission } : {}),
       getSessionId: options.getSessionId,
-      ...(options.ownsSessionId
-        ? { ownsSessionId: options.ownsSessionId }
+      // Every id the gate is given has already been resolved to this
+      // host's own name for the session (see `handleUserFrame`), so the
+      // gate's membership test is "is this a name the host answers to" —
+      // which the contract on `resolveSessionId` makes true of exactly
+      // the names it returns. Synthesised rather than asked of the host
+      // again: two questions could disagree, and this way there is only
+      // one answer per message.
+      ...(options.resolveSessionId
+        ? { ownsSessionId: (id: string) => messaging.canonicalName(id) === id }
+        : {}),
+      ...(options.presentsHolds !== undefined
+        ? { presentsHolds: options.presentsHolds }
         : {}),
       deliver: (frame, origin) => messaging.deliver(frame, origin),
       reportDropped: (frame, reason, origin) =>
@@ -392,7 +429,6 @@ export class PeerMessaging {
     // session id and the send ledger this process holds, not against the
     // nulls a later assignment would leave in place.
     messaging.getSessionId = options.getSessionId ?? null;
-    messaging.ownsSessionId = options.ownsSessionId ?? null;
     messaging.settleSentMessage =
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
@@ -484,8 +520,18 @@ export class PeerMessaging {
    * submitted frames are settled alongside the buffered ones: the queue
    * drains in order, so the unconsumed tail is exactly the queue's
    * current depth.
+   *
+   * For a process holding one session only. With several, that ordering
+   * argument does not hold — each queue drains on its own, so the last N
+   * frames handed over are not the N still waiting — and the host settles
+   * its own with `reportExpired` instead.
    */
   setQueuedPeerCount(fn: () => number): void {
+    if (this.resolveSessionId) {
+      throw new Error(
+        'PeerMessaging: a host of several sessions settles unconsumed messages with reportExpired, not setQueuedPeerCount',
+      );
+    }
     this.queuedPeerCount = fn;
   }
 
@@ -734,9 +780,15 @@ export class PeerMessaging {
    */
   private async settleUnconsumed(): Promise<void> {
     const queued = this.queuedPeerCount?.() ?? 0;
-    const dropped = this.outstanding.slice(
-      Math.max(0, this.outstanding.length - this.buffered.length - queued),
-    );
+    // A host of several sessions settles what reached a session itself,
+    // per session, because only it knows which queue read what. What is
+    // still buffered here reached no session at all, so it is this
+    // method's either way.
+    const dropped = this.resolveSessionId
+      ? this.buffered.map((delivery) => delivery.frame)
+      : this.outstanding.slice(
+          Math.max(0, this.outstanding.length - this.buffered.length - queued),
+        );
     const receipts = dropped
       .filter((frame) => frame.from !== undefined)
       .map((frame) =>
@@ -888,11 +940,18 @@ export class PeerMessaging {
     // may be the stale side (a skipped /clear patch), so it is re-asserted
     // too; otherwise every later send here would be refused the same way.
     const ownSessionId = this.getSessionId?.();
-    const ownsSessionId = this.ownsSessionId;
-    const misaddressed = ownsSessionId
-      ? // Hosting several sessions: a frame has to say which, and name one
-        // this process still holds.
-        frame.toSessionId === undefined || !ownsSessionId(frame.toSessionId)
+    // Hosting several sessions: a frame has to say which, and name one
+    // this process still holds. The host is asked once, here, and the
+    // name it gives replaces the sender's spelling on the frame below —
+    // everything downstream reads the addressee off the frame, so the
+    // gate, the queue and the host lookup cannot end up with different
+    // answers for one message.
+    const canonical =
+      this.resolveSessionId && frame.toSessionId !== undefined
+        ? this.canonicalName(frame.toSessionId)
+        : undefined;
+    const misaddressed = this.resolveSessionId
+      ? canonical === undefined
       : frame.toSessionId !== undefined &&
         ownSessionId !== undefined &&
         frame.toSessionId !== ownSessionId;
@@ -922,7 +981,34 @@ export class PeerMessaging {
       });
       return;
     }
-    this.gate?.admit(frame, origin);
+    this.gate?.admit(
+      canonical === undefined || canonical === frame.toSessionId
+        ? frame
+        : { ...frame, toSessionId: canonical },
+      origin,
+    );
+  }
+
+  /**
+   * The host's own name for the session `id` names, or undefined when it
+   * holds no such session.
+   *
+   * A host that cannot answer is answered for: a resolver throwing while
+   * a session tears down leaves the frame misaddressed, which tells the
+   * sender its directory is stale and lets it try again, rather than
+   * delivering to an address nobody confirmed.
+   */
+  private canonicalName(id: string): string | undefined {
+    try {
+      return this.resolveSessionId?.(id);
+    } catch (error) {
+      debugLogger.debug(
+        `resolving session ${id} threw (treating the frame as misaddressed): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
   }
 
   private deliver(frame: PeerUserFrame, origin: PeerOrigin): void {
@@ -952,6 +1038,10 @@ export class PeerMessaging {
   }
 
   private trackOutstanding(frame: PeerUserFrame): void {
+    // Kept for the one-session inference in `settleUnconsumed`. A host of
+    // several does not use it — it settles per session — so it is not
+    // retained there either.
+    if (this.resolveSessionId) return;
     this.outstanding.push(frame);
     // Only the unconsumed tail can ever matter, and it is bounded: at
     // most MAX_ACCEPTED_BACKLOG frames wait here and another
@@ -1000,20 +1090,15 @@ export class PeerMessaging {
       selfSent: origin.selfSent,
       ...(origin.controller ? { controller: origin.controller } : {}),
     };
+    const naming = {
+      from,
+      ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
+      ...attribution,
+    };
     return (
       this.submitFn?.(
-        formatPeerEnvelope({
-          from,
-          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
-          content: frame.message.content,
-          ...attribution,
-        }),
-        formatPeerDisplay({
-          from,
-          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
-          content: frame.message.content,
-          ...attribution,
-        }),
+        formatPeerEnvelope({ ...naming, content: frame.message.content }),
+        formatPeerDisplay({ ...naming, content: frame.message.content }),
         {
           msgId: frame.msgId,
           admissionKey: peerSenderKey(frame, origin),
@@ -1024,9 +1109,39 @@ export class PeerMessaging {
           ...(frame.toSessionId !== undefined
             ? { toSessionId: frame.toSessionId }
             : {}),
+          // The same name the display line carries, kept apart from it so
+          // a queue entry that wants only the sender does not have to
+          // parse a sentence back into its parts.
+          senderLabel: peerSenderLabel(naming),
         },
       ) ?? false
     );
+  }
+
+  /**
+   * Correct the `delivered` receipt of a message a session took but
+   * never read — it closed with the message still in its queue.
+   *
+   * For a host of several sessions, which is the only party that knows
+   * whether a given session consumed a given message: its queues drain
+   * independently, so nothing about the order messages were handed over
+   * in says which of them are still waiting.
+   */
+  reportExpired(delivery: PeerQueuedDelivery): void {
+    if (delivery.from) {
+      void sendDeliveryStatus(
+        delivery.from,
+        {
+          status: 'expired',
+          origMsgId: delivery.msgId,
+          from: this.inbox?.socketPath,
+        },
+        delivery.replyToken,
+      );
+    }
+    if (delivery.admissionKey !== undefined) {
+      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
+    }
   }
 
   /** Drop a queued frame if an in-process session swap invalidated its pin. */

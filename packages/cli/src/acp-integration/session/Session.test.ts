@@ -15262,6 +15262,190 @@ describe('Session', () => {
       ).toHaveLength(0);
     });
 
+    describe('cross-session messages', () => {
+      function peerDelivery(msgId: string) {
+        return {
+          msgId,
+          admissionKey: 'peer:/tmp/sender.sock',
+          from: '/tmp/sender.sock',
+          toSessionId: 'test-session-id',
+          senderLabel: 'the other window',
+        };
+      }
+
+      function queuedKinds(): string[] {
+        return (
+          session as unknown as {
+            notificationQueue: Array<{ kind: string }>;
+          }
+        ).notificationQueue.map((item) => item.kind);
+      }
+
+      async function queuePeer(msgId: string) {
+        return session.enqueuePeerMessage({
+          delivery: peerDelivery(msgId),
+          modelText: `<peer-message>${msgId}</peer-message>`,
+          displayText: `Message from another session: ${msgId}`,
+        });
+      }
+
+      async function queueResult(taskId: string) {
+        return session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId,
+          status: 'completed',
+          kind: 'agent',
+        });
+      }
+
+      beforeEach(() => {
+        // Nothing drains while a prompt is in flight, so the queue is
+        // observable for the length of each case.
+        (
+          session as unknown as { pendingPrompt: AbortController | null }
+        ).pendingPrompt = new AbortController();
+      });
+
+      it('queues a message as a turn of its own, named by its sender', async () => {
+        await expect(queuePeer('msg-1')).resolves.toEqual({ accepted: true });
+
+        const queued = (
+          session as unknown as {
+            notificationQueue: Array<{
+              kind: string;
+              taskId: string;
+              label?: string;
+              peerDelivery?: { msgId: string };
+            }>;
+          }
+        ).notificationQueue;
+        expect(queued).toHaveLength(1);
+        expect(queued[0]).toMatchObject({
+          kind: 'peer',
+          // The message id: a message that arrives twice is recognised
+          // rather than handled twice.
+          taskId: 'msg-1',
+          label: 'the other window',
+        });
+        expect(queued[0]?.peerDelivery?.msgId).toBe('msg-1');
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce();
+      });
+
+      it('keeps a message out of the eviction the rest of the queue shares', async () => {
+        // A result this session asked for can be produced again; someone
+        // else's message cannot, and its sender was told it arrived.
+        await queuePeer('msg-keep');
+        for (let index = 0; index < 25; index++) {
+          await queueResult(`worker-${index}`);
+        }
+
+        const kinds = queuedKinds();
+        expect(kinds.filter((kind) => kind === 'peer')).toEqual(['peer']);
+        // The overflow was absorbed by the results, which still fill
+        // their own allowance beside the message.
+        expect(kinds.filter((kind) => kind === 'agent')).toHaveLength(20);
+      });
+
+      it('evicts the oldest result, not whatever sits at the index', async () => {
+        // The admission rule answers with an index into the entries that
+        // can absorb the overflow. Read as an index into the queue
+        // itself, a message sitting ahead of them would shift every
+        // later one and the wrong result would go.
+        await queueResult('worker-oldest');
+        await queuePeer('msg-ahead');
+        for (let index = 0; index < 20; index++) {
+          await queueResult(`worker-${index}`);
+        }
+
+        const taskIds = (
+          session as unknown as {
+            notificationQueue: Array<{ taskId: string }>;
+          }
+        ).notificationQueue.map((item) => item.taskId);
+        expect(taskIds).not.toContain('worker-oldest');
+        expect(taskIds).toContain('msg-ahead');
+        expect(taskIds).toContain('worker-0');
+      });
+
+      it('turns a sender away once the allowance is full', async () => {
+        for (let index = 0; index < 20; index++) {
+          expect(session.hasRoomForPeerMessage()).toBe(true);
+          await queuePeer(`msg-${index}`);
+        }
+        expect(session.hasRoomForPeerMessage()).toBe(false);
+      });
+
+      it('counts a message still being written to the transcript', async () => {
+        // Answering "there is room" to a burst arriving inside that
+        // window would accept more than the allowance holds.
+        let finishPersistence!: () => void;
+        mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finishPersistence = resolve;
+            }),
+        );
+        const inFlight = queuePeer('msg-slow');
+        await vi.waitFor(() =>
+          expect(
+            mockChatRecordingService.recordNotificationStrict,
+          ).toHaveBeenCalledOnce(),
+        );
+        for (let index = 0; index < 19; index++) {
+          await queuePeer(`msg-${index}`);
+        }
+
+        expect(session.hasRoomForPeerMessage()).toBe(false);
+        finishPersistence();
+        await inFlight;
+      });
+
+      it('has no room with no recorder to write the message down', async () => {
+        // Queuing starts with a transcript record; without one every
+        // message would be accepted only to be taken back.
+        mockConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+        expect(session.hasRoomForPeerMessage()).toBe(false);
+      });
+
+      it('does not accept a message once the session is closing', async () => {
+        // Its sender is waiting on a receipt, and nothing will read a
+        // message queued into a session that is going.
+        const internals = session as unknown as { closing: boolean };
+        mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+          async () => {
+            internals.closing = true;
+          },
+        );
+
+        await expect(queuePeer('msg-closing')).resolves.toEqual({
+          accepted: false,
+        });
+        expect(queuedKinds()).toHaveLength(0);
+      });
+
+      it('hands back what it never read, once', async () => {
+        await queuePeer('msg-unread-1');
+        await queuePeer('msg-unread-2');
+        await queueResult('worker-kept');
+
+        expect(
+          session.takeUnconsumedPeerDeliveries().map((entry) => entry.msgId),
+        ).toEqual(['msg-unread-1', 'msg-unread-2']);
+        // Taken, not listed: a second sweep must not tell a sender twice.
+        expect(session.takeUnconsumedPeerDeliveries()).toEqual([]);
+        expect(queuedKinds()).toEqual(['agent']);
+      });
+
+      it('stops being addressable once it is closing', async () => {
+        expect(session.isOpenForPeerMessages()).toBe(true);
+        (session as unknown as { closing: boolean }).closing = true;
+        expect(session.isOpenForPeerMessages()).toBe(false);
+      });
+    });
+
     it('emits end_turn even when notification error display fails', async () => {
       mockChat.sendMessageStream = vi
         .fn()

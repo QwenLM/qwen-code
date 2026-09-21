@@ -302,9 +302,15 @@ export interface HeldMessage {
  * lifetime and approval mode, and a message is judged by the rules of
  * the session it is for. Such a host only ever sees pinned frames here:
  * an unpinned one is answered as misaddressed before it reaches the
- * gate. A host that answers to more than one spelling of one session
- * sees each spelling as its own session; resolving them to one name is
- * the host's, and is added with the host that needs it.
+ * gate, and so is one naming a session the host does not hold. A host
+ * that answers to more than one spelling of one session resolves them to
+ * the one name it keeps before the frame arrives here, so every id this
+ * gate is given is already the host's own name for a session it holds.
+ *
+ * A reader that throws fails closed, which means the message is held —
+ * and on a host that cannot present a hold (`presentsHolds: false`) a
+ * hold is answered `refused`. Failing closed there means the sender is
+ * turned away, not that it waits.
  */
 export interface InboundGateOptions {
   /**
@@ -383,6 +389,17 @@ export interface InboundGateOptions {
    * the session each is addressed to.
    */
   getHeldExpiryMs?: (sessionId?: string) => number | null;
+  /**
+   * Whether this host can put a parked message in front of a person.
+   * Default true.
+   *
+   * False turns every hold into a `refused` receipt, and nothing is ever
+   * parked. A host that has no way to ask — no `/peers` to read, no
+   * prompt to answer — would otherwise park a message on a decision that
+   * can never be made, having told its sender `held`, which promises
+   * that someone will look.
+   */
+  presentsHolds?: boolean;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
 }
@@ -744,7 +761,17 @@ export class InboundGate {
     }
 
     const decision = this.resolvePolicy(frame, origin);
-    const { policy } = decision;
+    // A host with nowhere to put a parked message refuses instead of
+    // parking. Decided here rather than by that host answering `refuse`
+    // to `getPolicySetting`, because that reader cannot tell a message
+    // that would be held from one that would be accepted: an explicit
+    // setting outranks both a trusted controller and this session's own
+    // processes, so refusing there would turn away messages this gate
+    // accepts without asking anyone.
+    const policy =
+      decision.policy === 'hold' && this.options.presentsHolds === false
+        ? 'refuse'
+        : decision.policy;
 
     if (policy === 'refuse') {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
@@ -755,7 +782,15 @@ export class InboundGate {
       // turning the next verbatim attempt into a `duplicate`, which would
       // replace "stop" with "fold it into a later message".
       this.forgetAdmittedBody(frame, origin);
-      this.recordSettled(frame.msgId, 'refused');
+      // Tombstoned only when the policy itself refused. A hold this host
+      // could not present is refused for want of a reviewer, and some of
+      // the reasons a message is held are momentary — a settings reader
+      // that threw while a session tore down reads as `policy-unreadable`.
+      // Settling the id would refuse that exact message for good, which is
+      // the trade the queue-full path already declines to make.
+      if (decision.policy === 'refuse') {
+        this.recordSettled(frame.msgId, 'refused');
+      }
       void this.report(frame, 'refused');
       return 'refused';
     }

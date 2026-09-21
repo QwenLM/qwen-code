@@ -323,12 +323,23 @@ that look like the envelope are defanged inside `content`.
   renamed itself, are both still to come.
 - **Same-name reporting.** `qwen sessions ps` and `list_agents` do not
   flag records that still collide.
-- **Inbound messages to ACP-driven sessions.** A session a program
-  drives over ACP — daemon-spawned or not — registers and can send, but
-  answers `refused` to anything sent to it: a hold is a question put to
-  a person, and nobody is watching a hold list on its behalf. Where a
-  held message should surface for those sessions — its client, or the
-  daemon's own API — is still open.
+- **Holds at an ACP-driven session.** A session a program drives over
+  ACP — daemon-spawned or not — takes a message its gate accepts, and
+  answers `refused` to one that would be held: a hold is a question put
+  to a person, and nobody is watching a hold list on its behalf. Where
+  a held message should surface for those sessions — its client, or the
+  daemon's own API — is still open, and until it is settled, setting
+  `agents.crossSessionInbound` to `hold` on such a session turns its
+  messages away rather than parking them.
+- **One duplicate window for every session behind an inbox.** The
+  30-second identical-body check (§6) is keyed by the sender alone, so
+  the same body sent to two sessions of one process inside that window
+  reaches the first and is dropped as a `duplicate` at the second,
+  although it never saw it. It fails closed, and a process the session
+  started and a trusted controller are exempt, as they are from the
+  check itself. Scoping the window by addressee has to move on both
+  sides at once: a sender predicts the receiver's answer locally before
+  it spends a connection.
 - **Sessions behind one inbox are one sender to every peer.** A process
   hosting several sessions sends with one `from` address, so a
   receiver's per-sender budget and duplicate window (§6) are shared by
