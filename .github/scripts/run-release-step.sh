@@ -11,8 +11,6 @@ step="${1:?usage: run-release-step.sh <step>}"
 
 publish_package() {
   local directory="$1"
-  local published_marker="${2:-}"
-  local marker_value="${3:-}"
   (
     cd "${directory}"
     local package_name
@@ -25,10 +23,7 @@ publish_package() {
       echo "::notice::${package_name}@${RELEASE_VERSION} already published; skipping"
       exit 0
     fi
-    npm publish --provenance "${publish_args[@]}"
-    if [[ -n "${published_marker}" ]]; then
-      echo "${marker_value}" >> "${published_marker}"
-    fi
+    corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"
   )
 }
 
@@ -181,31 +176,17 @@ case "${step}" in
     ;;
 
   publish-packages)
-    if [[ "${PUBLISH_EXTERNAL_CONTEXT_MEM0}" == "true" ]]; then
-      publish_package 'integrations/external-context-mem0'
+    package_names="$(node "$(dirname "$0")/../../scripts/release-packages.mjs")"
+    publish_args=(--access public "--tag=${NPM_TAG}" --no-git-checks --provenance)
+    while IFS= read -r name; do
+      publish_args+=("--filter=${name}")
+    done <<< "${package_names}"
+    if [[ "${IS_DRY_RUN}" == "true" ]]; then
+      # Exercise packing and lifecycle checks even for an existing version.
+      publish_args+=(--dry-run --force)
     fi
-    if [[ "${PUBLISH_AUDIO_CAPTURE}" == "true" ]]; then
-      publish_package 'packages/audio-capture'
-    fi
+    corepack pnpm -r publish "${publish_args[@]}"
     publish_package 'dist'
-    publish_package 'packages/channels/base'
-
-    publish_marker="$(mktemp)"
-    # Explicit allowlist: new channel packages require release approval.
-    for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do
-      echo "::group::Publishing @qwen-code/channel-${channel}"
-      publish_package "packages/channels/${channel}" "${publish_marker}" "${channel}"
-      echo "::endgroup::"
-    done
-
-    # Last on purpose: this is the only name in the sequence CI has never
-    # published, so a failure here leaves every long-shipped package already
-    # out instead of stranding them under `set -eo pipefail`.
-    publish_package 'packages/web-shell'
-
-    if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${publish_marker}" ]]; then
-      echo "::warning::Every channel package was already published; nothing shipped"
-    fi
     ;;
 
   verify-archives)

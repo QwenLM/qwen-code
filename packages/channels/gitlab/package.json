@@ -1,5 +1,6 @@
 {
   "name": "@qwen-code/channel-gitlab",
+  "private": true,
   "version": "0.24.3",
   "description": "GitLab polling channel adapter for Qwen Code",
   "type": "module",
