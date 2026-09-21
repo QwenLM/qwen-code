@@ -730,6 +730,7 @@ export function loadServeFastPathSettings(
   workspaceDir: string,
 ): ServeFastPathSettings {
   preResolveServeFastPathHomeEnvOverrides();
+  const operator = readOperatorSandboxSettings();
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
   const resolvedHomeDir = path.resolve(os.homedir());
   let realWorkspaceDir = resolvedWorkspaceDir;
@@ -782,7 +783,6 @@ export function loadServeFastPathSettings(
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
-  const operator = readOperatorSandboxSettings();
   if (operator.tools?.executionSandbox !== undefined) {
     merged.tools = {
       ...merged.tools,

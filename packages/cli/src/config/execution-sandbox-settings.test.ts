@@ -164,13 +164,48 @@ describe('operator execution sandbox policy', () => {
       'Cannot read operator sandbox policy',
     );
     expect(fs.readFileSync(user, 'utf8')).toBe('{"tools":{"executionSandbox":');
+    expect(fs.readFileSync(`${user}.corrupted`, 'utf8')).toBe(
+      '{"tools":{"executionSandbox":',
+    );
   });
-  it('keeps normal corruption recovery for settings without a policy', () => {
+  it('fails closed when truncation removes the policy key', () => {
+    const truncated =
+      '{"$version":4,"general":{"previewFeatures":true},"tools":{';
     fs.mkdirSync(path.dirname(user), { recursive: true });
-    fs.writeFileSync(user, 'invalid json');
-    const settings = loadSettings(workspace, { skipLoadEnvironment: true });
-    expect(settings.corruptedPath).toBe(`${user}.corrupted`);
-    expect(fs.readFileSync(`${user}.corrupted`, 'utf8')).toBe('invalid json');
+    fs.writeFileSync(user, truncated);
+    const loaders: Array<[() => unknown, RegExp]> = [
+      [readOperatorSandboxSettings, /Cannot read operator sandbox policy/],
+      [() => createMinimalSettings(), /Cannot read operator sandbox policy/],
+      [
+        () => loadSettings(workspace, { skipLoadEnvironment: true }),
+        /Cannot read operator sandbox policy/,
+      ],
+      [
+        () => loadServeFastPathSettings(workspace),
+        /Cannot read operator sandbox policy/,
+      ],
+    ];
+    for (const [load, error] of loaders) {
+      expect(load).toThrow(error);
+    }
+    expect(fs.readFileSync(user, 'utf8')).toBe(truncated);
+    expect(fs.readFileSync(`${user}.corrupted`, 'utf8')).toBe(truncated);
+  });
+  it.each([
+    ['system defaults', () => defaults],
+    ['system', () => system],
+  ])('fails closed on malformed %s settings', (_scope, getFile) => {
+    const file = getFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{broken');
+    expect(() => readOperatorSandboxSettings()).toThrow(
+      'Cannot read operator sandbox policy',
+    );
+    expect(() => loadServeFastPathSettings(workspace)).toThrow(
+      'Cannot read operator sandbox policy',
+    );
+    expect(fs.readFileSync(file, 'utf8')).toBe('{broken');
+    expect(fs.existsSync(`${file}.corrupted`)).toBe(false);
   });
   it.each([undefined, false])(
     'ignores a workspace legacy sandbox when operator selects %j',

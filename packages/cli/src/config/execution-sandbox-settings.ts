@@ -69,9 +69,10 @@ export function selectOperatorExecutionSandbox(
 
 /** Bare mode still honors operator confinement without loading project/env data. */
 export function readOperatorSandboxSettings(): SandboxSettingsInput {
+  const userSettingsPath = path.join(getGlobalQwenDirLite(), 'settings.json');
   const scopes = [
     getSystemDefaultsPath(),
-    path.join(getGlobalQwenDirLite(), 'settings.json'),
+    userSettingsPath,
     getSystemSettingsPath(),
   ].map((file) => {
     if (!fs.existsSync(file)) return {};
@@ -91,12 +92,18 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
       }
       return parsed as SandboxSettingsInput;
     } catch (error) {
-      if (/"executionSandbox"\s*:/.test(stripJsonComments(source))) {
-        throw new InvalidExecutionSandboxConfigError(
-          `Cannot read operator sandbox policy from ${file}: ${String(error)}`,
-        );
+      let backupPath: string | undefined;
+      if (file === userSettingsPath) {
+        try {
+          backupPath = `${file}.corrupted`;
+          fs.copyFileSync(file, backupPath);
+        } catch {
+          backupPath = undefined;
+        }
       }
-      return {};
+      throw new InvalidExecutionSandboxConfigError(
+        `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}`,
+      );
     }
   });
   const executionSandbox = selectOperatorExecutionSandbox(...scopes);
