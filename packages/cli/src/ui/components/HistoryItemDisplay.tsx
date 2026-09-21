@@ -316,6 +316,7 @@ export const CollapsibleToolGroupMessage: React.FC<
         if (!canToggle || !ref.current) return;
         if (event.name === 'move') {
           if (event.button === 'none') return;
+          cancelPendingCollapse();
           if (lastClickRef.current?.count === 1) {
             lastClickRef.current = null;
           }

@@ -106,6 +106,7 @@ const mouseEvent = (
   name: MouseEvent['name'],
   col: number,
   row = 1,
+  button: MouseEvent['button'] = 'left',
 ): MouseEvent => ({
   name,
   col,
@@ -113,7 +114,7 @@ const mouseEvent = (
   shift: false,
   meta: false,
   ctrl: false,
-  button: 'left',
+  button,
 });
 
 function renderCollapsedTool(viewport = true) {
@@ -253,6 +254,51 @@ describe('<CollapsibleToolGroupMessage />', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('ignores bare hover motion between double-click presses', () => {
+    vi.useFakeTimers();
+    const { handler, lastFrame } = renderCollapsedTool();
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
+    });
+
+    const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    act(() => {
+      expandedHandler?.(mouseEvent('left-press', 5));
+      expandedHandler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(30);
+      expandedHandler?.(mouseEvent('move', 6, 1, 'none'));
+      expandedHandler?.(mouseEvent('left-press', 6));
+      expandedHandler?.(mouseEvent('left-release', 6));
+      vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
+    });
+
+    expect(lastFrame()).toContain('very long result');
+    expect(lastFrame()).not.toContain('click to expand');
+  });
+
+  it('preserves a pending collapse during bare hover motion', () => {
+    vi.useFakeTimers();
+    const { handler, lastFrame } = renderCollapsedTool();
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+      vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
+    });
+
+    const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    act(() => {
+      expandedHandler?.(mouseEvent('left-press', 5));
+      expandedHandler?.(mouseEvent('left-release', 5));
+      expandedHandler?.(mouseEvent('move', 6, 1, 'none'));
+      vi.advanceTimersByTime(MULTI_CLICK_MS + 1);
+    });
+
+    expect(lastFrame()).toContain('click to expand');
+    expect(lastFrame()).not.toContain('very long result');
   });
 
   it('does not collapse from a click below the expanded header row', () => {
@@ -500,6 +546,8 @@ describe('<CollapsibleToolGroupMessage />', () => {
     ['same group body', 'left-press', 5, 2, false],
     ['context menu', 'right-press', 5, 1, false],
     ['scroll', 'scroll-down', 5, 1, false],
+    ['scrollbar drag', 'move', 95, 1, false],
+    ['selection drag below the group', 'move', 5, 8, false],
   ] as const)(
     'handles %s after arming a collapse',
     (_label, name, col, row, shouldCollapse) => {
