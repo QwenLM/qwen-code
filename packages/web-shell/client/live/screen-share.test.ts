@@ -217,6 +217,25 @@ describe('startScreenShare', () => {
     expect(attempts.length).toBeLessThanOrEqual(8);
   });
 
+  it('stops at the encode budget when shrinking barely helps', async () => {
+    // Just over the limit at every scale, so the aim step aims almost nowhere:
+    // ~23 passes would be needed to reach MIN_EDGE. This is what the encode
+    // budget is for, and the only shape that reaches it — every other fixture
+    // converges or bottoms out on size first.
+    bytesFor = () => Math.round(MAX_IMAGE_BYTES * 1.02);
+    const share = await startScreenShare(() => {});
+
+    await expect(share.grab()).rejects.toThrow('too detailed');
+
+    // Exactly the budget, not merely "not too many": raising MAX_ENCODES has
+    // to fail here, or the constant is decoration.
+    expect(attempts).toHaveLength(8);
+    // The last pass still had pixels to give, so size was never the stop.
+    expect(
+      Math.max(attempts.at(-1)!.width, attempts.at(-1)!.height),
+    ).toBeGreaterThan(480);
+  });
+
   it('refuses rather than sending a screen nothing could read', async () => {
     // No scale within reach gets under the limit.
     bytesFor = () => MAX_IMAGE_BYTES * 40;

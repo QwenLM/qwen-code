@@ -229,8 +229,11 @@ export async function startScreenShare(
     // about pixels, and the quality it gave away buys nothing. Take it back.
     if (roomiest.width >= Math.round(sourceWidth * cap)) {
       // The top step is skipped: the probe above already ruled it out.
+      // No encode budget check here: this loop is bounded by the quality
+      // ladder itself, and `largestThatFits` has already spent at most one
+      // step. A guard that cannot fire is a claim a reader has to go and
+      // disprove.
       for (const quality of QUALITY_STEPS.slice(1, -1)) {
-        if (encodes >= MAX_ENCODES) break;
         const attempt = await at(cap, quality);
         if (attempt.bytes.byteLength <= MAX_IMAGE_BYTES)
           return deliver(attempt);
