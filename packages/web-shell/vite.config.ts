@@ -142,6 +142,13 @@ export default defineConfig(({ command }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    // The Live Voice capture worklet is loaded with audioWorklet.addModule(),
+    // which the Web Shell CSP (`script-src 'self'`, no `data:`) only allows
+    // from a same-origin URL. At ~2 KB it is under Vite's default inline
+    // limit and would be turned into a `data:` URL — silently, because the
+    // client then falls back to the main-thread capture node. Keep it a file.
+    assetsInlineLimit: (filePath) =>
+      /[\\/]live[\\/]capture-worklet\.js$/.test(filePath) ? false : undefined,
     rollupOptions: {
       input: {
         index: resolve(__dirname, 'client/index.html'),

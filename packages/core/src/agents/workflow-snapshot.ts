@@ -22,6 +22,7 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { deleteInlineWorkflowScript } from './runtime/workflow-saved.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
@@ -45,6 +46,21 @@ const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
 /** Cap on snapshots retained on disk; oldest are pruned on write. */
 export const MAX_RETAINED_SNAPSHOTS = 30;
+
+/**
+ * A temp file a snapshot write left behind. `atomicWriteFile` renames its
+ * temp into place and unlinks it on failure, so one survives only a process
+ * that died mid-write. Matched as the exact suffix that function appends to
+ * a snapshot name this module wrote, so the sweep below cannot reach a file
+ * this module did not create.
+ */
+const SNAPSHOT_TEMP_FILE = /^wf_[0-9a-f]+\.json\.[0-9a-f]+\.tmp$/;
+
+/**
+ * How long a snapshot temp file is left alone. Anything younger may belong
+ * to a write in flight -- in this process or another CLI sharing the project.
+ */
+const SNAPSHOT_TEMP_GRACE_MS = 60 * 60 * 1000;
 
 /**
  * Characters of serialized `args` a snapshot keeps. A run launched with more
@@ -180,6 +196,31 @@ export function snapshotArgs(
   return { args: JSON.parse(json) as unknown, argsRecorded: true };
 }
 
+/**
+ * Why a run cannot be started again from what its history kept of its `args`,
+ * or `undefined` when it can.
+ *
+ * A retry reuses the run's journal, whose key chain is rooted in a hash of
+ * the args, so starting one with the wrong args replays nothing and
+ * re-dispatches every agent under the old run id -- worse than refusing.
+ *
+ * - `omitted`: the args were too large for the snapshot to keep.
+ * - `unrecorded`: the snapshot predates {@link snapshotArgs}, so it cannot
+ *   say whether the run had args at all.
+ *
+ * The daemon refuses these, and the task projection reports the same answer
+ * to clients, so a client never offers an action the daemon will refuse.
+ */
+export function snapshotArgsUnavailable(
+  snapshot: Pick<WorkflowSnapshot, 'args' | 'argsOmitted' | 'argsRecorded'>,
+): 'omitted' | 'unrecorded' | undefined {
+  if (snapshot.argsOmitted) return 'omitted';
+  if (snapshot.argsRecorded !== true && snapshot.args === undefined) {
+    return 'unrecorded';
+  }
+  return undefined;
+}
+
 /** A non-JSON-serializable result is replaced with a placeholder string. */
 function safeResult(result: unknown): unknown {
   if (result === undefined) return undefined;
@@ -231,10 +272,19 @@ export async function persistWorkflowSnapshot(
   try {
     const dir = storage.getWorkflowRunsDir();
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(
+    // Temp-and-rename, so the file on disk is either the whole previous
+    // snapshot or the whole new one. A snapshot carries the run's script and
+    // up to 256 KiB of args, which is long enough to be interrupted, and two
+    // processes can claim one interrupted run at once; a torn file fails
+    // validation on read, which drops the run from history entirely -- the
+    // one outcome the history is there to prevent. `noFollow` refuses to
+    // write through a symlink planted at the path, which `readWorkflowSnapshot`
+    // already refuses to read through, and the mode matches the run's journal
+    // and persisted script.
+    await atomicWriteFile(
       storage.getWorkflowRunSnapshotPath(snapshot.runId),
       JSON.stringify(snapshot, null, 2),
-      'utf8',
+      { encoding: 'utf8', mode: 0o600, forceMode: true, noFollow: true },
     );
     await pruneSnapshots(config, dir);
     return true;
@@ -572,14 +622,43 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   );
 }
 
+/**
+ * Remove temp files left by snapshot writes that never reached their rename.
+ * A snapshot name and its temp differ by suffix, so neither the listing nor
+ * the pruning below can mistake one for the other; this only keeps them from
+ * accumulating.
+ */
+async function sweepSnapshotTempFiles(
+  dir: string,
+  entries: readonly string[],
+): Promise<void> {
+  const cutoff = Date.now() - SNAPSHOT_TEMP_GRACE_MS;
+  await Promise.all(
+    entries
+      .filter((entry) => SNAPSHOT_TEMP_FILE.test(entry))
+      .map(async (entry) => {
+        try {
+          if ((await fs.stat(`${dir}/${entry}`)).mtimeMs >= cutoff) return;
+          await fs.unlink(`${dir}/${entry}`);
+        } catch (e) {
+          debugLogger.warn(`snapshot temp sweep failed for ${entry}: ${e}`);
+        }
+      }),
+  );
+}
+
 /** Remove the oldest snapshots beyond the retention cap. */
 async function pruneSnapshots(config: Config, dir: string): Promise<void> {
-  let files: string[];
+  let entries: string[];
   try {
-    files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json'));
+    entries = await fs.readdir(dir);
   } catch {
     return;
   }
+  // Before the retention check, not after it: a project under the cap would
+  // otherwise keep every temp file a crash ever left in this directory.
+  await sweepSnapshotTempFiles(dir, entries);
+  const files = entries.filter((f) => f.endsWith('.json'));
   if (files.length <= MAX_RETAINED_SNAPSHOTS) return;
   // Sort by mtime ascending (oldest first) and unlink the overflow.
   const stats = await Promise.all(

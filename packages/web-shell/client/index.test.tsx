@@ -123,7 +123,10 @@ afterEach(() => {
 });
 
 it('forwards settings presentation through the public provider wrapper', async () => {
-  const settings = { excludeItems: ['setting:fast-model'] as const };
+  const settings = {
+    includeItems: ['setting:language', 'setting:fast-model'] as const,
+    excludeItems: ['setting:fast-model'] as const,
+  };
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);

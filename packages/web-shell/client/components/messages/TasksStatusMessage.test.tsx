@@ -973,6 +973,26 @@ describe('TasksStatusMessage workflow details', () => {
     expect(generic.textContent).toContain('Could not update the workflow');
     expect(generic.textContent).not.toContain('socket hang up');
 
+    // Nothing started because the record that keeps a second runner off the
+    // journal could not be written. It arrives as a 503, and it is the one
+    // refusal whose advice is to make the same call again.
+    controlWorkflowTaskMock.mockRejectedValue(
+      Object.assign(new Error('Service Unavailable'), {
+        status: 503,
+        body: {
+          code: 'workflow_not_recorded',
+          error:
+            'Could not record that workflow run wf_1234abcd is running again, so another process could start it a second time. Nothing was started; try again.',
+        },
+      }),
+    );
+    const unrecorded = renderPanel([historical()]);
+    await clickRetry(unrecorded);
+    expect(unrecorded.textContent).toContain('Nothing was started; try again.');
+    expect(unrecorded.textContent).not.toContain(
+      'Could not update the workflow',
+    );
+
     // A conflict from somewhere else in the daemon is not a sentence about
     // this action.
     controlWorkflowTaskMock.mockRejectedValue(
@@ -1030,6 +1050,7 @@ describe('TasksStatusMessage workflow details', () => {
         id: 'workflow-saved',
         isHistorical: true,
         argsOmitted: true,
+        argsUnavailable: true,
         status: 'failed',
         startTime: 500,
         endTime: 1_000,
@@ -1044,6 +1065,82 @@ describe('TasksStatusMessage workflow details', () => {
     expect(container.textContent).toContain('Saved run');
     expect(container.textContent).not.toContain('Retry failed path');
     expect(container.textContent).not.toContain('Rerun all');
+  });
+
+  // An older daemon sends the reason and not the answer. Reading only the
+  // answer would put back a Retry this client had learned to hide.
+  it('offers no restart for a restored run a daemon older than argsUnavailable refused', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-old-daemon',
+        isHistorical: true,
+        argsOmitted: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
+    // Hiding the buttons takes away where the daemon's reason used to
+    // appear, so the reason has to stand on its own.
+    expect(container.textContent).toContain(
+      'No restart: its history does not have the args it was launched with.',
+    );
+  });
+
+  // Written before the daemon kept args: it cannot say whether the run had
+  // any, so a restart is refused -- and `argsOmitted` is not set to say why.
+  it('offers no restart for a restored run recorded before args were kept', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-legacy',
+        isHistorical: true,
+        argsUnavailable: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
+    expect(container.textContent).toContain(
+      'No restart: its history does not have the args it was launched with.',
+    );
+  });
+
+  it('says nothing about args for a restored run that can be restarted', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-restartable',
+        isHistorical: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Retry failed path');
+    expect(container.textContent).not.toContain('No restart:');
   });
 
   it('does not group workflow history by a shared display label', () => {

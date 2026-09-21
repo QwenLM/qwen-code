@@ -65,6 +65,9 @@ const BROWSER_REQUIREMENT_LABELS = {
  */
 type LiveHostMode = 'native' | 'self' | 'other-tab' | 'none';
 
+/** How long "Qwen looked at your screen" stays on screen. */
+const LOOK_NOTICE_MS = 4_000;
+
 const CLOSE_REASON_MESSAGES: Record<LiveBrowserHostCloseReason, string> = {
   occupied: 'live.browser.closed.occupied',
   'superseded-native': 'live.browser.closed.supersededNative',
@@ -149,6 +152,20 @@ export function LiveVoiceButton({
   // Flips a couple of times a second at most (the hook holds it), so state is
   // fine here; the level itself never goes through React.
   const [inputDropping, setInputDropping] = useState(false);
+  // Held briefly so a look is legible, then cleared so the region is empty
+  // again and the next look announces as a change rather than as more of the
+  // same text.
+  const [looked, setLooked] = useState(false);
+  const lastLookAt = browserHost.screenShare.lastLookAt;
+  useEffect(() => {
+    if (lastLookAt === undefined) {
+      setLooked(false);
+      return;
+    }
+    setLooked(true);
+    const timer = setTimeout(() => setLooked(false), LOOK_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [lastLookAt]);
   useEffect(() => {
     onSupportedChange?.(supported);
   }, [onSupportedChange, supported]);
@@ -267,7 +284,14 @@ export function LiveVoiceButton({
             })}
           </ul>
         ) : (
-          <div className={styles.liveStateGroup}>
+          <div
+            className={styles.liveStateGroup}
+            // Which capture path is live: the audio-thread worklet, or the
+            // main-thread fallback. Not shown; here for support and tests.
+            data-live-capture={
+              mode === 'self' ? browserHost.captureMode : undefined
+            }
+          >
             <div className={styles.liveState} data-state={status.state}>
               <span className={styles.liveStateOrb} />
               <span>{liveStateLabel(status, t)}</span>
@@ -333,6 +357,52 @@ export function LiveVoiceButton({
         ) : null}
         {browserForm ? (
           <p className={styles.hint}>{t('live.browser.headphonesHint')}</p>
+        ) : null}
+
+        {mode === 'self' && browserHost.screenShare.supported ? (
+          <div className={styles.screenShare} data-live-screen-share>
+            <Button
+              variant="outline"
+              data-live-screen-share-toggle
+              onClick={() => {
+                if (browserHost.screenShare.sharing) {
+                  browserHost.stopSharingScreen();
+                  return;
+                }
+                // Inside the click: getDisplayMedia needs the gesture.
+                void browserHost.startSharingScreen();
+              }}
+            >
+              {browserHost.screenShare.sharing
+                ? t('live.browser.stopScreenShare')
+                : t('live.browser.startScreenShare')}
+            </Button>
+            {browserHost.screenShare.sharing ? (
+              <span className={styles.hint} data-live-screen-share-label>
+                {browserHost.screenShare.label
+                  ? t('live.browser.sharingNamed', {
+                      target: browserHost.screenShare.label,
+                    })
+                  : t('live.browser.sharing')}
+              </span>
+            ) : browserHost.screenShare.requestedWhileIdle ? (
+              <span className={styles.hint} data-live-screen-share-requested>
+                {t('live.browser.screenRequested')}
+              </span>
+            ) : null}
+            {browserHost.screenShare.errorMessage ? (
+              <span className={styles.error} data-live-screen-share-error>
+                {browserHost.screenShare.errorMessage}
+              </span>
+            ) : null}
+            {/* Mounted whenever this tab can share, so the announcement of a
+                look is a text change in an existing region. A glance at the
+                screen leaves no other trace: the transcript shows the reply,
+                not what was read to produce it. */}
+            <p role="status" className={styles.droppingStatus} data-live-looked>
+              {looked ? t('live.browser.lookedAtScreen') : ''}
+            </p>
+          </div>
         ) : null}
 
         {canUseBrowser || (mode === 'self' && !active) ? (
