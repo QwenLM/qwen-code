@@ -190,6 +190,27 @@ export interface CoverageFromTranscripts {
   /** Chunk ids an agent declared unreachable. */
   uncoverableChunks: number[];
   /**
+   * Chunk ids an agent declared unreachable that this plan does NOT carry —
+   * a record launched as `chunk 9 of 12` over a plan of two.
+   *
+   * The other half of what `uncoverableChunks` used to hold: the two are
+   * split by one test, under the same supersession guard, so their union is
+   * exactly the set main computed and `ok` is what it was. Kept out of
+   * `uncoverableChunks` because the id is not a chunk of this plan — listed
+   * there it was counted as a section of the diff, in the summary's
+   * denominator and in the posted body. Kept in the report, and in `ok`,
+   * because the declaration may still be evidence about this diff: a
+   * record passes the plan's mtime fence when its transcript was written
+   * after the plan, and a planned chunk is credited to any agent pointed at
+   * its lines that opened the diff at all, which does not show that agent
+   * reached the line this one could not.
+   *
+   * Ids, not records, like the list beside it: a chunk agent's label IS its
+   * chunk id, so two declarers of one id are one entry here as they were
+   * one entry there.
+   */
+  unplannedDeclarations: number[];
+  /**
    * `Budget gap: <the check>` lines parsed from agent returns — the fixed
    * disclosure format the tool-budget brief mandates when an agent's soft
    * ceiling stopped a check it wanted. Detection is deterministic (this
@@ -425,6 +446,64 @@ function label(rec: AgentRecord, chunk: number | null): string {
 }
 
 /**
+ * The three outcome sets do not partition the plan.
+ *
+ * Its own class because the callers' rule is that different failures do not
+ * wear each other's message: this one is a defect in this file, and an
+ * operator told "the plan could not be used" goes off to re-capture a diff
+ * that was never the problem.
+ */
+export class ChunkPartitionError extends Error {}
+
+/**
+ * Every planned chunk has exactly one outcome, and no outcome names a chunk
+ * the plan does not carry.
+ *
+ * Holds by construction today — `covered` is filled from `plan.chunks`,
+ * `uncoverable` is subtracted from it, and `missing` is what is left — so
+ * this guards the construction against its next edit rather than against any
+ * input. It exists because the coverage summary's denominator used to be the
+ * SUM of these three sets, which made "17 of 17 chunks reviewed"
+ * self-consistent whatever the sets did: a ratio that cannot disagree with
+ * itself cannot report a fault. The denominator now reads the plan, and a
+ * denominator read from somewhere else is only right while this holds.
+ */
+export function assertChunkPartition(
+  planned: readonly number[],
+  outcomes: {
+    covered: readonly number[];
+    missing: readonly number[];
+    uncoverable: readonly number[];
+  },
+): void {
+  const plannedIds = new Set(planned);
+  const seen = new Map<number, string>();
+  for (const [outcome, ids] of Object.entries(outcomes)) {
+    for (const id of ids) {
+      if (!plannedIds.has(id)) {
+        throw new ChunkPartitionError(
+          `chunk ${id} is ${outcome} but the plan does not carry it`,
+        );
+      }
+      const earlier = seen.get(id);
+      if (earlier !== undefined) {
+        throw new ChunkPartitionError(
+          earlier === outcome
+            ? `chunk ${id} is listed twice as ${outcome}`
+            : `chunk ${id} is both ${earlier} and ${outcome}`,
+        );
+      }
+      seen.set(id, outcome);
+    }
+  }
+  for (const id of planned) {
+    if (!seen.has(id)) {
+      throw new ChunkPartitionError(`chunk ${id} has no outcome`);
+    }
+  }
+}
+
+/**
  * What the agents of this run actually did, as the harness recorded it.
  *
  * Nothing here is supplied by the caller except the plan path. The transcripts
@@ -463,6 +542,7 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const unplannedDeclared = new Set<number>();
   const driftedLaunches: string[] = [];
   // Used by the verbatim-drift rescue in both the chunk loop and the roster
   // walk, and by the roster's matching seed below.
@@ -815,10 +895,19 @@ export function coverageFromTranscripts(
       // other — the chunk lands in `missingChunks`, whose remediation
       // relaunches an agent that re-declares, forever. `gapsSuperseded`
       // below excludes same-shape records for exactly this reason.
+      //
+      // And as a CHUNK only when this plan carries it. `chunk` is read out of
+      // the launch prompt's text, so a record written against another
+      // chunking of this diff — `chunk 9 of 12` on a plan that now has two —
+      // declared an id nothing here plans, and admitting it reported a chunk
+      // that does not exist as not reviewed: `uncoverableChunks: [9]` beside
+      // `plannedChunks` 1 and 2. Same guard, other list — see
+      // `unplannedDeclarations` for why it still fails the gate.
       if (
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
       ) {
-        uncoverable.add(chunk);
+        if (plan.chunks.some((c) => c.id === chunk)) uncoverable.add(chunk);
+        else unplannedDeclared.add(chunk);
       }
       continue;
     }
@@ -1075,6 +1164,13 @@ export function coverageFromTranscripts(
   const missingChunks = planned.filter(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
+  // `check-coverage` prints its denominator from the plan, and the three
+  // sets below are what it counts against it — this is what proves they agree.
+  assertChunkPartition(planned, {
+    covered: [...covered],
+    missing: missingChunks,
+    uncoverable: [...uncoverable],
+  });
 
   // Prior-attempt records that clear the SAME certification bar as a live
   // launch — the resumed run's recovered work. The bar is deliberately the
@@ -1142,6 +1238,7 @@ export function coverageFromTranscripts(
       // no read can reach was not reviewed, and the verdict may not be Approve on
       // its strength. `compose-review` already caps on it; the report must agree.
       uncoverable.size === 0 &&
+      unplannedDeclared.size === 0 &&
       missingChunks.length === 0,
     agents: records.length,
     recoveredAgents,
@@ -1156,6 +1253,7 @@ export function coverageFromTranscripts(
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
+    unplannedDeclarations: [...unplannedDeclared].sort((a, b) => a - b),
     budgetGaps,
     coveredChunks: [...covered].sort((a, b) => a - b),
     plannedChunks: plan.chunks.map((c) => ({

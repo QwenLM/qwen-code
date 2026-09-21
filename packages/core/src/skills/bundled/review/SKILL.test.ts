@@ -62,6 +62,31 @@ describe('bundled review skill', () => {
     expect(body).toContain('decided stop with no composed artifact');
   });
 
+  it('rules an unplanned declarer under the eighth coverage failure, not a ninth', () => {
+    // `check-coverage` names a declarer whose chunk id the plan does not
+    // carry in the SAME `ERROR:` line as the planned ones, so the skill's
+    // eight rulings still cover everything the gate prints.
+    const body = skillBody();
+    expect(body).toContain(
+      'It reports eight failures, and they are not the same:',
+    );
+    // INSIDE the eighth bullet, not a bullet of its own — a ninth bullet
+    // would be a ninth failure with nothing in the gate to match it.
+    const eighth = body
+      .split('\n')
+      .find((l) => l.startsWith('- **Chunks declared uncoverable**'));
+    expect(eighth).toContain(
+      'The same line also names a declarer whose chunk id this plan does not carry',
+    );
+    expect(eighth).toContain(
+      'it is listed by that id but is no chunk of this plan',
+    );
+    expect(eighth).toContain(
+      'if you relay it in `uncoverableChunks`, write the bare `chunk <id>`',
+    );
+    expect(eighth).toContain('under the same ruling.');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice

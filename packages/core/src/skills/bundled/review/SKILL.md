@@ -505,7 +505,7 @@ It reads the harness's own per-agent transcripts: a record you do not author, ar
 - **Agents pointed at the diff that never opened it** — they made tool calls, so they are not idle; they simply worked on something else, usually the post-change source. Relaunch each once.
 - **Agents that made no tool call** — they read nothing, whatever they wrote. Relaunch each once.
 - **Chunks nobody reviewed** — launch an agent for each.
-- **Chunks declared uncoverable** — an agent reported that a chunk holds a single line longer than one read returns, which no paging can reach. This is a disclosed gap, not a failure to relaunch around: carry it into Step 6's "Not reviewed" and do not let the verdict be Approve on its strength.
+- **Chunks declared uncoverable** — an agent reported that a chunk holds a single line longer than one read returns, which no paging can reach. This is a disclosed gap, not a failure to relaunch around: carry it into Step 6's "Not reviewed" and do not let the verdict be Approve on its strength. The same line also names a declarer whose chunk id this plan does not carry (a record from another chunking of the diff): it is listed by that id but is no chunk of this plan, so there are no files of this plan to name beside it. `compose-review` discloses it on its own; if you relay it in `uncoverableChunks`, write the bare `chunk <id>` — the one form it recognises as the same report — under the same ruling.
 
 **Every repair uses the same batch path.** Take the exact `agent-prompt` selectors from the gate's FIX lines, add `--batch`, and redirect each successful build to its own manifest. Preserve `--rules`, `--findings` and `--round` when the role needs them. Build all independent repairs first, then emit and run ONE workflow:
 

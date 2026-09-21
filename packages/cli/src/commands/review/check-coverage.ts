@@ -36,6 +36,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
@@ -77,6 +78,19 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
       process.exitCode = 3;
       return;
     }
+    if (err instanceof ChunkPartitionError) {
+      // Neither the plan nor the environment: the coverage walk contradicted
+      // itself. Refuse for that reason, in those words — nothing the
+      // operator re-captures or relaunches repairs a defect in this CLI.
+      writeStderrLine(
+        `ERROR: the chunk outcomes do not partition the plan — ` +
+          `${err.message}. This is a defect in the coverage check itself, ` +
+          `not a finding about the agents or the plan. Coverage cannot be ` +
+          `shown, so the review must not certify the diff.`,
+      );
+      process.exitCode = 3;
+      return;
+    }
     throw err;
   }
 
@@ -84,10 +98,10 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   writeFileSync(args.out, JSON.stringify(report, null, 2));
   writeStdoutLine(`Wrote coverage report to ${args.out}`);
 
-  const totalChunks =
-    report.coveredChunks.length +
-    report.missingChunks.length +
-    report.uncoverableChunks.length;
+  // The plan's count, not the sum of the three outcome lists: a sum agrees
+  // with itself whatever the lists do. `assertChunkPartition` is what makes
+  // the two the same number.
+  const totalChunks = report.plannedChunks.length;
   const worked =
     report.agents - report.blindAgents.length - report.idleAgents.length;
   writeStderrLine(
@@ -228,10 +242,30 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `that made no call still returned confident, specific text.`,
     );
   }
-  if (report.uncoverableChunks.length > 0) {
+  // One failure, whichever list holds it: an agent declared a line no read
+  // can reach. A declarer whose chunk id this plan does not carry is named as
+  // an agent rather than listed as a chunk — the plan has no such chunk —
+  // and owes the same ruling.
+  if (
+    report.uncoverableChunks.length > 0 ||
+    report.unplannedDeclarations.length > 0
+  ) {
+    const declared: string[] = [];
+    if (report.uncoverableChunks.length > 0) {
+      declared.push(
+        `${report.uncoverableChunks.length} chunk(s) were declared ` +
+          `uncoverable — ${report.uncoverableChunks.join(', ')}`,
+      );
+    }
+    if (report.unplannedDeclarations.length > 0) {
+      declared.push(
+        `agents launched for ${report.unplannedDeclarations.length} chunk(s) ` +
+          `this plan does not carry declared a line uncoverable — ` +
+          report.unplannedDeclarations.join(', '),
+      );
+    }
     writeStderrLine(
-      `ERROR: ${report.uncoverableChunks.length} chunk(s) were declared ` +
-        `uncoverable — ${report.uncoverableChunks.join(', ')}. A diff with a ` +
+      `ERROR: ${declared.join('; ')}. A diff with a ` +
         `line no read can reach was not reviewed; the verdict may not approve on ` +
         `its strength. Report them to the user as an unreviewed gap.`,
     );
