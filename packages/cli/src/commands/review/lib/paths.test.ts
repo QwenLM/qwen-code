@@ -24,6 +24,7 @@ import {
   assertUnredirectedParent,
   assertWritableOutPath,
   baseWorktreePath,
+  commandPrefixed,
   ensureReviewTmpDir,
   repoRelativeOf,
   inertPath,
@@ -758,6 +759,24 @@ describe('ensureReviewTmpDir — the guarded set is pinned, not documented', () 
         file === 'commands/review/lib/paths.ts',
       );
     }
+  });
+});
+
+describe('commandPrefixed', () => {
+  it('prefixes a message once, however it arrives', () => {
+    // The entry guard names its command in the refusal, and three handlers
+    // prefix whatever they catch: unguarded, the operator reads
+    // `plan-diff: plan-diff: …`.
+    expect(commandPrefixed('plan-diff', 'no such file')).toBe(
+      'plan-diff: no such file',
+    );
+    expect(
+      commandPrefixed('plan-diff', 'plan-diff: .qwen/tmp is a symbolic link'),
+    ).toBe('plan-diff: .qwen/tmp is a symbolic link');
+    // Another command's prefix is part of the message, not this one's.
+    expect(commandPrefixed('plan-diff', 'fetch-diff: upstream said no')).toBe(
+      'plan-diff: fetch-diff: upstream said no',
+    );
   });
 });
 

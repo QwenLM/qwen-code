@@ -550,6 +550,18 @@ export function ensureReviewTmpDir(command: string): void {
 }
 
 /**
+ * `message` under `command`'s prefix — once. `ensureReviewTmpDir` names its
+ * command in the refusal itself, because most of its callers let the throw
+ * reach the CLI's top level, which adds nothing. A handler that catches and
+ * prefixes every message (`capture-local`, `plan-diff`, `fetch-diff`) would
+ * print that one as `plan-diff: plan-diff: …`.
+ */
+export function commandPrefixed(command: string, message: string): string {
+  const prefix = `${command}: `;
+  return message.startsWith(prefix) ? message : `${prefix}${message}`;
+}
+
+/**
  * Whether an `--out` the caller chose lands in the review's scratch
  * directory, and so needs `ensureReviewTmpDir` before it is written.
  *

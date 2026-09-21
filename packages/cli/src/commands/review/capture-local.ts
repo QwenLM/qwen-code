@@ -37,6 +37,7 @@ import {
 } from '../../utils/stdioHelpers.js';
 import {
   assertWritableOutPath,
+  commandPrefixed,
   ensureReviewTmpDir,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
@@ -1559,7 +1560,11 @@ export const captureLocalCommand: CommandModule = {
     } catch (err) {
       // writeStderrLineSafe, as in plan-diff: a broken stderr must not let
       // the throw escape the catch and lose the exit classification.
-      writeStderrLineSafe(`capture-local: ${(err as Error).message}`);
+      // `commandPrefixed`: the scratch-directory guard names this command in
+      // its own refusal, and a second prefix would double it.
+      writeStderrLineSafe(
+        commandPrefixed('capture-local', (err as Error).message),
+      );
       if (argv['debug'] === true && err instanceof Error && err.stack) {
         writeStderrLineSafe(err.stack);
       }

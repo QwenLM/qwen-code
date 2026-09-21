@@ -26,12 +26,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const stderrLines: string[] = [];
+/** What the handler's `catch` printed — the refusal line of a failed round. */
+const handlerErrors: string[] = [];
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn((line: string) => {
     stderrLines.push(line);
   }),
-  writeStderrLineSafe: vi.fn(),
+  writeStderrLineSafe: vi.fn((line: string) => {
+    handlerErrors.push(line);
+  }),
 }));
 
 const captures: Array<{ diff: Buffer }> = [];
@@ -88,6 +92,7 @@ beforeEach(() => {
   savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
   process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
+  handlerErrors.length = 0;
   captures.length = 0;
   hashPasses.length = 0;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-toctou-')));
@@ -112,6 +117,7 @@ afterEach(() => {
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();
+  process.exitCode = undefined;
 });
 
 const DIFF_A = Buffer.from(
@@ -365,7 +371,13 @@ describe('capture-local — the withheld candidate is not announced', () => {
           { diff: DIFF_A },
           { diff: Buffer.from('moved mid-hash\n') },
         );
-        expect(() => run()).toThrow(/tmp is a symbolic link/);
+        // The handler reports a refusal rather than throwing it: one line,
+        // exit 1 — a runtime refusal, not the usage class.
+        expect(() => run()).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(handlerErrors.join('\n')).toMatch(
+          /^capture-local: .*tmp is a symbolic link/s,
+        );
         expect(readFileSync(planted, 'utf8')).toBe('ORIGINAL');
         expect(existsSync(join(repo, 'plan.json'))).toBe(false);
       } finally {

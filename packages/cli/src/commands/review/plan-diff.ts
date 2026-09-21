@@ -22,7 +22,11 @@ import {
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import { ensureReviewTmpDir, writesIntoReviewTmp } from './lib/paths.js';
+import {
+  commandPrefixed,
+  ensureReviewTmpDir,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import { HOSTNAME_RE } from './lib/gh.js';
 import {
@@ -226,7 +230,7 @@ export const planDiffCommand: CommandModule = {
       // writeStderrLineSafe, not writeStderrLine: a broken stderr (an
       // early-exited reader) must not let the throw escape the catch and
       // lose the exit-2/exit-1 classification this handler exists to give.
-      writeStderrLineSafe(`plan-diff: ${(err as Error).message}`);
+      writeStderrLineSafe(commandPrefixed('plan-diff', (err as Error).message));
       process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },

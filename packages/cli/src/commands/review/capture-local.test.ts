@@ -219,9 +219,15 @@ describe('capture-local (command boundary)', () => {
       symlinkSync(elsewhere, join(dir, '.qwen', 'tmp'));
       try {
         capture();
-        expect(() => run(join(dir, 'plan.json'))).toThrow(
-          /^capture-local: .*tmp is a symbolic link/s,
+        // Reported, not thrown: the handler prints one line and exits 1 — a
+        // runtime refusal, not the usage class. ONE prefix: the guard names
+        // the command itself, and the handler must not name it again.
+        expect(() => run(join(dir, 'plan.json'))).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(errs.join('')).toMatch(
+          /^capture-local: \.qwen[/\\]tmp is a symbolic link/,
         );
+        expect(errs.join('')).not.toContain('capture-local: capture-local:');
         expect(existsSync(join(dir, 'plan.json'))).toBe(false);
         expect(readdirSync(elsewhere)).toEqual([]);
 
@@ -229,7 +235,11 @@ describe('capture-local (command boundary)', () => {
         rmSync(join(dir, '.qwen'), { recursive: true, force: true });
         symlinkSync(elsewhere, join(dir, '.qwen'));
         capture();
-        expect(() => run(join(dir, 'plan.json'))).toThrow(
+        process.exitCode = undefined;
+        errs = [];
+        expect(() => run(join(dir, 'plan.json'))).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(errs.join('')).toMatch(
           /^capture-local: \.qwen is a symbolic link/,
         );
         expect(readdirSync(elsewhere)).toEqual([]);

@@ -17,6 +17,7 @@ import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import {
   assertWritableOutPath,
+  commandPrefixed,
   ensureReviewTmpDir,
   writesIntoReviewTmp,
 } from './lib/paths.js';
@@ -133,7 +134,9 @@ export const fetchDiffCommand: CommandModule = {
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {
-      writeStderrLineSafe(`fetch-diff: ${(err as Error).message}`);
+      writeStderrLineSafe(
+        commandPrefixed('fetch-diff', (err as Error).message),
+      );
       process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },
