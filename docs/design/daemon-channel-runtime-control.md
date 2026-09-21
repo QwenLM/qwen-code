@@ -75,7 +75,13 @@ an otherwise ambiguous ownership tie, and keeps breaking it for as long as the
 daemon runs, so re-enabling a name the daemon stopped resolves as boot did. A
 name contributed only by non-primary workspaces is dropped with a log rather
 than failing the whole restore; a name the primary workspace listed keeps
-failing it. `all` stays primary-only and is reported when configured elsewhere.
+failing it. `all` stays primary-only and is reported when configured
+elsewhere. A workspace registered after boot restores its own names through the
+same path, after the registration response rather than inside it; a channel
+this daemon stopped on purpose, and every channel after a daemon-wide stop, is
+excluded until something enables channels again or the next boot reads the
+settings. An explicit `--channel` selection bounds hosting for the daemon's
+whole life, so a workspace registered later adds nothing to it.
 Without an explicit or persisted
 selection, the daemon does not reserve the channel service or load the heavy
 channel runtime until the first runtime mutation.

@@ -845,7 +845,17 @@ contributed is dropped, with a log identifying it, when it cannot be resolved,
 so one workspace's stale entry does not strand the others; a name the primary
 workspace listed still fails the restore as a whole, whether or not another
 workspace lists it too.
-`all` remains primary-only: it is ignored, and reported, anywhere else. With no
+`all` remains primary-only: it is ignored, and reported, anywhere else. A
+workspace registered after boot restores its own `serve.channels` through the
+same path, loading the channel runtime if nothing else has, and one name it
+cannot host does not stop the rest of its list. Registration answers before
+those channels are up: the restore runs after the response, so a worker that
+never becomes ready cannot hold the runtime-topology gate that registrations
+and trust reconciles share. An explicit `--channel` selection bounds what the
+daemon hosts for its whole life, so no workspace registered later adds to it; a
+channel stopped through `POST /workspaces/:workspace/channels/:name/stop`, and
+every channel once `DELETE /workspace/channel` has stopped hosting, is left
+alone until something enables it again or the daemon restarts. With no
 explicit or configured selection, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
