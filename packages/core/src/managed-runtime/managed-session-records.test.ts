@@ -86,6 +86,87 @@ function harnessEvent(
   };
 }
 
+function eventForKind(
+  kind:
+    | 'message.committed'
+    | 'tool.intent'
+    | 'tool.receipt'
+    | 'checkpoint.committed'
+    | 'context.compacted'
+    | 'turn.settled'
+    | 'config.bound',
+): Record<string, unknown> {
+  const payloads = {
+    'message.committed': {
+      messageId: 'msg-1',
+      role: 'assistant',
+      contentRef: ref(),
+      modelAttemptId: null,
+      parentMessageId: null,
+    },
+    'tool.intent': {
+      executionCallId: 'call-1',
+      batchId: 'batch-1',
+      ordinal: 0,
+      toolDefinitionRef: ref(),
+      argsRef: ref(),
+      outcomeSource: 'runtime',
+    },
+    'tool.receipt': {
+      executionCallId: 'call-1',
+      toolOutcomeRef: ref(),
+      resultRef: null,
+      resources: [],
+      historyRevision: 0,
+    },
+    'checkpoint.committed': {
+      checkpointId: 'checkpoint-1',
+      coveredSequence: 1,
+      previousCheckpointId: null,
+      stateRef: ref(),
+      boundary: null,
+    },
+    'context.compacted': {
+      compactionId: 'compaction-1',
+      fromSequence: 1,
+      toSequence: 1,
+      summaryRef: ref(),
+      replacedMessageIds: [],
+      tokenCountsRef: null,
+    },
+    'turn.settled': {
+      turnId: 'turn-1',
+      outcome: 'completed',
+      stopReason: null,
+      resultRef: null,
+      usageRef: null,
+      pendingOwnersRef: null,
+    },
+    'config.bound': {
+      revision: 1,
+      previousRevision: null,
+      bundleRef: ref(),
+      rootSnapshotRef: ref(),
+    },
+  } satisfies Record<string, Record<string, unknown>>;
+  const needsActivation = new Set([
+    'message.committed',
+    'tool.intent',
+    'checkpoint.committed',
+    'context.compacted',
+  ]);
+  return {
+    v: 1,
+    sequence: 2,
+    eventId: `evt-${kind}`,
+    sessionKey,
+    kind,
+    occurredAt: 1_700_000_000_001,
+    ...(needsActivation.has(kind) ? { subject: activationSubject } : {}),
+    payload: payloads[kind],
+  };
+}
+
 describe('managed session record envelope', () => {
   it('accepts a well-formed input.accepted event', () => {
     const event = parseManagedSessionEvent(inputEvent());
@@ -153,6 +234,14 @@ describe('managed session record envelope', () => {
     ).toThrow(/UTC Unix milliseconds as a safe integer/);
   });
 
+  it('rejects a timestamp outside the ECMAScript UTC range', () => {
+    expect(() =>
+      parseManagedSessionEvent(
+        inputEvent({ occurredAt: MANAGED_SESSION_LIMITS.maxTimeMs + 1 }),
+      ),
+    ).toThrow(/maximum UTC Unix millisecond value/);
+  });
+
   it('rejects a version other than 1', () => {
     expect(() => parseManagedSessionEvent(inputEvent({ v: 2 }))).toThrow(
       /event.v must be 1/,
@@ -189,6 +278,84 @@ describe('managed session shared field rules', () => {
     );
   });
 
+  it('requires stable identifiers to be valid UTF-8 in NFC form', () => {
+    expect(() =>
+      parseManagedSessionEvent(inputEvent({ eventId: '\ud800' })),
+    ).toThrow(/valid UTF-8 text/);
+    expect(() =>
+      parseManagedSessionEvent(inputEvent({ eventId: 'cafe\u0301' })),
+    ).toThrow(/NFC normalization/);
+    expect(
+      parseManagedSessionEvent(inputEvent({ eventId: '你好😀' })).eventId,
+    ).toBe('你好😀');
+  });
+
+  it('enforces the free-form text byte limit', () => {
+    const payload = inputEvent()['payload'] as Record<string, unknown>;
+    expect(() =>
+      parseManagedSessionEvent(
+        inputEvent({
+          payload: {
+            ...payload,
+            source: 'x'.repeat(MANAGED_SESSION_LIMITS.maxTextBytes),
+          },
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      parseManagedSessionEvent(
+        inputEvent({
+          payload: {
+            ...payload,
+            source: 'x'.repeat(MANAGED_SESSION_LIMITS.maxTextBytes + 1),
+          },
+        }),
+      ),
+    ).toThrow(/exceeds 4096 UTF-8 bytes/);
+  });
+
+  it('rejects array subclasses before their methods can bypass validation', () => {
+    class JsonArraySubclass extends Array<unknown> {}
+    expect(() =>
+      parseManagedSessionEvent({
+        ...eventForKind('tool.receipt'),
+        payload: {
+          ...(eventForKind('tool.receipt')['payload'] as object),
+          resources: new JsonArraySubclass('not-a-ref'),
+        },
+      }),
+    ).toThrow(/plain JSON array/);
+  });
+
+  it('keeps untrusted field names out of error-message control sequences', () => {
+    const unsafeKey = 'bad\u001b[31m\nfield';
+    const inputs = [
+      inputEvent({
+        payload: {
+          ...(inputEvent()['payload'] as object),
+          [unsafeKey]: true,
+        },
+      }),
+      {
+        ...eventForKind('tool.receipt'),
+        payload: {
+          ...(eventForKind('tool.receipt')['payload'] as object),
+          resources: [{ [unsafeKey]: Number.NaN }],
+        },
+      },
+    ];
+    for (const input of inputs) {
+      try {
+        parseManagedSessionEvent(input);
+        throw new Error('expected validation to fail');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ManagedSessionRecordError);
+        // eslint-disable-next-line no-control-regex
+        expect((error as Error).message).not.toMatch(/[\u001b\n]/);
+      }
+    }
+  });
+
   it('requires a lowercase sha-256 digest', () => {
     const payload = {
       ...(inputEvent()['payload'] as Record<string, unknown>),
@@ -214,6 +381,11 @@ describe('managed session shared field rules', () => {
     expect(() =>
       parseManagedSessionEvent(inputEvent({ sequence: 1.5 })),
     ).toThrow(/non-negative safe integer/);
+    expect(() =>
+      parseManagedSessionEvent(
+        inputEvent({ sequence: Number.MAX_SAFE_INTEGER }),
+      ),
+    ).toThrow(/cannot advance/);
   });
 
   it('rejects non-JSON values passed directly to a typed parser', () => {
@@ -246,17 +418,66 @@ describe('managed session shared field rules', () => {
 });
 
 describe('managed session per-kind rules', () => {
-  it('requires an activation subject for harness-advancing kinds', () => {
-    const event = harnessEvent();
-    delete event['subject'];
-    expect(() => parseManagedSessionEvent(event)).toThrow(
+  it.each([
+    ['model.attempt', () => harnessEvent()],
+    ['message.committed', () => eventForKind('message.committed')],
+    ['tool.intent', () => eventForKind('tool.intent')],
+    ['context.compacted', () => eventForKind('context.compacted')],
+    ['checkpoint.committed', () => eventForKind('checkpoint.committed')],
+  ])('requires an activation subject for %s', (_kind, makeEvent) => {
+    const missing = makeEvent();
+    delete missing['subject'];
+    expect(() => parseManagedSessionEvent(missing)).toThrow(
       /requires an activation subject/,
     );
     expect(() =>
-      parseManagedSessionEvent(
-        harnessEvent({ subject: { type: 'turn', turnId: 'turn-1' } }),
-      ),
+      parseManagedSessionEvent({
+        ...makeEvent(),
+        subject: { type: 'turn', turnId: 'turn-1' },
+      }),
     ).toThrow(/requires an activation subject/);
+  });
+
+  it.each([
+    'tool.intent',
+    'tool.receipt',
+    'checkpoint.committed',
+    'turn.settled',
+    'config.bound',
+  ] as const)('accepts a schema-exact %s event', (kind) => {
+    expect(parseManagedSessionEvent(eventForKind(kind)).kind).toBe(kind);
+  });
+
+  it('validates the hook-operation subject variant', () => {
+    const wake = {
+      v: 1,
+      sequence: 2,
+      eventId: 'evt-2',
+      sessionKey,
+      kind: 'wake.requested',
+      occurredAt: 1,
+      payload: {
+        wakeId: 'wake-1',
+        reason: 'hook',
+        subject: {
+          type: 'hook_operation',
+          operationId: 'op-1',
+          occurrenceId: 'occ-1',
+        },
+        sourceEventId: 'evt-1',
+        requiredSequence: 1,
+      },
+    };
+    expect(parseManagedSessionEvent(wake).kind).toBe('wake.requested');
+    expect(() =>
+      parseManagedSessionEvent({
+        ...wake,
+        payload: {
+          ...wake.payload,
+          subject: { ...wake.payload.subject, occurrenceId: '' },
+        },
+      }),
+    ).toThrow(/occurrenceId must be a non-empty string/);
   });
 
   it('requires usageRef to be null while a model attempt is started', () => {
@@ -321,6 +542,15 @@ describe('managed session per-kind rules', () => {
     expect(() =>
       parseManagedSessionEvent(activation('active', { installRef: null })),
     ).toThrow(/installRef must be present/);
+    expect(() =>
+      parseManagedSessionEvent(
+        activation('installing', { leaseDurationMs: null }),
+      ),
+    ).toThrow(/leaseDurationMs must be present/);
+    expect(
+      parseManagedSessionEvent(activation('revoked', { boundaryRef: ref() }))
+        .kind,
+    ).toBe('activation.changed');
     expect(() => parseManagedSessionEvent(activation('paused'))).toThrow(
       /phase must be one of/,
     );
@@ -389,6 +619,50 @@ describe('managed session per-kind rules', () => {
     expect(() => parseManagedSessionEvent(domainEvent({ version: 2 }))).toThrow(
       /version must be 1/,
     );
+    expect(() =>
+      parseManagedSessionEvent(
+        domainEvent({
+          recordRef: { ...ref('managed-session_metadata'), schemaVersion: 2 },
+        }),
+      ),
+    ).toThrow(/recordRef.schemaVersion must be 1/);
+  });
+
+  it('requires event-sequence references to start at 1', () => {
+    const wake = {
+      v: 1,
+      sequence: 2,
+      eventId: 'evt-2',
+      sessionKey,
+      kind: 'wake.requested',
+      occurredAt: 1,
+      payload: {
+        wakeId: 'wake-1',
+        reason: 'input',
+        subject: { type: 'turn', turnId: 'turn-1' },
+        sourceEventId: 'evt-1',
+        requiredSequence: 0,
+      },
+    };
+    expect(() => parseManagedSessionEvent(wake)).toThrow(/must start at 1/);
+    expect(() =>
+      parseManagedSessionEvent({
+        ...eventForKind('checkpoint.committed'),
+        payload: {
+          ...(eventForKind('checkpoint.committed')['payload'] as object),
+          coveredSequence: 0,
+        },
+      }),
+    ).toThrow(/must start at 1/);
+    expect(() =>
+      parseManagedSessionEvent({
+        ...eventForKind('context.compacted'),
+        payload: {
+          ...(eventForKind('context.compacted')['payload'] as object),
+          fromSequence: 0,
+        },
+      }),
+    ).toThrow(/sequence references must start at 1/);
   });
 
   it('rejects a compaction range whose end precedes its start', () => {
@@ -593,6 +867,24 @@ describe('managed session lifecycle transitions', () => {
     expect(
       isManagedSessionLifecycleTransitionAllowed('recovery_blocked', 'deleted'),
     ).toBe(false);
+    expect(
+      isManagedSessionLifecycleTransitionAllowed(
+        'recovery_blocked',
+        'recovery_blocked',
+      ),
+    ).toBe(false);
+  });
+
+  it('fails closed for invalid direct-call states and pins terminal transitions', () => {
+    expect(
+      isManagedSessionLifecycleTransitionAllowed('sleeping' as never, 'idle'),
+    ).toBe(false);
+    expect(
+      isManagedSessionLifecycleTransitionAllowed('closed', 'deleting'),
+    ).toBe(true);
+    expect(
+      isManagedSessionLifecycleTransitionAllowed('deleting', 'deleted'),
+    ).toBe(true);
   });
 });
 
@@ -619,6 +911,35 @@ describe('managed session header', () => {
     expect(() =>
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/2' })),
     ).toThrow(/is not supported by this reader/);
+  });
+
+  it('accepts an older minimum-reader requirement and returns its token', () => {
+    expect(
+      parseManagedSessionHeader(header({ minimumReader: 'managed-session/0' }))
+        .minimumReader,
+    ).toBe('managed-session/0');
+  });
+
+  it('validates and preserves a base transcript proof', () => {
+    expect(
+      parseManagedSessionHeader(header({ baseTranscriptProof: ref() }))
+        .baseTranscriptProof,
+    ).toEqual(ref());
+    expect(() =>
+      parseManagedSessionHeader(
+        header({ baseTranscriptProof: { ...ref(), digest: 'ZZ' } }),
+      ),
+    ).toThrow(/lowercase SHA-256/);
+  });
+
+  it('uses managed validation errors for unsupported structured versions', () => {
+    const unsupported = Object.create(null) as Record<string, never>;
+    expect(() =>
+      parseManagedSessionHeader(header({ formatVersion: unsupported })),
+    ).toThrow(ManagedSessionRecordError);
+    expect(() =>
+      parseManagedSessionHeader(header({ minimumReader: unsupported })),
+    ).toThrow(ManagedSessionRecordError);
   });
 
   it('refuses a non-managed engine', () => {
@@ -711,8 +1032,11 @@ describe('managed session transactions', () => {
     ).toThrow(/contiguous sequence range/);
   });
 
-  it('rejects a transaction that spans workspaces', () => {
-    const other = { ...sessionKey, workspaceId: 'w2' };
+  it.each([
+    { ...sessionKey, tenantId: 't2' },
+    { ...sessionKey, workspaceId: 'w2' },
+    { ...sessionKey, sessionId: 's2' },
+  ])('rejects a transaction that spans session keys', (other) => {
     expect(() =>
       assertManagedSessionTransaction([event(1), event(2, other)], 1024),
     ).toThrow(/must not span sessions/);
@@ -736,9 +1060,25 @@ describe('managed session transactions', () => {
   it('rejects an invalid encoded transaction size', () => {
     expect(() =>
       assertManagedSessionTransaction([event(1)], Number.NaN),
-    ).toThrow(/encoded size must be a non-negative safe integer/);
+    ).toThrow(/encoded size must be a positive safe integer/);
     expect(() => assertManagedSessionTransaction([event(1)], -1)).toThrow(
-      /encoded size must be a non-negative safe integer/,
+      /encoded size must be a positive safe integer/,
+    );
+    expect(() => assertManagedSessionTransaction([event(1)], 0)).toThrow(
+      /encoded size must be a positive safe integer/,
+    );
+  });
+
+  it('rejects array subclasses before they can bypass transaction checks', () => {
+    class EventArraySubclass extends Array<ManagedSessionEvent> {
+      override forEach(): void {}
+    }
+    const events = new EventArraySubclass(
+      event(1),
+      event(3, { ...sessionKey, workspaceId: 'w2' }),
+    );
+    expect(() => assertManagedSessionTransaction(events, 1024)).toThrow(
+      /plain JSON array/,
     );
   });
 
@@ -749,6 +1089,16 @@ describe('managed session transactions', () => {
     );
     expect(managedSessionEventsDigest([event(1), event(2)])).toBe(digest);
     expect(managedSessionEventsDigest([event(2), event(1)])).not.toBe(digest);
+  });
+
+  it('bounds digest input before encoding event identities', () => {
+    const events = Array.from(
+      { length: MANAGED_SESSION_LIMITS.maxTransactionEvents + 1 },
+      (_, index) => event(index + 1),
+    );
+    expect(() => managedSessionEventsDigest(events)).toThrow(
+      /must not exceed 256 events/,
+    );
   });
 });
 
@@ -824,5 +1174,32 @@ describe('managed session raw record parsing', () => {
     expect(() => parseManagedSessionRecordJson('{"a":}', 1024)).toThrow(
       /not valid JSON/,
     );
+  });
+
+  it('rejects non-finite numbers produced by JSON exponent overflow', () => {
+    expect(() => parseManagedSessionRecordJson('1e400', 1024)).toThrow(
+      /numbers must be finite/,
+    );
+  });
+
+  it('uses the declared header byte cap', () => {
+    const exact = JSON.stringify(
+      'x'.repeat(MANAGED_SESSION_LIMITS.maxHeaderBytes - 2),
+    );
+    expect(
+      parseManagedSessionRecordJson(
+        exact,
+        MANAGED_SESSION_LIMITS.maxHeaderBytes,
+      ),
+    ).toBe('x'.repeat(MANAGED_SESSION_LIMITS.maxHeaderBytes - 2));
+    const over = JSON.stringify(
+      'x'.repeat(MANAGED_SESSION_LIMITS.maxHeaderBytes - 1),
+    );
+    expect(() =>
+      parseManagedSessionRecordJson(
+        over,
+        MANAGED_SESSION_LIMITS.maxHeaderBytes,
+      ),
+    ).toThrow(/exceeds 65536 UTF-8 bytes/);
   });
 });

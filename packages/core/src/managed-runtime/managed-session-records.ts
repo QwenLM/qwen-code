@@ -6,6 +6,8 @@
 
 import { createHash } from 'node:crypto';
 
+import { stripAnsiAndControl } from '../utils/textUtils.js';
+
 export type ManagedSessionJsonValue =
   | null
   | boolean
@@ -17,6 +19,9 @@ export type ManagedSessionJsonValue =
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
 
+const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
+const MAX_ERROR_VALUE_LENGTH = 4096;
+
 export const MANAGED_SESSION_HEADER_SUBTYPE = 'managed_session_header_v1';
 export const MANAGED_SESSION_EVENT_SUBTYPE = 'managed_session_event_v1';
 export const MANAGED_SESSION_COMMIT_SUBTYPE = 'managed_session_commit_v1';
@@ -26,7 +31,9 @@ export const MANAGED_SESSION_LIMITS = {
   // Not frozen by the storage spec: a bound for free-form enum-adjacent fields
   // such as `source` or `stopReason`, borrowed from its error-message cap.
   maxTextBytes: 4096,
+  maxTimeMs: 8_640_000_000_000_000,
   maxJsonDepth: 64,
+  maxHeaderBytes: 64 * 1024,
   maxEventBytes: 1024 * 1024,
   maxCommitMarkerBytes: 64 * 1024,
   maxTransactionEvents: 256,
@@ -127,6 +134,15 @@ export const MANAGED_SESSION_ACTION_SOURCES = [
 export type ManagedSessionActionSource =
   (typeof MANAGED_SESSION_ACTION_SOURCES)[number];
 
+const MANAGED_SESSION_ACTION_STATES = [
+  'requested',
+  'decided',
+  'cancelled',
+  'expired',
+] as const;
+
+type ManagedSessionActionState = (typeof MANAGED_SESSION_ACTION_STATES)[number];
+
 export interface ManagedSessionKey {
   readonly tenantId: string;
   readonly workspaceId: string;
@@ -163,7 +179,7 @@ export interface ManagedSessionEvent {
   readonly kind: ManagedSessionEventKind;
   readonly occurredAt: number;
   readonly subject?: ManagedSessionSubject;
-  readonly payload: Readonly<Record<string, ManagedSessionJsonValue>>;
+  readonly payload: Readonly<Partial<Record<string, ManagedSessionJsonValue>>>;
 }
 
 export interface ManagedSessionHeader {
@@ -200,6 +216,10 @@ export class ManagedSessionRecordError extends Error {
 
 function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
+}
+
+function safeErrorValue(value: string): string {
+  return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
 }
 
 function object(
@@ -247,7 +267,11 @@ function assertJsonValue(
   try {
     const descriptors = Object.getOwnPropertyDescriptors(value);
     const keys = Reflect.ownKeys(descriptors);
+    const prototype = Object.getPrototypeOf(value) as object | null;
     if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) {
+        fail(`${label} must be a plain JSON array.`);
+      }
       if (
         keys.length !== value.length + 1 ||
         keys.some(
@@ -273,7 +297,6 @@ function assertJsonValue(
       return;
     }
 
-    const prototype = Object.getPrototypeOf(value) as object | null;
     if (prototype !== Object.prototype && prototype !== null) {
       fail(`${label} objects must be plain JSON objects.`);
     }
@@ -281,16 +304,12 @@ function assertJsonValue(
       if (typeof key !== 'string') {
         fail(`${label} objects must not contain symbol keys.`);
       }
+      const keyLabel = safeErrorValue(`${label}.${key}`);
       const descriptor = descriptors[key];
       if (!descriptor.enumerable || !('value' in descriptor)) {
-        fail(`${label}.${key} must be an enumerable data property.`);
+        fail(`${keyLabel} must be an enumerable data property.`);
       }
-      assertJsonValue(
-        descriptor.value,
-        `${label}.${key}`,
-        ancestors,
-        depth + 1,
-      );
+      assertJsonValue(descriptor.value, keyLabel, ancestors, depth + 1);
     }
   } finally {
     ancestors.delete(value);
@@ -304,7 +323,7 @@ function assertNoUnknownKeys(
 ): void {
   for (const key of Object.keys(input)) {
     if (!allowed.includes(key)) {
-      fail(`${label} has the unknown field "${key}".`);
+      fail(`${label} has the unknown field "${safeErrorValue(key)}".`);
     }
   }
 }
@@ -321,7 +340,7 @@ function boundedString(
     fail(`${label} exceeds ${maxBytes} UTF-8 bytes.`);
   }
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) {
     fail(`${label} must not contain control characters.`);
   }
   return value;
@@ -331,7 +350,14 @@ export function assertManagedSessionStableId(
   value: ManagedSessionJsonValue | undefined,
   label: string,
 ): string {
-  return boundedString(value, label, MANAGED_SESSION_LIMITS.maxIdBytes);
+  const id = boundedString(value, label, MANAGED_SESSION_LIMITS.maxIdBytes);
+  if (Buffer.from(id, 'utf8').toString('utf8') !== id) {
+    fail(`${label} must be valid UTF-8 text.`);
+  }
+  if (id.normalize('NFC') !== id) {
+    fail(`${label} must use NFC normalization.`);
+  }
+  return id;
 }
 
 export function assertManagedSessionSequence(
@@ -353,6 +379,9 @@ export function assertManagedSessionTime(
 ): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
     fail(`${label} must be UTC Unix milliseconds as a safe integer.`);
+  }
+  if (value > MANAGED_SESSION_LIMITS.maxTimeMs) {
+    fail(`${label} exceeds the maximum UTC Unix millisecond value.`);
   }
   return value;
 }
@@ -483,7 +512,6 @@ type FieldKind =
   | 'ids'
   | 'sequence'
   | 'sequenceOrNull'
-  | 'time'
   | 'timeOrNull'
   | 'ref'
   | 'refOrNull'
@@ -669,13 +697,25 @@ const EVENT_ACTORS: Readonly<
   'domain.committed': ['trusted_entry'],
 };
 
-const ACTIVATION_SUBJECT_KINDS: readonly ManagedSessionEventKind[] = [
-  'model.attempt',
-  'message.committed',
-  'tool.intent',
-  'context.compacted',
-  'checkpoint.committed',
-];
+const ACTIVATION_SUBJECT_KINDS: Readonly<
+  Record<ManagedSessionEventKind, boolean>
+> = {
+  'input.accepted': false,
+  'wake.requested': false,
+  'activation.changed': false,
+  'model.attempt': true,
+  'message.committed': true,
+  'tool.intent': true,
+  'action.changed': false,
+  'tool.receipt': false,
+  'checkpoint.committed': true,
+  'context.compacted': true,
+  'cancel.requested': false,
+  'turn.settled': false,
+  'config.bound': false,
+  'lifecycle.changed': false,
+  'domain.committed': false,
+};
 
 function assertField(
   payload: Record<string, ManagedSessionJsonValue>,
@@ -703,9 +743,6 @@ function assertField(
       return;
     case 'sequenceOrNull':
       if (value !== null) assertManagedSessionSequence(value, at);
-      return;
-    case 'time':
-      assertManagedSessionTime(value, at);
       return;
     case 'timeOrNull':
       if (value !== null) assertManagedSessionTime(value, at);
@@ -760,6 +797,12 @@ function assertPayloadRules(
 ): void {
   const at = `payload`;
   switch (kind) {
+    case 'wake.requested': {
+      if ((payload['requiredSequence'] as number) < 1) {
+        fail(`${at}.requiredSequence must start at 1.`);
+      }
+      return;
+    }
     case 'activation.changed': {
       const phase = assertEnum(
         payload['phase'],
@@ -805,7 +848,7 @@ function assertPayloadRules(
       );
       const state = assertEnum(
         payload['state'],
-        ['requested', 'decided', 'cancelled', 'expired'] as const,
+        MANAGED_SESSION_ACTION_STATES,
         `${at}.state`,
       );
       if ((state === 'decided') === (payload['decisionRef'] === null)) {
@@ -839,8 +882,17 @@ function assertPayloadRules(
     case 'context.compacted': {
       const from = payload['fromSequence'] as number;
       const to = payload['toSequence'] as number;
+      if (from < 1 || to < 1) {
+        fail(`${at} sequence references must start at 1.`);
+      }
       if (to < from) {
         fail(`${at}.toSequence must not precede ${at}.fromSequence.`);
+      }
+      return;
+    }
+    case 'checkpoint.committed': {
+      if ((payload['coveredSequence'] as number) < 1) {
+        fail(`${at}.coveredSequence must start at 1.`);
       }
       return;
     }
@@ -850,23 +902,34 @@ function assertPayloadRules(
         MANAGED_SESSION_DOMAINS,
         `${at}.domain`,
       );
-      if (payload['version'] !== MANAGED_SESSION_FORMAT_VERSION) {
-        fail(`${at}.version must be ${MANAGED_SESSION_FORMAT_VERSION}.`);
+      if (payload['version'] !== MANAGED_SESSION_DOMAIN_RECORD_VERSION) {
+        fail(`${at}.version must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`);
       }
-      const recordRef = payload['recordRef'] as unknown as {
-        kind: string;
-        schemaVersion: number;
-      };
+      const recordRef = payload[
+        'recordRef'
+      ] as unknown as ManagedSessionDurableRef;
       if (recordRef.kind !== `managed-${domain}`) {
         fail(`${at}.recordRef.kind must be managed-${domain}.`);
       }
-      if (recordRef.schemaVersion !== 1) {
-        fail(`${at}.recordRef.schemaVersion must be 1.`);
+      if (recordRef.schemaVersion !== MANAGED_SESSION_DOMAIN_RECORD_VERSION) {
+        fail(
+          `${at}.recordRef.schemaVersion must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`,
+        );
       }
       return;
     }
-    default:
+    case 'input.accepted':
+    case 'message.committed':
+    case 'tool.intent':
+    case 'tool.receipt':
+    case 'cancel.requested':
+    case 'turn.settled':
+    case 'config.bound':
       return;
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
   }
 }
 
@@ -918,10 +981,7 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
     record['subject'] === undefined
       ? undefined
       : assertSubject(record['subject'], 'event.subject');
-  if (
-    ACTIVATION_SUBJECT_KINDS.includes(kind) &&
-    subject?.type !== 'activation'
-  ) {
+  if (ACTIVATION_SUBJECT_KINDS[kind] && subject?.type !== 'activation') {
     fail(`${kind} requires an activation subject.`);
   }
 
@@ -952,9 +1012,12 @@ export function assertManagedSessionEventActor(
   event: ManagedSessionEvent,
   actor: ManagedSessionActorClass,
 ): void {
+  if (!EVENT_ACTORS[event.kind].includes(actor)) {
+    fail(`${event.kind} must not be requested by ${actor}.`);
+  }
   if (event.kind === 'action.changed') {
     const source = event.payload['source'] as ManagedSessionActionSource;
-    const state = event.payload['state'] as string;
+    const state = event.payload['state'] as ManagedSessionActionState;
     const expected: ManagedSessionActorClass =
       state === 'requested' && source === 'tool_call'
         ? 'harness'
@@ -965,9 +1028,6 @@ export function assertManagedSessionEventActor(
       );
     }
     return;
-  }
-  if (!EVENT_ACTORS[event.kind].includes(actor)) {
-    fail(`${event.kind} must not be requested by ${actor}.`);
   }
 }
 
@@ -997,9 +1057,25 @@ export function isManagedSessionLifecycleTransitionAllowed(
   from: ManagedSessionLifecycleState | null,
   to: ManagedSessionLifecycleState,
 ): boolean {
+  if (
+    (from !== null && !MANAGED_SESSION_LIFECYCLE_STATES.includes(from)) ||
+    !MANAGED_SESSION_LIFECYCLE_STATES.includes(to)
+  ) {
+    return false;
+  }
   if (from === null) return to === 'idle';
-  if (to === 'recovery_blocked') return from !== 'deleted';
+  if (to === 'recovery_blocked') {
+    return from !== 'deleted' && from !== 'recovery_blocked';
+  }
   return LIFECYCLE_TRANSITIONS[from].includes(to);
+}
+
+function managedSessionReaderVersion(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const match = /^managed-session\/(0|[1-9][0-9]*)$/.exec(value);
+  if (match === null) return null;
+  const version = Number(match[1]);
+  return Number.isSafeInteger(version) ? version : null;
 }
 
 export function parseManagedSessionHeader(
@@ -1022,14 +1098,19 @@ export function parseManagedSessionHeader(
     'header',
   );
   if (record['formatVersion'] !== MANAGED_SESSION_FORMAT_VERSION) {
-    fail(
-      `header.formatVersion ${String(record['formatVersion'])} is not supported by this reader.`,
-    );
+    fail('header.formatVersion is not supported by this reader.');
   }
-  if (record['minimumReader'] !== MANAGED_SESSION_MINIMUM_READER) {
-    fail(
-      `header.minimumReader ${String(record['minimumReader'])} is not supported by this reader.`,
-    );
+  const minimumReader = record['minimumReader'];
+  const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
+  const currentReaderVersion = managedSessionReaderVersion(
+    MANAGED_SESSION_MINIMUM_READER,
+  );
+  if (
+    requiredReaderVersion === null ||
+    currentReaderVersion === null ||
+    requiredReaderVersion > currentReaderVersion
+  ) {
+    fail('header.minimumReader is not supported by this reader.');
   }
   if (record['engine'] !== 'managed') {
     fail('header.engine must be managed.');
@@ -1037,7 +1118,7 @@ export function parseManagedSessionHeader(
   const proof = record['baseTranscriptProof'];
   return {
     formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-    minimumReader: MANAGED_SESSION_MINIMUM_READER,
+    minimumReader: minimumReader as string,
     sessionKey: assertManagedSessionKey(
       record['sessionKey'],
       'header.sessionKey',
@@ -1148,11 +1229,34 @@ export function parseManagedSessionCommitMarker(
 export function managedSessionEventsDigest(
   events: readonly ManagedSessionEvent[],
 ): string {
-  const identities = events.map((event) => ({
-    sequence: event.sequence,
-    eventId: event.eventId,
-    kind: event.kind,
-  }));
+  if (events.length === 0) {
+    return fail('transaction identity must contain at least one event.');
+  }
+  if (events.length > MANAGED_SESSION_LIMITS.maxTransactionEvents) {
+    return fail(
+      `transaction identity must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionEvents} events.`,
+    );
+  }
+  assertJsonValue(events, 'events');
+  const identities: ManagedSessionJsonValue[] = [];
+  for (let index = 0; index < events.length; index++) {
+    const event = events[index];
+    identities.push({
+      sequence: assertManagedSessionSequence(
+        event.sequence,
+        `events[${index}].sequence`,
+      ),
+      eventId: assertManagedSessionStableId(
+        event.eventId,
+        `events[${index}].eventId`,
+      ),
+      kind: assertEnum(
+        event.kind,
+        MANAGED_SESSION_EVENT_KINDS,
+        `events[${index}].kind`,
+      ),
+    });
+  }
   const encoded = canonicalManagedSessionJson(identities);
   if (
     Buffer.byteLength(encoded, 'utf8') >
@@ -1191,8 +1295,9 @@ export function assertManagedSessionTransaction(
       `a transaction must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionEvents} events.`,
     );
   }
-  if (!Number.isSafeInteger(encodedBytes) || encodedBytes < 0) {
-    fail('transaction encoded size must be a non-negative safe integer.');
+  assertJsonValue(events, 'transaction.events');
+  if (!Number.isSafeInteger(encodedBytes) || encodedBytes < 1) {
+    fail('transaction encoded size must be a positive safe integer.');
   }
   if (encodedBytes > MANAGED_SESSION_LIMITS.maxTransactionBytes) {
     fail(
@@ -1200,14 +1305,15 @@ export function assertManagedSessionTransaction(
     );
   }
   const key = events[0].sessionKey;
-  events.forEach((event, index) => {
+  for (let index = 0; index < events.length; index++) {
+    const event = events[index];
     if (!managedSessionKeysEqual(event.sessionKey, key)) {
       fail('a transaction must not span sessions.');
     }
     if (index > 0 && event.sequence !== events[index - 1].sequence + 1) {
       fail('a transaction must append a contiguous sequence range.');
     }
-  });
+  }
 }
 
 /**
@@ -1225,11 +1331,14 @@ export function parseManagedSessionRecordJson(
     fail(`record exceeds ${maxBytes} UTF-8 bytes.`);
   }
   assertNoDuplicateJsonKeys(text);
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as ManagedSessionJsonValue;
+    parsed = JSON.parse(text);
   } catch {
     return fail('record is not valid JSON.');
   }
+  assertJsonValue(parsed, 'record');
+  return parsed;
 }
 
 const JSON_ESCAPES: Readonly<Record<string, string>> = {
@@ -1297,7 +1406,7 @@ function assertNoDuplicateJsonKeys(text: string): void {
       if (text[probe] === ':' && stack.length > 0) {
         const keys = stack[stack.length - 1];
         if (keys.has(value)) {
-          fail(`record has the duplicate JSON key "${value}".`);
+          fail(`record has the duplicate JSON key "${safeErrorValue(value)}".`);
         }
         keys.add(value);
       }

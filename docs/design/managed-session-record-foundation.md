@@ -58,11 +58,17 @@ nesting, and malformed JSON before typed parsing. The typed parsers reject
 unknown fields, invalid identifiers, non-safe integers, invalid state
 transitions, and non-lowercase SHA-256 digests.
 
+Stable identifiers must be valid UTF-8 text in NFC form. Readers accept a
+`minimumReader` token at or below their own `managed-session/N` version and
+reject malformed or newer requirements.
+
 | Limit                  |          v1 value |
 | ---------------------- | ----------------: |
 | Identifier             |   512 UTF-8 bytes |
 | Free-form bounded text | 4,096 UTF-8 bytes |
+| UTC Unix timestamp     |   0 to 8.64e15 ms |
 | JSON depth             |                64 |
+| Header                 |            64 KiB |
 | Event                  |             1 MiB |
 | Commit marker          |            64 KiB |
 | Events per transaction |               256 |
@@ -87,11 +93,16 @@ authority and operation adapters own their computation and cross-checking.
 
 The Core package exports the record constants, types, raw and typed parsers,
 transition checks, transaction checks, and digest helper. A future reader must
-pass the appropriate event or commit-marker byte limit to the raw parser before
-calling its typed parser. The existing `ChatRecord` type accepts the three
-reserved subtypes so later writers can use the standard transcript envelope.
-Transcript readers recognize them as private Session Authority journal records
-and exclude them from ordinary conversation projection.
+pass the appropriate header, event, or commit-marker byte limit to the raw
+parser before calling its typed parser. It must run the transaction validator
+before accepting a committed range. The event actor is not stored in the
+record, so an authority must derive it from the request's trust context and run
+the actor validator separately; the typed event parser does not authorize the
+request. The existing `ChatRecord` type accepts the three reserved subtypes so
+later writers can use the standard transcript envelope. A future writer must
+append them with `updateActiveTail: false`. Transcript readers recognize them
+as private Session Authority journal records and exclude them from ordinary
+conversation projection.
 
 This private Harness-side Session Authority journal is distinct from the Java
 control plane's public Event/Item/Snapshot store and Runtime Broker state. A
@@ -101,6 +112,25 @@ store replaces or aliases the other in this change.
 No caller writes these records in this change. Follow-up work must add the
 single-writer authority, durable resources, transaction recovery, projections,
 and Harness checkpoints in separate changes.
+
+## Lifecycle transitions
+
+The initial state is `idle`. Legal transitions are:
+
+| From               | To                                                            |
+| ------------------ | ------------------------------------------------------------- |
+| `idle`             | `active`, `closing`, `recovery_blocked`                       |
+| `active`           | `idle`, `closing`, `recovery_blocked`                         |
+| `closing`          | `closed`, `recovery_blocked`                                  |
+| `closed`           | `archived`, `deleting`, `recovery_blocked`                    |
+| `archived`         | `closed`, `deleting`, `recovery_blocked`                      |
+| `deleting`         | `deleted`, `recovery_blocked`                                 |
+| `deleted`          | none                                                          |
+| `recovery_blocked` | `idle`, `active`, `closing`, `closed`, `archived`, `deleting` |
+
+Re-entering `recovery_blocked` is not a transition. Recovery must restore the
+saved intended stage, which a later authority validates outside this record
+layer.
 
 ## Risks and mitigations
 
@@ -128,8 +158,9 @@ and Harness checkpoints in separate changes.
 ## Acceptance criteria
 
 1. The v1 constants, types, and validators are exported by Core.
-2. Raw record parsing enforces caller-selected byte and depth bounds, while
-   typed header, event, and commit-marker parsing enforces the v1 schema.
+2. Raw record parsing enforces the caller-selected byte bound and fixed v1 depth
+   bound, while typed header, event, and commit-marker parsing enforces the v1
+   schema.
 3. Transaction identity hashing is deterministic.
 4. Reserved Managed Session subtypes are recognized without projecting them as
    ordinary conversation records.

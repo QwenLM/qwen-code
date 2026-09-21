@@ -51,11 +51,17 @@ v1 的 event kind、domain、actor class、action source 和 lifecycle state 都
 字节上限的记录、过深嵌套和非法 JSON；类型解析器再拒绝未知字段、非法标识、非
 safe integer、非法状态转换，以及不是小写格式的 SHA-256 digest。
 
+稳定标识符必须是采用 NFC 形式的合法 UTF-8 文本。reader 接受不高于自身
+`managed-session/N` 版本的 `minimumReader` token，并拒绝格式错误或更高版本的
+要求。
+
 | 限额            |           v1 数值 |
 | --------------- | ----------------: |
 | 标识符          |   512 UTF-8 bytes |
 | 有界自由文本    | 4,096 UTF-8 bytes |
+| UTC Unix 时间戳 |   0 到 8.64e15 ms |
 | JSON 深度       |                64 |
+| Header          |            64 KiB |
 | 单个 Event      |             1 MiB |
 | Commit marker   |            64 KiB |
 | 单事务 Event 数 |               256 |
@@ -76,9 +82,12 @@ authority 和各 operation adapter 负责计算及交叉核验。
 ## 集成边界
 
 Core 包导出记录常量、类型、原始及类型解析器、转换校验、事务校验和 digest
-helper。未来 reader 必须先把 event 或 commit marker 对应的字节上限传给原始
-解析器，再调用类型解析器。现有 `ChatRecord` 类型接受三种预留 subtype，便于
-后续 writer 复用标准 transcript envelope。Transcript reader 会把它们识别为
+helper。未来 reader 必须先把 header、event 或 commit marker 对应的字节上限传给
+原始解析器，再调用类型解析器；接受已提交区间前还必须运行事务校验器。event actor
+不存储在记录中，因此 authority 必须从请求的信任上下文中推导 actor，并单独运行
+actor 校验器；类型化 event 解析器不会对请求做授权。现有 `ChatRecord` 类型接受
+三种预留 subtype，便于后续 writer 复用标准 transcript envelope。未来 writer
+必须以 `updateActiveTail: false` 追加这些记录。Transcript reader 会把它们识别为
 Session Authority 私有日志记录，并排除在普通会话投影之外。
 
 这份 Harness 侧私有 Session Authority 日志不同于 Java 管控面的公共
@@ -87,6 +96,24 @@ Event/Item/Snapshot 存储和 Runtime Broker 状态。后续集成可以跨边�
 
 本次变更没有调用方写入这些记录。后续工作必须通过独立变更加入单 writer
 authority、持久资源、事务恢复、投影和 Harness checkpoint。
+
+## 生命周期转换
+
+初始状态为 `idle`。合法转换如下：
+
+| 来源               | 目标                                                          |
+| ------------------ | ------------------------------------------------------------- |
+| `idle`             | `active`、`closing`、`recovery_blocked`                       |
+| `active`           | `idle`、`closing`、`recovery_blocked`                         |
+| `closing`          | `closed`、`recovery_blocked`                                  |
+| `closed`           | `archived`、`deleting`、`recovery_blocked`                    |
+| `archived`         | `closed`、`deleting`、`recovery_blocked`                      |
+| `deleting`         | `deleted`、`recovery_blocked`                                 |
+| `deleted`          | 无                                                            |
+| `recovery_blocked` | `idle`、`active`、`closing`、`closed`、`archived`、`deleting` |
+
+再次进入 `recovery_blocked` 不构成合法转换。恢复必须回到之前保存的目标阶段，该
+约束由后续 authority 在本记录层之外校验。
 
 ## 风险与缓解
 
@@ -109,8 +136,8 @@ authority、持久资源、事务恢复、投影和 Harness checkpoint。
 ## 验收标准
 
 1. Core 导出 v1 常量、类型和校验器。
-2. 原始记录解析执行调用方指定的字节和深度上限，类型解析对 header、event 和
-   commit marker 执行 v1 schema 校验。
+2. 原始记录解析执行调用方指定的字节上限和固定的 v1 深度上限，类型解析对
+   header、event 和 commit marker 执行 v1 schema 校验。
 3. 事务身份 hash 是确定性的。
 4. 预留 Managed Session subtype 可被识别，且不会被投影成普通会话记录。
 5. 没有生产调用方写入 Managed Session 记录。
