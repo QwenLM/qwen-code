@@ -1327,6 +1327,14 @@ describe('llm.tsx main function', () => {
         dualOutputInputFile: 'session.jsonl',
         expected: false,
       },
+      {
+        // The term that keeps an interactive TUI launch off execve: with no
+        // prompt the supervisor must survive so in-session relaunch exit
+        // codes still have a consumer.
+        label: 'plain interactive launch (no prompt)',
+        argv: {},
+        expected: false,
+      },
     ];
 
     it.each(rows)(

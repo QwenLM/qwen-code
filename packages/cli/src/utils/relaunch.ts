@@ -90,8 +90,15 @@ export async function relaunchAppInChildProcess(
         [process.execPath, ...nodeArgs],
         createChildEnv(),
       );
-    } catch {
-      // Fall back when the runtime supports execve but the replacement fails.
+    } catch (error) {
+      // Fall back when the runtime supports execve but the replacement
+      // fails; surface the reason so a persistent failure (e.g. E2BIG) is
+      // visible instead of silently voiding the optimization.
+      writeStderrLine(
+        `Process replacement failed, using a supervised relaunch instead: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
