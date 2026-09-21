@@ -123,6 +123,43 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('reduceDaemonEventToTuiUpdates', () => {
+  it('renders structured shell results as sanitized display text', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'shell-1',
+          status: 'completed',
+          rawOutput: {
+            type: 'shell_result',
+            version: 1,
+            text: '\x1b[32mHealth check complete\x1b[0m',
+            output: 'raw stdout must not replace display text',
+            directory: '/workspace',
+            exitCode: 0,
+            signal: null,
+            pid: 42,
+            error: null,
+            outcome: 'completed',
+            notices: [],
+            truncated: false,
+            outputFiles: [],
+          },
+        },
+      },
+    });
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: { tools: [{ resultDisplay: 'Health check complete' }] },
+      },
+    ]);
+  });
+
   it('renders structured question answers as sanitized display text', () => {
     const updates = reduceDaemonEventToTuiUpdates({
       id: 1,

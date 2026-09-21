@@ -210,7 +210,8 @@ export function parseBackgroundNotificationTurn(
     (kind !== 'agent' &&
       kind !== 'monitor' &&
       kind !== 'shell' &&
-      kind !== 'workflow') ||
+      kind !== 'workflow' &&
+      kind !== 'peer') ||
     typeof startedAt !== 'number' ||
     !Number.isFinite(startedAt) ||
     startedAt < 0

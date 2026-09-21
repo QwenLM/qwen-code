@@ -64,6 +64,12 @@ const RELEASE_TARGETS = [
 const DEFAULT_RUNTIME = 'node';
 const DEFAULT_BUN_VERSION = '1.3.14';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
+// The runtime downloads are the publish job's least reliable leg: one
+// transient download failure aborted the v0.23.4 publish while the
+// unchanged re-run passed. Bound each attempt and retry before failing.
+const MAX_DOWNLOAD_ATTEMPTS = 3;
+const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 // Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
 // render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
@@ -123,14 +129,14 @@ async function main() {
     // checksum list (Node.js SHASUMS256.txt vs Bun's), so fetch one per flavor.
     const checksums = {};
     for (const flavor of flavors) {
-      const checksumsPath = path.join(runtimeDir, `${flavor}-SHASUMS256.txt`);
-      await downloadFile(
-        `${flavor === 'bun' ? bunDistUrl : nodeDistUrl}/SHASUMS256.txt`,
-        checksumsPath,
-      );
-      checksums[flavor] = parseChecksums(
-        fs.readFileSync(checksumsPath, 'utf8'),
-      );
+      checksums[flavor] = await downloadRuntimeChecksums({
+        runtime: flavor,
+        distUrl: flavor === 'bun' ? bunDistUrl : nodeDistUrl,
+        checksumsPath: path.join(runtimeDir, `${flavor}-SHASUMS256.txt`),
+        expectedArchives: RELEASE_TARGETS.map((target) =>
+          runtimeArchiveName({ ...target, runtime: flavor, nodeVersion }),
+        ),
+      });
     }
     const nativeModulesDir = stageNativeModules(runtimeDir);
     // Only the bun runtime consumes the staged OpenTUI packages; the classic
@@ -169,6 +175,22 @@ function isMainModule() {
   return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
+function runtimeArchiveName({
+  runtime,
+  nodeVersion,
+  nodeTarget,
+  nodeArchiveExtension,
+  bunAsset,
+}) {
+  return runtime === 'bun'
+    ? `${bunAsset}.zip`
+    : `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
+}
+
+function runtimeLabel(runtime) {
+  return runtime === 'bun' ? 'Bun' : 'Node.js';
+}
+
 async function packageTarget({
   qwenTarget,
   nodeTarget,
@@ -185,24 +207,23 @@ async function packageTarget({
   nativeModulesDir,
   opentuiModulesDir,
 }) {
-  let archiveName;
-  let archiveUrlBase;
-  if (runtime === 'bun') {
-    archiveName = `${bunAsset}.zip`;
-    archiveUrlBase = bunDistUrl;
-  } else {
-    archiveName = `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
-    archiveUrlBase = nodeDistUrl;
-  }
+  const archiveName = runtimeArchiveName({
+    runtime,
+    nodeVersion,
+    nodeTarget,
+    nodeArchiveExtension,
+    bunAsset,
+  });
+  const archiveUrlBase = runtime === 'bun' ? bunDistUrl : nodeDistUrl;
   const archivePath = path.join(runtimeDir, archiveName);
 
-  await downloadFile(`${archiveUrlBase}/${archiveName}`, archivePath);
-  await verifyNodeArchive(
+  await downloadRuntimeArchive({
+    archiveUrl: `${archiveUrlBase}/${archiveName}`,
     archivePath,
     archiveName,
     checksums,
-    runtime === 'bun' ? 'Bun' : 'Node.js',
-  );
+    label: runtimeLabel(runtime),
+  });
 
   const args = [
     'scripts/create-standalone-package.js',
@@ -368,9 +389,11 @@ function stageOpenTuiPackages(runtimeDir) {
   return path.join(installDir, 'node_modules');
 }
 
-async function downloadFile(url, destination) {
+async function downloadFile(url, destination, { fetchImpl = fetch } = {}) {
   console.log(`Downloading ${url}`);
-  const response = await fetch(url);
+  const response = await fetchImpl(url, {
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
   if (!response.ok) {
     fail(
       `Failed to download ${url}: ${response.status} ${response.statusText}`,
@@ -385,6 +408,93 @@ async function downloadFile(url, destination) {
   );
 }
 
+// verify runs after each attempt: an integrity failure means the bytes on
+// disk are bad, so the retry re-downloads instead of reusing them.
+async function downloadWithRetry(
+  url,
+  destination,
+  {
+    verify,
+    fetchImpl = fetch,
+    sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = {},
+) {
+  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      await downloadFile(url, destination, { fetchImpl });
+      await verify?.();
+      return;
+    } catch (error) {
+      if (attempt >= MAX_DOWNLOAD_ATTEMPTS) {
+        throw error;
+      }
+      const delayMs = INITIAL_DOWNLOAD_BACKOFF_MS * 2 ** (attempt - 1);
+      const message = error instanceof Error ? error.message : String(error);
+      // A real undici network failure reads only "fetch failed"; the
+      // discriminating detail (ECONNRESET, ENOTFOUND, ...) is on the cause.
+      const cause =
+        error instanceof Error && error.cause instanceof Error
+          ? error.cause.message
+          : undefined;
+      console.warn(
+        `Download attempt ${attempt}/${MAX_DOWNLOAD_ATTEMPTS} failed for ${url}: ${message}${
+          cause ? ` (cause: ${cause})` : ''
+        }, retrying in ${delayMs / 1000}s...`,
+      );
+      await sleepImpl(delayMs);
+    }
+  }
+}
+
+// The archive leg's download-and-verify wiring, lifted out of packageTarget so
+// tests pin it behaviourally (a rejected download must be re-fetched) instead
+// of matching its source spelling.
+async function downloadRuntimeArchive({
+  archiveUrl,
+  archivePath,
+  archiveName,
+  checksums,
+  label,
+  fetchImpl,
+  sleepImpl,
+}) {
+  await downloadWithRetry(archiveUrl, archivePath, {
+    verify: () => verifyNodeArchive(archivePath, archiveName, checksums, label),
+    fetchImpl,
+    sleepImpl,
+  });
+}
+
+// The checksum list is the one download the archive legs cannot re-fetch, so
+// verify it inside the retry: a corrupt or truncated list is downloaded again
+// instead of poisoning every archive check that shares the parsed map.
+async function downloadRuntimeChecksums({
+  runtime,
+  distUrl,
+  checksumsPath,
+  expectedArchives,
+  fetchImpl,
+  sleepImpl,
+}) {
+  let checksums;
+  await downloadWithRetry(`${distUrl}/SHASUMS256.txt`, checksumsPath, {
+    verify: () => {
+      checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
+      const missing = expectedArchives.filter(
+        (archiveName) => !checksums.has(archiveName),
+      );
+      if (missing.length > 0) {
+        fail(
+          `${runtimeLabel(runtime)} SHASUMS256.txt does not list ${missing.join(', ')}`,
+        );
+      }
+    },
+    fetchImpl,
+    sleepImpl,
+  });
+  return checksums;
+}
+
 function parseChecksums(content) {
   const checksums = new Map();
   for (const line of content.split(/\r?\n/)) {
@@ -397,10 +507,10 @@ function parseChecksums(content) {
 }
 
 async function verifyNodeArchive(archivePath, archiveName, checksums, label) {
-  const runtimeLabel = label || 'Node.js';
+  const displayLabel = label || 'Node.js';
   const expected = checksums.get(archiveName);
   if (!expected) {
-    fail(`${runtimeLabel} SHASUMS256.txt does not list ${archiveName}`);
+    fail(`${displayLabel} SHASUMS256.txt does not list ${archiveName}`);
   }
 
   const actual = await sha256File(archivePath);
@@ -408,7 +518,7 @@ async function verifyNodeArchive(archivePath, archiveName, checksums, label) {
     fail(`Checksum verification failed for ${archiveName}`);
   }
 
-  console.log(`Verified ${runtimeLabel} runtime checksum for ${archiveName}`);
+  console.log(`Verified ${displayLabel} runtime checksum for ${archiveName}`);
 }
 
 async function sha256File(filePath) {
@@ -548,10 +658,14 @@ function fail(message) {
 
 export {
   assertStandaloneOutput,
+  downloadRuntimeArchive,
+  downloadRuntimeChecksums,
+  downloadWithRetry,
   parseChecksums,
   readClipboardPackageSpecs,
   readNodePtyPackageSpecs,
   RELEASE_TARGETS,
+  runtimeArchiveName,
 };
 
 if (isMainModule()) {

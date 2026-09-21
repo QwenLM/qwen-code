@@ -23,6 +23,7 @@ import {
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   type BridgeRequest,
 } from '../protocol.js';
 import { encodeFrame, FrameDecoder } from '../transport/framing.js';
@@ -308,11 +309,28 @@ describe.skipIf(process.platform === 'win32')('Native Host processes', () => {
     expect(h.messages.some((m) => m.method === 'tabs.close')).toBe(false);
   });
 
+  test.each(CHROME_EXTENSION_IDS)(
+    'serves a hello from extension %s',
+    async (extensionId) => {
+      const h = startHost({ extensionId });
+      const a = await client(h.socketPath);
+      const hello = await a.hello();
+      expect(hello.extensionId).toBe(extensionId);
+      expect(h.child.exitCode).toBeNull();
+    },
+  );
+
   test('exits without listening when the hello is not from the Qwen extension', async () => {
-    const h = startHost({ extensionId: 'a'.repeat(32) });
+    const rejectedId = 'a'.repeat(32);
+    const h = startHost({ extensionId: rejectedId });
+    let stderr = '';
+    h.child.stderr.on('data', (chunk: Buffer) => (stderr += String(chunk)));
     const [code] = await once(h.child, 'exit');
     expect(code).toBe(1);
     expect(fs.existsSync(h.socketPath)).toBe(false);
+    // The extension discards the disconnect reason, so this is the only
+    // record of why a Host that Chrome keeps relaunching refuses to serve.
+    expect(stderr).toContain(rejectedId);
   });
 
   test.each([

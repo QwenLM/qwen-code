@@ -82,6 +82,41 @@ describe('toRpcError', () => {
     },
   );
 
+  // A run whose stored state rules out the action — no journal to resume,
+  // args its snapshot could not keep — is not a daemon fault: the client
+  // gets the reason and a status it can branch on.
+  it.each([
+    'workflow_journal_unavailable',
+    'workflow_args_unavailable',
+    'workflow_run_live_elsewhere',
+  ])('answers %s as a conflict that keeps its message', (errorKind) => {
+    const source = RequestError.invalidParams(
+      { errorKind },
+      'Workflow run wf_1234abcd has no journal on disk',
+    );
+
+    expect(toRpcError(source)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: source.message,
+      data: { errorKind, httpStatus: 409 },
+    });
+  });
+
+  // Nothing started, and the daemon is not at fault for it: the write that
+  // keeps a second runner off this journal did not land. Retryable.
+  it('answers workflow_not_recorded as unavailable, with its message', () => {
+    const source = RequestError.invalidParams(
+      { errorKind: 'workflow_not_recorded' },
+      'Could not record that workflow run wf_1234abcd is running again',
+    );
+
+    expect(toRpcError(source)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: source.message,
+      data: { errorKind: 'workflow_not_recorded', httpStatus: 503 },
+    });
+  });
+
   it.each([
     new Error('Unexpected workflow failure'),
     RequestError.invalidParams(undefined, 'Unclassified parameter error'),
