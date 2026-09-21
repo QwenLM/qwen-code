@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { cp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,10 +15,31 @@ const packageRoot = path.resolve(
   '..',
 );
 
+/**
+ * Stages a copy of the built extension without the manifest's `key`. The key
+ * pins the id of a build loaded from source; the Chrome Web Store rejects an
+ * upload that carries one and identifies the item by its own key instead.
+ * It lands next to the build it copies, so the release scan can read it the
+ * same way it reads dist/extension; a caller packaging from elsewhere passes
+ * its own path rather than writing into the package's build tree.
+ */
+async function stageStoreBuild(source, staged) {
+  await rm(staged, { recursive: true, force: true });
+  await cp(source, staged, { recursive: true });
+  const manifestPath = path.join(staged, 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  delete manifest.key;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return staged;
+}
+
 export async function packageExtension({
   source = path.join(packageRoot, 'dist/extension'),
   archive = path.join(packageRoot, 'chrome-extension.zip'),
+  store = false,
+  staged = path.join(packageRoot, 'dist/store-extension'),
 } = {}) {
+  if (store) source = await stageStoreBuild(source, staged);
   await rm(archive, { force: true });
   await new Promise((resolve, reject) => {
     const child = spawn('zip', ['-r', archive, '.'], {
@@ -51,7 +72,13 @@ const isMainEntry = () =>
   fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
 
 if (isMainEntry()) {
-  packageExtension().catch((error) => {
+  const store = process.argv.includes('--store');
+  packageExtension({
+    store,
+    ...(store
+      ? { archive: path.join(packageRoot, 'chrome-extension-store.zip') }
+      : {}),
+  }).catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
   });
