@@ -1347,18 +1347,20 @@ describe('resident tool gating (#12032)', () => {
     return [guidance, examples];
   }
 
-  it('saves about 1.1k characters of policy text for a file-work allowlist', () => {
+  it('saves about 1.4k characters of policy text for a file-work allowlist', () => {
     const full = promptFor();
     const trimmed = promptFor(FILE_WORK_TOOLS);
 
-    // 1,104 characters (~276 tokens) when this landed, all of it policy
-    // bullets: the examples only call file tools and the shell, so this
-    // allowlist keeps every one of them. The band is loose enough for wording
-    // edits and tight enough that a lost saving, or newly added ungated tool
-    // text, shows up here instead of silently.
+    // 1,421 characters (~355 tokens) with the monitor bullet gated too, all
+    // of it policy bullets: the examples only call file tools and the shell,
+    // so this allowlist keeps every one of them. 1,104 is the subagent and
+    // codebase bullets; the remaining 317 is the monitor bullet, which goes
+    // because `monitor` is not in this allowlist either. The band is loose
+    // enough for wording edits and tight enough that a lost saving, or newly
+    // added ungated tool text, shows up here instead of silently.
     const saved = full.length - trimmed.length;
     expect(saved).toBeGreaterThan(900);
-    expect(saved).toBeLessThan(1_400);
+    expect(saved).toBeLessThan(1_500);
     expect(countExamples(trimmed)).toBe(countExamples(full));
   });
 
@@ -1378,9 +1380,29 @@ describe('resident tool gating (#12032)', () => {
     expect(prompt).toContain('- **File Paths:**');
     expect(prompt).toContain('- **Background Processes:**');
     expect(prompt).toContain('- **Interactive Commands:**');
-    // Only the two bullets whose tools are absent go.
+    // Only the bullets whose tools are absent go.
     expect(prompt).not.toContain('- **Subagent Delegation:**');
     expect(prompt).not.toContain('- **Codebase Search:**');
+  });
+
+  // `monitor` is registered `shouldDefer=true, alwaysLoad=false`, so a default
+  // session leaves it out of `getFunctionDeclarations()` and therefore out of
+  // the prompt snapshot built from it. The bullet has to follow the tool:
+  // discovery of a still-deferred `monitor` is the startup reminder's job, and
+  // a policy line for a tool the session cannot call directly is exactly what
+  // #12032 gates away.
+  it('gates the monitor bullet on the session declaring monitor', () => {
+    const withMonitor = new Set<string>([
+      ...FILE_WORK_TOOLS,
+      ToolNames.MONITOR,
+    ]);
+
+    expect(promptFor(withMonitor)).toContain(
+      `- **Monitor Processes:** Use the '${ToolNames.MONITOR}' tool`,
+    );
+    expect(promptFor(FILE_WORK_TOOLS)).not.toContain(
+      '- **Monitor Processes:**',
+    );
   });
 
   it('drops example blocks too once the allowlist is narrower', () => {
