@@ -6719,6 +6719,60 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
   });
 });
 
+describe('the coverage-failure arms keep their own messages', () => {
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('names a partition failure as the coverage check\u2019s own defect', () => {
+    // Outcomes that do not partition the plan are a defect in coverage.ts.
+    // Folded into the generic arm, an operator handed "the plan could not be
+    // used" goes to re-capture a diff that was never the problem.
+    const p = coveredPlan();
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new coverageModule.ChunkPartitionError(
+          'chunk 2 is both covered and missing',
+        );
+      });
+    try {
+      const r = compose(p);
+      expect(r.body).toContain('the coverage check contradicted its own plan');
+      expect(r.body).toContain('chunk 2 is both covered and missing');
+      expect(r.body).not.toContain('the plan could not be used');
+      // Fail-closed, like its two siblings: a run that cannot show what it
+      // read has not shown it read anything.
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      expect(r.event).not.toBe('APPROVE');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the unusable-plan message for an unusable plan', () => {
+    // The control: the new arm must not have taken the generic one's input.
+    const p = coveredPlan();
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new Error('coverage: plan.json has no chunks[]');
+      });
+    try {
+      const r = compose(p);
+      expect(r.body).toContain('the plan could not be used');
+      expect(r.body).not.toContain('contradicted its own plan');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 // `verdictLine` is what Step 6 prints — the one place a verdict exists for the
 // user. It had no test, and a review of this change found the reason to want one.
 describe('verdictLine — the terminal verdict, and its dangling colon', () => {
@@ -20171,59 +20225,5 @@ describe('the fix-induced marking behind a source tag (#10291, review round 2)',
       id: 'R3-2',
       title: '[probe] the fix opened a new gap',
     });
-  });
-});
-
-describe('the coverage-failure arms keep their own messages', () => {
-  const compose = (p: string) =>
-    composeReview({
-      criticalsInline: 0,
-      suggestionsInline: 0,
-      planPath: p,
-      env: ENV,
-      modelId: MODEL,
-    });
-
-  it('names a partition failure as the coverage check\u2019s own defect', () => {
-    // Outcomes that do not partition the plan are a defect in coverage.ts.
-    // Folded into the generic arm, an operator handed "the plan could not be
-    // used" goes to re-capture a diff that was never the problem.
-    const p = coveredPlan();
-    const spy = vi
-      .spyOn(coverageModule, 'coverageFromTranscripts')
-      .mockImplementation(() => {
-        throw new coverageModule.ChunkPartitionError(
-          'chunk 2 is both covered and missing',
-        );
-      });
-    try {
-      const r = compose(p);
-      expect(r.body).toContain('the coverage check contradicted its own plan');
-      expect(r.body).toContain('chunk 2 is both covered and missing');
-      expect(r.body).not.toContain('the plan could not be used');
-      // Fail-closed, like its two siblings: a run that cannot show what it
-      // read has not shown it read anything.
-      expect(r.cappedBy).toContain('unreviewed-dimension');
-      expect(r.event).not.toBe('APPROVE');
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it('keeps the unusable-plan message for an unusable plan', () => {
-    // The control: the new arm must not have taken the generic one's input.
-    const p = coveredPlan();
-    const spy = vi
-      .spyOn(coverageModule, 'coverageFromTranscripts')
-      .mockImplementation(() => {
-        throw new Error('coverage: plan.json has no chunks[]');
-      });
-    try {
-      const r = compose(p);
-      expect(r.body).toContain('the plan could not be used');
-      expect(r.body).not.toContain('contradicted its own plan');
-    } finally {
-      spy.mockRestore();
-    }
   });
 });
