@@ -186,8 +186,10 @@ jobs:
 
           # --fail would discard the body, and the store explains a refusal
           # there: an expired refresh token, an item that cannot be updated.
-          # N3: the store's own workflows retry; a 5xx here after a successful
+          # The store's own workflows retry; a 5xx here after a successful
           # upload would otherwise fail the release with the package already in.
+          # --retry 5 allows six attempts; --retry-max-time bounds when a new
+          # one may START, so one call can run to roughly that plus --max-time.
           call() {
             local what=$1 status
             shift
