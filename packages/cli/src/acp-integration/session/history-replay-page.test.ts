@@ -23,6 +23,7 @@ import {
 import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
+  degradeReplayEnvelopeAppHtml,
   replayTranscriptRecordPage,
 } from './history-replay-page.js';
 
@@ -165,6 +166,48 @@ function largeToolResultRecord(
       callId: 'call-1',
       responseParts: [],
       resultDisplay,
+    },
+  };
+}
+
+function appToolResultRecord(
+  uuid: string,
+  callId: string,
+  html: string,
+  fallbackText: string,
+): ChatRecord {
+  return {
+    uuid,
+    parentUuid: null,
+    sessionId: SESSION_ID,
+    timestamp: TIMESTAMP,
+    type: 'tool_result',
+    cwd: '/workspace',
+    version: '1.0.0',
+    message: {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: callId,
+            name: 'amplitude__chart',
+            response: { result: fallbackText },
+          },
+        },
+      ],
+    },
+    toolCallResult: {
+      callId,
+      responseParts: [],
+      resultDisplay: {
+        type: 'mcp_app',
+        serverName: 'amplitude',
+        resourceUri: 'ui://amplitude/chart',
+        html,
+        toolResult: {},
+        toolArguments: {},
+        fallbackText,
+      },
     },
   };
 }
@@ -476,6 +519,124 @@ describe('history replay page', () => {
       reason: 'bytes',
       limit: 2,
     });
+  });
+
+  it('blanks the oldest replayed App html until a limited page fits', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [
+        appToolResultRecord(
+          'app-record-1',
+          'call-app-1',
+          'x'.repeat(3000),
+          'first chart',
+        ),
+        appToolResultRecord(
+          'app-record-2',
+          'call-app-2',
+          'y'.repeat(3000),
+          'second chart',
+        ),
+        appToolResultRecord(
+          'app-record-3',
+          'call-app-3',
+          'z'.repeat(3000),
+          'third chart',
+        ),
+      ],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      limits: { maxBytes: 8000, maxUpdates: 100 },
+    });
+
+    const appOutputs = result.updates
+      .filter((update) => update.sessionUpdate === 'tool_call_update')
+      .map(
+        (update) =>
+          (update as { rawOutput: { html: string; fallbackText: string } })
+            .rawOutput,
+      );
+    expect(appOutputs).toHaveLength(3);
+    expect(appOutputs[0]).toMatchObject({
+      html: '',
+      fallbackText: 'first chart',
+    });
+    expect(appOutputs[1]).toMatchObject({
+      html: 'y'.repeat(3000),
+      fallbackText: 'second chart',
+    });
+    expect(appOutputs[2]).toMatchObject({
+      html: 'z'.repeat(3000),
+      fallbackText: 'third chart',
+    });
+  });
+
+  it('admits a single over-budget App update degraded rather than failing the page', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [
+        appToolResultRecord(
+          'app-record-1',
+          'call-app-1',
+          'x'.repeat(3000),
+          'only chart',
+        ),
+      ],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      limits: { maxBytes: 2000, maxUpdates: 100 },
+    });
+
+    const update = result.updates.find(
+      (candidate) => candidate.sessionUpdate === 'tool_call_update',
+    );
+    expect(update).toMatchObject({
+      rawOutput: { html: '', fallbackText: 'only chart' },
+    });
+  });
+
+  it('degrades envelope App html oldest-first until the envelope serializes under the cap', () => {
+    const appUpdate = (callId: string, html: string, fallbackText: string) =>
+      ({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        status: 'completed',
+        rawOutput: { type: 'mcp_app', html, fallbackText },
+      }) as unknown as SessionUpdate;
+    const envelope = {
+      v: 1,
+      updates: [
+        appUpdate('call-app-1', 'x'.repeat(3000), 'first chart'),
+        appUpdate('call-app-2', 'y'.repeat(3000), 'second chart'),
+      ],
+    };
+
+    degradeReplayEnvelopeAppHtml(envelope, 4000);
+
+    const [first, second] = envelope.updates as unknown as Array<{
+      rawOutput: { html: string; fallbackText: string };
+    }>;
+    expect(first!.rawOutput).toMatchObject({
+      html: '',
+      fallbackText: 'first chart',
+    });
+    expect(second!.rawOutput).toMatchObject({
+      html: 'y'.repeat(3000),
+      fallbackText: 'second chart',
+    });
+    expect(jsonBytes(envelope)).toBeLessThanOrEqual(4000);
+  });
+
+  it('leaves a within-budget envelope untouched', () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-app-1',
+      status: 'completed',
+      rawOutput: { type: 'mcp_app', html: '<b>ok</b>', fallbackText: 'chart' },
+    } as unknown as SessionUpdate;
+    const envelope = { v: 1, updates: [update] };
+
+    degradeReplayEnvelopeAppHtml(envelope, 4000);
+
+    expect(envelope.updates[0]).toBe(update);
   });
 
   it('filters malformed replay state before encoding the next cursor', async () => {

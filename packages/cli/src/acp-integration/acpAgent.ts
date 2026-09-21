@@ -331,6 +331,7 @@ import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
+  degradeReplayEnvelopeAppHtml,
   HistoryReplayLimitError,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
@@ -5834,6 +5835,9 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
+            if (enforceLimits) {
+              degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
+            }
             validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
             // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
@@ -6006,6 +6010,12 @@ class QwenAgent implements Agent {
                     : {}),
                   ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
+                if (restoreOptions.replay.kind === 'recent') {
+                  degradeReplayEnvelopeAppHtml(
+                    replayEnvelope,
+                    LOAD_REPLAY_MAX_BYTES,
+                  );
+                }
                 validateLoadReplayEnvelope(
                   sessionId,
                   replayEnvelope,

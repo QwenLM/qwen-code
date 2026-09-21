@@ -186,6 +186,57 @@ function parseTranscriptReplayState(
   };
 }
 
+/**
+ * Copy a replayed update with its MCP App `html` blanked, or undefined
+ * when the update carries no App html to lose. `fallbackText` stays: the
+ * client renders it in place of the App. App html is the one replay field
+ * that can reach multiple MiB (bounded only by the per-server App
+ * resource limit), so it is the field a page-level byte budget degrades.
+ */
+export function blankReplayedMcpAppHtml(
+  update: SessionUpdate,
+): SessionUpdate | undefined {
+  const record = update as unknown as Record<string, unknown>;
+  if (record['sessionUpdate'] !== 'tool_call_update') return undefined;
+  const rawOutput = record['rawOutput'];
+  if (
+    !isObjectRecord(rawOutput) ||
+    rawOutput['type'] !== 'mcp_app' ||
+    typeof rawOutput['html'] !== 'string' ||
+    rawOutput['html'] === ''
+  ) {
+    return undefined;
+  }
+  return {
+    ...record,
+    rawOutput: { ...rawOutput, html: '' },
+  } as unknown as SessionUpdate;
+}
+
+/**
+ * Blank replayed MCP App `html` oldest-first until the serialized
+ * envelope fits `maxBytes`. The replay accounting bounds the updates
+ * array itself; this backstop covers the envelope wrapper so validation
+ * cannot fail closed on a page whose App documents degrade cleanly. A
+ * page that still does not fit after every App is degraded is left for
+ * the caller's validator.
+ */
+export function degradeReplayEnvelopeAppHtml(
+  envelope: { updates: SessionUpdate[] },
+  maxBytes: number,
+): void {
+  let pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  for (let i = 0; i < envelope.updates.length && pageBytes > maxBytes; i++) {
+    const update = envelope.updates[i]!;
+    const blanked = blankReplayedMcpAppHtml(update);
+    if (blanked === undefined) continue;
+    pageBytes +=
+      Buffer.byteLength(JSON.stringify(blanked), 'utf8') -
+      Buffer.byteLength(JSON.stringify(update), 'utf8');
+    envelope.updates[i] = blanked;
+  }
+}
+
 function replayContext(
   sessionId: string,
   updates: SessionUpdate[],
@@ -208,7 +259,7 @@ function replayContext(
           _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
         } as unknown as SessionUpdate;
       })();
-      const deliveredUpdate = liftSessionUpdateTimestamp(updateWithRecordId);
+      let deliveredUpdate = liftSessionUpdateTimestamp(updateWithRecordId);
       observeAcpToolResultProjection(
         update,
         projectedUpdate,
@@ -225,9 +276,38 @@ function replayContext(
             limits.maxUpdates,
           );
         }
-        serializedUpdateBytes +=
+        let updateBytes =
           (updates.length === 0 ? 0 : 1) +
           Buffer.byteLength(JSON.stringify(deliveredUpdate), 'utf8');
+        if (serializedUpdateBytes + updateBytes > limits.maxBytes) {
+          // A page holding several ceiling-size App documents serializes
+          // past the envelope cap; blank App html oldest-first — the
+          // client renders `fallbackText` instead — rather than failing
+          // the whole load closed.
+          for (
+            let i = 0;
+            i < updates.length &&
+            serializedUpdateBytes + updateBytes > limits.maxBytes;
+            i++
+          ) {
+            const blanked = blankReplayedMcpAppHtml(updates[i]!);
+            if (blanked === undefined) continue;
+            serializedUpdateBytes -=
+              Buffer.byteLength(JSON.stringify(updates[i]!), 'utf8') -
+              Buffer.byteLength(JSON.stringify(blanked), 'utf8');
+            updates[i] = blanked;
+          }
+          if (serializedUpdateBytes + updateBytes > limits.maxBytes) {
+            const blanked = blankReplayedMcpAppHtml(deliveredUpdate);
+            if (blanked !== undefined) {
+              deliveredUpdate = blanked;
+              updateBytes =
+                (updates.length === 0 ? 0 : 1) +
+                Buffer.byteLength(JSON.stringify(blanked), 'utf8');
+            }
+          }
+        }
+        serializedUpdateBytes += updateBytes;
         if (serializedUpdateBytes > limits.maxBytes) {
           throw new HistoryReplayLimitError(
             sessionId,

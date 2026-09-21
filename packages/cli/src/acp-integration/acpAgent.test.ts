@@ -28828,6 +28828,80 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('degrades the oldest replayed App html when the bulk replay page exceeds the envelope byte cap', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [],
+    });
+    // U+0001 escapes to a 6-char JSON form, so a 2 M-char document
+    // serializes to ~12 MB and three of them sum past the 32 MiB envelope
+    // cap. Without the oldest-first degrade the load fails closed with
+    // transcript_page_too_large.
+    const bigHtml = (code: number) =>
+      String.fromCharCode(code).repeat(2_000_000);
+    const appUpdate = (callId: string, html: string, fallbackText: string) => ({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: callId,
+      status: 'completed',
+      rawOutput: {
+        type: 'mcp_app',
+        serverName: 'amplitude',
+        resourceUri: 'ui://amplitude/chart',
+        html,
+        toolResult: {},
+        toolArguments: {},
+        fallbackText,
+      },
+    });
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        await context.sendUpdate(
+          appUpdate('call-app-1', bigHtml(1), 'first chart'),
+        );
+        await context.sendUpdate(
+          appUpdate('call-app-2', bigHtml(2), 'second chart'),
+        );
+        await context.sendUpdate(
+          appUpdate('call-app-3', bigHtml(3), 'third chart'),
+        );
+      },
+    );
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 50,
+      },
+    })) as {
+      _meta?: Record<
+        string,
+        {
+          updates: Array<{
+            rawOutput?: { html?: string; fallbackText?: string };
+          }>;
+        }
+      >;
+    };
+
+    const updates = response._meta?.['qwen.session.loadReplay']?.updates ?? [];
+    expect(updates).toHaveLength(3);
+    expect(updates[0]?.rawOutput).toMatchObject({
+      html: '',
+      fallbackText: 'first chart',
+    });
+    expect(updates[1]?.rawOutput?.html).toHaveLength(2_000_000);
+    expect(updates[2]?.rawOutput?.html).toHaveLength(2_000_000);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('tells the Goal renderer when a cold bulk replay page is partial', async () => {
     // The page did not end where the transcript does, so a card that
     // supersedes the page's last card must not be rendered.
