@@ -95,6 +95,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     outputs:
+      already_published: '${{ steps.published.outputs.already_published }}'
       qwen_code_sha: '${{ steps.source.outputs.sha }}'
       tag: '${{ steps.version.outputs.tag }}'
       version: '${{ steps.version.outputs.version }}'
@@ -138,6 +139,57 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=desktop-v$version" >> "$GITHUB_OUTPUT"
 
+      - name: 'Check whether stable release is already published'
+        id: 'published'
+        shell: 'bash'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_CLOBBER: '${{ inputs.clobber }}'
+          RELEASE_DRAFT: '${{ inputs.draft }}'
+          RELEASE_DRY_RUN: '${{ inputs.dry_run }}'
+          RELEASE_ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
+          RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
+          RELEASE_TAG: '${{ steps.version.outputs.tag }}'
+          RELEASE_VERSION: '${{ steps.version.outputs.version }}'
+        run: |
+          set -euo pipefail
+          echo 'already_published=false' >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" != 'release' ] && {
+            [ "$RELEASE_DRY_RUN" = 'true' ] ||
+            [ "$RELEASE_DRAFT" = 'true' ] ||
+            [ "$RELEASE_PRERELEASE" = 'true' ] ||
+            [ "$RELEASE_CLOBBER" = 'true' ] ||
+            [ "$RELEASE_ELECTRON_BRIDGE" = 'true' ];
+          }; then
+            exit 0
+          fi
+
+          release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)" || exit 0
+          if ! jq -e '.isDraft == false and .isPrerelease == false' <<< "$release" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          if ! gh release download "$FEED_TAG" --dir "$directory" --pattern 'desktop-latest.json' >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/desktop-latest.json" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          if ! curl -fsSL --connect-timeout 15 --max-time 300 "$ALIYUN_OSS_PUBLIC_BASE_URL/desktop/latest/desktop-latest.json" -o "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          echo "::notice::Desktop $RELEASE_VERSION is already published; skipping build, publish and sync-oss. Dispatch this workflow with clobber=true to force a rebuild."
+          echo 'already_published=true' >> "$GITHUB_OUTPUT"
+
       - name: 'Resolve Qwen Code source'
         id: 'source'
         shell: 'bash'
@@ -175,6 +227,7 @@ jobs:
 
   build:
     name: 'Build ${{ matrix.name }}'
+    if: "${{ needs.prepare.outputs.already_published != 'true' }}"
     needs: 'prepare'
     runs-on: '${{ matrix.os }}'
     timeout-minutes: 120
@@ -224,9 +277,7 @@ jobs:
         with:
           node-version: '${{ env.NODE_VERSION }}'
           cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            packages/desktop-shell/package-lock.json
+          cache-dependency-path: 'packages/desktop-shell/package-lock.json'
 
       - name: 'Configure bundled Node.js cache'
         id: 'node-cache-path'
@@ -260,7 +311,12 @@ jobs:
         working-directory: '${{ runner.temp }}/qwen-code-source'
         env:
           QWEN_SKIP_PREPARE: '1'
-        run: 'npm ci --no-audit --progress=false'
+        run: |-
+          if [ -f pnpm-lock.yaml ]; then
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          else
+            npm ci --no-audit --progress=false
+          fi
 
       - name: 'Install desktop dependencies'
         working-directory: 'packages/desktop-shell'
@@ -615,7 +671,7 @@ jobs:
 
   publish:
     name: 'Publish GitHub release'
-    if: "${{ (github.event_name == 'release' || inputs.dry_run == false) && github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ (github.event_name == 'release' || inputs.dry_run == false) && github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.already_published != 'true' }}"
     needs:
       - 'prepare'
       - 'build'
@@ -765,7 +821,7 @@ jobs:
 
   sync-oss:
     name: 'Mirror stable Desktop release to Aliyun OSS'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) && needs.prepare.outputs.already_published != 'true' }}"
     needs:
       - 'prepare'
       - 'build'

@@ -42,7 +42,15 @@ const TOS_PRIVACY_URL =
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
 type AuthGroup = DaemonAuthProviderCatalog['groups'][number];
-type AuthStep = 'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig';
+type ModelWireApi = 'chat-completions' | 'responses';
+type AuthStep =
+  | 'protocol'
+  | 'wireApi'
+  | 'baseUrl'
+  | 'apiKey'
+  | 'models'
+  | 'advancedConfig';
+
 interface AuthMessageProps {
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onClose: () => void;
@@ -76,9 +84,14 @@ function getProtocolOptions(
   ];
 }
 
-function defaultBaseUrl(protocol: string): string {
+function defaultBaseUrl(protocol: string, wireApi?: ModelWireApi): string {
   if (protocol === 'anthropic') return 'https://api.anthropic.com/v1';
   if (protocol === 'gemini') return 'https://generativelanguage.googleapis.com';
+  // The Responses wire dials the /v1-less default endpoint (the pipeline
+  // appends /v1/responses itself); the Chat Completions wire keeps /v1.
+  if (protocol === 'openai-responses' || wireApi === 'responses') {
+    return 'https://api.openai.com';
+  }
   return 'https://api.openai.com/v1';
 }
 
@@ -99,6 +112,7 @@ function titleForStep(
   t: ReturnType<typeof useI18n>['t'],
 ): string {
   if (step === 'protocol') return t('auth.step.protocol');
+  if (step === 'wireApi') return t('auth.step.api');
   if (step === 'baseUrl') {
     return provider.uiLabels?.baseUrlStepTitle ?? t('auth.step.baseUrl');
   }
@@ -148,6 +162,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     null,
   );
   const [protocol, setProtocol] = useState('openai');
+  const [wireApi, setWireApi] = useState<ModelWireApi>('chat-completions');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState('');
@@ -195,7 +210,26 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       );
   }, [catalog, groupId, groups]);
 
-  const steps = useMemo(() => provider?.steps ?? [], [provider?.steps]);
+  const steps = useMemo(
+    () =>
+      (provider?.steps ?? []).filter(
+        (step) => step !== 'wireApi' || protocol === 'openai',
+      ),
+    [provider?.steps, protocol],
+  );
+  const protocolOptions = useMemo(
+    () =>
+      getProtocolOptions(t).filter((option) =>
+        (provider?.protocolOptions ?? [provider?.protocol]).includes(
+          option.value,
+        ),
+      ),
+    [provider, t],
+  );
+  const apiOptions: Array<Option<ModelWireApi>> = [
+    { value: 'chat-completions', label: t('auth.api.chatCompletions') },
+    { value: 'responses', label: t('auth.api.responses') },
+  ];
   const currentStep = steps[stepIndex] as AuthStep | undefined;
   const shouldReview = provider?.showAdvancedConfig === true;
   const isInputStep =
@@ -204,6 +238,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     (currentStep === 'baseUrl' && !Array.isArray(provider?.baseUrl));
 
   const [optionIndex, setOptionIndex] = useState(0);
+
+  useEffect(() => {
+    if (currentStep === 'wireApi') {
+      setOptionIndex(wireApi === 'responses' ? 1 : 0);
+    }
+  }, [wireApi, currentStep]);
 
   useEffect(() => {
     if (!ownerChanged) return;
@@ -221,13 +261,18 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setSetupBackView(backView);
       const nextProtocol =
         nextProvider.protocolOptions?.[0] ?? nextProvider.protocol;
-      setProtocol(nextProtocol);
+      const nextWireApi: ModelWireApi =
+        nextProtocol === 'openai-responses' ? 'responses' : 'chat-completions';
+      setProtocol(
+        nextProtocol === 'openai-responses' ? 'openai' : nextProtocol,
+      );
+      setWireApi(nextWireApi);
       if (typeof nextProvider.baseUrl === 'string') {
         setBaseUrl(nextProvider.baseUrl);
       } else if (Array.isArray(nextProvider.baseUrl)) {
         setBaseUrl(nextProvider.baseUrl[0]?.url ?? '');
       } else {
-        setBaseUrl(defaultBaseUrl(nextProtocol));
+        setBaseUrl(defaultBaseUrl(nextProtocol, nextWireApi));
       }
       setApiKey('');
       setModels(modelIds(nextProvider));
@@ -323,6 +368,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     if (
       purpose === 'voice' &&
       (protocol !== 'openai' ||
+        wireApi === 'responses' ||
         !normalizeModelIds(models).every(isVoiceModelId))
     ) {
       setError(t('auth.purpose.voiceHint'));
@@ -362,6 +408,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   }, [
     purpose,
     protocol,
+    wireApi,
     models,
     baseUrl,
     steps,
@@ -387,6 +434,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       .installAuthProvider({
         providerId: provider.id,
         protocol,
+        ...(protocol === 'openai' && provider.steps.includes('wireApi')
+          ? { wireApi }
+          : {}),
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
         modelIds: normalizeModelIds(models),
@@ -411,6 +461,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         if (isCurrent()) setSaving(false);
       });
   }, [
+    wireApi,
     apiKey,
     baseUrl,
     advancedConfig,
@@ -428,7 +479,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const goNext = useCallback(() => {
     if (!provider || saving) return;
     if (currentStep === 'baseUrl') {
-      const effective = baseUrl.trim() || defaultBaseUrl(protocol);
+      const effective = baseUrl.trim() || defaultBaseUrl(protocol, wireApi);
       if (!effective) {
         setError(t('auth.baseUrlRequired'));
         return;
@@ -460,6 +511,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setOptionIndex(0);
     }
   }, [
+    wireApi,
     apiKey,
     baseUrl,
     currentStep,
@@ -510,13 +562,28 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     }
     if (!provider || !currentStep) return;
     if (currentStep === 'protocol') {
-      const value = (provider.protocolOptions ?? [provider.protocol])[
-        optionIndex
-      ];
+      const value = protocolOptions[optionIndex]?.value;
       if (value) {
         setProtocol(value);
+        setWireApi('chat-completions');
         if (!provider.baseUrl) setBaseUrl(defaultBaseUrl(value));
       }
+      goNext();
+      return;
+    }
+    if (currentStep === 'wireApi') {
+      const nextWireApi: ModelWireApi =
+        optionIndex === 1 ? 'responses' : 'chat-completions';
+      // A wire change re-derives the default endpoint; a no-op re-selection
+      // must not clobber a baseUrl the user already typed.
+      if (
+        nextWireApi !== wireApi &&
+        !provider.baseUrl &&
+        baseUrl === defaultBaseUrl(protocol, wireApi)
+      ) {
+        setBaseUrl(defaultBaseUrl(protocol, nextWireApi));
+      }
+      setWireApi(nextWireApi);
       goNext();
       return;
     }
@@ -528,6 +595,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     }
     goNext();
   }, [
+    wireApi,
+    baseUrl,
     currentStep,
     catalog,
     goNext,
@@ -536,6 +605,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     optionIndex,
     provider,
     providerIndex,
+    protocol,
+    protocolOptions,
     providers,
     save,
     startProvider,
@@ -577,11 +648,26 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         return;
       }
       if (currentStep === 'protocol') {
-        const value = (provider.protocolOptions ?? [provider.protocol])[index];
+        const value = protocolOptions[index]?.value;
         if (value) {
           setProtocol(value);
+          setWireApi('chat-completions');
           if (!provider.baseUrl) setBaseUrl(defaultBaseUrl(value));
         }
+        goNext();
+        return;
+      }
+      if (currentStep === 'wireApi') {
+        const nextWireApi: ModelWireApi =
+          index === 1 ? 'responses' : 'chat-completions';
+        if (
+          nextWireApi !== wireApi &&
+          !provider.baseUrl &&
+          baseUrl === defaultBaseUrl(protocol, wireApi)
+        ) {
+          setBaseUrl(defaultBaseUrl(protocol, nextWireApi));
+        }
+        setWireApi(nextWireApi);
         goNext();
         return;
       }
@@ -593,11 +679,15 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       }
     },
     [
+      wireApi,
+      baseUrl,
       currentStep,
       catalog,
       goNext,
       groups,
       provider,
+      protocol,
+      protocolOptions,
       providers,
       save,
       startProvider,
@@ -636,14 +726,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const renderStep = () => {
     if (!provider || !currentStep) return null;
     if (currentStep === 'protocol') {
-      const allowed = provider.protocolOptions ?? [provider.protocol];
-      return renderOptions(
-        getProtocolOptions(t).filter((option) =>
-          allowed.includes(option.value),
-        ),
-        optionIndex,
-        setOptionIndex,
-      );
+      return renderOptions(protocolOptions, optionIndex, setOptionIndex);
+    }
+    if (currentStep === 'wireApi') {
+      return renderOptions(apiOptions, optionIndex, setOptionIndex);
     }
     if (currentStep === 'baseUrl') {
       if (Array.isArray(provider.baseUrl)) {
@@ -665,7 +751,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             value={baseUrl}
             aria-label={t('auth.step.baseUrl')}
             disabled={saving}
-            placeholder={defaultBaseUrl(protocol)}
+            placeholder={defaultBaseUrl(protocol, wireApi)}
             onChange={(event) => {
               setBaseUrl(event.target.value);
               setError(null);
@@ -960,6 +1046,15 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
           getProtocolOptions(t).find((option) => option.value === protocol)
             ?.label ?? protocol,
         ],
+        ...(steps.includes('wireApi')
+          ? [
+              [
+                t('auth.step.api'),
+                apiOptions.find((option) => option.value === wireApi)?.label ??
+                  wireApi,
+              ],
+            ]
+          : []),
         [t('auth.step.baseUrl'), baseUrl.trim()],
         [
           t('auth.step.apiKey'),

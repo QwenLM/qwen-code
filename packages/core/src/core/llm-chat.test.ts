@@ -59,6 +59,11 @@ import {
 } from './tool-call-preparation.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 
+const degradeOmniMediaMock = vi.hoisted(() => vi.fn());
+vi.mock('../omni/reactive-degrade.js', () => ({
+  degradeOmniMediaAfterServerReject: degradeOmniMediaMock,
+}));
+
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
 
@@ -5404,6 +5409,71 @@ describe('LlmChat', async () => {
   });
 
   describe('auto-compression integration', () => {
+    it('keeps compressed history and token counts consistent if worker invalidation fails', async () => {
+      chat.setLastPromptTokenCount(1000);
+      mockConfig.getExecutionEnvironment = () =>
+        ({
+          invalidateReadCache: vi
+            .fn()
+            .mockRejectedValue(new Error('executor closed')),
+        }) as unknown as ReturnType<Config['getExecutionEnvironment']>;
+      const newHistory = [{ role: 'user', parts: [{ text: 'summary' }] }];
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory,
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      expect(
+        (await chat.tryCompress('failed-invalidation', true)).compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getHistory()).toEqual(newHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('clears the execution environment cache before finishing compression', async () => {
+      let completeInvalidation!: () => void;
+      const invalidateReadCache = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completeInvalidation = resolve;
+          }),
+      );
+      mockConfig.getExecutionEnvironment = () =>
+        ({ invalidateReadCache }) as unknown as ReturnType<
+          Config['getExecutionEnvironment']
+        >;
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      let finished = false;
+      const compression = chat
+        .tryCompress('container-compression', true)
+        .then(() => {
+          finished = true;
+        });
+      await vi.waitFor(() =>
+        expect(invalidateReadCache).toHaveBeenCalledOnce(),
+      );
+      expect(finished).toBe(false);
+      completeInvalidation();
+      await compression;
+      expect(finished).toBe(true);
+    });
+
     function makeStreamResponse(
       text = 'ok',
       usageMetadata?: GenerateContentResponse['usageMetadata'],
@@ -6207,6 +6277,163 @@ describe('LlmChat', async () => {
         (compressedEvent as { info: ChatCompressionInfo }).info
           .originalTokenCountIsEstimated,
       ).toBe(true);
+    });
+
+    describe('Omni overflow recovery on LlmChat', () => {
+      beforeEach(() => {
+        degradeOmniMediaMock.mockReset();
+        Object.assign(mockConfig, {
+          getOmniProcessingConfig: () => ({
+            limits: { maxTransportPasses: 1 },
+          }),
+        });
+      });
+
+      it('rebuilds the request from degraded media before compressing history', async () => {
+        const compress = vi
+          .spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValue({
+            newHistory: null,
+            info: {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          });
+        degradeOmniMediaMock.mockImplementation(
+          async (_config, history: Content[]) => {
+            history.at(-1)!.parts = [
+              {
+                fileData: { mimeType: 'image/png', fileUri: 'oss://degraded' },
+              },
+            ];
+            return { replacedParts: 1, degradedResources: 1 };
+          },
+        );
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(new Error('context_length_exceeded'))
+          .mockResolvedValueOnce(makeStreamResponse('recovered'));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                fileData: { mimeType: 'image/png', fileUri: 'oss://original' },
+              },
+            ],
+          },
+          'omni-recovery',
+        );
+        const events: StreamEvent[] = [];
+        for await (const event of stream) events.push(event);
+        expect(degradeOmniMediaMock).toHaveBeenCalledOnce();
+        expect(compress).toHaveBeenCalledTimes(1);
+        const retry = JSON.stringify(
+          vi.mocked(mockContentGenerator.generateContentStream).mock
+            .calls[1][0],
+        );
+        expect(retry).toContain('oss://degraded');
+        expect(retry).not.toContain('oss://original');
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+      });
+
+      it('bounds degradation and then follows the existing compression failure path', async () => {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+        degradeOmniMediaMock.mockResolvedValue({
+          replacedParts: 1,
+          degradedResources: 1,
+        });
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          new Error('context_length_exceeded'),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'omni-bound',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toThrow('context_length_exceeded');
+        expect(degradeOmniMediaMock).toHaveBeenCalledOnce();
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not degrade media on a byte-only HTTP 413', async () => {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          Object.assign(new Error('Request Entity Too Large'), { status: 413 }),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'omni-413',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toThrow();
+        expect(degradeOmniMediaMock).not.toHaveBeenCalled();
+      });
+
+      it('propagates cancellation during degradation without another model request', async () => {
+        const controller = new AbortController();
+        degradeOmniMediaMock.mockImplementation(async () => {
+          controller.abort();
+          controller.signal.throwIfAborted();
+        });
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(new Error('context_length_exceeded'));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: 'latest',
+            config: { abortSignal: controller.signal },
+          },
+          'omni-cancel',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledOnce();
+      });
     });
 
     it('does not attempt reactive compression more than once per send', async () => {
@@ -14618,6 +14845,63 @@ describe('LlmChat', async () => {
           vi.useRealTimers();
         }
       });
+
+      it('drops a pending continuation when Omni media degradation takes over', async () => {
+        vi.useFakeTimers();
+        try {
+          Object.assign(mockConfig, {
+            getOmniProcessingConfig: () => ({
+              limits: { maxTransportPasses: 1 },
+            }),
+          });
+          degradeOmniMediaMock.mockResolvedValue({
+            replacedParts: 1,
+            degradedResources: 1,
+          });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('discarded half ')]))
+            .mockRejectedValueOnce(
+              new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-replaced-by-omni',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('discarded half'),
+              ),
+            ),
+          ).toBe(false);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
 
     it('falls back after yielding only tool preparation metadata', async () => {
@@ -21603,6 +21887,35 @@ describe('LlmChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);
     };
 
+    async function recordTokenUsage(
+      targetChat: LlmChat,
+      usageMetadata: NonNullable<GenerateContentResponse['usageMetadata']>,
+      model = 'test-model',
+    ): Promise<void> {
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        streamResponse({
+          candidates: [
+            {
+              content: { parts: [{ text: 'ok' }] },
+              finishReason: 'STOP',
+            },
+          ],
+          usageMetadata,
+        } as unknown as GenerateContentResponse),
+      );
+
+      const stream = await targetChat.sendMessageStream(
+        model,
+        { message: 'record usage' },
+        `prompt-usage-${usageMetadata.promptTokenCount}`,
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+    }
+
     it('invalidates API-reported counts when the model route changes', () => {
       // Count reported by the pre-switch route (authoritative, not estimated).
       chat.setLastPromptTokenCount(691_000, false);
@@ -21837,42 +22150,64 @@ describe('LlmChat', async () => {
       ).not.toHaveBeenCalledWith(42);
     });
 
-    it('mirrors cached content alongside a route-stamped prompt count', async () => {
-      // The cached-content mirror's only non-zero production write lives
-      // inside the prompt-count guard; deleting it must not leave the suite
-      // green. Consumed without a route switch, a cached-content response
-      // must reach the /context cached-tokens line (#9454).
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: { parts: [{ text: 'cached' }] },
-                finishReason: 'STOP',
-              },
-            ],
-            usageMetadata: {
-              promptTokenCount: 100,
-              totalTokenCount: 100,
-              cachedContentTokenCount: 42,
-            },
-          } as unknown as GenerateContentResponse;
-        })(),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'cached-happy' },
-        'prompt-cached-happy',
-      );
-      for await (const _ of stream) {
-        /* consume */
-      }
+    it('stores, clears, and retains cached content per route', async () => {
+      await recordTokenUsage(chat, {
+        promptTokenCount: 100,
+        totalTokenCount: 100,
+        cachedContentTokenCount: 42,
+      });
 
       expect(chat.getLastPromptTokenCount()).toBe(100);
+      expect(chat.getLastCachedContentTokenCount()).toBe(42);
       expect(
         uiTelemetryService.setLastCachedContentTokenCount,
       ).toHaveBeenCalledWith(42);
+
+      switchRoute('other-model@route');
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+      switchRoute('gemini-pro@test0001');
+      expect(chat.getLastCachedContentTokenCount()).toBe(42);
+
+      await recordTokenUsage(chat, {
+        promptTokenCount: 120,
+        totalTokenCount: 120,
+      });
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+    });
+
+    it('clears cached content when non-API writers replace the prompt count', async () => {
+      await recordTokenUsage(chat, {
+        promptTokenCount: 65_267,
+        totalTokenCount: 65_267,
+        cachedContentTokenCount: 64_653,
+      });
+
+      chat.setLastPromptTokenCount(10_000, true);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+
+      await recordTokenUsage(chat, {
+        promptTokenCount: 65_267,
+        totalTokenCount: 65_267,
+        cachedContentTokenCount: 64_653,
+      });
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'question' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'reasoning '.repeat(100), thought: true },
+            { text: 'answer' },
+          ],
+        },
+      ]);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+      expect(
+        uiTelemetryService.setLastCachedContentTokenCount,
+      ).toHaveBeenLastCalledWith(0);
     });
 
     it('restores the request route key when a failed hard-rescue rolls counts back', async () => {
@@ -22017,8 +22352,18 @@ describe('LlmChat', async () => {
         } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
-      // Authoritative count pair recorded by an earlier override-route turn.
-      rescueChat.seedResumeTokenCounts(170_000, 8_000, false);
+      await recordTokenUsage(
+        rescueChat,
+        {
+          promptTokenCount: 170_000,
+          totalTokenCount: 178_000,
+          candidatesTokenCount: 8_000,
+          cachedContentTokenCount: 42_000,
+        },
+        'override-model',
+      );
+      expect(rescueChat.getLastCachedContentTokenCount()).toBe(42_000);
+      vi.mocked(mockContentGenerator.generateContentStream).mockClear();
       vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
         model ? `${model}@route` : 'active@route',
       );
@@ -22054,6 +22399,7 @@ describe('LlmChat', async () => {
       );
       expect(rescueChat.getLastPromptTokenCount()).toBe(170_000);
       expect(rescueChat.getLastOutputTokenCount()).toBe(8_000);
+      expect(rescueChat.getLastCachedContentTokenCount()).toBe(42_000);
     });
 
     it('re-adopts the request route after the compression service flips the slots (#9506)', async () => {

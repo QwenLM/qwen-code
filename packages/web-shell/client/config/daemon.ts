@@ -283,6 +283,7 @@ export function buildDaemonConnectionUrl(
   url.searchParams.delete('context');
   url.searchParams.delete('addWorkspace');
   url.searchParams.delete('workspaceReturn');
+  url.searchParams.delete('addRemoteWorkspace');
   url.searchParams.delete('token');
   // Session-scoped like the rest: a `?split=` deep link names sessions of the
   // daemon being left behind.
@@ -296,7 +297,8 @@ export function buildDaemonConnectionUrl(
   return url.toString();
 }
 
-// ponytail: remember one target in this tab; no persistent host catalog.
+// Target confirmation is separate from the persistent Connections catalog:
+// only the last confirmed origin is trusted automatically in this tab.
 const DAEMON_TARGET_CONFIRMATION_KEY = 'qwen-daemon-target-confirmed';
 
 export function confirmDaemonTarget(origin: string): void {
@@ -318,10 +320,26 @@ export function isKnownDaemonTarget(origin: string): boolean {
   }
 }
 
-export function navigateToDaemon(raw: string, token?: string): boolean {
+export function navigateToDaemon(
+  raw: string,
+  token?: string,
+  options?: {
+    continueFlow?: 'workspace' | 'connection';
+  },
+): boolean {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
-  const nextUrl = buildDaemonConnectionUrl(raw, window.location.href);
-  if (!daemonOrigin || !nextUrl) return false;
+  const builtUrl = buildDaemonConnectionUrl(raw, window.location.href);
+  if (!daemonOrigin || !builtUrl) return false;
+  const nextUrl = new URL(builtUrl);
+  const continuation =
+    options?.continueFlow === 'workspace'
+      ? (['addRemoteWorkspace', 'browse'] as const)
+      : options?.continueFlow === 'connection'
+        ? (['addRemoteConnection', 'verify'] as const)
+        : undefined;
+  if (continuation) {
+    nextUrl.searchParams.set(continuation[0], continuation[1]);
+  }
   // Read before the assign: getDaemonBaseUrl() follows the live URL.
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
@@ -346,6 +364,11 @@ export function navigateToDaemon(raw: string, token?: string): boolean {
     // Unless the credential cannot outlive it: with storage disabled the
     // reloaded page would boot with no token at all, so stay on this one.
     if (token !== undefined && !hasReloadSurvivableDaemonToken()) return false;
+    if (continuation) {
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set(continuation[0], continuation[1]);
+      window.history.replaceState(null, '', currentUrl);
+    }
     window.location.reload();
     return true;
   }
@@ -354,6 +377,31 @@ export function navigateToDaemon(raw: string, token?: string): boolean {
   // just the same: this navigation stays in the same tab, so the entry would
   // survive and boot the next daemon into a split of sessions it has never had.
   clearSplitSessions();
-  window.location.assign(nextUrl);
+  // `nextUrl` drops `?token=` and clears the hash, so a credential that lives
+  // only in the URL cannot survive this navigation — and the invalid-target
+  // boot path deliberately leaves one there for recovery, with this escape
+  // hatch as its only exit. Salvage it under the page origin's key, and only
+  // when the page is not already pointed at some other daemon — a URL token
+  // belongs to the target in the address bar, never to a replacement.
+  if (
+    token === undefined &&
+    daemonOrigin === window.location.origin &&
+    daemonOrigin === previousDaemonOrigin
+  ) {
+    const fromUrl = readTokenFromLocation();
+    if (fromUrl) persistDaemonToken(fromUrl, daemonOrigin);
+  }
+  // Past this point the credential rides on storage alone, so ask the key this
+  // navigation lands on — not hasReloadSurvivableDaemonToken(), which answers
+  // for the target being left. With the write refused the switch would land
+  // unauthenticated while reporting success. An empty token means the daemon
+  // needs none, so there is nothing to lose.
+  if (
+    token?.trim() &&
+    readStoredDaemonToken(daemonTokenStorageKey(daemonOrigin)) === undefined
+  ) {
+    return false;
+  }
+  window.location.assign(nextUrl.toString());
   return true;
 }

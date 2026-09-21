@@ -335,6 +335,37 @@ describe('navigateToDaemon', () => {
     expect(assigned.searchParams.get('context')).toBeNull();
   });
 
+  it('carries the remote workspace continuation only when requested', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?addRemoteWorkspace=browse',
+    );
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://remote.example:4170');
+    let assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBeNull();
+
+    assign.mockClear();
+    mod.navigateToDaemon('http://remote.example:4170', undefined, {
+      continueFlow: 'workspace',
+    });
+    assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBe('browse');
+  });
+
+  it('carries connection verification only when requested', async () => {
+    const { assign } = setupPage('http://localhost:5173/app');
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://remote.example:4170', undefined, {
+      continueFlow: 'connection',
+    });
+
+    const assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteConnection')).toBe('verify');
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBeNull();
+  });
+
   // The Daemon Status address field is pre-filled with the current target, so
   // this is the form's DEFAULT click — an operator rotating a bearer token must
   // not be rebooted out of the session a plain F5 would have kept.
@@ -348,6 +379,22 @@ describe('navigateToDaemon', () => {
     expect(assign).not.toHaveBeenCalled();
     // The persist half still ran, or the reload would boot the old credential.
     expect(mod.getDaemonToken('http://localhost:5173')).toBe('rotated-token');
+  });
+
+  it('preserves continuation when reloading the current target', async () => {
+    const { reload } = setupPage('http://localhost:5173/app');
+    const replaceState = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => undefined);
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://localhost:5173', undefined, {
+      continueFlow: 'workspace',
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    const replaced = new URL(replaceState.mock.calls[0]![2] as URL);
+    expect(replaced.searchParams.get('addRemoteWorkspace')).toBe('browse');
   });
 
   // Boot scrubbed the fragment, so with storage disabled the in-memory cache
@@ -393,6 +440,65 @@ describe('navigateToDaemon', () => {
     expect(assign).toHaveBeenCalledTimes(1);
     const assigned = new URL(assign.mock.calls[0]![0] as string);
     expect(assigned.searchParams.get('daemon')).toBeNull();
+  });
+
+  // Boot keeps a fragment token on the invalid-target path for recovery, and
+  // this escape hatch is the only recovery it offers — but the URL it assigns
+  // clears the hash, so the credential has to be persisted before the page
+  // turns over or the operator lands locked out of their own daemon.
+  it('salvages a URL credential when the escape hatch returns to the page origin', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?daemon=ftp%3A%2F%2Fdaemon.example#token=url-secret',
+    );
+    const mod = await import('./daemon');
+    expect(mod.navigateToDaemon('http://localhost:5173')).toBe(true);
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBe(
+      'url-secret',
+    );
+    const assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('token')).toBeNull();
+    expect(assigned.hash).toBe('');
+  });
+
+  // The salvage is for a URL credential that belongs to the page's own daemon.
+  // While a valid `?daemon=` names someone else, the URL token is theirs, and
+  // switching back must not file it under the page origin's key.
+  it('does not salvage a URL token that belongs to another daemon', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example#token=remote-secret',
+    );
+    const mod = await import('./daemon');
+    expect(mod.navigateToDaemon('http://localhost:5173')).toBe(true);
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBeNull();
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  // A target switch carries the credential in storage alone. With the write
+  // refused the landed page would hold nothing for the new target while the
+  // dialog read the switch as successful.
+  it('reports a blocked switch when the new target keeps no credential', async () => {
+    const { assign, reload } = setupPage('http://localhost:5173/app');
+    const original = window.sessionStorage;
+    Object.defineProperty(window, 'sessionStorage', {
+      get() {
+        throw new Error('storage disabled');
+      },
+      configurable: true,
+    });
+    try {
+      const mod = await import('./daemon');
+      expect(
+        mod.navigateToDaemon('http://remote.example:4170', 'remote-token'),
+      ).toBe(false);
+      expect(assign).not.toHaveBeenCalled();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 });
 
