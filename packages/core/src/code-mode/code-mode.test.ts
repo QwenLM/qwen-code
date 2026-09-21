@@ -226,7 +226,7 @@ describe('code mode exposure', () => {
     expect(execDescription).not.toContain('tools.read_file(args:');
     expect(execDescription).toContain('"name":"read_file"');
     expect(execDescription).toContain(
-      'Deferred tools with a reveal path receive a declaration',
+      'tool_search returns deferred parameter schemas without changing top-level declarations',
     );
   });
 
@@ -272,12 +272,17 @@ describe('code mode exposure', () => {
     );
     registry.registerTool(new MockTool({ name: 'exec' }));
     registry.registerTool(new MockTool({ name: 'tool_search' }));
+    registry.registerTool(new MockTool({ name: 'tool_call' }));
     registry.registerTool(
       new MockTool({ name: 'deferred_tool', shouldDefer: true }),
     );
 
     const initial = registry.getFunctionDeclarations();
-    expect(initial.map((item) => item.name)).toEqual(['exec', 'tool_search']);
+    expect(initial.map((item) => item.name)).toEqual([
+      'exec',
+      'tool_call',
+      'tool_search',
+    ]);
     expect(initial[0]?.description).toContain('"name":"deferred_tool"');
     expect(initial[0]?.description).not.toContain('tools.deferred_tool(args:');
     expect(registry.getDeferredToolSummary().map((item) => item.name)).toEqual([
@@ -285,7 +290,7 @@ describe('code mode exposure', () => {
     ]);
 
     const filtered = registry.getFunctionDeclarationsFiltered(
-      ['exec', 'tool_search'],
+      ['exec', 'tool_call', 'tool_search'],
       new Set(['deferred_tool']),
     );
     expect(filtered[0]?.description).toContain('tools.deferred_tool(args:');
@@ -298,28 +303,38 @@ describe('code mode exposure', () => {
     ).toContain('declare const tools: { deferred_tool(args:');
   });
 
-  it('includes nested schemas when CodeMode has no reveal path', () => {
-    const registry = new ToolRegistry(
-      makeFakeConfig({ toolMode: ToolMode.CodeMode }),
-    );
-    registry.registerTool(new MockTool({ name: 'exec' }));
-    registry.registerTool(
-      new MockTool({
-        name: 'deferred_tool',
-        shouldDefer: true,
-        params: {
-          type: 'object',
-          properties: { path: { type: 'string' } },
-          required: ['path'],
-        },
-      }),
-    );
+  it.each([
+    { bridgeTools: [] },
+    { bridgeTools: ['tool_search'] },
+    { bridgeTools: ['tool_call'] },
+  ])(
+    'includes nested schemas with incomplete bridge $bridgeTools',
+    ({ bridgeTools }) => {
+      const registry = new ToolRegistry(
+        makeFakeConfig({ toolMode: ToolMode.CodeMode }),
+      );
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      for (const name of bridgeTools) {
+        registry.registerTool(new MockTool({ name }));
+      }
+      registry.registerTool(
+        new MockTool({
+          name: 'deferred_tool',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        }),
+      );
 
-    const description = registry.getFunctionDeclarations()[0]?.description;
-    expect(description).toContain(
-      'tools.deferred_tool(args: { "path": string })',
-    );
-  });
+      const description = registry.getFunctionDeclarations()[0]?.description;
+      expect(description).toContain(
+        'tools.deferred_tool(args: { "path": string })',
+      );
+    },
+  );
 
   it('describes an empty filtered CodeMode surface accurately', () => {
     const registry = new ToolRegistry(

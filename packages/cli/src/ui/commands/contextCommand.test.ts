@@ -125,7 +125,7 @@ describe('collectContextData (contextCommand)', () => {
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
     // /context should reflect what's actually sent to the model. Deferred
     // tools (MCP tools default to shouldDefer=true) are excluded from the
-    // prompt unless ToolSearch has revealed them this session — see
+    // prompt unless session setup has revealed them — see
     // client.ts which calls getFunctionDeclarations() with no options.
     // Pinning the call here keeps the /context token estimate aligned with
     // the real request, instead of overcounting by the full MCP tool pool.
@@ -1342,6 +1342,112 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(2);
     expect(data.memoryFiles[0].path).toBe('QWEN.md');
     expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+  });
+
+  it('names the extension that contributes a context file (#12030)', async () => {
+    // An extension's context file is resident in every request of every session
+    // it is active in, and the marker path alone does not say who is paying for
+    // it — the row has to name the extension to be actionable.
+    const workingDir = path.join(os.tmpdir(), 'context-extension-dir');
+    const extensionFile = path.join(
+      workingDir,
+      'extensions',
+      'report-tools',
+      'QWEN.md',
+    );
+    const memory =
+      `--- Context from: QWEN.md ---\n` +
+      `project rules\n` +
+      `--- End of Context from: QWEN.md ---\n` +
+      `--- Context from: ${extensionFile} ---\n` +
+      `extension rules\n` +
+      `--- End of Context from: ${extensionFile} ---`;
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      getActiveExtensions: vi.fn().mockReturnValue([
+        {
+          name: 'report-tools',
+          displayName: 'Report Tools',
+          path: path.dirname(extensionFile),
+          contextFiles: [extensionFile],
+        },
+      ]),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(2);
+    // The project file keeps its path; only the extension's file is renamed.
+    expect(data.memoryFiles[0].path).toBe('QWEN.md');
+    expect(data.memoryFiles[1].path).toBe(
+      `${t('Extension')}: Report Tools · QWEN.md`,
+    );
+  });
+
+  it('keeps extension file labels distinct and safe without changing token counts', async () => {
+    const workingDir = path.join(os.tmpdir(), 'context-extension-dir');
+    const extensionRoot = path.join(workingDir, 'extensions', 'report-tools');
+    const files = ['docs', 'prompts'].map((dir) =>
+      path.join(extensionRoot, dir, 'QWEN.md'),
+    );
+    const memory = files
+      .map((file) => {
+        const marker = path.relative(workingDir, file);
+        return `--- Context from: ${marker} ---\nextension rules\n--- End of Context from: ${marker} ---`;
+      })
+      .join('\n');
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      getActiveExtensions: vi.fn().mockReturnValue([]),
+    } as unknown as Config;
+    const before = await collectContextData(config, true);
+    vi.mocked(config.getActiveExtensions).mockReturnValue([
+      {
+        name: 'report-tools',
+        displayName: '\u001b[31mReport\u001b[0m\nTools\u202e',
+        path: extensionRoot,
+        contextFiles: files,
+      } as ReturnType<Config['getActiveExtensions']>[number],
+    ]);
+
+    const after = await collectContextData(config, true);
+
+    expect(after.memoryFiles.map((file) => file.path)).toEqual(
+      ['docs', 'prompts'].map(
+        (dir) =>
+          `${t('Extension')}: Report Tools · ${path.join(dir, 'QWEN.md')}`,
+      ),
+    );
+    expect(after.memoryFiles.map((file) => file.tokens)).toEqual(
+      before.memoryFiles.map((file) => file.tokens),
+    );
+  });
+
+  it('leaves memory rows alone when no extension owns them (#12030)', async () => {
+    const workingDir = path.join(os.tmpdir(), 'context-extension-dir');
+    const memory =
+      `--- Context from: QWEN.md ---\nproject rules\n` +
+      `--- End of Context from: QWEN.md ---`;
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      // A Config without the accessor at all: partial stubs and older shapes
+      // must not break the breakdown.
+      getActiveExtensions: undefined,
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(1);
+    expect(data.memoryFiles[0].path).toBe('QWEN.md');
   });
 
   it('excludes disabled skills from the detail breakdown', async () => {

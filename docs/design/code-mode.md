@@ -44,23 +44,29 @@ force `direct`. Container execution exposes direct tools only: selecting
 
 ## Exposure policy
 
-| Surface              | `direct`                 | `code_mode`                     | `code_mode_only` |
-| -------------------- | ------------------------ | ------------------------------- | ---------------- |
-| Ordinary eager tools | Direct                   | Direct and nested               | Nested only      |
-| Deferred tools       | `tool_search`            | `tool_search` and nested        | Nested only      |
-| Direct-control tools | Direct                   | Direct only                     | Direct only      |
-| `exec`               | Not registered           | Direct                          | Direct           |
-| Hidden bridge tools  | Existing direct behavior | Direct where already applicable | Hidden           |
+| Surface              | `direct`                    | `code_mode`                     | `code_mode_only` |
+| -------------------- | --------------------------- | ------------------------------- | ---------------- |
+| Ordinary eager tools | Direct                      | Direct and nested               | Nested only      |
+| Deferred tools       | `tool_search` + `tool_call` | Bridge and nested               | Nested only      |
+| Direct-control tools | Direct                      | Direct only                     | Direct only      |
+| `exec`               | Not registered              | Direct                          | Direct           |
+| Hidden bridge tools  | Existing direct behavior    | Direct where already applicable | Hidden           |
 
 In `code_mode`, ordinary visible tool descriptions gain an `exec` declaration
 for that tool. The `exec` description keeps the complete `ALL_TOOLS` metadata
-but does not duplicate every schema. Deferred tools gain their declaration when
-their normal top-level declaration is revealed. In `code_mode_only`, the
-existing behavior remains: all nested declarations live in the `exec`
-description because no later top-level reveal is possible. `tools.eager` and
-`tools.visible` do not reduce those nested schemas in CodeModeOnly: `tool_search`
-is hidden, deferred reminders and the no-ToolSearch warning are skipped, and
-surviving callable tools remain available through `exec`.
+without duplicating every schema. With both bridge tools available, `tool_search`
+returns deferred parameter schemas without changing the top-level declarations.
+Match each returned schema name exactly to `ALL_TOOLS.name`, then invoke
+`tools[entry.jsName]` with arguments shaped by that schema. If there is no entry,
+do not normalize or guess a binding; use `tool_call` outside `exec`, or an
+available direct tool, subject to normal validation and approval.
+
+When either bridge half is absent or the agent surface is filtered, `exec`
+includes signatures for nested tools whose schemas are otherwise unavailable.
+In `code_mode_only`, all nested declarations live in the `exec` description.
+Both bridge tools are hidden, deferred reminders and the incomplete-bridge
+warning are skipped, and `tools.eager` / `tools.visible` do not reduce those
+nested schemas. Callable tools remain available through `exec`.
 
 Nested bindings prefer an exact canonical JavaScript name over names rewritten
 to that property. Other collisions retain canonical-name ordering; omitted

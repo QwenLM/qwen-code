@@ -238,7 +238,7 @@ export function buildExecDescription(
   plan: CodeModeBindingPlan,
   codeModeOnly = true,
   topLevelBindingNames: ReadonlySet<string> = new Set(),
-  canRevealDeferred = false,
+  canSearchDeferredSchemas = false,
 ): string {
   const allTools = plan.bindings.map(
     ({ name, jsName, description, deferred }) => ({
@@ -257,7 +257,7 @@ export function buildExecDescription(
   const uncoveredBindings = plan.bindings.filter(
     (binding) =>
       !topLevelBindingNames.has(binding.name) &&
-      (!binding.deferred || !canRevealDeferred),
+      (!binding.deferred || !canSearchDeferredSchemas),
   );
   const declarations =
     plan.bindings.length === 0
@@ -265,14 +265,14 @@ export function buildExecDescription(
       : codeModeOnly
         ? plan.bindings.map(describeBinding).join('\n')
         : [
-            'Nested tool declarations for directly exposed tools are included in their top-level tool descriptions. Deferred tools with a reveal path receive a declaration when their top-level declaration is revealed.',
+            'Nested tool declarations for directly exposed tools are included in their top-level tool descriptions. With both tool_search and tool_call available, tool_search returns deferred parameter schemas without changing top-level declarations. Match the returned schema name exactly to ALL_TOOLS.name, then call tools[entry.jsName] with arguments shaped by that schema. If no entry matches, do not normalize or guess a binding; use tool_call outside exec, or an available direct tool, subject to normal validation and approval.',
             uncoveredBindings.map(describeBinding).join('\n'),
           ]
             .filter(Boolean)
             .join('\n');
   const toolsDescription = codeModeOnly
     ? 'the code-mode-callable tool functions declared below.'
-    : 'the code-mode-callable tool functions declared in their top-level tool descriptions or below.';
+    : 'the code-mode-callable functions listed in ALL_TOOLS. Parameter schemas are in their top-level tool descriptions, below, or returned by tool_search; use the exact ALL_TOOLS name-to-jsName mapping.';
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
@@ -308,7 +308,7 @@ export function buildExecDeclaration(
   plan: CodeModeBindingPlan,
   codeModeOnly = true,
   topLevelBindingNames?: ReadonlySet<string>,
-  canRevealDeferred?: boolean,
+  canSearchDeferredSchemas?: boolean,
 ): FunctionDeclaration {
   return {
     ...execTool.schema,
@@ -316,7 +316,7 @@ export function buildExecDeclaration(
       plan,
       codeModeOnly,
       topLevelBindingNames,
-      canRevealDeferred,
+      canSearchDeferredSchemas,
     ),
   };
 }
