@@ -425,6 +425,64 @@ function label(rec: AgentRecord, chunk: number | null): string {
 }
 
 /**
+ * The three outcome sets do not partition the plan.
+ *
+ * Its own class because the callers' rule is that different failures do not
+ * wear each other's message: this one is a defect in this file, and an
+ * operator told "the plan could not be used" goes off to re-capture a diff
+ * that was never the problem.
+ */
+export class ChunkPartitionError extends Error {}
+
+/**
+ * Every planned chunk has exactly one outcome, and no outcome names a chunk
+ * the plan does not carry.
+ *
+ * Holds by construction today — `covered` is filled from `plan.chunks`,
+ * `uncoverable` is subtracted from it, and `missing` is what is left — so
+ * this guards the construction against its next edit rather than against any
+ * input. It exists because the coverage summary's denominator used to be the
+ * SUM of these three sets, which made "17 of 17 chunks reviewed"
+ * self-consistent whatever the sets did: a ratio that cannot disagree with
+ * itself cannot report a fault. The denominator now reads the plan, and a
+ * denominator read from somewhere else is only right while this holds.
+ */
+export function assertChunkPartition(
+  planned: readonly number[],
+  outcomes: {
+    covered: readonly number[];
+    missing: readonly number[];
+    uncoverable: readonly number[];
+  },
+): void {
+  const plannedIds = new Set(planned);
+  const seen = new Map<number, string>();
+  for (const [outcome, ids] of Object.entries(outcomes)) {
+    for (const id of ids) {
+      if (!plannedIds.has(id)) {
+        throw new ChunkPartitionError(
+          `chunk ${id} is ${outcome} but the plan does not carry it`,
+        );
+      }
+      const earlier = seen.get(id);
+      if (earlier !== undefined) {
+        throw new ChunkPartitionError(
+          earlier === outcome
+            ? `chunk ${id} is listed twice as ${outcome}`
+            : `chunk ${id} is both ${earlier} and ${outcome}`,
+        );
+      }
+      seen.set(id, outcome);
+    }
+  }
+  for (const id of planned) {
+    if (!seen.has(id)) {
+      throw new ChunkPartitionError(`chunk ${id} has no outcome`);
+    }
+  }
+}
+
+/**
  * What the agents of this run actually did, as the harness recorded it.
  *
  * Nothing here is supplied by the caller except the plan path. The transcripts
@@ -815,7 +873,16 @@ export function coverageFromTranscripts(
       // other — the chunk lands in `missingChunks`, whose remediation
       // relaunches an agent that re-declares, forever. `gapsSuperseded`
       // below excludes same-shape records for exactly this reason.
+      //
+      // And only for a chunk this plan carries. `chunk` is read out of the
+      // launch prompt's text, so a record written against another chunking
+      // of this diff — `chunk 9 of 12` on a plan that now has two — declared
+      // an id nothing here plans, and admitting it reported a chunk that
+      // does not exist as not reviewed: `uncoverableChunks: [9]` beside
+      // `plannedChunks` 1 and 2. The record is still disclosed — no prompt
+      // was built for that chunk, so it is already in `rewrittenPrompts`.
       if (
+        plan.chunks.some((c) => c.id === chunk) &&
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
       ) {
         uncoverable.add(chunk);
@@ -1075,6 +1142,13 @@ export function coverageFromTranscripts(
   const missingChunks = planned.filter(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
+  // `check-coverage` prints its denominator from the plan, and the three
+  // sets below are what it counts against it — this is what proves they agree.
+  assertChunkPartition(planned, {
+    covered: [...covered],
+    missing: missingChunks,
+    uncoverable: [...uncoverable],
+  });
 
   // Prior-attempt records that clear the SAME certification bar as a live
   // launch — the resumed run's recovered work. The bar is deliberately the

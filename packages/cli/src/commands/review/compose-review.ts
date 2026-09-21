@@ -29,6 +29,7 @@ import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
@@ -5772,14 +5773,23 @@ function composeReviewBody(
       // Both cap — a run that cannot show what it read has not shown it read
       // anything — but a reader chasing "could not read the transcripts" over a
       // plan with no `chunks[]` is chasing the wrong thing.
+      //
+      // A third, for the same reason: outcomes that do not partition the plan
+      // are a defect in the coverage walk, and "the plan could not be used"
+      // would send the operator to re-capture a diff that was never the
+      // problem.
       const why =
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
-          : `the plan could not be used (${(err as Error).message})`;
+          : err instanceof ChunkPartitionError
+            ? `the coverage check contradicted its own plan (${err.message})`
+            : `the plan could not be used (${(err as Error).message})`;
       const whyZh =
         err instanceof TranscriptsUnavailableError
           ? `无法读取 agent 的运行记录（${err.message}）`
-          : `plan 无法使用（${(err as Error).message}）`;
+          : err instanceof ChunkPartitionError
+            ? `覆盖率检查与其自身的 plan 相矛盾（${err.message}）`
+            : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
