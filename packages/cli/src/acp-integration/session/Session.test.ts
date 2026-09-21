@@ -1109,6 +1109,127 @@ describe('Session', () => {
     );
   });
 
+  describe('MCP App tools', () => {
+    const request = {
+      serverName: 'tableau',
+      resourceUri: 'ui://tableau/app',
+      name: 'get-embed-token',
+      arguments: {},
+    };
+    function installAppTool() {
+      const raw = {
+        content: [{ type: 'text', text: '{"token":"APP_PRIVATE_TOKEN"}' }],
+        _meta: { secret: 'APP_PRIVATE_TOKEN' },
+        structuredContent: { token: 'APP_PRIVATE_TOKEN' },
+      };
+      const callTool = vi.fn().mockResolvedValue(raw);
+      const tool = new core.DiscoveredMCPTool(
+        { tool: async () => ({}), callTool: async () => [] },
+        'tableau',
+        'get-embed-token',
+        'Get embed token',
+        { type: 'object', properties: {} },
+        false,
+        undefined,
+        mockConfig,
+        { callTool },
+      );
+      const registry = Object.assign(mockToolRegistry, {
+        hasMcpAppResource: vi.fn(
+          (server: string, uri: string) =>
+            server === request.serverName && uri === request.resourceUri,
+        ),
+        getMcpAppTool: vi.fn((server: string, name: string) =>
+          server === request.serverName && name === request.name
+            ? tool
+            : undefined,
+        ),
+      });
+      return { raw, callTool, tool, registry };
+    }
+
+    it('requests permission and returns raw data only to the App', async () => {
+      const { raw, callTool } = installAppTool();
+      await expect(
+        session.callMcpAppTool('mcp-app-1', request),
+      ).resolves.toEqual(raw);
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(callTool).toHaveBeenCalledOnce();
+      expect(
+        JSON.stringify(vi.mocked(mockClient.sessionUpdate).mock.calls),
+      ).not.toContain('APP_PRIVATE_TOKEN');
+      expect(
+        JSON.stringify(mockChatRecordingService.recordToolResult.mock.calls),
+      ).not.toContain('APP_PRIVATE_TOKEN');
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('does not execute when permission is cancelled', async () => {
+      const { callTool } = installAppTool();
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(await session.callMcpAppTool('mcp-app-2', request)).toMatchObject({
+        isError: true,
+      });
+      expect(callTool).not.toHaveBeenCalled();
+    });
+
+    it('honors explicit permission deny before YOLO and rejects unknown origins and targets', async () => {
+      const { callTool } = installAppTool();
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+      vi.mocked(mockConfig.getPermissionManager).mockReturnValue({
+        isToolEnabled: async () => true,
+        hasRelevantRules: () => true,
+        evaluate: async () => 'deny',
+        findMatchingDenyRule: () => 'mcp__tableau__get-embed-token',
+      } as unknown as ReturnType<Config['getPermissionManager']>);
+      expect(
+        await session.callMcpAppTool('mcp-app-deny', request),
+      ).toMatchObject({ isError: true });
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      await expect(
+        session.callMcpAppTool('mcp-app-server', {
+          ...request,
+          serverName: 'other',
+        }),
+      ).rejects.toThrow('resource');
+      await expect(
+        session.callMcpAppTool('mcp-app-resource', {
+          ...request,
+          resourceUri: 'ui://other',
+        }),
+      ).rejects.toThrow('resource');
+      await expect(
+        session.callMcpAppTool('mcp-app-target', { ...request, name: 'shell' }),
+      ).rejects.toThrow('tool');
+      expect(callTool).not.toHaveBeenCalled();
+    });
+
+    it('holds the session while awaiting approval and aborts on close', async () => {
+      const { callTool } = installAppTool();
+      vi.mocked(mockClient.requestPermission).mockReturnValue(
+        new Promise(() => {}),
+      );
+      const pending = session.callMcpAppTool('mcp-app-close', request);
+      const rejected = pending.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+      );
+      expect(session.isTurnIdle()).toBe(false);
+      expect(session.collectActiveWorkHolds()).toContainEqual({
+        category: 'session',
+        id: 'session:active-turn',
+      });
+      expect(() => session.beginHistoryMutation()).toThrow('busy');
+      const release = session.beginClose();
+      expect(await rejected).toBeInstanceOf(Error);
+      release();
+      expect(callTool).not.toHaveBeenCalled();
+      expect(session.isTurnIdle()).toBe(true);
+    });
+  });
+
   afterEach(() => {
     session?.dispose();
     if (originalProcessGuardMode === undefined) {

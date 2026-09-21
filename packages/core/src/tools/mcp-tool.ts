@@ -366,6 +366,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly appResourceUi?: Record<string, unknown>,
     private readonly retryCount: number = 0,
     private readonly appResourceLimits?: McpAppResourceLimits,
+    private readonly onAppResult?: (result: McpAppToolResult) => void,
   ) {
     super(params);
   }
@@ -600,6 +601,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     if (this.mcpClient) {
       return this.executeWithDirectClient(signal, updateOutput);
     }
+    if (this.onAppResult) {
+      throw new Error('MCP App tool calls require a direct MCP client.');
+    }
     return this.executeWithCallableTool(signal);
   }
 
@@ -678,7 +682,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             // Reset idle timeout on progress
             resetIdleTimeout();
 
-            if (updateOutput) {
+            if (updateOutput && !this.onAppResult) {
               const progressData: McpToolProgressData = {
                 type: 'mcp_tool_progress',
                 progress: progress.progress,
@@ -704,6 +708,22 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       if (idleTimeoutId) {
         clearTimeout(idleTimeoutId);
         idleTimeoutId = undefined;
+      }
+
+      if (this.onAppResult) {
+        this.onAppResult(callToolResult);
+        const summary = callToolResult.isError
+          ? 'MCP App tool reported an error.'
+          : 'MCP App tool completed.';
+        return {
+          llmContent: summary,
+          returnDisplay: summary,
+          ...(callToolResult.isError
+            ? {
+                error: { message: summary, type: ToolErrorType.MCP_TOOL_ERROR },
+              }
+            : {}),
+        };
       }
 
       // Wrap the raw CallToolResult into the Part[] format that the
@@ -738,6 +758,23 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
+      if (this.onAppResult) {
+        if (signal.aborted) throw createToolCallAbortError();
+        if (
+          idleTimeoutWon ||
+          isExecutionTimeoutFailure(error, this.serverName, signal)
+        ) {
+          throw new StructuredToolError(
+            'MCP App tool call timed out.',
+            ToolErrorType.EXECUTION_TIMEOUT,
+          );
+        }
+        // Neither server errors nor a repeated side effect belong in App replay.
+        throw new StructuredToolError(
+          'MCP App tool call failed.',
+          ToolErrorType.EXECUTION_FAILED,
+        );
+      }
       // `idleTimeoutWon` is our own client-side timer firing, so it is an
       // execution timeout regardless of what the transport thinks.
       if (
@@ -1105,6 +1142,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     readonly appResourceUri?: string,
     readonly appResourceUi?: Record<string, unknown>,
     readonly appResourceLimits?: McpAppResourceLimits,
+    readonly appVisibility?: readonly string[],
   ) {
     super(
       nameOverride ??
@@ -1178,6 +1216,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUri,
       this.appResourceUi,
       this.appResourceLimits,
+      this.appVisibility,
     );
   }
 
@@ -1203,6 +1242,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUri,
       appResourceUi,
       this.appResourceLimits,
+      this.appVisibility,
     );
   }
 
@@ -1252,11 +1292,34 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUri,
       this.appResourceUi,
       this.appResourceLimits,
+      this.appVisibility,
     );
+  }
+
+  get isAppVisible(): boolean {
+    return (
+      this.appVisibility === undefined || this.appVisibility.includes('app')
+    );
+  }
+
+  get isModelVisible(): boolean {
+    return (
+      this.appVisibility === undefined || this.appVisibility.includes('model')
+    );
+  }
+
+  buildForApp(
+    params: ToolParams,
+    onResult: (result: McpAppToolResult) => void,
+  ): ToolInvocation<ToolParams, ToolResult> {
+    const validationError = this.validateToolParams(params);
+    if (validationError) throw new Error(validationError);
+    return this.createInvocation(params, onResult);
   }
 
   protected createInvocation(
     params: ToolParams,
+    onAppResult?: (result: McpAppToolResult) => void,
   ): ToolInvocation<ToolParams, ToolResult> {
     return new DiscoveredMCPToolInvocation(
       this.mcpTool,
@@ -1277,6 +1340,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.appResourceUi,
       0,
       this.appResourceLimits,
+      onAppResult,
     );
   }
 }

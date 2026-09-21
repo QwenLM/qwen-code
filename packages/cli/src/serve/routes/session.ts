@@ -6315,6 +6315,63 @@ export function registerSessionRoutes(
     ),
   );
 
+  app.post(
+    '/session/:id/mcp-app/tools/call',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/mcp-app/tools/call',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!clientId) {
+          res
+            .status(403)
+            .json({ error: 'MCP App calls require a session-bound client id' });
+          return;
+        }
+        const body = safeBody(req);
+        const { serverName, resourceUri, name, arguments: args } = body;
+        if (
+          typeof serverName !== 'string' ||
+          !serverName ||
+          typeof resourceUri !== 'string' ||
+          !resourceUri.startsWith('ui://') ||
+          typeof name !== 'string' ||
+          !name ||
+          !args ||
+          typeof args !== 'object' ||
+          Array.isArray(args)
+        ) {
+          res.status(400).json({ error: 'Invalid MCP App tool call' });
+          return;
+        }
+        const abort = new AbortController();
+        const onClose = () => {
+          if (!res.writableEnded) abort.abort();
+        };
+        res.once('close', onClose);
+        try {
+          res.json(
+            await runtime.bridge.callMcpAppTool(
+              sessionId,
+              {
+                serverName,
+                resourceUri,
+                name,
+                arguments: args as Record<string, unknown>,
+              },
+              abort.signal,
+              { clientId },
+            ),
+          );
+        } finally {
+          res.off('close', onClose);
+        }
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
   app.get(
     '/session/:id/resources',
     withOwnerReadSession(

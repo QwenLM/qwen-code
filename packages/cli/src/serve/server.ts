@@ -2138,7 +2138,8 @@ export function createServeApp(
       : [];
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
-    mountMcpAppSandbox(app);
+    (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
+      mountMcpAppSandbox(app);
   }
 
   if (deps.enqueueChannelWebhookTask) {
@@ -3715,10 +3716,12 @@ export function createServeApp(
         }
       };
       const locals = app.locals as {
+        stopMcpAppSandbox?: () => void;
         stopScheduledTaskKeepalive?: () => void;
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
       };
+      stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);

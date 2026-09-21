@@ -27,6 +27,7 @@ function mkTool(
   serverToolName: string,
   trust?: boolean,
   alwaysLoad = false,
+  visibility?: readonly string[],
 ): DiscoveredMCPTool {
   return new DiscoveredMCPTool(
     // mcpTool stub: tests only inspect `trust` / `name` / `serverName`,
@@ -44,6 +45,11 @@ function mkTool(
     undefined,
     undefined,
     alwaysLoad,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    visibility,
   );
 }
 
@@ -290,6 +296,28 @@ describe('SessionMcpView', () => {
     expect(registered).toBeDefined();
     expect(registered!.trust).toBe(true);
     expect(registered).not.toBe(snapshotTool);
+  });
+
+  it('preserves App-only visibility through filtered pooled views and clears stale snapshots', () => {
+    const { tools, prompts, resources } = mkRegistries();
+    const snapshot = [
+      mkTool('srv', 'token', false, false, ['app']),
+      mkTool('srv', 'excluded', false, false, ['app']),
+    ];
+    const cfg = Object.assign(new MCPServerConfig('node'), {
+      trust: true,
+      excludeTools: ['excluded'],
+    });
+    const view = new SessionMcpView(tools, prompts, resources, 'A', 'srv', cfg);
+    view.applyTools(snapshot);
+    const registered = [...tools._toolMap.values()];
+    expect(registered).toHaveLength(1);
+    expect(registered[0].isModelVisible).toBe(false);
+    expect(registered[0].isAppVisible).toBe(true);
+    expect(registered[0].trust).toBe(true);
+    expect(snapshot[0].trust).toBe(false);
+    view.applyTools([]);
+    expect(tools._toolMap.size).toBe(0);
   });
 
   it('applyTools skips clone when trust matches (allocation pin)', () => {

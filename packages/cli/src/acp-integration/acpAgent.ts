@@ -11142,6 +11142,51 @@ class QwenAgent implements Agent {
         }
         return { requestId, cancelled };
       }
+      case 'qwen/session/mcp-app/call':
+      case 'qwen/session/mcp-app/cancel': {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'MCP App calls require a trusted private ACP parent',
+          );
+        }
+        const { sessionId, callId } = params;
+        if (
+          typeof sessionId !== 'string' ||
+          typeof callId !== 'string' ||
+          !callId.startsWith('mcp-app-')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App session or call id',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        if (method === 'qwen/session/mcp-app/cancel') {
+          session.cancelMcpAppCall(callId);
+          return {};
+        }
+        const { serverName, resourceUri, name, arguments: args } = params;
+        if (
+          typeof serverName !== 'string' ||
+          typeof resourceUri !== 'string' ||
+          typeof name !== 'string' ||
+          !args ||
+          typeof args !== 'object' ||
+          Array.isArray(args)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App tool call',
+          );
+        }
+        return session.callMcpAppTool(callId, {
+          serverName,
+          resourceUri,
+          name,
+          arguments: args as Record<string, unknown>,
+        });
+      }
       case 'qwen/session/sources/list':
       case 'qwen/session/sources/upsert':
       case 'qwen/session/sources/remove':

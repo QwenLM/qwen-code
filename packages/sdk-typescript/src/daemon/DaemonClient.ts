@@ -21,6 +21,8 @@ import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
   DaemonAgentMutationResult,
+  DaemonMcpAppToolCall,
+  DaemonMcpAppToolResult,
   DaemonAuthProviderId,
   DaemonAuthProviderCatalog,
   DaemonAuthProviderInstallRequest,
@@ -6413,6 +6415,26 @@ export class DaemonClient {
     // settle from deleting a newer entry after this clear.
     this.workspaceProvidersInFlight.clear();
     this.transport.dispose();
+  }
+
+  callMcpAppTool(
+    sessionId: string,
+    request: DaemonMcpAppToolCall,
+    clientId: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonMcpAppToolResult> {
+    return this.jsonRequest(
+      `/session/${encodeURIComponent(sessionId)}/mcp-app/tools/call`,
+      'MCP App tool call failed',
+      {
+        method: 'POST',
+        body: request,
+        clientId,
+        signal,
+        timeoutMs: 300_000,
+        mode: 'rest',
+      },
+    );
   }
 
   listSessionSources(

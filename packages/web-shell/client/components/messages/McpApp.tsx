@@ -3,7 +3,11 @@ import {
   AppBridge,
   PostMessageTransport,
 } from '@modelcontextprotocol/ext-apps/app-bridge';
-import { McpAppHostContext } from '../../mcpAppHostContext';
+import {
+  McpAppHostContext,
+  McpAppSessionContext,
+  McpAppToolsContext,
+} from '../../mcpAppHostContext';
 import { useTheme } from '../../themeContext';
 import styles from './McpApp.module.css';
 
@@ -118,6 +122,10 @@ function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
 
 export function McpApp({ display }: { display: McpAppDisplay }) {
   const daemonBaseUrl = useContext(McpAppHostContext);
+  const sessionId = useContext(McpAppSessionContext);
+  const tools = useContext(McpAppToolsContext);
+  const callTool =
+    sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const bridgeRef = useRef<AppBridge | null>(null);
@@ -152,6 +160,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       null,
       { name: 'qwen-code-web-shell', version: '0.0.1' },
       {
+        ...(callTool ? { serverTools: {} } : {}),
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
         },
@@ -159,6 +168,21 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       { hostContext: mcpAppHostContext(themeRef.current) },
     );
     bridgeRef.current = bridge;
+    const appAbort = new AbortController();
+    if (callTool) {
+      bridge.oncalltool = async (params, extra) => {
+        const result = await callTool(
+          {
+            serverName: current.serverName,
+            resourceUri: current.resourceUri,
+            name: params.name,
+            arguments: params.arguments ?? {},
+          },
+          AbortSignal.any([extra.signal, appAbort.signal]),
+        );
+        return result as AppToolResult;
+      };
+    }
 
     bridge.onsandboxready = () => {
       const resource = displayRef.current;
@@ -199,6 +223,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       .catch((reason: unknown) => setError(String(reason)));
 
     return () => {
+      appAbort.abort();
       bridgeRef.current = null;
       const unload = () => {
         // Compare against later effect runs so a superseded teardown
@@ -220,6 +245,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     };
   }, [
     sandboxUrl,
+    callTool,
     display.serverName,
     display.resourceUri,
     display.html,
@@ -250,7 +276,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         title={`${display.serverName} MCP App`}
         className={styles.frame}
         style={{ height, display: error ? 'none' : undefined }}
-        sandbox="allow-scripts allow-forms"
+        sandbox="allow-scripts allow-forms allow-same-origin"
         referrerPolicy="origin"
         onError={() => setError('sandbox-load-failed')}
       />

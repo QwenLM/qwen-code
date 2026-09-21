@@ -2,7 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { McpAppHostContext } from '../../mcpAppHostContext';
+import {
+  McpAppHostContext,
+  McpAppSessionContext,
+  McpAppToolsContext,
+} from '../../mcpAppHostContext';
 import { ThemeProvider, WebShellThemeId } from '../../themeContext';
 import type { McpAppDisplay } from './McpApp';
 
@@ -11,6 +15,10 @@ const appBridgeMocks = vi.hoisted(() => ({
   last: null as {
     onsandboxready?: () => void;
     oninitialized?: () => void;
+    oncalltool?: (
+      params: { name: string; arguments?: Record<string, unknown> },
+      extra: { signal: AbortSignal },
+    ) => Promise<unknown>;
   } | null,
   lastCapabilities: undefined as unknown,
   setHostContext: vi.fn(),
@@ -171,8 +179,9 @@ describe('McpApp host lifetime', () => {
     });
 
     const iframe = document.querySelector('iframe');
-    expect(iframe?.getAttribute('sandbox')).toBe('allow-scripts allow-forms');
-    expect(iframe?.getAttribute('sandbox')).not.toContain('allow-same-origin');
+    expect(iframe?.getAttribute('sandbox')).toBe(
+      'allow-scripts allow-forms allow-same-origin',
+    );
 
     expect(appBridgeMocks.sendSandboxResourceReady).toHaveBeenCalledWith(
       expect.objectContaining({ html: '<main>Ready</main>' }),
@@ -311,5 +320,49 @@ describe('McpApp host lifetime', () => {
     });
 
     expect(iframe?.getAttribute('src')).toContain('/mcp-app-sandbox');
+  });
+});
+
+describe('McpApp server tool bridge', () => {
+  it('pins the source server, forwards raw results, and cancels on session change', async () => {
+    const raw = {
+      content: [],
+      _meta: { token: 'PRIVATE' },
+      structuredContent: { token: 'PRIVATE' },
+    };
+    const callTool = vi.fn().mockResolvedValue(raw);
+    const { rerender } = renderApp(appDisplay());
+    const render = (sessionId: string) => (
+      <McpAppToolsContext.Provider value={{ sessionId: 'original', callTool }}>
+        <McpAppSessionContext.Provider value={sessionId}>
+          <McpApp display={appDisplay()} />
+        </McpAppSessionContext.Provider>
+      </McpAppToolsContext.Provider>
+    );
+    rerender(render('original'));
+    expect(appBridgeMocks.lastCapabilities).toEqual({
+      sandbox: {},
+      serverTools: {},
+    });
+    const result = await appBridgeMocks.last!.oncalltool!(
+      { name: 'get-embed-token' },
+      { signal: new AbortController().signal },
+    );
+    expect(result).toBe(raw);
+    expect(callTool).toHaveBeenCalledWith(
+      {
+        serverName: 'demo',
+        resourceUri: 'ui://demo/app',
+        name: 'get-embed-token',
+        arguments: {},
+      },
+      expect.any(AbortSignal),
+    );
+    const signal = callTool.mock.calls[0][1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    rerender(render('other-session'));
+    expect(signal.aborted).toBe(true);
+    expect(appBridgeMocks.lastCapabilities).toEqual({ sandbox: {} });
+    expect(appBridgeMocks.last?.oncalltool).toBeUndefined();
   });
 });

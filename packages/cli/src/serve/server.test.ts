@@ -2515,6 +2515,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionSources() {
       return { revision: 0, sources: [] };
     },
+    async callMcpAppTool() {
+      return { content: [] };
+    },
     async upsertSessionSource(_sessionId, input) {
       return {
         revision: 1,
@@ -4676,12 +4679,14 @@ describe('createServeApp', () => {
       });
       const sandbox = await request(app)
         .get('/mcp-app-sandbox')
+        .query({ hostOrigin: 'http://127.0.0.1:4170' })
         .set('Host', host);
-      expect(sandbox.status).toBe(200);
-      expect(sandbox.text).toContain('ui/notifications/sandbox-proxy-ready');
-      expect(sandbox.headers['content-security-policy']).toContain(
-        "form-action 'none'",
+      expect(sandbox.status).toBe(302);
+      expect(new URL(sandbox.headers['location']).hostname).toMatch(
+        /^[a-f0-9-]{36}\.localhost$/,
       );
+      expect(sandbox.text).not.toContain('sandbox-proxy-ready');
+      (app.locals['stopMcpAppSandbox'] as () => void)();
       const api = await request(app).get('/capabilities').set('Host', host);
       expect(api.status).toBe(401);
     });
@@ -25033,6 +25038,41 @@ describe('createServeApp', () => {
         expect(result.body.code).toBe(errorKind);
       },
     );
+
+    it('MCP App tools require a client id, validate input, and forward to the session bridge', async () => {
+      const bridge = fakeBridge();
+      const call = vi.spyOn(bridge, 'callMcpAppTool');
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const input = {
+        serverName: 'tableau',
+        resourceUri: 'ui://app',
+        name: 'get-embed-token',
+        arguments: {},
+      };
+      const missing = await auth(
+        request(app).post('/session/session-A/mcp-app/tools/call'),
+      ).send(input);
+      expect(missing.status).toBe(403);
+      const malformed = await auth(
+        request(app).post('/session/session-A/mcp-app/tools/call'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ ...input, arguments: [] });
+      expect(malformed.status).toBe(400);
+      expect(call).not.toHaveBeenCalled();
+      const result = await auth(
+        request(app).post('/session/session-A/mcp-app/tools/call'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send(input);
+      expect(result.status).toBe(200);
+      expect(call).toHaveBeenCalledWith(
+        'session-A',
+        input,
+        expect.any(AbortSignal),
+        { clientId: 'client-1' },
+      );
+    });
 
     it('POST /session/:id/artifacts requires a client id', async () => {
       const bridge = fakeBridge();

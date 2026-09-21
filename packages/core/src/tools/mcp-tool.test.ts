@@ -1221,6 +1221,113 @@ describe('DiscoveredMCPTool', () => {
         appResourceLimits,
       );
 
+    it('returns App results privately without rendering or leaking them', async () => {
+      const raw = {
+        content: [{ type: 'text', text: 'APP_SECRET_TOKEN' }],
+        structuredContent: { jwt: 'APP_SECRET_TOKEN' },
+        _meta: { token: 'APP_SECRET_TOKEN' },
+      };
+      const client = {
+        callTool: vi.fn(async () => raw),
+        readResource: vi.fn(),
+      };
+      const received = vi.fn();
+      const progress = vi.fn();
+      const result = await createAppTool(client)
+        .buildForApp({ param: 'test' }, received)
+        .execute(new AbortController().signal, progress);
+      expect(received).toHaveBeenCalledWith(raw);
+      expect(JSON.stringify(result)).not.toContain('APP_SECRET_TOKEN');
+      expect(client.readResource).not.toHaveBeenCalled();
+      expect(result.error).toBeUndefined();
+    });
+
+    it('keeps App errors private and does not retry a transport failure', async () => {
+      const received = vi.fn();
+      const client = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({
+            isError: true,
+            content: [{ type: 'text', text: 'APP_SECRET_TOKEN' }],
+          })
+          .mockRejectedValueOnce(
+            new Error('Connection closed APP_SECRET_TOKEN'),
+          ),
+      };
+      const tool = createAppTool(client);
+      const result = await tool
+        .buildForApp({ param: 'test' }, received)
+        .execute(new AbortController().signal);
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(JSON.stringify(result)).not.toContain('APP_SECRET_TOKEN');
+      await expect(
+        tool
+          .buildForApp({ param: 'test' }, received)
+          .execute(new AbortController().signal),
+      ).rejects.toThrow('MCP App tool call failed.');
+      expect(client.callTool).toHaveBeenCalledTimes(2);
+      expect(received).toHaveBeenCalledTimes(1);
+    });
+
+    it('suppresses App progress text and promptly cancels a non-cooperative server', async () => {
+      let resolveCall!: (value: { content: [] }) => void;
+      const progress = vi.fn();
+      const received = vi.fn();
+      const client: McpDirectClient = {
+        callTool: vi.fn<McpDirectClient['callTool']>((_params, options) => {
+          options?.onprogress?.({ progress: 1, message: 'APP_SECRET_TOKEN' });
+          return new Promise((resolve) => {
+            resolveCall = resolve;
+          });
+        }),
+      };
+      const abort = new AbortController();
+      const execution = createAppTool(client)
+        .buildForApp({ param: 'test' }, received)
+        .execute(abort.signal, progress);
+      abort.abort(new Error('APP_SECRET_TOKEN'));
+      await expect(execution).rejects.toThrow();
+      resolveCall({ content: [] });
+      await Promise.resolve();
+      expect(progress).not.toHaveBeenCalled();
+      expect(received).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves App visibility through resource, qualified-name and session clones', () => {
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        'ui://demo/app',
+        undefined,
+        undefined,
+        ['app'],
+      );
+      for (const clone of [
+        tool.asFullyQualifiedTool(),
+        tool.withAppResourceUi({}),
+        tool.withSessionConfig(true, true),
+        tool.withTrust(true),
+      ]) {
+        expect(clone.isAppVisible).toBe(true);
+        expect(clone.isModelVisible).toBe(false);
+        expect(clone.appVisibility).toEqual(['app']);
+      }
+    });
+
     const expectDiscardedLimitWarn = (
       key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
       warned: string | undefined,

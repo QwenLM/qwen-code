@@ -4,10 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import express from 'express';
+import express, {
+  type Application,
+  type Request,
+  type Response,
+  type NextFunction,
+} from 'express';
 import { runInNewContext } from 'node:vm';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildMcpAppCsp,
   mountMcpAppSandbox,
@@ -15,6 +20,22 @@ import {
 } from './mcp-app-sandbox.js';
 
 describe('MCP App sandbox', () => {
+  const disposers: Array<() => void> = [];
+  afterEach(() => {
+    for (const dispose of disposers.splice(0)) dispose();
+  });
+  const makeApp = () => {
+    const app = express();
+    disposers.push(mountMcpAppSandbox(app));
+    return app;
+  };
+  const readSandbox = (location: string, path = '/mcp-app-sandbox') => {
+    const url = new URL(location);
+    return request(`http://127.0.0.1:${url.port}`)
+      .get(path)
+      .set('Host', url.host);
+  };
+
   it('keeps declared origins and drops CSP injection attempts', () => {
     const parsed = parseMcpAppCsp(
       JSON.stringify({
@@ -55,70 +76,144 @@ describe('MCP App sandbox', () => {
     expect(buildMcpAppCsp(parsed)).toContain("form-action 'none'");
   });
 
-  it('serves the proxy with CSP and no-store headers', async () => {
-    const app = express();
-    mountMcpAppSandbox(app);
-
-    const response = await request(app).get('/mcp-app-sandbox');
-
+  it('redirects to an isolated one-use origin with server-pinned CSP', async () => {
+    const app = makeApp();
+    const redirect = await request(app)
+      .get('/mcp-app-sandbox')
+      .query({ hostOrigin: 'http://127.0.0.1:4170' });
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers['cache-control']).toBe('no-store');
+    expect(redirect.text).not.toContain('sandbox-proxy-ready');
+    const url = new URL(redirect.headers['location']);
+    expect(url.hostname).toMatch(/^[a-f0-9-]{36}\.localhost$/);
+    expect(url.search).toBe('');
+    expect((await readSandbox(url.href, '/session')).status).toBe(404);
+    expect(
+      (await readSandbox(url.href, '/mcp-app-sandbox?csp=changed')).status,
+    ).toBe(404);
+    const response = await readSandbox(url.href);
     expect(response.status).toBe(200);
     expect(response.headers['content-security-policy']).toContain(
       "frame-src 'none'",
     );
-    expect(response.headers['cache-control']).toContain('no-store');
     expect(response.headers['content-security-policy']).toContain(
       "form-action 'none'",
     );
-    expect(response.text).toContain('ui/notifications/sandbox-proxy-ready');
+    expect(response.headers['cache-control']).toContain('no-store');
+    expect(response.headers['origin-agent-cluster']).toBe('?1');
     expect(response.text).toContain(
-      "inner.setAttribute('sandbox', 'allow-scripts allow-forms')",
-    );
-    expect(response.text).not.toContain(
-      "inner.setAttribute('sandbox', 'allow-scripts allow-same-origin",
+      "'allow-scripts allow-forms allow-same-origin'",
     );
     expect(response.text).not.toContain("inner.setAttribute('allow'");
-    expect(response.text).not.toContain("clipboardWrite: 'clipboard-write'");
-    expect(response.text).not.toContain("camera: 'camera'");
-    expect(response.text).not.toContain("microphone: 'microphone'");
-    expect(response.text).not.toContain("geolocation: 'geolocation'");
-    expect(response.text).toContain('inner.srcdoc = params.html');
-    expect(response.text).toContain("event.origin === 'null'");
+    expect((await readSandbox(url.href)).status).toBe(404);
 
     const script = response.text.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     expect(script).toBeDefined();
-
-    const runSandbox = (hostOrigin: string) => {
-      const appendChild = vi.fn();
-      const postMessage = vi.fn();
-      const window = {
+    const inner = {
+      setAttribute: vi.fn(),
+      style: {},
+      contentWindow: { postMessage: vi.fn() },
+    };
+    const parent = { postMessage: vi.fn() };
+    const addEventListener = vi.fn();
+    runInNewContext(script!, {
+      window: {
         self: {},
         top: {},
-        location: {
-          href: `http://127.0.0.2:4170/mcp-app-sandbox?hostOrigin=${encodeURIComponent(hostOrigin)}`,
-        },
-        parent: { postMessage },
-        addEventListener: vi.fn(),
-      };
-      const document = {
-        referrer: '',
-        createElement: () => ({
-          setAttribute: vi.fn(),
-          style: { cssText: '' },
-          contentWindow: { postMessage: vi.fn() },
-        }),
-        body: { appendChild },
-      };
-      runInNewContext(script!, { window, document, URL });
-      return { appendChild, postMessage };
+        parent,
+        location: { origin: url.origin },
+        addEventListener,
+      },
+      document: { createElement: () => inner, body: { appendChild: vi.fn() } },
+    });
+    const onMessage = addEventListener.mock.calls[0][1];
+    onMessage({
+      source: parent,
+      origin: 'http://other.localhost',
+      data: {
+        method: 'ui/notifications/sandbox-resource-ready',
+        params: { html: 'wrong' },
+      },
+    });
+    expect(inner).not.toHaveProperty('srcdoc');
+    onMessage({
+      source: parent,
+      origin: 'http://127.0.0.1:4170',
+      data: {
+        method: 'ui/notifications/sandbox-resource-ready',
+        params: { html: 'right' },
+      },
+    });
+    expect(inner).toHaveProperty('srcdoc', 'right');
+    parent.postMessage.mockClear();
+    onMessage({ source: inner.contentWindow, origin: 'null', data: 'wrong' });
+    expect(parent.postMessage).not.toHaveBeenCalled();
+    onMessage({
+      source: inner.contentWindow,
+      origin: url.origin,
+      data: 'right',
+    });
+    expect(parent.postMessage).toHaveBeenCalledWith(
+      'right',
+      'http://127.0.0.1:4170',
+    );
+  });
+
+  it('settles a registration when shutdown races initial listener startup', async () => {
+    let handle!: (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+    ) => Promise<void>;
+    const app = {
+      get: (_path: string, handler: typeof handle) => {
+        handle = handler;
+      },
+    } as unknown as Application;
+    const dispose = mountMcpAppSandbox(app);
+    disposers.push(dispose);
+    const next = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      end: vi.fn(),
+      redirect: vi.fn(),
     };
+    const registration = handle(
+      { query: { hostOrigin: 'http://127.0.0.1:4170' } } as unknown as Request,
+      response as unknown as Response,
+      next,
+    );
+    dispose();
+    await registration;
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
+    expect(response.redirect).not.toHaveBeenCalled();
+  });
 
-    const loopback = runSandbox('http://127.0.0.2:4170');
-    expect(loopback.appendChild).toHaveBeenCalledOnce();
-    expect(loopback.postMessage).toHaveBeenCalledOnce();
+  it('assigns concurrent Apps distinct origins on one static listener', async () => {
+    const app = makeApp();
+    const replies = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        request(app)
+          .get('/mcp-app-sandbox')
+          .query({ hostOrigin: 'http://localhost:4170' }),
+      ),
+    );
+    const urls = replies.map((reply) => new URL(reply.headers['location']));
+    expect(new Set(urls.map((url) => url.origin)).size).toBe(4);
+    expect(new Set(urls.map((url) => url.port)).size).toBe(1);
+  });
 
-    const nonLoopback = runSandbox('https://example.com');
-    expect(nonLoopback.appendChild).not.toHaveBeenCalled();
-    expect(nonLoopback.postMessage).not.toHaveBeenCalled();
+  it.each([
+    'http://app.localhost:4170',
+    'https://evil.example',
+    'file://localhost',
+    'null',
+    '',
+  ])('rejects an untrusted parent %s', async (hostOrigin) => {
+    const response = await request(makeApp())
+      .get('/mcp-app-sandbox')
+      .query({ hostOrigin });
+    expect(response.status).toBe(400);
   });
 
   it.each([
@@ -128,15 +223,13 @@ describe('MCP App sandbox', () => {
   ])(
     'drops Unicode case-folding match %s before writing CSP headers',
     async (domain) => {
-      const app = express();
-      mountMcpAppSandbox(app);
-
-      const response = await request(app)
+      const redirect = await request(makeApp())
         .get('/mcp-app-sandbox')
         .query({
+          hostOrigin: 'http://127.0.0.1:4170',
           csp: JSON.stringify({ connectDomains: [domain] }),
         });
-
+      const response = await readSandbox(redirect.headers['location']);
       expect(response.status).toBe(200);
       expect(response.headers['content-security-policy']).not.toContain(domain);
     },

@@ -204,6 +204,7 @@ Signal: Signal number or \`(none)\` if no signal was received.
 export class ToolRegistry {
   // The tools keyed by tool name as seen by the LLM.
   private tools: Map<string, AnyDeclarativeTool> = new Map();
+  private mcpAppTools = new Map<string, DiscoveredMCPTool>();
   // Lazy tool factories keyed by tool name — resolved on first use.
   private factories: Map<string, ToolFactory> = new Map();
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
@@ -364,6 +365,15 @@ export class ToolRegistry {
       );
       return;
     }
+    if (tool instanceof DiscoveredMCPTool) {
+      if (tool.isAppVisible) {
+        this.mcpAppTools.set(
+          JSON.stringify([tool.serverName, tool.serverToolName]),
+          tool,
+        );
+      }
+      if (!tool.isModelVisible) return;
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -492,6 +502,14 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    for (const [key, tool] of source.mcpAppTools) {
+      if (
+        !this.mcpAppTools.has(key) &&
+        !this.isToolDisabled(tool.name, tool.permissionAliases)
+      ) {
+        this.mcpAppTools.set(key, tool);
+      }
+    }
     for (const tool of source.tools.values()) {
       if (
         (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
@@ -506,6 +524,7 @@ export class ToolRegistry {
   }
 
   private removeDiscoveredTools(): void {
+    this.mcpAppTools.clear();
     for (const tool of this.tools.values()) {
       if (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) {
         this.tools.delete(tool.name);
@@ -522,6 +541,9 @@ export class ToolRegistry {
    * @param serverName The name of the server to remove tools from.
    */
   removeMcpToolsByServer(serverName: string): void {
+    for (const [key, tool] of this.mcpAppTools) {
+      if (tool.serverName === serverName) this.mcpAppTools.delete(key);
+    }
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
@@ -652,17 +674,7 @@ export class ToolRegistry {
    * @param serverName - The name of the server to discover tools from.
    */
   async discoverToolsForServer(serverName: string): Promise<void> {
-    // Remove any previously discovered tools from this server
-    for (const [name, tool] of this.tools.entries()) {
-      if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
-        this.tools.delete(name);
-        // Drop reveal state too so a re-discovered tool of the same
-        // name doesn't inherit a `revealed: true` from before the
-        // disconnect (would surface in declarations immediately after
-        // reconnection).
-        this.revealedDeferred.delete(name);
-      }
-    }
+    this.removeMcpToolsByServer(serverName);
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
     this.config.getResourceRegistry().removeResourcesByServer(serverName);
@@ -1174,6 +1186,26 @@ export class ToolRegistry {
     return this.isToolAvailable(name) ? this.tools.get(name) : undefined;
   }
 
+  getMcpAppTool(
+    serverName: string,
+    rawName: string,
+  ): DiscoveredMCPTool | undefined {
+    const tool = this.mcpAppTools.get(JSON.stringify([serverName, rawName]));
+    return tool && !this.isToolDisabled(tool.name, tool.permissionAliases)
+      ? tool
+      : undefined;
+  }
+
+  hasMcpAppResource(serverName: string, uri: string): boolean {
+    return [...this.tools.values(), ...this.mcpAppTools.values()].some(
+      (tool) =>
+        tool instanceof DiscoveredMCPTool &&
+        tool.serverName === serverName &&
+        tool.appResourceUri === uri &&
+        !this.isToolDisabled(tool.name, tool.permissionAliases),
+    );
+  }
+
   async readMcpResource(
     serverName: string,
     uri: string,
@@ -1191,6 +1223,7 @@ export class ToolRegistry {
    * This method is idempotent and safe to call multiple times.
    */
   async stop(): Promise<void> {
+    this.mcpAppTools.clear();
     // Wait for any in-flight factory promises to settle before disposing, so
     // that tools which finish loading after stop() is called are still cleaned
     // up rather than leaking their listeners and resources.
