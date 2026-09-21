@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../../config/config.js';
 import type { SubagentManager } from '../../../subagents/subagent-manager.js';
 import { ToolDisplayNames, ToolNames } from '../../../tools/tool-names.js';
+import { ToolMode } from '../../../tools/code-mode.js';
 import { AgentTool } from '../../../tools/agent/agent.js';
 import { parseSkillContent } from '../../skill-load.js';
 import { AGENT_DELEGATION_SKILL_NAME } from '../../agent-delegation-skill.js';
@@ -56,17 +57,28 @@ function skillFrontmatter(): string {
  * models a user who turned off the whole bundled level, and
  * `skillDisabledByName: true` one who named this reference in
  * `skills.disabled`; in either the description carries neither.
+ * `toolMode: ToolMode.CodeModeOnly` models a session where both bridge tools
+ * are hidden, so a deferred Skill tool is reached through the `exec` binding
+ * instead.
  */
 async function agentDescription({
   skills = true,
   bundledDisabled = false,
   skillDisabledByName = false,
   skillDeferred = false,
+  toolMode = ToolMode.Direct,
 }: {
   skills?: boolean;
   bundledDisabled?: boolean;
   skillDisabledByName?: boolean;
   skillDeferred?: boolean;
+  /**
+   * Always declared on the stub rather than left absent: an omitted
+   * `getToolMode` yields `undefined`, which the route resolver treats exactly
+   * like `Direct`, so a stub without the method cannot tell the two apart and
+   * the CodeModeOnly guard would be untested on this path.
+   */
+  toolMode?: ToolMode;
 } = {}): Promise<string> {
   const subagentManager = {
     listSubagents: vi.fn().mockResolvedValue([]),
@@ -78,6 +90,7 @@ async function agentDescription({
     getLlmClient: () => undefined,
     isAgentTeamEnabled: () => false,
     isTodoWriteEnabled: () => true,
+    getToolMode: () => toolMode,
     // Read before the Skill tool is asked about: a user opt-out wins over the
     // lack of a route, which is the ordering the withheld test below pins.
     ...(bundledDisabled
@@ -234,6 +247,34 @@ describe('bundled agent-delegation skill', () => {
       `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
     );
     expect(description).toContain(
+      toolSearchBridgeSentence(ToolDisplayNames.SKILL),
+    );
+  });
+
+  /**
+   * The same deferral under `ToolMode.CodeModeOnly`, where both bridge tools
+   * are hidden (`code-mode.ts` `HIDDEN_TOOLS`) and the deferred Skill tool is
+   * reached through the `exec` binding. The guard that keeps the bridge
+   * sentence out of the route exists for this tool above all: `AgentTool`
+   * freezes its surface in the constructor, so a dead instruction here is
+   * wrong for every remaining turn of the session, while the Workflow
+   * description re-asks per turn. `workflow-authoring-skill.test.ts` pins the
+   * guard on the Workflow route; this pins it on the Agent route.
+   * Mutation check: dropping
+   * `config.getToolMode?.() !== ToolMode.CodeModeOnly &&` from
+   * `resolveBundledReferenceRoute` turns this red, exactly as it turns the
+   * Workflow row red.
+   */
+  it('points straight at the skill when CodeModeOnly hides the bridge', async () => {
+    const description = await agentDescription({
+      skillDeferred: true,
+      toolMode: ToolMode.CodeModeOnly,
+    });
+
+    expect(description).toContain(
+      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
+    );
+    expect(description).not.toContain(
       toolSearchBridgeSentence(ToolDisplayNames.SKILL),
     );
   });
