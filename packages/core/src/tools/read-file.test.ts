@@ -288,27 +288,37 @@ describe('ReadFileTool', () => {
       },
     );
 
-    it('should reject offset or limit for notebook files', () => {
-      const params: ReadFileToolParams = {
-        file_path: path.join(tempRootDir, 'test.ipynb'),
-        offset: 0,
-        limit: 10,
-      };
+    it.each([
+      { offset: 0 },
+      { offset: -1 },
+      { limit: 10 },
+      { limit: 0 },
+      { limit: -1 },
+      { offset: 0, limit: 2000, pages: '' },
+      { pages: '1' },
+      { pages: 'invalid' },
+    ])('gives a path-only notebook retry for %j', (pagination) => {
+      const filePath = path.join(tempRootDir, 'test "quoted".IPYNB');
+      const error = tool.validateToolParams({
+        file_path: filePath,
+        ...pagination,
+      });
 
-      expect(() => tool.build(params)).toThrow(
-        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      expect(error).toContain(
+        "For Jupyter notebooks (.ipynb), omit 'offset', 'limit', and 'pages' entirely; do not use 0 or null.",
       );
+      const retry = JSON.parse(error!.split('Retry with only: ')[1]);
+      expect(retry).toEqual({ file_path: filePath });
+      expect(() => tool.build(retry)).not.toThrow();
     });
 
-    it('should reject pages for notebook files', () => {
-      const params: ReadFileToolParams = {
-        file_path: path.join(tempRootDir, 'test.ipynb'),
-        pages: '1',
-      };
-
-      expect(() => tool.build(params)).toThrow(
-        'pages is not supported for Jupyter notebook (.ipynb) files',
-      );
+    it.each(['', '   '])('allows empty notebook pages (%j)', (pages) => {
+      expect(() =>
+        tool.build({
+          file_path: path.join(tempRootDir, 'test.ipynb'),
+          pages,
+        }),
+      ).not.toThrow();
     });
   });
 
@@ -1051,7 +1061,15 @@ describe('ReadFileTool', () => {
         metadata: { language_info: { name: 'python' } },
       };
       await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
-      const params: ReadFileToolParams = { file_path: nbPath };
+      const error = tool.validateToolParams({
+        file_path: nbPath,
+        offset: 0,
+        limit: 0,
+      });
+      expect(error).toContain('Retry with only: ');
+      const params: ReadFileToolParams = JSON.parse(
+        error!.split('Retry with only: ')[1],
+      );
       const invocation = tool.build(params) as ToolInvocation<
         ReadFileToolParams,
         ToolResult
