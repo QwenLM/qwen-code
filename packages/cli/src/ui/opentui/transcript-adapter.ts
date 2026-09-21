@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import {
   extractStructuredResult,
+  formatToolArgs,
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
@@ -191,6 +192,10 @@ export function transcribeSession(
               tool: name,
               title: opts.toolTitle?.(name) ?? name,
             });
+            const args = formatToolArgs(
+              p.functionCall.args as Record<string, unknown> | undefined,
+            );
+            if (args) events.push({ type: 'tool-args', id, args });
           } else if (p.text) {
             events.push({ type: 'text', delta: p.text });
           }

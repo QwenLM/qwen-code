@@ -46,10 +46,15 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { buildFailureLines } from './workflow-failure-lines.js';
+import {
+  formatWorkflowSizeWarningLog,
+  type WorkflowSizeWarning,
+} from './runtime/workflow-size.js';
 import { parseExtensionWorkflowName } from './runtime/workflow-saved.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
+  NO_JOURNAL_NO_RESUME_NOTE,
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from './workflow-resume-call.js';
 import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
@@ -349,6 +354,12 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * shape. Treat `undefined` as `0`.
    */
   agentsRespawned?: number;
+  /**
+   * The large-run flag, recorded the first time this run scheduled more agents
+   * or projected more output tokens than its thresholds. At most one per run;
+   * absent while the run stays within bounds.
+   */
+  sizeWarning?: WorkflowSizeWarning;
   /** Most recent log lines from the sandbox's `getLogs()`. Capped at 100 for the UI. */
   recentLogs: string[];
   /** Ordered runtime facts used to replay this run after it settles. */
@@ -407,6 +418,15 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * it rides here. Process-local, like the notification it feeds.
    */
   authoringHint?: string;
+  /**
+   * The name a name-only session may resume this run by. The runner sets it
+   * only when the run's workflow name resolved, as the run started, to the
+   * script the run executed: a name recorded from a path in a subdirectory,
+   * one a same-named project workflow shadows, or one a retry carried over to
+   * an inline copy would lead a resume to a different script. Process-local,
+   * like the notification it feeds.
+   */
+  resumeName?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -434,6 +454,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'agentsDispatched'
   | 'agentsCompleted'
   | 'agentsRespawned'
+  | 'sizeWarning'
   | 'recentLogs'
   | 'events'
   | 'tokensSpent'
@@ -515,6 +536,17 @@ interface WorkflowApprovalRuntime {
 }
 
 export class WorkflowRunRegistry {
+  /**
+   * The session runs named workflows only (`tools.workflowNameOnly`). Set by
+   * the owning Config, which holds the lock; read when a notification offers
+   * a resume call.
+   */
+  private nameOnly = false;
+
+  setNameOnly(nameOnly: boolean): void {
+    this.nameOnly = nameOnly;
+  }
+
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
   private readonly starting = new Map<string, AbortController>();
@@ -669,8 +701,8 @@ export class WorkflowRunRegistry {
     // produced none.
     const recovery =
       entry.status === 'failed'
-        ? buildRecoveryLines(entry)
-        : buildDiagnosticsLines(entry);
+        ? buildRecoveryLines(entry, this.nameOnly)
+        : buildDiagnosticsLines(entry, this.nameOnly);
     if (recovery.length > 0) {
       const tag = entry.status === 'failed' ? 'recovery' : 'diagnostics';
       modelParts.push(
@@ -704,17 +736,40 @@ export class WorkflowRunRegistry {
     runId: string,
     createController: () => AbortController,
   ): AbortController {
-    const existing = this.entries.get(runId);
-    if (
-      (existing && isActiveWorkflowStatus(existing.status)) ||
-      this.handles.has(runId) ||
-      this.starting.has(runId)
-    ) {
-      throw new Error(`Workflow run ${runId} is already active.`);
-    }
+    const refusal = this.describeLiveRun(runId);
+    if (refusal) throw new Error(refusal);
     const controller = createController();
     this.starting.set(runId, controller);
     return controller;
+  }
+
+  /**
+   * Why a run id cannot be started again yet, or `undefined` when it can. A
+   * second start under a live id would run two copies of its agents against
+   * one journal, so each case says what to do instead of only that it is
+   * taken.
+   */
+  private describeLiveRun(runId: string): string | undefined {
+    const twoCopies =
+      'Starting it again now would run two copies of its agents against the same journal';
+    if (this.starting.has(runId)) {
+      return `Workflow run ${runId} is already starting. Wait for that start to settle before resuming it.`;
+    }
+    const existing = this.entries.get(runId);
+    if (existing && isActiveWorkflowStatus(existing.status)) {
+      // Only a run that has finished pausing can be resumed (`resume()`
+      // wants `paused`), so a run still on its way there is told to wait.
+      if (existing.status === 'pausing') {
+        return `Workflow run ${runId} is pausing, not finished. ${twoCopies}: wait for it to pause and resume it from /workflows, or cancel it there and wait for it to exit.`;
+      }
+      return existing.status === 'paused'
+        ? `Workflow run ${runId} is paused, not finished. ${twoCopies}: resume it from /workflows, or cancel it there and wait for it to exit.`
+        : `Workflow run ${runId} is still running. ${twoCopies}: cancel it from /workflows first, or wait for it to settle.`;
+    }
+    if (this.handles.has(runId)) {
+      return `Workflow run ${runId} is not running but its run has not exited yet. ${twoCopies}: wait for it to exit.`;
+    }
+    return undefined;
   }
 
   releaseStart(runId: string, controller: AbortController): void {
@@ -794,6 +849,7 @@ export class WorkflowRunRegistry {
     entry.agentsDispatched = 0;
     entry.agentsCompleted = 0;
     entry.agentsRespawned = 0;
+    delete entry.sizeWarning;
     entry.recentLogs = [];
     entry.events = [];
     entry.tokensSpent = 0;
@@ -1343,6 +1399,30 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * Record the large-run flag. Returns whether it was recorded: a run is
+   * flagged at most once, and only while it is still active — a warning for a
+   * run that already settled would ask the user to stop something stopped.
+   */
+  onSizeWarning(runId: string, warning: WorkflowSizeWarning): boolean {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      entry.sizeWarning !== undefined ||
+      !isActiveWorkflowStatus(entry.status)
+    ) {
+      return false;
+    }
+    entry.sizeWarning = warning;
+    this.onLogAppended(
+      runId,
+      formatWorkflowSizeWarningLog(warning),
+      warning.at,
+    );
+    this.emitStatusChange(entry);
+    return true;
+  }
+
+  /**
    * P5: mirror a `budgetUpdated` emitter event into the entry. Attributes
    * the cumulative delta (`spent - entry.tokensSpent`) to the entry's
    * `currentPhase`. Per-phase attribution is best-effort: agents in
@@ -1883,10 +1963,14 @@ function buildUsageLine(entry: WorkflowTask): string {
 }
 
 /** `<recovery>` body for a failed run. */
-function buildRecoveryLines(entry: WorkflowTask): string[] {
+function buildRecoveryLines(entry: WorkflowTask, nameOnly: boolean): string[] {
   const lines: string[] = [];
-  const resume = buildResumeCall(entry);
-  if (resume) {
+  const resume = buildResumeCall({ ...entry, nameOnly });
+  // A resume replays the run's journal, so a run that wrote none is not
+  // offered one: the call would be refused.
+  if (resume && !entry.journalPath) {
+    lines.push(NO_JOURNAL_NO_RESUME_NOTE);
+  } else if (resume) {
     // Only an extension workflow's name carries `<extension>:`. Its file is
     // third-party and an extension update replaces it, so the copy has to
     // land somewhere the user owns.
@@ -1898,13 +1982,19 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
       : entry.workflowName
         ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
         : 'Edit the generated script copy first if the script needs to change.';
-    const journalAdvice = entry.journalPath
-      ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
-      : 'No journal was written for this run, so every agent() call runs live.';
-    lines.push(`Resume: ${resume} — ${pathAdvice} ${journalAdvice}`);
+    lines.push(
+      `Resume: ${resume} — ${pathAdvice} The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.`,
+    );
     if (hasUninlinableResumeArgs(entry)) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
+  } else if (nameOnly) {
+    // The model may not pass a script here, and this run has no name that
+    // leads back to the one it ran — a host's script, or a name that now
+    // resolves elsewhere — so the resume is not the model's to make.
+    lines.push(
+      'This session runs named workflows only, and this run cannot be resumed by name, so only whoever started it can retry it.',
+    );
   }
   if (entry.journalPath) {
     lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
@@ -1916,14 +2006,20 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
 }
 
 /** `<diagnostics>` body for a completed run. */
-function buildDiagnosticsLines(entry: WorkflowTask): string[] {
+function buildDiagnosticsLines(
+  entry: WorkflowTask,
+  nameOnly: boolean,
+): string[] {
   const lines: string[] = [];
   if (entry.journalPath) {
     lines.push(
       `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
     );
   }
-  const resume = buildResumeCall(entry);
+  // Offered only beside a journal: without one the call would be refused.
+  const resume = entry.journalPath
+    ? buildResumeCall({ ...entry, nameOnly })
+    : null;
   if (resume) {
     lines.push(
       entry.workflowName

@@ -10,6 +10,8 @@ import {
 import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../utils/env-provenance.js';
+export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
@@ -26,6 +28,8 @@ export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
 export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  // Project reloads must not replace or relabel an operator container requirement.
+  'QWEN_AGENT_EXECUTION_BACKEND',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   // These two select which file becomes the System / SystemDefaults settings
@@ -57,6 +61,10 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // The name-only lock is a deployment policy. A project that wants it sets
+  // tools.workflowNameOnly, which a workspace may only turn on; a project
+  // .env must not be able to unset the operator's exported value.
+  'QWEN_CODE_WORKFLOW_NAME_ONLY',
   // The review prebuild (commands/review/lib/prebuild.ts) is an operator
   // decision: CI welds it as real step env, a local operator exports it. A
   // project `.env` must not opt its own review into the blocking
@@ -271,6 +279,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // child as Conversations-hosted (it would force the writer lease and the
   // unbound-durable-task skip onto sessions the contract does not cover).
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -314,6 +323,7 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
 // stay inherited; the CLI captures and deletes the Conversations marker.
 const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
   PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
+  PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
   'sandbox',
   'sandbox_enforcement',
 ]);

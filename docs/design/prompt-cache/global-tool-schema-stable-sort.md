@@ -22,9 +22,9 @@ and messages prefix can also lose reuse.
 Today `GeminiClient.setTools()` directly uses the return value of
 `ToolRegistry.getFunctionDeclarations()`, and `getFunctionDeclarations()`
 iterates tools in `Map` insertion order. Built-in tool registration order is
-usually stable, but progressive MCP discovery, ToolSearch reveals, MCP
-reconnects, and external tool registration can all cause the same tool set to be
-serialized in different orders. That creates unnecessary prompt cache misses.
+usually stable, but progressive MCP discovery, MCP reconnects, and external
+tool registration can all cause the same tool set to be serialized in different
+orders. That creates unnecessary prompt cache misses.
 
 ## Goals
 
@@ -141,8 +141,8 @@ stable prefix bytes unchanged
 ```
 
 This design improves hit probability by stabilizing tools array order,
-especially for registration-order churn caused by progressive MCP discovery and
-ToolSearch reveals.
+especially for registration-order churn caused by progressive MCP discovery,
+MCP reconnects, and external tool registration.
 
 ## Design
 
@@ -333,7 +333,7 @@ npm run build && npm run typecheck
   risk is acceptable because tool order should not be product semantics; stable
   cache prefixes have higher priority.
 - This design does not prevent cache misses caused by newly added tools. New MCP
-  server tools, tool schema content changes, and ToolSearch reveals of new tools
+  server tools, tool schema content changes, and explicit reveal-state changes
   will still legitimately change the tools block.
 - If a provider requires preserving tool registration semantics in the future,
   that should be handled in the provider layer. Current code has no such

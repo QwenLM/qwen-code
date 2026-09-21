@@ -15,12 +15,12 @@ import type {
   GoalTurnHost,
   GoalContinuationTurn,
   GoalTurnPermit,
-  ActiveGoal,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
   ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
+import { formatDuration } from './ui/utils/formatters.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -81,7 +81,6 @@ import {
   getErrorType,
   getActiveInteractionSpan,
   buildGoalContinuationParts,
-  goalCheckpointHealthLine,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -244,19 +243,6 @@ function sameGoalPermit(
   );
 }
 
-function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
-  const goal = snapshot.goal;
-  if (goal?.status !== 'active') return null;
-  return {
-    condition: goal.objective,
-    iterations: goal.turnCount,
-    setAt: goal.createdAt,
-    tokensAtStart: 0,
-    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
-    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
-  };
-}
-
 /**
  * The TEXT rendering of a Goal control's outcome.
  *
@@ -279,7 +265,15 @@ export function formatGoalState(
   // scrollback and piped into scripts, neither of which is helped by `1.2k`.
   const usage: string[] = [];
   if (goal.turnCount > 0) {
-    usage.push(`${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`);
+    const turns = goal.turnBudget ?? goal.turnCount;
+    usage.push(
+      `${goal.turnCount}${goal.turnBudget === undefined ? '' : ` of ${goal.turnBudget}`} ${turns === 1 ? 'turn' : 'turns'}`,
+    );
+  }
+  if (goal.activeTimeMs > 0 && goal.activeTimeBudgetMs !== undefined) {
+    usage.push(
+      `${formatDuration(goal.activeTimeMs, { hideTrailingZeros: true })} of ${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })} active`,
+    );
   }
   if (goal.tokensUsed > 0) {
     const used = goal.tokensUsed.toLocaleString('en-US');
@@ -294,15 +288,11 @@ export function formatGoalState(
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
-  // Both lines are written to stdout as they are, so both are sanitized: a
-  // pause reason can embed a raw provider error.
+  // Written to stdout as it is, so it is sanitized: a pause reason can embed
+  // a raw provider error.
   if (goal.status !== 'active' && goal.lastReason) {
     lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
   }
-  // The checkpoint line the interactive cards show, in the same words: a
-  // checkpoint stop reason names the kind of failure, only this says which.
-  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
-  if (checkpoint !== undefined) lines.push(`Checkpoint: ${checkpoint}`);
   return lines.join('\n');
 }
 
@@ -501,21 +491,55 @@ export interface RunNonInteractiveOptions {
  * under the tool's canonical name (via `canonicalToolName`, as execution and
  * the interactive scheduler do) so a legacy alias — e.g. `search_file_content`
  * for `grep` — classifies with the same safety and doesn't parallelize
- * differently from the TUI. An unregistered tool resolves to `undefined`,
+ * differently from the TUI. A valid ToolCall envelope uses its hidden target's
+ * identity for the same reason. An unregistered tool resolves to `undefined`,
  * which {@link isToolCallConcurrencySafe} treats as unsafe.
  */
 function partitionHeadlessToolCalls(
   requests: ToolCallRequestInfo[],
   config: Config,
 ): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
+  return partitionByConcurrencySafety(requests, (request) => {
+    const executionRequest = getHeadlessExecutionRequest(request, config);
+    return isToolCallConcurrencySafe(
+      executionRequest.name,
+      config.getToolRegistry().getTool(canonicalToolName(executionRequest.name))
+        ?.kind,
+      executionRequest.args,
+    );
+  });
+}
+
+function getHeadlessExecutionRequest(
+  request: ToolCallRequestInfo,
+  config: Config,
+): ToolCallRequestInfo {
+  if (canonicalToolName(request.name) !== ToolNames.TOOL_CALL) {
+    return request;
+  }
+
+  const targetName = request.args['name'];
+  const targetArgs = request.args['arguments'];
+  if (
+    typeof targetName !== 'string' ||
+    typeof targetArgs !== 'object' ||
+    targetArgs === null ||
+    Array.isArray(targetArgs)
+  ) {
+    return request;
+  }
+
   const registry = config.getToolRegistry();
-  return partitionByConcurrencySafety(requests, (request) =>
-    isToolCallConcurrencySafe(
-      request.name,
-      registry.getTool(canonicalToolName(request.name))?.kind,
-      request.args,
-    ),
-  );
+  const target = registry.getTool(canonicalToolName(targetName));
+  if (!target || !registry.isDeferredAndHidden(target.name)) {
+    return request;
+  }
+
+  return {
+    ...request,
+    name: target.name,
+    args: targetArgs as Record<string, unknown>,
+  };
 }
 
 /**
@@ -569,13 +593,16 @@ export async function runNonInteractive(
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
-    const cleanupReviewWorktrees = (gitTimeout?: number) =>
+    const cleanupReviewWorktrees = (gitTimeout?: number) => {
+      // Review leases live in the tool-writable workspace in this mode.
+      if (config.getShellExecutionSandbox?.()) return;
       cleanupReviewWorktreeLeases({
         sessionId,
         promptId: prompt_id,
         repositoryRoot: config.getProjectRoot(),
         gitTimeout,
       });
+    };
     const unregisterReviewWorktreeCleanup = registerCleanup(() =>
       cleanupReviewWorktrees(1_000),
     );
@@ -630,10 +657,6 @@ export async function runNonInteractive(
       adapter.processEvent({
         type: LlmEventType.GoalState,
         value: snapshot,
-      });
-      adapter.processEvent({
-        type: LlmEventType.ActiveGoal,
-        value: projectLegacyActiveGoal(snapshot),
       });
     };
     const observeGoalRuntime = (runtime: GoalRuntime) => {
@@ -1101,6 +1124,7 @@ export async function runNonInteractive(
         config,
         sessionId,
         permissionMode,
+        settings,
       );
       adapter.emitMessage(systemMessage);
 
@@ -1141,6 +1165,7 @@ export async function runNonInteractive(
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
           apiHistory: llmClient.getChat().getHistory(),
+          completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -1848,6 +1873,10 @@ export async function runNonInteractive(
           ToolCallResponseInfo,
           'success' | 'error' | 'cancelled'
         >();
+        const executionRequestByResponse = new Map<
+          ToolCallResponseInfo,
+          ToolCallRequestInfo
+        >();
         const structuredOutputActive =
           config.getJsonSchema() &&
           batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
@@ -2034,8 +2063,12 @@ export async function runNonInteractive(
         const launchToolCall = async (
           requestInfo: ToolCallRequestInfo,
         ): Promise<ToolCallResponseInfo> => {
+          const executionRequest = getHeadlessExecutionRequest(
+            requestInfo,
+            config,
+          );
           debugLogger.debug(
-            `[runNonInteractive] launching tool call ${requestInfo.callId} (${requestInfo.name})`,
+            `[runNonInteractive] launching tool call ${requestInfo.callId} (${executionRequest.name})`,
           );
           const inputFormat =
             typeof config.getInputFormat === 'function'
@@ -2050,14 +2083,14 @@ export async function runNonInteractive(
           // has its own complex handler (subagent messages). All other
           // tools with canUpdateOutput=true (e.g., MCP tools) get a
           // generic handler that emits progress via the adapter.
-          const isAgentTool = requestInfo.name === 'agent';
+          const isAgentTool = executionRequest.name === ToolNames.AGENT;
           const { handler: outputUpdateHandler } = isAgentTool
             ? createAgentToolProgressHandler(
                 config,
                 requestInfo.callId,
                 adapter,
               )
-            : createToolProgressHandler(requestInfo, adapter);
+            : createToolProgressHandler(executionRequest, adapter);
 
           const response = await executeToolCall(
             config,
@@ -2078,6 +2111,7 @@ export async function runNonInteractive(
               onAllToolCallsComplete: async (completedCalls) => {
                 for (const call of completedCalls) {
                   statusByResponse.set(call.response, call.status);
+                  executionRequestByResponse.set(call.response, call.request);
                 }
               },
               runtimeView,
@@ -2087,7 +2121,7 @@ export async function runNonInteractive(
             },
           );
           debugLogger.debug(
-            `[runNonInteractive] tool call ${requestInfo.callId} (${requestInfo.name}) settled${
+            `[runNonInteractive] tool call ${requestInfo.callId} (${executionRequest.name}) settled${
               response.error ? ' with error' : ''
             }`,
           );
@@ -2101,6 +2135,9 @@ export async function runNonInteractive(
           requestInfo: ToolCallRequestInfo,
           toolResponse: ToolCallResponseInfo,
         ): boolean => {
+          const executionRequest =
+            executionRequestByResponse.get(toolResponse) ??
+            getHeadlessExecutionRequest(requestInfo, config);
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
             // formatted as tool_result blocks. handleToolError detects
@@ -2108,7 +2145,7 @@ export async function runNonInteractive(
             // the LLM can decide what to do next. In text mode, we
             // still log the error.
             handleToolError(
-              requestInfo.name,
+              executionRequest.name,
               toolResponse.error,
               config,
               toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
@@ -2119,14 +2156,14 @@ export async function runNonInteractive(
             );
           }
 
-          adapter.emitToolResult(requestInfo, toolResponse);
+          adapter.emitToolResult(executionRequest, toolResponse);
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
           config
             .getLlmClient()
             .recordCompletedToolCall(
-              requestInfo.name,
-              requestInfo.args as Record<string, unknown>,
+              executionRequest.name,
+              executionRequest.args as Record<string, unknown>,
             );
 
           // Capture model override from skill tool results.
@@ -2356,11 +2393,20 @@ export async function runNonInteractive(
           const response = responseByRequest.get(request);
           return response ? [{ request, response }] : [];
         });
+        const resolvedResponses = orderedResponses.map(
+          ({ request, response }) => ({
+            request,
+            response,
+            executionRequest:
+              executionRequestByResponse.get(response) ??
+              getHeadlessExecutionRequest(request, config),
+          }),
+        );
         const finalized = await finalizeToolResponses(
           config,
-          orderedResponses.map(({ request, response }) => ({
+          resolvedResponses.map(({ request, response, executionRequest }) => ({
             callId: request.callId,
-            toolName: request.name,
+            toolName: executionRequest.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             artifacts: response.artifacts,
@@ -2375,11 +2421,12 @@ export async function runNonInteractive(
 
         const chatRecordingService = config.getChatRecordingService?.();
         const toolResponseParts: Part[] = [];
-        for (let index = 0; index < orderedResponses.length; index++) {
-          const { request, response } = orderedResponses[index];
+        for (let index = 0; index < resolvedResponses.length; index++) {
+          const { request, response, executionRequest } =
+            resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          const goalProvenance = goalToolResultProvenance(request);
+          const goalProvenance = goalToolResultProvenance(executionRequest);
           chatRecordingService?.recordToolResult?.(
             finalizedParts,
             {
@@ -2542,6 +2589,12 @@ export async function runNonInteractive(
           // Process fallback metadata only after the abandoned attempt has
           // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
+          if (
+            event.type === LlmEventType.HookSystemMessage &&
+            outputFormat === OutputFormat.TEXT
+          ) {
+            process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
+          }
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
@@ -2865,6 +2918,14 @@ export async function runNonInteractive(
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
+                if (
+                  event.type === LlmEventType.HookSystemMessage &&
+                  outputFormat === OutputFormat.TEXT
+                ) {
+                  process.stderr.write(
+                    `${sanitizeTerminalText(event.value)}\n`,
+                  );
+                }
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
