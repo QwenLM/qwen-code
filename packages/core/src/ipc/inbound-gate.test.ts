@@ -2786,6 +2786,92 @@ describe('a gate for a process hosting several sessions', () => {
     expect(asked).toEqual(['chat-a', 'chat-b', 'chat-c']);
   });
 
+  it('looks the addressee up once for a whole admission', () => {
+    // `admit` is synchronous, but the host reads live state and a settings
+    // reader it calls could move the session map underneath a second
+    // lookup — and then the record admission wrote and the key the gate
+    // parks under would no longer name the same session.
+    let lookups = 0;
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      resolveSessionId: (id) => {
+        lookups += 1;
+        return id;
+      },
+      deliver: () => {},
+    });
+
+    expect(
+      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'chat-a' })),
+    ).toBe('held');
+    expect(lookups).toBe(1);
+  });
+
+  it('counts a parked message against the allowance it was parked under', () => {
+    // The host can stop recognizing the id a message was addressed by
+    // while that message waits. Re-keying the backlog on today's answer
+    // would take those messages out of the allowance they are actually
+    // occupying, and the session would quietly get a second one.
+    let liveIdResolves = true;
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      // `chat-live` is the id the session answers to now; `chat-pub` is
+      // the name the host keeps it under. A `/clear` takes the first away.
+      resolveSessionId: (id) => {
+        if (id === 'chat-pub') return 'chat-pub';
+        if (id === 'chat-live' && liveIdResolves) return 'chat-pub';
+        return undefined;
+      },
+      deliver: () => {},
+    });
+
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      expect(
+        gate.admit(frame({ fromMode: 'prompting', toSessionId: 'chat-live' })),
+      ).toBe('held');
+    }
+    liveIdResolves = false;
+
+    // The same session, by the name the host still keeps it under. Its
+    // allowance is full.
+    expect(
+      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'chat-pub' })),
+    ).toBe('dropped');
+  });
+
+  it("expires a parked message on its own session's lifetime, not its sender's spelling", () => {
+    // The lifetime is re-read on every sweep, so a setting change reaches
+    // messages already waiting — but it is read for the session the
+    // message was parked for, which is not the spelling on the frame.
+    const asked: Array<string | undefined> = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      resolveSessionId: (id) =>
+        id === 'chat-live' || id === 'chat-pub' ? 'chat-pub' : undefined,
+      getHeldExpiryMs: (id) => {
+        asked.push(id);
+        return null;
+      },
+      deliver: () => {},
+    });
+
+    expect(
+      gate.admit(frame({ fromMode: 'prompting', toSessionId: 'chat-live' })),
+    ).toBe('held');
+    asked.length = 0;
+    gate.reevaluate('settings-changed');
+
+    // How many times the sweep reads is pinned elsewhere; what matters
+    // here is that every read names the session, not the sender's id.
+    expect([...new Set(asked)]).toEqual(['chat-pub']);
+  });
+
   it('gives two spellings of a name nobody claims one hold allowance', () => {
     // A name the host did not give back is nobody's, and the id on the
     // frame is all the gate has to key on. Two spellings of it must not
