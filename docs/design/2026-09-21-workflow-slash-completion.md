@@ -31,9 +31,18 @@ Both would introduce new delivery rules for a case the existing background mode
 already handles. Removing the foreground notification guard would deliver
 model-initiated foreground results twice.
 
+Another option is to expand interactive commands into model prompts, as headless
+and ACP commands do. The model could then invoke a foreground workflow and keep
+inline progress. This adds a model turn before execution and gives the model
+control over whether to invoke the tool and how to pass the arguments. Background
+dispatch preserves the user's explicit invocation and arguments without that
+extra launch step.
+
 The chosen change moves inline live progress to Background Tasks and
-`/workflows`, and releases the prompt after launch. This is the visible behavior
-change maintainers should assess. It introduces no protocol or persisted-schema
+`/workflows`, and releases the prompt after launch. Completion also starts a model
+turn, consuming tokens even for a short script whose result previously stayed in
+the local tool card. Maintainers should assess both the progress presentation and
+the added completion cost. The change introduces no protocol or persisted-schema
 change and does not alter model-initiated, headless, or ACP execution.
 
 ## Scope
