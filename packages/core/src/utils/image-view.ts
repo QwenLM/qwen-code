@@ -337,14 +337,24 @@ async function renderFullFrameView(
  * Bound an in-memory image (an MCP tool result, say) to the same visual budget
  * `read_file` applies. Returns null when the image already fits, so small
  * images keep their original bytes, format and alpha channel.
+ *
+ * `maxBytes` is the caller's inline byte ceiling. Fitting the visual budget
+ * says nothing about file size — a 1200x800 PNG carrying a large ancillary
+ * chunk fits the geometry and still outweighs the ceiling — so a caller that
+ * would otherwise drop the part passes its ceiling here and gets a re-encode
+ * instead. Omit it to keep "fits" purely visual, as `read_file` does.
  */
 export async function boundImageBuffer(
   bytes: Buffer,
   label: string,
   signal: AbortSignal,
+  maxBytes?: number,
 ): Promise<ImageView | null> {
   const prepared = await prepareImageBuffer(bytes, label, signal);
-  if (fitsVisualBudget(orientedSize(prepared.metadata))) {
+  if (
+    fitsVisualBudget(orientedSize(prepared.metadata)) &&
+    (maxBytes === undefined || prepared.bytes.length <= maxBytes)
+  ) {
     return null;
   }
   return renderFullFrameView(label, prepared, signal);

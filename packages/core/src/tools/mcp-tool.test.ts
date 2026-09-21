@@ -772,132 +772,6 @@ describe('DiscoveredMCPTool', () => {
       ).toBeLessThanOrEqual(1568);
     });
 
-    it('forwards original bytes untouched when omni delivery owns the media', async () => {
-      // With omni delivery active the scheduler-side funnel uploads the
-      // ORIGINAL bytes and swaps the part for a fileData reference (the
-      // fileUtils.ts precedent: no local resize on the omni path), so the
-      // bound must skip — the inline-size pressure it relieves never exists
-      // on this path. Removing the gate in boundInlineParts turns this test
-      // red: the 3840x2160 PNG comes back re-encoded to a ~1456px JPEG.
-      const omniActiveConfig = {
-        isOmniEnabled: () => true,
-        isTrustedFolder: () => true,
-        getOmniUploadConfig: () => ({
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-          apiKey: 'test-key',
-          model: 'qwen-vl-max',
-        }),
-        getTruncateToolOutputThreshold: () => 500_000,
-        getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
-        getUsageStatisticsEnabled: () => false,
-      } as unknown as Config;
-      const omniTool = new DiscoveredMCPTool(
-        mockCallableToolInstance,
-        serverName,
-        serverToolName,
-        baseDescription,
-        inputSchema,
-        undefined,
-        undefined,
-        omniActiveConfig,
-      );
-      const bound = vi.spyOn(imageView, 'boundImageBuffer');
-      const oversized = await sharp({
-        create: {
-          width: 3840,
-          height: 2160,
-          channels: 3,
-          background: '#204080',
-        },
-      })
-        .png()
-        .toBuffer();
-      const data = oversized.toString('base64');
-      mockCallTool.mockResolvedValue([
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [{ type: 'image', data, mimeType: 'image/png' }],
-            },
-          },
-        },
-      ] as Part[]);
-
-      const result = await omniTool
-        .build({ param: 'screenshot' })
-        .execute(new AbortController().signal);
-
-      expect(bound).not.toHaveBeenCalled();
-      expect((result.llmContent as Part[])[1]!.inlineData).toEqual({
-        mimeType: 'image/png',
-        data,
-      });
-    });
-
-    it('still bounds when omni is enabled but no upload channel resolves', async () => {
-      // The gate's predicate is `isOmniDeliveryActive`, not
-      // `Config.isOmniEnabled`: omni can be enabled (QWEN_CODE_ENABLE_OMNI /
-      // omni.enabled) with no resolvable upload channel — no dedicated
-      // omni.delivery.upload block and no legacy DashScope inference config —
-      // in which case the funnel returns immediately and bounding must NOT
-      // be skipped. The existing omni test satisfies every leg of the gate's
-      // conjunction at once, so only this case reds when the predicate is
-      // mutated to `this.cliConfig?.isOmniEnabled?.()`.
-      const omniEnabledNoUploadConfig = {
-        isOmniEnabled: () => true,
-        isTrustedFolder: () => true,
-        getTruncateToolOutputThreshold: () => 500_000,
-        getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
-        getUsageStatisticsEnabled: () => false,
-      } as unknown as Config;
-      const noUploadTool = new DiscoveredMCPTool(
-        mockCallableToolInstance,
-        serverName,
-        serverToolName,
-        baseDescription,
-        inputSchema,
-        undefined,
-        undefined,
-        omniEnabledNoUploadConfig,
-      );
-      const bound = vi.spyOn(imageView, 'boundImageBuffer');
-      const oversized = await sharp({
-        create: {
-          width: 3840,
-          height: 2160,
-          channels: 3,
-          background: '#204080',
-        },
-      })
-        .png()
-        .toBuffer();
-      mockCallTool.mockResolvedValue([
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [
-                {
-                  type: 'image',
-                  data: oversized.toString('base64'),
-                  mimeType: 'image/png',
-                },
-              ],
-            },
-          },
-        },
-      ] as Part[]);
-
-      const result = await noUploadTool
-        .build({ param: 'screenshot' })
-        .execute(new AbortController().signal);
-
-      expect(bound).toHaveBeenCalled();
-      const parts = result.llmContent as Part[];
-      expect(parts[1]!.inlineData!.mimeType).toBe('image/jpeg');
-    });
-
     it('bounds images sequentially', async () => {
       const mockBoundImageBuffer = vi.spyOn(imageView, 'boundImageBuffer');
       let releaseFirst!: () => void;
@@ -1231,6 +1105,54 @@ describe('DiscoveredMCPTool', () => {
 
       const parts = toolResult.llmContent as Part[];
       expect(parts[1]!.inlineData).toEqual({ mimeType: 'image/png', data });
+    });
+
+    it('re-encodes an in-budget image that outweighs the inline ceiling', async () => {
+      // 1200x800 fits the visual budget (long edge 1200, 43x29 = 1247 patches)
+      // but stored uncompressed it outweighs a 1 MiB ceiling, while the same
+      // frame re-encodes to ~11 KB of JPEG. Deciding "already fits" on geometry
+      // alone returns null here, and the trailing clamp then drops the part to
+      // a placeholder instead of keeping the resized image.
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', String(1024 * 1024));
+      const heavy = await sharp({
+        create: {
+          width: 1200,
+          height: 800,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .png({ compressionLevel: 0 })
+        .toBuffer();
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'image',
+                  data: heavy.toString('base64'),
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Part[];
+      expect(parts[1]!.text).toBeUndefined();
+      const inline = parts[1]!.inlineData!;
+      expect(inline.mimeType).toBe('image/jpeg');
+      expect(Buffer.from(inline.data!, 'base64').length).toBeLessThan(
+        1024 * 1024,
+      );
+      expect(parts[0]!.text).toContain('mime-type: image/jpeg]');
     });
 
     it('forwards an image the renderer cannot bound unchanged', async () => {
