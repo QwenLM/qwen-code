@@ -18,3 +18,24 @@ Build and test with:
 mvn test
 mvn checkstyle:check
 ```
+
+## JDBC persistence
+
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the three private
+Broker tables. The JDBC implementations use only `javax.sql.DataSource`; the
+embedding service owns the connection pool and schema lifecycle. This module
+intentionally does not persist Tool executions or wire a Spring service.
+
+Run the optional real-MySQL contract with:
+
+```bash
+mvn -Pmysql-integration \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3306/runtime_broker_test' \
+  -Dmysql.user=root \
+  -Dmysql.password= \
+  verify
+```
+
+Durable rows alone do not make a stopped local Runtime process recoverable.
+The embedding service must reconcile a persisted lease before reuse and own the
+process adoption or reprovisioning policy.

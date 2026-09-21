@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../utils/shell-result.js';
 import {
   vi,
   describe,
@@ -1792,7 +1793,7 @@ describe('ShellTool', () => {
           expect(result.llmContent).toBe(
             'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
           );
-          expect(result.returnDisplay).toBe(
+          expect(shellResultText(result.returnDisplay)).toBe(
             'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
           );
           expect(result.error).toEqual({
@@ -3747,27 +3748,39 @@ describe('ShellTool', () => {
       },
     );
 
-    it('reports a foreground non-zero exit as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'failing-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: 'failed output',
-        exitCode: 3,
-        error: null,
-      });
+    it.each(['failed output', ''])(
+      'reports a foreground non-zero exit with output %j as a tool error',
+      async (output) => {
+        const invocation = shellTool.build({
+          command: 'failing-command',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output,
+          exitCode: 3,
+          error: null,
+        });
 
-      const result = await promise;
+        const result = await promise;
 
-      expect(result.returnDisplay).toContain('failed output');
-      expect(result.error).toEqual({
-        message: expect.stringContaining('Exit Code: 3'),
-        type: ToolErrorType.SHELL_EXECUTE_ERROR,
-      });
-      expect(result.error?.message).toContain('failed output');
-    });
+        expect(shellResultText(result.returnDisplay)).toBe(
+          output || 'Command exited with code: 3',
+        );
+        expect(result.error).toEqual({
+          message: expect.stringContaining('Exit Code: 3'),
+          type: ToolErrorType.SHELL_EXECUTE_ERROR,
+        });
+        expect(result.error?.message).toContain(output || 'Output: (empty)');
+        expect(result.returnDisplay).toMatchObject({
+          type: 'shell_result',
+          version: 1,
+          outcome: 'failed',
+          output,
+          exitCode: 3,
+        });
+      },
+    );
 
     it('reports a foreground signal termination as a tool error', async () => {
       const invocation = shellTool.build({
@@ -3789,7 +3802,7 @@ describe('ShellTool', () => {
         message: expect.stringContaining('Signal: 15'),
         type: ToolErrorType.SHELL_EXECUTE_ERROR,
       });
-      expect(result.returnDisplay).toContain(
+      expect(shellResultText(result.returnDisplay)).toBe(
         'Command terminated by signal: 15',
       );
     });
@@ -3811,6 +3824,21 @@ describe('ShellTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Output: completed');
+      expect(result.returnDisplay).toEqual({
+        type: 'shell_result',
+        version: 1,
+        text: 'completed',
+        output: 'completed',
+        directory: '/test/dir',
+        exitCode: 0,
+        signal: 0,
+        pid: 12345,
+        error: null,
+        outcome: 'completed',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      });
     });
 
     it('reports a PTY signal termination as a tool error', async () => {
@@ -3853,6 +3881,11 @@ describe('ShellTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Command was cancelled');
+      expect(result.returnDisplay).toMatchObject({
+        outcome: 'cancelled',
+        output: '',
+        signal: 15,
+      });
     });
 
     it.each([
@@ -3879,6 +3912,11 @@ describe('ShellTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Exit Code: 1');
+      expect(result.returnDisplay).toMatchObject({
+        outcome: 'completed',
+        exitCode: 1,
+        error: null,
+      });
     });
 
     it('does not report exit 1 from a pipeline ending in grep as a tool error', async () => {
@@ -4059,6 +4097,9 @@ describe('ShellTool', () => {
           );
           expect(result.llmContent).toContain(truncatedContent);
           expect(result.persistedOutputFiles).toEqual([outputFile]);
+          expect(result.returnDisplay).toMatchObject({
+            outputFiles: [outputFile],
+          });
         } finally {
           spy.mockRestore();
         }
@@ -4501,6 +4542,26 @@ describe('ShellTool', () => {
       });
     });
 
+    it('preserves full successful display for hooks before preview compaction', async () => {
+      const output =
+        'A'.repeat(20_000) + '\nHOOK_MIDDLE_SENTINEL\n' + 'B'.repeat(20_000);
+      const promise = shellTool
+        .build({ command: 'printf large-output', is_background: false })
+        .execute(mockAbortSignal);
+      resolveShellExecution({ output, exitCode: 0, error: null });
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(shellResultText(result.returnDisplay)).toContain(output);
+      expect(result.returnDisplay).toMatchObject({
+        output,
+        truncated: false,
+      });
+      expect(result.outputBudgetApplied).toBe(true);
+      expect(result.persistedOutputFiles?.length).toBeGreaterThan(0);
+      expect(result.llmContent).not.toContain('HOOK_MIDDLE_SENTINEL');
+    });
+
     it('retains shell truncation without an artifact and records the persistence decision', async () => {
       const originalOutput = 'A'.repeat(30_001);
       const shortenedContent =
@@ -4589,7 +4650,7 @@ describe('ShellTool', () => {
         resolveShellExecution({ output: '', exitCode: 0 });
         const result = await promise;
         expect(result.llmContent).toContain('foreground command ran for 65s');
-        expect(result.returnDisplay).toContain(
+        expect(shellResultText(result.returnDisplay)).toContain(
           'foreground command ran for 65s',
         );
       });
@@ -4753,6 +4814,12 @@ describe('ShellTool', () => {
           aborted: false,
         });
         const result = await promise;
+        expect(result.returnDisplay).toMatchObject({
+          type: 'shell_result',
+          version: 1,
+          outcome: 'completed',
+          notices: [expect.stringContaining('foreground command ran for 60s')],
+        });
         expect(result.llmContent).toContain('foreground command ran for 60s');
       });
 
@@ -5028,12 +5095,18 @@ describe('ShellTool', () => {
         resolveShellExecution({ output: 'all green', exitCode: 0 });
         const result = await promise;
         // Both surfaces have the hint.
+        expect(result.returnDisplay).toMatchObject({
+          type: 'shell_result',
+          version: 1,
+          outcome: 'completed',
+          notices: [expect.stringContaining('foreground command ran for 60s')],
+        });
         expect(result.llmContent).toContain('foreground command ran for 60s');
-        expect(result.returnDisplay).toContain(
+        expect(shellResultText(result.returnDisplay)).toContain(
           'foreground command ran for 60s',
         );
         // Original output preserved (not replaced by hint).
-        expect(result.returnDisplay).toContain('all green');
+        expect(shellResultText(result.returnDisplay)).toContain('all green');
       });
 
       it('hint also appears in debug-mode returnDisplay (mirrors LLM view)', async () => {
@@ -5053,8 +5126,16 @@ describe('ShellTool', () => {
           await vi.advanceTimersByTimeAsync(60_000);
           resolveShellExecution({ output: 'all green', exitCode: 0 });
           const result = await promise;
+          expect(result.returnDisplay).toMatchObject({
+            type: 'shell_result',
+            version: 1,
+            outcome: 'completed',
+            notices: [
+              expect.stringContaining('foreground command ran for 60s'),
+            ],
+          });
           expect(result.llmContent).toContain('foreground command ran for 60s');
-          expect(result.returnDisplay).toContain(
+          expect(shellResultText(result.returnDisplay)).toContain(
             'foreground command ran for 60s',
           );
         } finally {
@@ -6702,10 +6783,10 @@ describe('ShellTool', () => {
           expect(String(result.llmContent)).not.toContain(
             longMessage.slice(0, 200),
           );
-          expect(String(result.returnDisplay)).toContain(
+          expect(shellResultText(result.returnDisplay)).toContain(
             `AI attribution note skipped: ${longMessage.slice(0, 120)}.`,
           );
-          expect(String(result.returnDisplay)).not.toContain(
+          expect(shellResultText(result.returnDisplay)).not.toContain(
             longMessage.slice(0, 200),
           );
         });
@@ -7359,7 +7440,7 @@ describe('ShellTool', () => {
         );
         expect(result.llmContent).toContain('python -u');
         expect(result.llmContent).toContain('stdbuf -oL');
-        expect(result.returnDisplay).toContain(
+        expect(shellResultText(result.returnDisplay)).toContain(
           `Promoted to background: ${entry.shellId}`,
         );
         // No `error` on the result — promote is a success-shaped outcome
@@ -7613,6 +7694,7 @@ describe('ShellTool', () => {
         );
         // Captured output is preserved.
         expect(String(result.llmContent)).toContain('oops too late');
+        expect(result.returnDisplay).toMatchObject({ outcome: 'completed' });
       });
 
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
@@ -9326,10 +9408,16 @@ describe('ShellTool', () => {
       expect(result.llmContent).toContain(
         'Below is the output before it timed out',
       );
-      expect(result.returnDisplay).toContain(
+      expect(shellResultText(result.returnDisplay)).toContain(
         'Command timed out after 5000ms before it could complete.',
       );
-      expect(result.returnDisplay).toContain('partial output');
+      expect(result.returnDisplay).toMatchObject({
+        type: 'shell_result',
+        output: 'partial output',
+        outcome: 'timed_out',
+        error: expect.stringContaining('timed out'),
+      });
+      expect(shellResultText(result.returnDisplay)).toContain('partial output');
       expect(result.error).toEqual({
         message: 'Command timed out after 5000ms before it could complete.',
         type: ToolErrorType.EXECUTION_TIMEOUT,
@@ -9372,7 +9460,7 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain(
           'There was no output before it timed out.',
         );
-        expect(result.returnDisplay).toContain(
+        expect(shellResultText(result.returnDisplay)).toContain(
           'There was no output before it timed out.',
         );
         expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
@@ -9424,7 +9512,9 @@ describe('ShellTool', () => {
         const result = await promise;
 
         expect(result.llmContent).toContain('/tmp/tool-output.txt');
-        expect(result.returnDisplay).toContain('/tmp/tool-output.txt');
+        expect(shellResultText(result.returnDisplay)).toContain(
+          '/tmp/tool-output.txt',
+        );
         expect(result.error).toEqual({
           message: 'Command timed out after 5000ms before it could complete.',
           type: ToolErrorType.EXECUTION_TIMEOUT,

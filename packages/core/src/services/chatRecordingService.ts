@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
@@ -2388,11 +2389,11 @@ export class ChatRecordingService {
       const inputDisplay = toolCallResult?.resultDisplay;
       const inputValues = () => [
         ...toolResultPartDiagnosticValues(message),
-        ...(typeof inputDisplay === 'string'
+        ...(shellResultText(inputDisplay) !== undefined
           ? [
               {
                 representation: 'display' as const,
-                value: inputDisplay,
+                value: shellResultText(inputDisplay)!,
               },
             ]
           : []),
@@ -2441,11 +2442,11 @@ export class ChatRecordingService {
         mutated,
         values: () => [
           ...toolResultPartDiagnosticValues(message),
-          ...(typeof outputDisplay === 'string'
+          ...(shellResultText(outputDisplay) !== undefined
             ? [
                 {
                   representation: 'display' as const,
-                  value: outputDisplay,
+                  value: shellResultText(outputDisplay)!,
                 },
               ]
             : []),
