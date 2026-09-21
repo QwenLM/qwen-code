@@ -209,7 +209,13 @@ export function blankReplayedMcpAppHtml(
   }
   return {
     ...record,
-    rawOutput: { ...rawOutput, html: '' },
+    rawOutput: {
+      ...rawOutput,
+      html: '',
+      fallbackText:
+        rawOutput['fallbackText'] ||
+        'MCP App HTML omitted because the restored page exceeds its size limit.',
+    },
   } as unknown as SessionUpdate;
 }
 

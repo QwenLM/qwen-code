@@ -593,6 +593,65 @@ describe('history replay page', () => {
     });
   });
 
+  it('keeps an HTML-only App visible when a limited replay page degrades it', async () => {
+    const record = appToolResultRecord(
+      'app-record-1',
+      'call-app-1',
+      'x'.repeat(3000),
+      '',
+    );
+    const original = JSON.stringify(record);
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [record],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      limits: { maxBytes: 2000, maxUpdates: 100 },
+    });
+
+    expect(result.updates).toContainEqual(
+      expect.objectContaining({
+        rawOutput: expect.objectContaining({
+          html: '',
+          fallbackText:
+            'MCP App HTML omitted because the restored page exceeds its size limit.',
+        }),
+      }),
+    );
+    expect(jsonBytes(result.updates)).toBeLessThanOrEqual(2000);
+    expect(JSON.stringify(record)).toBe(original);
+  });
+
+  it('keeps an HTML-only App visible when the envelope wrapper exceeds the budget', () => {
+    const rawOutput = {
+      type: 'mcp_app',
+      html: 'x'.repeat(3000),
+      fallbackText: '',
+    };
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-app-1',
+      status: 'completed',
+      rawOutput,
+    } as unknown as SessionUpdate;
+    const envelope = { v: 1, updates: [update] };
+
+    degradeReplayEnvelopeAppHtml(envelope, jsonBytes(envelope) - 1);
+
+    expect(envelope.updates[0]).toMatchObject({
+      rawOutput: {
+        html: '',
+        fallbackText:
+          'MCP App HTML omitted because the restored page exceeds its size limit.',
+      },
+    });
+    expect(jsonBytes(envelope)).toBeLessThanOrEqual(1000);
+    expect(rawOutput).toEqual({
+      type: 'mcp_app',
+      html: 'x'.repeat(3000),
+      fallbackText: '',
+    });
+  });
+
   it('degrades envelope App html oldest-first until the envelope serializes under the cap', () => {
     const appUpdate = (callId: string, html: string, fallbackText: string) =>
       ({
