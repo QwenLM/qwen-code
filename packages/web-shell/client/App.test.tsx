@@ -634,6 +634,9 @@ const {
       streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
       queuedPromptWriteBlocked: false,
+      queuedPromptDispatchError: undefined as
+        | ((text: string) => string | undefined)
+        | undefined,
       queuedPromptStreamingState: 'idle',
       queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
@@ -992,11 +995,13 @@ vi.mock('./hooks/useAnimationFrameValue', () => ({
 
 vi.mock('./hooks/useQueuedPrompts', () => ({
   useQueuedPrompts: (args: {
+    getPromptDispatchError?: (text: string) => string | undefined;
     holdQueuedPromptsLocally?: boolean;
     writeBlocked?: boolean;
     streamingState: string;
     sessionHasActivePrompt?: boolean;
   }) => {
+    testState.queuedPromptDispatchError = args.getPromptDispatchError;
     testState.queuedPromptWriteBlocked = args.writeBlocked === true;
     testState.queuedPromptHoldHistory.push(
       args.holdQueuedPromptsLocally === true,
@@ -1272,7 +1277,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
         scope: 'user' | 'workspace',
       ) => void;
       presentation?: WebShellSettingsOptions;
-      modelManagement?: {
+      modelManagementSectionProps?: {
         busy?: boolean;
         onAddModel?: () => void;
         onSelectModel?: (modelId: string) => void;
@@ -1286,7 +1291,8 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       testState.latestSettingsState = props.settingsState;
       testState.latestSettingsInitialCategory = props.initialCategory;
       testState.latestSettingsPresentation = props.presentation;
-      testState.latestModelManagement = props.modelManagement ?? null;
+      testState.latestModelManagement =
+        props.modelManagementSectionProps ?? null;
       return React.createElement(
         'div',
         { 'data-testid': 'settings-message' },
@@ -35195,6 +35201,8 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
     const oldActions = testState.latestModelManagement!;
+    const oldDispatchPolicy = testState.queuedPromptDispatchError!;
+    expect(oldDispatchPolicy('/auth')).toBeUndefined();
     act(() => oldActions.onAddModel?.());
     expect(
       container.querySelector('[data-testid="dialog-shell"]'),
@@ -35202,6 +35210,10 @@ describe('App session callbacks', () => {
     rerender({ modelManagement: { allowAdd: false, allowDelete: false } });
     await flush();
     expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(oldDispatchPolicy('/auth')).toBe(
+      'Adding models is disabled by the host.',
+    );
+    expect(oldDispatchPolicy('/model')).toBeUndefined();
     act(() => {
       oldActions.onAddModel?.();
       oldActions.onDeleteModel?.({ authType: 'openai', modelId: 'example' });

@@ -90,6 +90,8 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
 });
 
 const CLIENT_ID = 'client-self';
+const denySetup = (text: string) =>
+  text.trim() === '/auth' ? 'Model setup disabled' : undefined;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -100,7 +102,7 @@ function deferred<T>() {
 }
 
 interface HarnessOptions {
-  modelManagement?: { allowAdd?: boolean; allowDelete?: boolean };
+  getPromptDispatchError?: (text: string) => string | undefined;
   connected?: boolean;
   writeBlocked?: boolean;
   sessionId?: string;
@@ -157,7 +159,7 @@ function createHarness() {
   function TestComponent(opts: HarnessOptions) {
     latest = useQueuedPrompts({
       connected: opts.connected ?? true,
-      modelManagement: opts.modelManagement,
+      getPromptDispatchError: opts.getPromptDispatchError,
       writeBlocked: opts.writeBlocked ?? false,
       sessionId: opts.sessionId ?? 'session-a',
       workspaceCwd: opts.workspaceCwd ?? '/workspace',
@@ -263,7 +265,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       act(() => harness.result().enqueuePrompt('/auth'));
       await harness.render({
         streamingState: 'idle',
-        modelManagement: { allowAdd: false },
+        getPromptDispatchError: denySetup,
       });
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
       expect(harness.reportError).toHaveBeenCalled();
@@ -273,17 +275,18 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('checks current model policy through a retained enqueue callback', async () => {
+  it('checks an arbitrary caller policy through a retained enqueue callback', async () => {
     const harness = createHarness();
     try {
       await harness.render({ streamingState: 'idle' });
       const enqueue = harness.result().enqueuePrompt;
       await harness.render({
         streamingState: 'idle',
-        modelManagement: { allowAdd: false },
+        getPromptDispatchError: (text) =>
+          text === 'blocked prompt' ? 'Disabled by caller' : undefined,
       });
       await act(async () => {
-        enqueue('/auth');
+        enqueue('blocked prompt');
       });
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
       expect(harness.reportError).toHaveBeenCalled();
@@ -322,7 +325,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           ]);
       });
       expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
-      await harness.render({ modelManagement: { allowAdd: false } });
+      await harness.render({ getPromptDispatchError: denySetup });
       await act(async () => {
         uploaded.resolve({
           type: 'resource',
@@ -349,7 +352,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       try {
         await harness.render({
           streamingState: 'idle',
-          modelManagement: { allowAdd: false },
+          getPromptDispatchError: denySetup,
         });
         await act(async () => {
           harness.result().enqueuePrompt(text);

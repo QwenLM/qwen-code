@@ -37,6 +37,9 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let sessionHasActivePromptValue: boolean;
+let queuedPromptDispatchError:
+  | ((text: string) => string | undefined)
+  | undefined;
 let queuedPromptStreamingState: string | undefined;
 let queuedPromptSessionHasActivePrompt: boolean | undefined;
 let latestOnSubmit:
@@ -163,9 +166,11 @@ vi.mock('../session-catalog/session-catalog-hooks', () => ({
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
   useQueuedPrompts: (args: {
+    getPromptDispatchError?: (text: string) => string | undefined;
     streamingState: string;
     sessionHasActivePrompt?: boolean;
   }) => {
+    queuedPromptDispatchError = args.getPromptDispatchError;
     queuedPromptStreamingState = args.streamingState;
     queuedPromptSessionHasActivePrompt = args.sessionHasActivePrompt;
     return {
@@ -3146,7 +3151,13 @@ describe('ChatPane', () => {
     const onSlashCommand = vi.fn(() => true);
     render({ onSlashCommand });
     const retainedSubmit = latestOnSubmit!;
+    const retainedDispatchPolicy = queuedPromptDispatchError!;
+    expect(retainedDispatchPolicy('/auth')).toBeUndefined();
     rerender({ onSlashCommand, modelManagement: { allowAdd: false } });
+    expect(retainedDispatchPolicy('/auth')).toBe(
+      'Adding models is disabled by the host.',
+    );
+    expect(retainedDispatchPolicy('/model')).toBeUndefined();
     act(() => {
       expect(retainedSubmit('/auth')).toBe(true);
     });

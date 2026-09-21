@@ -10,9 +10,21 @@ Embedded hosts may provision models externally while retaining native model sele
 
 Expose `modelManagement?: WebShellModelManagementOptions` with independent `allowAdd?` and `allowDelete?`, both defaulting to true. Export the type from the public entry. Normalize defaults and recognize setup commands in a small shared helper using the existing slash parser.
 
-App hides add/delete UI, consumes disabled `/auth` before host callbacks or hidden-command forwarding, filters suggestions, closes an open setup dialog on restriction, and checks the latest policy in add/delete callbacks. AuthMessage checks again before installation. ModelManagementSection clears stale delete confirmation. SplitView and side-task panels forward the policy to ChatPane, which has its own command router and menu. Side tasks also check their initial prompt before sending it. Queued browser dispatch checks the latest policy at the submit/enqueue boundary, including after attachment preparation. No generic SDK behavior changes.
+App hides add/delete UI, consumes disabled `/auth` before host callbacks or hidden-command forwarding, filters suggestions, closes an open setup dialog on restriction, and checks the latest policy in add/delete callbacks. AuthMessage checks again before installation. ModelManagementSection clears stale delete confirmation. SplitView and side-task panels forward the policy to ChatPane, which has its own command router and menu. Side tasks also check their initial prompt before sending it. Queued browser dispatch checks a caller-supplied synchronous `getPromptDispatchError` callback at the submit/enqueue boundary, including after attachment preparation. The queue knows neither model policy nor `/auth`; its private rejection type only distinguishes a local refusal from an SDK admission. The internal SettingsMessage data/handler bag is named `modelManagementSectionProps`, distinct from the public `modelManagement` policy. No generic SDK behavior changes.
 
 Dynamic restrictions affect future browser requests. Already dispatched operations and daemon-owned queued prompts cannot be revoked by these props. Re-enabling a capability does not reopen a stale dialog. Model lists, current badges, switching, `/model`, context-window editing, and session `/delete` keep existing behavior. Settings exclusions compose independently.
+
+## Why a single router guard is insufficient
+
+| Boundary                        | Responsibility                                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| App composer                    | Handles main/welcome input before host callbacks or hidden-command forwarding.                                      |
+| ChatPane composer               | Owns split/side-task submission; its host callback is not App's complete command router.                            |
+| Side-task initial prompt        | Calls `actions.sendPrompt` directly, without a composer submission.                                                 |
+| Browser queue dispatch          | Rechecks after holding a prompt or preparing attachments, when the policy may have changed.                         |
+| Setup/save and delete callbacks | Covers settings actions and callbacks retained across a policy update; does not revoke already-dispatched requests. |
+
+These are entry/dispatch checks for one UI policy, not six independent permission systems. Public options remain unchanged; internal naming and queue layering are implementation details.
 
 ## Validation
 

@@ -10898,7 +10898,10 @@ export function App({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   } = useQueuedPrompts({
-    modelManagement,
+    getPromptDispatchError: (text) =>
+      !modelManagementRef.current.allowAdd && isModelSetupCommand(text)
+        ? t('settings.models.addDisabled')
+        : undefined,
     connected,
     writeBlocked:
       sessionWriteBlocked ||
@@ -19287,7 +19290,7 @@ export function App({
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
                         }
-                        modelManagement={{
+                        modelManagementSectionProps={{
                           ...modelManagementPolicy,
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,

@@ -693,7 +693,10 @@ export function ChatPane({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   } = useQueuedPrompts({
-    modelManagement,
+    getPromptDispatchError: (text) =>
+      !modelManagementRef.current.allowAdd && isModelSetupCommand(text)
+        ? t('settings.models.addDisabled')
+        : undefined,
     connected: connection.status === 'connected',
     writeBlocked: connection.runtimeStopped,
     runtimeStopped: connection.runtimeStopped,
