@@ -483,6 +483,10 @@ for (const theme of THEMES) {
       const scenario = createWebShellDaemonScenario({
         transcriptPage: {
           events: trajectoryTranscriptEvents(TRAJECTORY_SESSION_ID),
+          // Reported with a cursor, so the capture carries the control that
+          // reaches the history this page ends before.
+          hasMore: true,
+          nextCursor: 'older-1',
         },
         sessionId: TRAJECTORY_SESSION_ID,
       });
