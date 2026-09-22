@@ -2466,7 +2466,7 @@
   bottom: calc(100% + 8px);
   left: 0;
   z-index: 20;
-  max-height: min(320px, 50vh);
+  max-height: min(320px, 50vh, var(--chat-editor-search-room, 320px));
   padding: 8px;
   border: 1px solid var(--chat-editor-border-color);
   border-radius: 12px;
@@ -2738,6 +2738,12 @@
   --chat-editor-max-height: min(480px, 60dvh);
 }
 
+/* The workspace/Git row lives inside the capped box; without its height added
+   back, a soft keyboard leaves the attachments strip almost no room. */
+.editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
+  --chat-editor-max-height: calc(min(480px, 60dvh) + 44px);
+}
+
 .editorShell[data-web-shell-mobile-composer] .uploadRowAction,
 .editorShell[data-web-shell-mobile-composer] .toolBtn,
 .editorShell[data-web-shell-mobile-composer] .sendBtn,
@@ -2788,7 +2794,6 @@
 
 .mobileEditingActions {
   flex-wrap: wrap;
-  margin-top: -8px;
 }
 
 .mobileEditingActions svg {

@@ -11,6 +11,7 @@ import {
   useState,
 } from 'react';
 import type {
+  CSSProperties,
   ReactNode,
   RefObject,
   DragEvent as ReactDragEvent,
@@ -2179,6 +2180,36 @@ export const ChatEditor = memo(
       handleSearchCompositionEnd,
     } = core.searchState;
 
+    // The panel opens upward from the composer; a soft keyboard can leave less
+    // room above it than the CSS cap, which would slide the search box under
+    // the header.
+    const [searchPanelRoom, setSearchPanelRoom] = useState<number>();
+    useLayoutEffect(() => {
+      const container = containerRef.current;
+      if (!searchMode || !container) return undefined;
+      const update = () => {
+        const safeTop =
+          Number.parseFloat(
+            getComputedStyle(container).getPropertyValue(
+              '--web-shell-popover-safe-top',
+            ),
+          ) || 48;
+        setSearchPanelRoom(
+          Math.max(96, container.getBoundingClientRect().top - safeTop - 8),
+        );
+      };
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(container);
+      window.addEventListener('resize', update);
+      window.addEventListener('scroll', update, true);
+      return () => {
+        resizeObserver.disconnect();
+        window.removeEventListener('resize', update);
+        window.removeEventListener('scroll', update, true);
+      };
+    }, [searchMode]);
+
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
       const custom = renderComposerTag?.({
         tag,
@@ -2713,6 +2744,13 @@ export const ChatEditor = memo(
             <div
               ref={searchUiRef}
               className={styles.searchPanel}
+              style={
+                searchPanelRoom === undefined
+                  ? undefined
+                  : ({
+                      '--chat-editor-search-room': `${searchPanelRoom}px`,
+                    } as CSSProperties)
+              }
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
             >

@@ -26,6 +26,7 @@ import {
   expectEmptyMobileWelcomeChromeVisible,
   gotoEmptyMobileWelcomeHarness,
 } from './utils/emptyMobileComposer';
+import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
@@ -552,6 +553,119 @@ test('mobile stop remains reachable with a queued draft @smoke', async ({
     )
     .toBe(true);
   await expect(textarea).toHaveValue('keep this follow-up');
+});
+
+// 412x402 is a Pixel 7 once Gboard and Chrome's autofill bar have resized
+// the viewport for a focused text field.
+test('mobile history search stays reachable above a soft keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 412, height: 402 });
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'qwen-web-shell-history',
+      JSON.stringify(
+        Array.from({ length: 8 }, (_, index) => `saved input ${index + 1}`),
+      ),
+    ),
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('working draft');
+  await page.getByRole('button', { name: 'Add to message' }).tap();
+  await page.getByRole('button', { name: 'Input history', exact: true }).tap();
+  const search = page.locator('[data-web-shell-composer-history-search]');
+  await expect(search).toBeFocused();
+  const close = page
+    .locator('[data-web-shell-composer-surface]')
+    .getByRole('button', { name: 'close', exact: true });
+  // Polled: the Add drawer's closing overlay briefly covers the page.
+  for (const control of [search, close]) {
+    await expect
+      .poll(() =>
+        control.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            rect.left + rect.width / 2,
+            rect.top + rect.height / 2,
+          );
+          return element === hit || element.contains(hit);
+        }),
+      )
+      .toBe(true);
+  }
+  await close.tap();
+  await expect(textarea).toHaveValue('working draft');
+  await expect(textarea).toBeFocused();
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile workspace row stays clear of the editing row @smoke', async ({
+  page,
+}, testInfo) => {
+  await installScenario(page, createGitWorkspaceScenario(), testInfo);
+  await page.goto('/');
+  const branch = page.locator('[data-web-shell-git-branch]');
+  await expect(branch).toBeVisible({ timeout: 10_000 });
+  const branchBox = (await branch.boundingBox())!;
+  const previousBox = (await page
+    .getByRole('button', { name: 'Previous input' })
+    .boundingBox())!;
+  expect(previousBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
+});
+
+// 412x450 is a Pixel 7 once the soft keyboard has resized the viewport.
+test('mobile attachments stay reachable above a soft keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 412, height: 450 });
+  await installScenario(page, createGitWorkspaceScenario(), testInfo);
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-git-branch]')).toBeVisible({
+    timeout: 10_000,
+  });
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await textarea.evaluate(async (element) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 120;
+    canvas.height = 90;
+    const png = await new Promise<Blob>((resolve) =>
+      canvas.toBlob((blob) => resolve(blob!), 'image/png'),
+    );
+    for (const file of [
+      new File([png], 'first.png', { type: 'image/png' }),
+      new File(['notes\n'], 'notes-one.txt', { type: 'text/plain' }),
+      new File(['notes\n'], 'notes-two.txt', { type: 'text/plain' }),
+    ]) {
+      const data = new DataTransfer();
+      data.items.add(file);
+      element.dispatchEvent(
+        new ClipboardEvent('paste', {
+          clipboardData: data,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  });
+  const remove = page.getByRole('button', { name: 'Remove notes-one.txt' });
+  await expect(remove).toBeAttached();
+  await expect
+    .poll(() =>
+      remove.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(
+          rect.left + rect.width / 2,
+          rect.top + rect.height / 2,
+        );
+        return element === hit || element.contains(hit);
+      }),
+    )
+    .toBe(true);
 });
 
 async function installScenario(

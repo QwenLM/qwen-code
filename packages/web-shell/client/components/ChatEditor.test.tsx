@@ -147,6 +147,7 @@ const composerCoreState = vi.hoisted(() => ({
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
+  searchMode: false,
   openHistorySearch: vi.fn(),
   imageDropCapture: vi.fn(),
   ingestFiles: vi.fn(),
@@ -287,7 +288,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         currentMode: 'default',
         sessionName: undefined,
         searchState: {
-          searchMode: false,
+          searchMode: composerCoreState.searchMode,
           searchQuery: '',
           searchMatches: [],
           searchActiveIndex: 0,
@@ -371,6 +372,7 @@ afterEach(() => {
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
+  composerCoreState.searchMode = false;
   composerCoreState.openHistorySearch.mockReset();
   composerCoreState.imageDropCapture.mockReset();
   composerCoreState.ingestFiles.mockReset();
@@ -3715,6 +3717,25 @@ describe('ChatEditor mobile composer actions', () => {
       expect(document.activeElement).not.toBe(backend.textareaRef.current);
     } finally {
       document.removeEventListener('click', onClick);
+    }
+  });
+
+  it('limits the history panel to the room above the composer', () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const rect = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({ top: 182 } as DOMRect);
+    try {
+      const container = renderChatEditor({});
+      const panel = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-history-search]',
+      )!.parentElement!.parentElement!;
+      expect(panel.style.getPropertyValue('--chat-editor-search-room')).toBe(
+        '126px',
+      );
+    } finally {
+      rect.mockRestore();
     }
   });
 
