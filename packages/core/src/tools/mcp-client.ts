@@ -565,7 +565,10 @@ export class McpClient {
       this.transport = await this.createTransport();
 
       this.client.onerror = (error) => {
-        if (this.isDisconnecting) {
+        // Legacy Streamable HTTP can wrap a JSON-RPC -32601 response in a
+        // transport error. Discovery treats that response as an absent
+        // optional method, so it must not poison the healthy connection.
+        if (this.isDisconnecting || isBenignMcpMethodNotFound(error)) {
           return;
         }
         // capture the upstream error
@@ -1473,6 +1476,12 @@ export async function connectAndDiscover(
     );
 
     mcpClient.onerror = (error) => {
+      // Match the pooled client path above: a legacy transport may surface an
+      // optional method's JSON-RPC -32601 as an error callback, even though
+      // discovery correctly treats it as "method not found".
+      if (isBenignMcpMethodNotFound(error)) {
+        return;
+      }
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
@@ -1741,6 +1750,39 @@ function isMethodNotFound(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   if (code === -32601) return true;
   return error instanceof Error && error.message.includes('Method not found');
+}
+
+/**
+ * The legacy Streamable HTTP transport can turn a JSON-RPC method-not-found
+ * response into an HTTP 400 error before the discovery request sees it. That
+ * response is benign for optional MCP method families, but unrelated errors
+ * must still retire the connection.
+ */
+function isBenignMcpMethodNotFound(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === -32601) return true;
+  if (getErrorStatus(error) !== 400) return false;
+
+  const text = (error as { text?: unknown } | null)?.text;
+  const message =
+    typeof text === 'string'
+      ? text
+      : error instanceof Error
+        ? error.message
+        : undefined;
+  if (message === undefined) return false;
+
+  const jsonStart = message.indexOf('{');
+  if (jsonStart === -1) return false;
+  try {
+    const payload = JSON.parse(message.slice(jsonStart)) as {
+      jsonrpc?: unknown;
+      error?: { code?: unknown };
+    };
+    return payload.jsonrpc === '2.0' && payload.error?.code === -32601;
+  } catch {
+    return false;
+  }
 }
 
 /**

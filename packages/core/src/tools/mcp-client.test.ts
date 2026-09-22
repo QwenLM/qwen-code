@@ -135,6 +135,18 @@ function mockAppOnlyMcpServer(): void {
   } as unknown as GenAiLib.CallableTool);
 }
 
+function legacyOptionalMethodTransportError(): Error {
+  const responseBody = JSON.stringify({
+    jsonrpc: '2.0',
+    error: { code: -32601, message: 'Method not found' },
+    id: 1,
+  });
+  return Object.assign(
+    new Error(`Error POSTing to endpoint: ${responseBody}`),
+    { status: 400, text: responseBody },
+  );
+}
+
 describe('mcp-client', () => {
   afterEach(() => {
     _setMcpFetchForTest(undefined);
@@ -868,6 +880,131 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
   });
 
   describe('McpClient', () => {
+    it('does not disconnect for a legacy HTTP -32601 optional-method response', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+        onerror: undefined as ((error: Error) => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const serverName = 'legacy-optional-method-server';
+      const client = new McpClient(
+        serverName,
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      mockedClient.onerror?.(legacyOptionalMethodTransportError());
+
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      removeMCPServerStatus(serverName);
+    });
+
+    it('still disconnects for unrelated transport errors', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+        onerror: undefined as ((error: Error) => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const serverName = 'unrelated-transport-error-server';
+      const client = new McpClient(
+        serverName,
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      mockedClient.onerror?.(new Error('ECONNRESET'));
+
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      removeMCPServerStatus(serverName);
+    });
+
+    it('keeps standalone discovery connected for a legacy -32601 error', async () => {
+      const methodNotFoundTransportError = legacyOptionalMethodTransportError();
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        getInstructions: vi.fn(),
+        close: vi.fn(),
+        onerror: undefined as ((error: Error) => void) | undefined,
+        request: vi.fn(),
+        listTools: vi.fn(),
+      };
+      mockedClient.request.mockImplementation(async () => {
+        mockedClient.onerror?.(methodNotFoundTransportError);
+        throw methodNotFoundTransportError;
+      });
+      mockedClient.listTools.mockImplementation(async () => {
+        setTimeout(() => {
+          mockedClient.onerror?.(methodNotFoundTransportError);
+        }, 0);
+        return { tools: [{ name: 'healthy-tool' }] };
+      });
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'healthy-tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const serverName = 'standalone-legacy-optional-method-server';
+      await connectAndDiscover(
+        serverName,
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        false,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+          onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+        } as unknown as WorkspaceContext,
+        cfgWithResources(),
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      removeMCPServerStatus(serverName);
+    });
+
     it('recovers HTTP connections when the SDK omits the 401 status', async () => {
       const connect = vi
         .fn()
