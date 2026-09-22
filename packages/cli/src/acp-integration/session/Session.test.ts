@@ -15334,6 +15334,61 @@ describe('Session', () => {
         ).toHaveBeenCalledOnce();
       });
 
+      it('stops remembering a message id once it is done with it', async () => {
+        // A peer mints ids without limit, and this set would otherwise
+        // keep every one for the life of the process. What stops a
+        // message arriving twice is the transport's record, not this.
+        await letTheQueueDrain();
+        const remembered = (
+          session as unknown as {
+            persistedBackgroundNotificationTaskIds: Set<string>;
+          }
+        ).persistedBackgroundNotificationTaskIds;
+
+        for (let index = 0; index < 25; index++) {
+          await queuePeer(`msg-round-${index}`);
+          await vi.waitFor(() => expect(queuedKinds()).toEqual([]));
+        }
+
+        await vi.waitFor(() =>
+          expect(
+            [...remembered].filter((id) => id.startsWith('msg-round-')),
+          ).toEqual([]),
+        );
+      });
+
+      it('holds the session while a message waits unread', async () => {
+        // A conditional close reads the published holds: a queued result
+        // or shell line refuses one, and someone else's message — which
+        // its sender was told arrived — cannot be worth less.
+        await queuePeer('msg-holding');
+
+        expect(session.collectActiveWorkHolds()).toEqual(
+          expect.arrayContaining([
+            { category: 'notification', id: 'msg-holding' },
+          ]),
+        );
+      });
+
+      it('caps a sender-chosen name at what a label surface holds', async () => {
+        // The frame allows a name more than twice as long as any label
+        // surface, and this is the only background label a peer chooses.
+        const long = 'x'.repeat(200);
+        await session.enqueuePeerMessage({
+          delivery: { ...peerDelivery('msg-long-label'), senderLabel: long },
+          modelText: '<peer-message>hello</peer-message>',
+          displayText: 'Message from another session',
+        });
+
+        const queued = (
+          session as unknown as {
+            notificationQueue: Array<{ label?: string }>;
+          }
+        ).notificationQueue;
+        expect(queued[0]?.label).toHaveLength(80);
+        expect(queued[0]?.label?.endsWith('...')).toBe(true);
+      });
+
       it('keeps a message out of the eviction the rest of the queue shares', async () => {
         // A result this session asked for can be produced again; someone
         // else's message cannot, and its sender was told it arrived.
@@ -15476,9 +15531,141 @@ describe('Session', () => {
         expect(queuedKinds()).toEqual(['agent']);
       });
 
-      it('stops being addressable once it is closing', async () => {
+      /**
+       * Lets the queue drain: the block holds a prompt open so the queue
+       * is observable, and these two cases are about what the drain does
+       * with a message.
+       */
+      async function letTheQueueDrain() {
+        (
+          session as unknown as { pendingPrompt: AbortController | null }
+        ).pendingPrompt = null;
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+      }
+
+      it('hands a queued message to the model as a turn of its own', async () => {
+        await letTheQueueDrain();
+
+        await queuePeer('msg-drain');
+
+        const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+        await vi.waitFor(() => {
+          expect(sendMessageStream.mock.calls.length).toBeGreaterThanOrEqual(2);
+        });
+        const parts = (
+          sendMessageStream.mock.calls[1]![1] as {
+            message: Array<{ text: string }>;
+          }
+        ).message;
+        expect(parts.at(-1)?.text).toBe(
+          '<peer-message>msg-drain</peer-message>',
+        );
+        expect(queuedKinds()).toEqual([]);
+        // The model has it, so its sender's `delivered` stands and the
+        // host has nothing to correct.
+        expect(session.takeUnconsumedPeerDeliveries()).toEqual([]);
+        const notified = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.find(
+            ([{ update }]) =>
+              update._meta?.backgroundTask?.taskId === 'msg-drain',
+          );
+        expect(notified?.[0].update._meta?.['backgroundTask']).toMatchObject({
+          kind: 'peer',
+          taskId: 'msg-drain',
+        });
+      });
+
+      it('still owes a sender a message the turn dropped before sending it', async () => {
+        // The session token limit stops the send, and that bail keeps
+        // only tool results in history — a message is text, so nothing
+        // will ever read it, while its sender holds a `delivered`.
+        await letTheQueueDrain();
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockLlmClient.tryCompressChat.mockResolvedValue({
+          originalTokenCount: 999,
+          newTokenCount: 999,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+
+        await queuePeer('msg-dropped');
+
+        // Off the queue, which on its own says nothing about who read it.
+        await vi.waitFor(() => expect(queuedKinds()).toEqual([]));
+        expect(
+          session.takeUnconsumedPeerDeliveries().map((entry) => entry.msgId),
+        ).toEqual(['msg-dropped']);
+        // Taken once, here as anywhere.
+        expect(session.takeUnconsumedPeerDeliveries()).toEqual([]);
+      });
+
+      it('waits in one place when the host turns its turn away', async () => {
+        // Refused admission puts the message back on the queue, so it
+        // must stop counting as in flight — a message waiting in both
+        // places would cost its sender two corrections.
+        await letTheQueueDrain();
+        vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+          if (method === '_qwencode/start_turn') return { accepted: false };
+          return { messages: [], hasQueuedPrompt: false };
+        });
+
+        await queuePeer('msg-deferred');
+
+        await vi.waitFor(() =>
+          expect(
+            vi
+              .mocked(mockClient.extMethod)
+              .mock.calls.some(([method]) => method === '_qwencode/start_turn'),
+          ).toBe(true),
+        );
+        await vi.waitFor(() => expect(queuedKinds()).toEqual(['peer']));
+        expect(
+          session.takeUnconsumedPeerDeliveries().map((entry) => entry.msgId),
+        ).toEqual(['msg-deferred']);
+      });
+
+      it('counts a message the drain took but nothing has read', async () => {
+        // It is neither queued nor read: without it in the tally a
+        // session that keeps dropping messages keeps accepting them.
+        await letTheQueueDrain();
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockLlmClient.tryCompressChat.mockResolvedValue({
+          originalTokenCount: 999,
+          newTokenCount: 999,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+
+        for (let index = 0; index < 20; index++) {
+          expect(session.hasRoomForPeerMessage()).toBe(true);
+          await queuePeer(`msg-stuck-${index}`);
+          await vi.waitFor(() => expect(queuedKinds()).toEqual([]));
+        }
+        expect(session.hasRoomForPeerMessage()).toBe(false);
+      });
+
+      it('stays addressable while a close that may be undone runs', () => {
+        // The close gate is released again when an `onlyIfUnheld` close
+        // finds a hold, so the session may well be here to read what
+        // arrives in that window. "Not this session" is terminal; no
+        // room is not.
         expect(session.isOpenForPeerMessages()).toBe(true);
-        (session as unknown as { closing: boolean }).closing = true;
+        const release = session.beginClose();
+        expect(session.isOpenForPeerMessages()).toBe(true);
+        expect(session.hasRoomForPeerMessage()).toBe(false);
+        release();
+        expect(session.hasRoomForPeerMessage()).toBe(true);
+      });
+
+      it('stops being addressable once it is disposed', () => {
+        expect(session.isOpenForPeerMessages()).toBe(true);
+        (session as unknown as { disposed: boolean }).disposed = true;
         expect(session.isOpenForPeerMessages()).toBe(false);
       });
     });

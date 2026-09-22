@@ -2173,6 +2173,21 @@ export class Session implements SessionContext {
    */
   private readonly acceptingPeerMessageIds = new Set<string>();
   /**
+   * Peer messages the drain took off the queue whose turn has not put
+   * them in front of the model yet, keyed by message id.
+   *
+   * A turn can end without running what it took — cancelled before it
+   * started, refused admission, or stopped at the session's token limit,
+   * which discards the parts it was going to send. The queue no longer
+   * holds those messages, so without this the host would sweep an empty
+   * queue and their senders would keep a `delivered` receipt for a
+   * message no model ever saw.
+   */
+  private readonly inFlightPeerDeliveries = new Map<
+    string,
+    PeerQueuedDelivery
+  >();
+  /**
    * Notifications lost to queue overflow since the last drain. Reported as one
    * summary on the next notification turn rather than per loss, so an overflow
    * burst cannot itself flood the session.
@@ -4257,9 +4272,20 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent' || item.kind === 'workflow') {
+      // A peer message counts like work this session asked for: it was
+      // accepted with a receipt that said so, and a conditional close
+      // that reads this session as idle would discard it with the queue.
+      if (
+        item.kind === 'agent' ||
+        item.kind === 'workflow' ||
+        item.kind === 'peer'
+      ) {
         notificationIds.add(item.taskId);
       }
+    }
+    // The same for one the drain took but nothing has read yet.
+    for (const msgId of this.inFlightPeerDeliveries.keys()) {
+      notificationIds.add(msgId);
     }
     for (const taskId of this.activeNotificationAcceptances) {
       notificationIds.add(taskId);
@@ -10718,8 +10744,11 @@ export class Session implements SessionContext {
           kind: 'peer',
           displayText: message.displayText,
           modelText: message.modelText,
+          // Capped here like every other background-notification label:
+          // this one is the only one a peer chooses, and the frame allows
+          // it more than twice what the label surfaces hold.
           ...(delivery.senderLabel !== undefined
-            ? { label: delivery.senderLabel }
+            ? { label: truncateNotificationLabel(delivery.senderLabel) }
             : {}),
         },
         delivery,
@@ -10746,32 +10775,50 @@ export class Session implements SessionContext {
       // every message would be accepted only to be taken back.
       this.config.getChatRecordingService() !== undefined &&
       this.notificationQueue.filter((entry) => entry.kind === 'peer').length +
-        this.acceptingPeerMessageIds.size <
+        this.acceptingPeerMessageIds.size +
+        this.inFlightPeerDeliveries.size <
         MAX_QUEUED_PEER_MESSAGES
     );
   }
 
-  /** Whether this session can still be addressed at all. */
+  /**
+   * Whether this session can still be addressed at all.
+   *
+   * A close under way does not answer this question: `beginClose()` is
+   * reversible — an `onlyIfUnheld` close that finds a hold releases the
+   * gate and the session carries on — and "not this session" is the one
+   * terminal receipt a sender cannot retry past. The room check keeps
+   * `closing`, so a message arriving in that window is turned away as
+   * queue-full instead: its id is left unsettled, which is the honest
+   * answer for a session that may well be here to read it next.
+   */
   isOpenForPeerMessages(): boolean {
-    return !this.disposed && !this.closing;
+    return !this.disposed;
   }
 
   /**
-   * Remove the peer messages still waiting in the queue and hand back
-   * what the host needs to correct their receipts.
+   * Remove the peer messages nothing has read and hand back what the
+   * host needs to correct their receipts.
    *
-   * A message whose turn has started is not among them: the queue entry
-   * is taken out when the turn begins, so what is left here is exactly
-   * what nothing has read. Taking rather than listing, so a second sweep
-   * of the same session does not tell a sender twice.
+   * Two places hold one: the queue, and the in-flight list a message
+   * moves to when the drain takes it and moves out of once the model has
+   * it. A message is in exactly one of them, so a sender is told once.
+   * Taking rather than listing, so a second sweep of the same session
+   * does not tell it twice either.
    */
   takeUnconsumedPeerDeliveries(): PeerQueuedDelivery[] {
-    const taken: PeerQueuedDelivery[] = [];
+    const taken: PeerQueuedDelivery[] = [
+      ...this.inFlightPeerDeliveries.values(),
+    ];
+    this.inFlightPeerDeliveries.clear();
     this.notificationQueue = this.notificationQueue.filter((entry) => {
       if (entry.kind !== 'peer') return true;
       if (entry.peerDelivery) taken.push(entry.peerDelivery);
       return false;
     });
+    for (const delivery of taken) {
+      this.persistedBackgroundNotificationTaskIds.delete(delivery.msgId);
+    }
     return taken;
   }
 
@@ -10917,9 +10964,37 @@ export class Session implements SessionContext {
     return parts;
   }
 
+  /**
+   * Put an item the drain took back at the front of the queue.
+   *
+   * A peer message waits in the queue or in the in-flight list, never in
+   * both and never in neither: the host hands its sender exactly one
+   * correction, and `takeUnconsumedPeerDeliveries()` reads both.
+   */
+  #requeueBackgroundNotification(item: QueuedBackgroundNotification): void {
+    if (item.kind === 'peer') this.inFlightPeerDeliveries.delete(item.taskId);
+    this.notificationQueue.unshift(item);
+  }
+
+  /**
+   * The message reached the model, or the history the next turn sends —
+   * either way its sender's `delivered` receipt is true and the host has
+   * nothing to correct.
+   */
+  #peerDeliveryWasRead(item: QueuedBackgroundNotification): void {
+    if (item.kind !== 'peer') return;
+    this.inFlightPeerDeliveries.delete(item.taskId);
+    // And the session stops remembering the id. What keeps a message
+    // from arriving twice is the transport's own record of what it has
+    // settled; this set only has to answer for one that is still on its
+    // way through here, and peer ids are the one kind of id an outside
+    // party can mint without limit.
+    this.persistedBackgroundNotificationTaskIds.delete(item.taskId);
+  }
+
   #deferBackgroundAdmission(item: QueuedBackgroundNotification): void {
     if (this.disposed) return;
-    this.notificationQueue.unshift(item);
+    this.#requeueBackgroundNotification(item);
     this.notificationAdmissionDeferred = true;
     if (this.notificationsPaused) return;
     const attempt = item.admissionRetries ?? 0;
@@ -11034,6 +11109,12 @@ export class Session implements SessionContext {
         if (nextIndex < 0) break;
         const [item] = this.notificationQueue.splice(nextIndex, 1);
         if (!item) break;
+        // Off the queue but not read yet: the turn below can end without
+        // running it, and a peer message's sender is owed a correction
+        // if it does.
+        if (item.kind === 'peer' && item.peerDelivery) {
+          this.inFlightPeerDeliveries.set(item.taskId, item.peerDelivery);
+        }
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
         this.currentWorkflowNotificationTaskId =
@@ -11204,7 +11285,7 @@ export class Session implements SessionContext {
         try {
           await this.assertCanStartTurn();
           if (ac.signal.aborted) {
-            this.notificationQueue.unshift(item);
+            this.#requeueBackgroundNotification(item);
             return;
           }
           if (channelTask?.signal.aborted) {
@@ -11254,7 +11335,7 @@ export class Session implements SessionContext {
           if (!channelTask) this.backgroundTurn = turn;
           if (ac.signal.aborted) {
             delete item.turn;
-            this.notificationQueue.unshift(item);
+            this.#requeueBackgroundNotification(item);
             await finishBackgroundNotificationTurn('cancelled', true);
             return;
           }
@@ -11330,7 +11411,10 @@ export class Session implements SessionContext {
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
               this.todoStopGuard.suspend();
+              // Kept in history, so the next turn sends it: the message
+              // is not lost and its receipt needs no correction.
               this.#preserveUnsentMessageHistory(nextMessage, true);
+              this.#peerDeliveryWasRead(item);
               await finishBackgroundNotificationTurn('cancelled', true);
               return;
             }
@@ -11351,10 +11435,13 @@ export class Session implements SessionContext {
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
-              this.#preserveUnsentMessageHistory(
-                nextMessage,
-                sendResult.stopReason === 'cancelled',
-              );
+              // Only a cancelled send keeps the whole message in history;
+              // any other stop reason drops everything that is not a tool
+              // result, which is all a peer message is. Leaving it on the
+              // in-flight list is what earns its sender a correction.
+              const keptInHistory = sendResult.stopReason === 'cancelled';
+              this.#preserveUnsentMessageHistory(nextMessage, keptInHistory);
+              if (keptInHistory) this.#peerDeliveryWasRead(item);
               await finishBackgroundNotificationTurn(
                 sendResult.stopReason,
                 true,
@@ -11362,6 +11449,8 @@ export class Session implements SessionContext {
               return;
             }
 
+            // In front of the model now.
+            this.#peerDeliveryWasRead(item);
             const responseStream = sendResult.responseStream;
             const requestRouteKey = sendResult.requestRouteKey;
             nextMessage = null;
