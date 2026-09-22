@@ -49,16 +49,18 @@ JDBC 驱动。嵌入服务负责 DataSource 和 schema 生命周期。测试使�
 的 H2 以及 MySQL Connector/J。
 
 私有 Tool execution ledger 中的 JSON 字段使用 Fastjson2；它们是 Broker
-内部不透明载荷，不是公开 Agent Event 或 Item 资源。
+内部不透明载荷，不是公开 Agent Event 或 Item 资源。读取时关闭引用检测，确保
+`$ref` 和 `@type` 保持普通数据；有限十进制数不使用指数形式写出，避免持久化
+过程通过浮点转换造成收窄或溢出。
 
 ### 数据表
 
-| 表                          | 身份                                        | 并发约束                                                                                                    |
-| --------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `qwen_runtime_binding_slot` | 不可变请求摘要                              | 每个请求一条加锁分配记录；非空 Session isolation key 全局唯一；保存当前活跃 binding 和最后分配的 generation |
-| `qwen_runtime_binding`      | `binding_id`；不可变请求摘要与 generation   | generation 唯一且单调递增；version 和 operation generation fencing                                          |
-| `qwen_runtime_session`      | 全局唯一的公共 `runtime_session_id`         | 原子创建；version compare-and-set；scope、binding generation 与 Session 身份不可变                          |
-| `qwen_tool_execution`       | `execution_call_id`；唯一 `idempotency_key` | 原子幂等创建；version compare-and-set；dispatch owner、过期时间和 generation fencing                        |
+| 表                          | 身份                                                               | 并发约束                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `qwen_runtime_binding_slot` | 不可变请求摘要                                                     | 每个请求一条加锁分配记录；非空 Session isolation key 全局唯一；保存当前活跃 binding 和最后分配的 generation |
+| `qwen_runtime_binding`      | `binding_id`；不可变请求摘要与 generation                          | generation 唯一且单调递增；version 和 operation generation fencing                                          |
+| `qwen_runtime_session`      | 全局唯一的公共 `runtime_session_id`                                | 原子创建；version compare-and-set；scope、binding generation 与 Session 身份不可变                          |
+| `qwen_tool_execution`       | 哈希加完整 `execution_call_id`；唯一的哈希加完整 `idempotency_key` | 原子幂等创建；version compare-and-set；dispatch owner、过期时间和 generation fencing                        |
 
 请求摘要和 scope 摘要使用对不可变字段做长度前缀编码后的 SHA-256。原始字段
 仍完整保存在记录中，并在读取后重建和比对；即使出现摘要冲突，也会失败关闭，
@@ -90,7 +92,9 @@ JDBC 驱动。嵌入服务负责 DataSource 和 schema 生命周期。测试使�
 Tool execution 记录把稳定幂等键绑定到 Runtime binding generation、Harness
 Session、Runtime Session、Turn、Tool call、请求摘要和不可变调用引用。重复的
 幂等键返回原记录，由调用方比对请求并拒绝内容变化。派发响应丢失或结果不明确
-时，仍可通过原 `executionCallId` 查询。
+时，仍可通过原 `executionCallId` 查询。execution 与 idempotency 标识都使用
+SHA-256 key，确保在任意数据库排序规则下获得有界且大小写敏感的索引；每次查询
+都会核验完整标识，哈希冲突时失败关闭。
 
 ### Schema 生命周期
 
@@ -106,6 +110,10 @@ Runtime Session 主键；任何试图把它复用于其他 Harness 或 scope 的
 拒绝。Session 隔离的 binding 使用同一个 UUID 作为唯一 isolation key；
 workspace 隔离的 binding 保持该 key 为空。JDBC 适配器不鉴权这些字段；Java
 管控面必须从可信准入上下文生成它们。
+
+Tool execution 方法有意不再单独接收 tenant 或 workspace 参数。嵌入服务必须从
+已认证的 tenant、workspace 和 Session 上下文生成全局唯一的 execution 与
+idempotency 标识；仅凭不可信标识绝不能完成授权。
 
 Runtime endpoint token 是私有管控面凭证。为了重启恢复，schema 需要保存原始
 lease，但嵌入服务必须使用加密存储或数据库级加密，且不能通过公共 API 或日志

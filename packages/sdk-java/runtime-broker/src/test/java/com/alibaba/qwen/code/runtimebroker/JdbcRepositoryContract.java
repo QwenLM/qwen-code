@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -15,6 +16,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -373,6 +375,39 @@ final class JdbcRepositoryContract {
         ToolExecutionRecord original = reconstructed.findOrCreate(changed);
         assertEquals(executionId, original.getExecutionCallId());
         assertFalse(original.sameRequest(changed));
+
+        String lowercaseId = prefix + "-case-execution";
+        String uppercaseId = prefix + "-CASE-EXECUTION";
+        first.findOrCreate(execution(lowercaseId,
+                prefix + "-case-lower-idempotency",
+                prefix + "-case-lower-digest"));
+        first.findOrCreate(execution(uppercaseId,
+                prefix + "-case-upper-idempotency",
+                prefix + "-case-upper-digest"));
+        assertEquals(lowercaseId, second.findByExecutionCallId(lowercaseId)
+                .getExecutionCallId());
+        assertEquals(uppercaseId, second.findByExecutionCallId(uppercaseId)
+                .getExecutionCallId());
+
+        String typedKey = prefix + "-typed-idempotency";
+        Map<String, Object> typedReference = new LinkedHashMap<>();
+        typedReference.put("sessionId", prefix + "-typed-runtime-session");
+        typedReference.put("promptId", prefix + "-typed-turn");
+        typedReference.put("callId", prefix + "-typed-tool");
+        typedReference.put("argsDigest", prefix + "-typed-digest");
+        typedReference.put("schema", Map.of("$ref", "$"));
+        typedReference.put("jsonLd", Map.of("@type", "Thing"));
+        typedReference.put("scale",
+                new BigDecimal("1.2345678901234567890123E+30"));
+        ToolExecutionRecord typed = ToolExecutionRecord.prepared(
+                prefix + "-typed-execution", typedKey,
+                prefix + "-typed-binding", 1, prefix + "-typed-harness",
+                prefix + "-typed-runtime-session", prefix + "-typed-turn",
+                prefix + "-typed-tool", prefix + "-typed-digest",
+                typedReference);
+        first.findOrCreate(typed);
+        assertTrue(new JdbcToolExecutionRepository(dataSource)
+                .findByIdempotencyKey(typedKey).sameRequest(typed));
     }
 
     private static RuntimeScope scope(String tenant) {

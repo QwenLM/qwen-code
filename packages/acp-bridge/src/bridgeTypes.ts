@@ -1306,6 +1306,10 @@ export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
 
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
+// Bare (unprefixed) key by contract: the SDK wire type
+// (`sdk-typescript/src/daemon/ui/types.ts`) and already-written transcripts
+// pin the value, so it must stay `inputAnnotations`.
+export const DAEMON_INPUT_ANNOTATIONS_META_KEY = 'inputAnnotations';
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
 // dependency path between them, so a cross-package test pins the value.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';

@@ -7,12 +7,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  managedToolDigest,
   type ManagedToolExecutionResult,
-  type ManagedToolInvocationReference,
   type ManagedToolInvocationStatus,
   type ManagedToolV2Client,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
+import {
+  managedToolDigest,
+  type ManagedToolInvocationReference,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   ManagedRuntimeProviderError,

@@ -46,6 +46,7 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -194,6 +195,7 @@ function executionEngineProof(
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
+  Object.defineProperty(ToolMock.prototype, 'name', { value: toolName });
   Object.defineProperty(ToolMock, 'Name', {
     value: toolName,
     writable: true,
@@ -11976,6 +11978,68 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('uses a main-session execution environment and disposes it once', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const dispose = vi
+        .spyOn(environment, 'dispose')
+        .mockResolvedValue(undefined);
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+        todoWriteEnabled: true,
+        mcpServers: { local: { command: 'must-not-start' } },
+      });
+      expect(config.getExecutionEnvironment()).toBe(environment);
+      expect(config.getMcpServers()).toEqual({});
+      await config.createToolRegistry();
+      const registered = vi
+        .mocked(ToolRegistry.prototype.registerFactory)
+        .mock.calls.map(([name]) => name);
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.SHELL);
+      for (const name of [
+        ToolNames.STRUCTURED_OUTPUT,
+        ToolNames.WEB_FETCH,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
+        ToolNames.TODO_WRITE,
+      ])
+        expect(registered).toContain(name);
+      expect(registered).not.toContain(ToolNames.TASK_STOP);
+      expect(registered).not.toContain(ToolNames.NOTEBOOK_EDIT);
+      expect(registered).not.toContain(ToolNames.CREATE_SUB_SESSION);
+      await config.shutdownExecutionEnvironments();
+      await config.shutdownExecutionEnvironments();
+      expect(dispose).toHaveBeenCalledOnce();
+    });
+    it('skips host project hooks, skills, extensions and memory during SSH initialization', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        enableAutoSkill: true,
+      });
+      const refreshExtensions = vi.spyOn(
+        config.getExtensionManager(),
+        'refreshCache',
+      );
+      await config.initialize({ skipLlmInitialization: true });
+      await config.refreshHierarchicalMemory();
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.refreshCache).not.toHaveBeenCalled();
+      expect(refreshExtensions).not.toHaveBeenCalled();
+      expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+      await config.shutdown();
+    });
+
     it('registers zoom_image unconditionally so it survives model switches', async () => {
       const config = new Config(baseParams);
       // A first-run / text-only session reports no image modality, yet the tool

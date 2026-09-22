@@ -6,13 +6,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
-import {
-  PRIVATE_ACP_CAPABILITY_ENV,
-  SessionEndReason,
-  Storage,
-  type Config,
-  type ShellConfiguration,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { SessionEndReason } from '@qwen-code/qwen-code-core/hooks/types.js';
+import { PRIVATE_ACP_CAPABILITY_ENV } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
+import type { ShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import {
   createInMemoryChannel,
   type AcpChannel,

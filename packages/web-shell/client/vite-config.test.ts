@@ -199,3 +199,31 @@ describe('Web Shell daemon API proxy coverage', () => {
     ).toBeUndefined();
   });
 });
+
+describe('Web Shell remote workspace development proxy', () => {
+  // Proxy keys are path-prefix matches, so the `/workspace` entry cannot reach
+  // `/remote-workspace*`. Without their own entries the SPA fallback answers
+  // the browse leg with index.html and the dialog fails JSON parsing in dev.
+  it.each([
+    {
+      key: '/remote-workspace-path-suggestions',
+      method: 'GET',
+      url: '/remote-workspace-path-suggestions?daemon=http%3A%2F%2Fb.test%3A4170&prefix=%2Fsrv%2F',
+    },
+    { key: '/remote-workspaces', method: 'POST', url: '/remote-workspaces' },
+  ])('proxies $key to the daemon', ({ key, method, url }) => {
+    const proxy = loadConfig().server?.proxy;
+    expect(proxy?.[key]).not.toBeTypeOf('string');
+    const options = proxy?.[key] as ProxyOptions | undefined;
+    expect(options).toBeDefined();
+    const request = {
+      method,
+      url,
+      headers: { accept: '*/*' },
+    } as unknown as IncomingMessage;
+
+    expect(
+      options?.bypass?.(request, {} as unknown as ServerResponse, options),
+    ).toBeUndefined();
+  });
+});

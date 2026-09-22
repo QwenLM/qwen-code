@@ -77,7 +77,7 @@ import {
 } from './settingsUtils.js';
 import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
-import { QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -2141,195 +2141,88 @@ describe('Settings Loading and Merging', () => {
       ]);
     });
 
-    it('should handle JSON parsing errors gracefully by renaming corrupted file', () => {
+    it('should fail closed and preserve malformed operator settings', () => {
       const invalidJsonContent = 'invalid json';
-      const userReadError = new SyntaxError(
-        "Expected ',' or '}' after property value in JSON at position 10",
-      );
-
-      // No .orig backup available
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
-        const pathStr = String(p);
-        if (pathStr.endsWith('.orig')) return false;
-        return true;
-      });
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) {
-            vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
-              throw userReadError;
-            });
-            return invalidJsonContent;
-          }
-          return '{}';
-        },
-      );
-
-      // Should NOT throw — corrupted settings degrade gracefully
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      // Verify the corrupted file was copied to .corrupted
-      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
-      const corruptedCopy = copyCalls.find(
-        (call: unknown[]) =>
-          call[0] === USER_SETTINGS_PATH &&
-          String(call[1]).includes('.corrupted'),
-      );
-      expect(corruptedCopy).toBeDefined();
-
-      // Corrupted dialog is driven by corruptedPath, not by migrationWarnings
-      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
-      expect(result.wasRecovered).toBe(false);
-
-      vi.restoreAllMocks();
-    });
-
-    it('should ignore a stale .orig backup and reset to empty when settings.json is corrupted', () => {
-      // `.orig` is no longer used for recovery — writeWithBackupSync removes it
-      // on success, so any leftover is stale and must not be restored from.
-      const invalidJsonContent = 'invalid json';
-      const staleBackupContent = JSON.stringify({
-        $version: SETTINGS_VERSION,
-        model: { id: 'backup-model' },
-      });
-
       (mockFsExistsSync as Mock).mockReturnValue(true);
-
       (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          if (p === `${USER_SETTINGS_PATH}.orig`) return staleBackupContent;
-          return '{}';
-        },
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? invalidJsonContent : '{}',
       );
 
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      // The stale backup must NOT be written back to the original path.
-      const writeCalls = (fs.writeFileSync as Mock).mock.calls;
-      const restoreWrite = writeCalls.find(
-        (call: unknown[]) =>
-          call[0] === USER_SETTINGS_PATH && call[1] === staleBackupContent,
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
+        /Cannot read operator sandbox policy/,
       );
-      expect(restoreWrite).toBeUndefined();
-
-      // Settings are reset to empty and corruption is reported, not recovered.
-      expect(result.wasRecovered).toBe(false);
-      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
-      const resetWrites = writeCalls.filter(
-        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      expect(fs.copyFileSync).toHaveBeenCalledWith(
+        USER_SETTINGS_PATH,
+        `${USER_SETTINGS_PATH}.corrupted`,
       );
-      expect(resetWrites.length).toBeGreaterThan(0);
-
-      vi.restoreAllMocks();
+      expect(fs.writeFileSync).not.toHaveBeenCalledWith(
+        USER_SETTINGS_PATH,
+        '{}',
+        'utf-8',
+      );
     });
 
-    it('should degrade gracefully when both settings.json and backup are corrupted', () => {
-      const invalidJsonContent = 'invalid json';
-      const invalidBackupContent = 'also invalid';
+    it.each([
+      ['user', () => USER_SETTINGS_PATH],
+      ['system', getSystemSettingsPath],
+    ])(
+      'should fail closed if %s operator settings tear after policy pre-read',
+      (_scope, getFile) => {
+        const file = getFile();
+        const validJsonContent = JSON.stringify({
+          $version: 4,
+          tools: {
+            executionSandbox: {
+              filesystem: 'read-only',
+              network: 'closed',
+            },
+          },
+        });
+        let reads = 0;
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === file,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p !== file) return '{}';
+            reads += 1;
+            return reads === 1 ? validJsonContent : '{';
+          },
+        );
 
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
-        const pathStr = String(p);
-        if (
-          pathStr === USER_SETTINGS_PATH ||
-          pathStr === `${USER_SETTINGS_PATH}.orig`
-        )
-          return true;
-        return false;
-      });
+        let error: unknown;
+        try {
+          loadSettings(MOCK_WORKSPACE_DIR);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(FatalConfigError);
+        expect(error).toMatchObject({ message: expect.stringContaining(file) });
+        expect(reads).toBe(2);
+        expect(fs.copyFileSync).not.toHaveBeenCalled();
+        expect(fs.writeFileSync).not.toHaveBeenCalledWith(file, '{}', 'utf-8');
+      },
+    );
 
+    it('should still fail closed when preserving malformed settings fails', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          if (p === `${USER_SETTINGS_PATH}.orig`) return invalidBackupContent;
-          return '{}';
-        },
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? 'invalid json' : '{}',
       );
-
-      // Should NOT throw — falls through to rename-and-degrade
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
-      expect(result.wasRecovered).toBe(false);
-      const resetWrites = (fs.writeFileSync as Mock).mock.calls.filter(
-        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
-      );
-      expect(resetWrites.length).toBeGreaterThan(0);
-
-      // Verify the corrupted file was copied to .corrupted
-      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
-      expect(
-        copyCalls.some(
-          (call: unknown[]) =>
-            call[0] === USER_SETTINGS_PATH &&
-            String(call[1]).includes('.corrupted'),
-        ),
-      ).toBe(true);
-
-      vi.restoreAllMocks();
-    });
-
-    it('should start with empty settings when copy of corrupted file fails', () => {
-      const invalidJsonContent = 'invalid json';
-
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
-        const pathStr = String(p);
-        if (pathStr.endsWith('.orig')) return false;
-        return true;
-      });
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          return '{}';
-        },
-      );
-
-      // Simulate copy failure (e.g., permission denied)
       (fs.copyFileSync as Mock).mockImplementation(() => {
         throw new Error('EACCES: permission denied');
       });
 
-      // Should still NOT throw — proceeds with empty settings
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(result).toBeDefined();
-
-      // Corruption warning no longer goes through migrationWarnings —
-      // copy failed so corruptedPath is undefined too
-      const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
-      expect(result.corruptedPath).toBeUndefined();
-
-      vi.restoreAllMocks();
-    });
-
-    it('should return warnings suitable for early stderr emission when settings.json has invalid JSON', () => {
-      const invalidJsonContent = '{ broken json!!!';
-      (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
+        /Cannot read operator sandbox policy/,
       );
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          return '{}';
-        },
+      expect(fs.writeFileSync).not.toHaveBeenCalledWith(
+        USER_SETTINGS_PATH,
+        '{}',
+        'utf-8',
       );
-      (fs.renameSync as Mock).mockImplementation(() => {});
-
-      const result = loadSettings(MOCK_WORKSPACE_DIR);
-      const warnings = getSettingsWarnings(result);
-
-      // Corruption warning no longer goes through migrationWarnings —
-      // it is emitted via settings.corruptedPath check in llm.tsx
-      // early stderr path instead. Verify corruptedPath is set.
-      expect(result.corruptedPath).toBeDefined();
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
-
-      vi.restoreAllMocks();
     });
 
     describe('corruption env var propagation', () => {

@@ -6,16 +6,16 @@
 
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { FileManagedActivationStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-activation-store.js';
+import { EmbeddedHarnessScheduler } from '@qwen-code/qwen-code-core/managed-runtime/embedded-harness-scheduler.js';
+import { ManagedPromptAdmissionController } from '@qwen-code/qwen-code-core/managed-runtime/managed-prompt-admission.js';
 import {
-  EmbeddedHarnessScheduler,
-  FileManagedActivationStore,
   FileManagedSessionInbox,
-  ManagedPromptAdmissionController,
   ManagedSessionInboxAdmissionError,
   ManagedSessionMessageConflictError,
   type ManagedSessionJsonValue,
   type ManagedSessionMessageIdentity,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-inbox.js';
 import {
   ManagedPromptServiceError,
   type ManagedPromptAdmissionResponse,

@@ -9,9 +9,26 @@ public final class RuntimeBrokerException extends RuntimeException {
     public RuntimeBrokerException(int statusCode, String code,
             String message, boolean retryable) {
         super(message);
+        validateStatus(statusCode);
         this.statusCode = statusCode;
         this.code = BrokerValues.requireId(code, "code");
         this.retryable = retryable;
+    }
+
+    public RuntimeBrokerException(int statusCode, String code,
+            String message, boolean retryable, Throwable cause) {
+        super(message, cause);
+        validateStatus(statusCode);
+        this.statusCode = statusCode;
+        this.code = BrokerValues.requireId(code, "code");
+        this.retryable = retryable;
+    }
+
+    private static void validateStatus(int statusCode) {
+        if (statusCode < 400 || statusCode > 599) {
+            throw new IllegalArgumentException(
+                    "statusCode must be an error status");
+        }
     }
 
     public int getStatusCode() {

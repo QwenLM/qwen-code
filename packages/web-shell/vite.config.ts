@@ -199,6 +199,12 @@ export default defineConfig(({ command }) => ({
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
+      // Remote-daemon browse/register proxies. Keys are path-prefix matches,
+      // so the `/workspace` entry above cannot reach these; without them the
+      // SPA fallback returns index.html in dev and the Add-workspace dialog
+      // fails JSON parsing on the browse leg.
+      '/remote-workspace-path-suggestions': daemonProxy,
+      '/remote-workspaces': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,

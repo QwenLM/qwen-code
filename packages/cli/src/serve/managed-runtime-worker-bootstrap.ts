@@ -14,7 +14,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import type { ManagedWorkerBoot } from './managed-runtime-activator.js';
 
 const MANAGED_WORKER_BOOT_MAX_BYTES = 32_768;

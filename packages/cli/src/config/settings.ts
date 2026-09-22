@@ -20,6 +20,12 @@ import type {
   McpServerScope,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
+import {
+  parseExecutionSandboxSettings,
+  readOperatorSandboxSettings,
+  selectOperatorExecutionSandbox,
+  stripUtf8Bom,
+} from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { readConfigFile } from './read-config-file.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
@@ -614,7 +620,7 @@ function mergeSettings(
   // 2. User Settings
   // 3. Workspace Settings
   // 4. System Settings (as overrides)
-  return customDeepMerge(
+  const merged = customDeepMerge(
     getMergeStrategyForPath,
     {}, // Start with an empty object
     systemDefaults,
@@ -622,6 +628,33 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const executionSandbox = selectOperatorExecutionSandbox(
+    systemDefaults,
+    user,
+    system,
+  );
+  const legacySandbox = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['tools']>['sandbox']
+  >((current, scope) => scope.tools?.sandbox ?? current, undefined);
+  // Restore the complete operator object even if a project replaced `tools`
+  // with null, a scalar, or an array during the ordinary settings merge.
+  if (executionSandbox) {
+    const tools = merged.tools;
+    merged.tools = {
+      ...(tools && typeof tools === 'object' && !Array.isArray(tools)
+        ? tools
+        : {}),
+      executionSandbox,
+    };
+    if (legacySandbox === undefined) {
+      delete merged.tools.sandbox;
+    } else {
+      merged.tools.sandbox = legacySandbox;
+    }
+  } else if (merged.tools && typeof merged.tools === 'object') {
+    delete merged.tools.executionSandbox;
+  }
+  return merged;
 }
 
 export class LoadedSettings {
@@ -794,8 +827,11 @@ export class LoadedSettings {
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      const parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
+        }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
           this.runtimeEnvironment === undefined
@@ -888,6 +924,20 @@ export class LoadedSettings {
  * Used in stream-json mode where settings are ignored.
  */
 export function createMinimalSettings(): LoadedSettings {
+  const operator = readOperatorSandboxSettings();
+  const executionSandbox = parseExecutionSandboxSettings(
+    operator.tools?.executionSandbox,
+  );
+  const legacy = operator.tools?.sandbox;
+  const operatorSettings: Settings =
+    executionSandbox || legacy === 'bwrap'
+      ? {
+          tools: {
+            executionSandbox,
+            sandbox: legacy as boolean | string | undefined,
+          },
+        }
+      : {};
   const emptySettingsFile: SettingsFile = {
     path: '',
     settings: {},
@@ -895,7 +945,11 @@ export function createMinimalSettings(): LoadedSettings {
     rawJson: '{}',
   };
   return new LoadedSettings(
-    emptySettingsFile,
+    {
+      ...emptySettingsFile,
+      settings: operatorSettings,
+      originalSettings: operatorSettings,
+    },
     emptySettingsFile,
     emptySettingsFile,
     emptySettingsFile,
@@ -1003,6 +1057,12 @@ function loadSettingsInternal(
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
   if (opts.runtimeEnvironment === undefined) preResolveHomeEnvOverrides();
+  // A malformed operator file cannot silently reset a confinement policy.
+  // Validate literals before environment substitution and corruption recovery.
+  const operatorSandbox =
+    opts.runtimeEnvironment === undefined
+      ? readOperatorSandboxSettings().tools?.executionSandbox
+      : undefined;
   const userSettingsPath = getUserSettingsPath();
   const qwenHomeRedirectWarning =
     opts.runtimeEnvironment === undefined
@@ -1061,11 +1121,13 @@ function loadSettingsInternal(
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
-          rawSettings = JSON.parse(stripJsonComments(content));
+          rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
           if (snapshotOnly) {
             throw new Error('Settings file contains invalid JSON.');
           }
+          if (scope !== SettingScope.Workspace || operatorSandbox)
+            throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
@@ -1148,6 +1210,11 @@ function loadSettingsInternal(
           return { settings: {} };
         }
 
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(
+            (rawSettings as Settings).tools?.executionSandbox,
+          );
+        }
         let settingsObject = rawSettings as Record<string, unknown>;
         const hasVersionKey = SETTINGS_VERSION_KEY in settingsObject;
         const versionValue = settingsObject[SETTINGS_VERSION_KEY];
@@ -1171,6 +1238,7 @@ function loadSettingsInternal(
             migratedInMemoryScopes.add(scope);
             return;
           }
+          if (operatorSandbox && scope === SettingScope.Workspace) return;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.

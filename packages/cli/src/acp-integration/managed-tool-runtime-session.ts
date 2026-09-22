@@ -6,21 +6,25 @@
 
 import {
   createBuiltinManagedToolRuntime,
-  ManagedToolProtocolError,
-  MANAGED_TOOL_FILE_HISTORY_MAX_BYTES,
-  ToolConfirmationOutcome,
-  ToolNames,
+  type ManagedToolRuntime,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
+import {
   managedToolDigest,
   parseManagedToolCallIdentity,
   parseManagedToolContentModification,
   parseManagedToolMediaContext,
+  parseManagedToolInvocationReference,
+  parseManagedToolConfirmationPayload,
+  ManagedToolProtocolError,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import {
+  MANAGED_TOOL_FILE_HISTORY_MAX_BYTES,
   parseManagedToolFileHistoryBinding,
   parseManagedToolFileHistoryPromptId,
   parseManagedToolFileHistoryState,
-  parseManagedToolInvocationReference,
-  parseManagedToolConfirmationPayload,
-  type ManagedToolRuntime,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import type { ManagedToolV2Client } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseCallerSuppliedSessionId } from '../config/session-id.js';

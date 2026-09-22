@@ -185,6 +185,7 @@ export interface ProcessLaunch {
   cwd: string;
   env: Readonly<Record<string, string>>;
   stdin?: string | Buffer;
+  inheritStdin?: boolean;
 }
 
 function launchCommand(input: string | ProcessLaunch) {
@@ -388,6 +389,8 @@ export interface ShellPostPromoteSettleInfo {
  */
 export interface ShellExecuteOptions {
   streamStdout?: boolean;
+  /** Stream byte-exact child output without text decoding or binary sniffing. */
+  streamRawOutput?: boolean;
   /**
    * Post-promote callback hooks. See {@link ShellPostPromoteHandlers}.
    * Optional; omit to preserve the caller-visible PR-2 detach-everything
@@ -400,6 +403,12 @@ export interface ShellExecuteOptions {
  * Describes a structured event emitted during shell command execution.
  */
 export type ShellOutputEvent =
+  | {
+      /** The event contains a byte-exact output chunk. */
+      type: 'raw_data';
+      chunk: Buffer;
+      stream: 'stdout' | 'stderr';
+    }
   | {
       /** The event contains a chunk of output data. */
       type: 'data';
@@ -829,6 +838,7 @@ export class ShellExecutionService {
       stdin: Buffer.isBuffer(launch.stdin)
         ? Buffer.from(launch.stdin)
         : launch.stdin,
+      inheritStdin: launch.inheritStdin,
     };
     if (
       !path.isAbsolute(snapshot.executable) ||
@@ -849,7 +859,13 @@ export class ShellExecutionService {
     ) {
       throw new Error('Invalid process launch argument or environment.');
     }
-    if (shouldUseNodePty && snapshot.stdin !== undefined) {
+    if (snapshot.stdin !== undefined && snapshot.inheritStdin) {
+      throw new Error('Process stdin cannot be both piped and inherited.');
+    }
+    if (
+      shouldUseNodePty &&
+      (snapshot.stdin !== undefined || snapshot.inheritStdin)
+    ) {
       throw new Error('Process stdin requires pipe execution.');
     }
     if (shouldUseNodePty && !snapshot.env['TERM']) {
@@ -972,6 +988,7 @@ export class ShellExecutionService {
       onOutputEvent,
       abortSignal,
       options.streamStdout ?? false,
+      options.streamRawOutput ?? false,
       getMaxBufferedOutputBytes(shellExecutionConfig),
       shellExecutionConfig.pager,
       options.postPromote,
@@ -991,6 +1008,7 @@ export class ShellExecutionService {
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
     streamStdout: boolean,
+    streamRawOutput: boolean,
     maxBufferedOutputBytes: number,
     pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
@@ -1017,7 +1035,11 @@ export class ShellExecutionService {
       const child = cpSpawn(executable, shellArgs, {
         cwd,
         stdio: [
-          launch?.stdin === undefined ? 'ignore' : 'pipe',
+          launch?.inheritStdin
+            ? 'inherit'
+            : launch?.stdin === undefined
+              ? 'ignore'
+              : 'pipe',
           'pipe',
           'pipe',
         ],
@@ -1120,6 +1142,17 @@ export class ShellExecutionService {
         };
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
+          totalOutputBytes += data.length;
+          const capturedData = captureOutputData(data);
+          if (streamRawOutput) {
+            onOutputEvent({
+              type: 'raw_data',
+              chunk: Buffer.from(data),
+              stream,
+            });
+            return;
+          }
+
           if (!stdoutDecoder || !stderrDecoder) {
             const encoding = getCachedEncodingForBuffer(data);
             try {
@@ -1164,9 +1197,6 @@ export class ShellExecutionService {
               sniffChunks.length = 0;
             }
           }
-
-          totalOutputBytes += data.length;
-          const capturedData = captureOutputData(data);
 
           if (!isStreamingRawContent) {
             // Binary mode: drop further data. Foreground emits the

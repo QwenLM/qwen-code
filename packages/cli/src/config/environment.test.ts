@@ -1701,12 +1701,10 @@ describe('loadEnvironment', () => {
     expect(process.env['ld_library_path']).toBe('/workspace-a/first');
   });
 
-  // The bwrap backend derives its writable roots from XDG_CACHE_HOME and
-  // os.tmpdir() (TMPDIR/TMP/TEMP), and resolveSandboxNetworkMode flips to
-  // proxied — spawning QWEN_SANDBOX_PROXY_COMMAND through `bash -c` on the
-  // host — purely on that variable's presence. None of them may arrive from
-  // repository content: the project .env/settings.env application and reload
-  // paths must reject them like the other hardcoded exclusions.
+  // Sandbox selection, host-side proxy commands, and process-wide cache/temp
+  // roots are operator inputs. The tool boundary also derives writable scratch
+  // from os.tmpdir() (TMPDIR/TMP/TEMP). None may arrive from repository content:
+  // project .env/settings.env application and reload paths must reject them.
   it('never applies the sandbox confinement keys from project .env or settings.env, including reload', () => {
     resetEnvironmentTrackingForTesting();
     const workspace = makeWorkspace();

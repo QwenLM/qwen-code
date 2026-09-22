@@ -10,7 +10,10 @@ database.
 `JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the Broker's private
 tables. The JDBC implementations depend only on `javax.sql.DataSource`; the
 embedding service owns its connection pool, schema lifecycle, and repository
-wiring.
+wiring. Tool execution rows preserve idempotency identity, dispatch ownership,
+lease and cancellation state, ambiguous `UNKNOWN` recovery, and settled
+results. Their case-sensitive execution and idempotency identifiers are indexed
+by deterministic hashes and verified against the complete stored values.
 
 The module provides:
 

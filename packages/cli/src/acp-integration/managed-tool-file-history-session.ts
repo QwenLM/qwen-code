@@ -8,12 +8,14 @@ import { realpath } from 'node:fs/promises';
 import {
   deriveAgentConfig,
   deriveConfig,
-  managedToolDigest,
-  ManagedToolFileHistory,
-  ManagedToolProtocolError,
   type Config,
-  type ManagedToolFileHistoryBinding,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { ManagedToolFileHistory } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history.js';
+import type { ManagedToolFileHistoryBinding } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js';
+import {
+  managedToolDigest,
+  ManagedToolProtocolError,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 
 interface Binding {
   digest: string;

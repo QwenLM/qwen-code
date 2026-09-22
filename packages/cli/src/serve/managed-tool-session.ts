@@ -7,20 +7,24 @@
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
-  captureManagedToolExecutionContext,
-  managedToolDigest,
   deserializeSnapshots,
   serializeSnapshot,
-  type Config,
-  type ManagedToolFileHistoryState,
-  type ManagedToolInvocationReference,
-  type ManagedToolSession,
-  type ManagedToolSessionFactory,
   type SerializedFileHistorySnapshot,
-  type ManagedToolV2Client,
-  type ShellConfiguration,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
+import type { ManagedToolFileHistoryState } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history.js';
+import { captureManagedToolExecutionContext } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js';
+import {
+  managedToolDigest,
+  type ManagedToolInvocationReference,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import type { ManagedToolV2Client } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
+import type {
+  ManagedToolSession,
+  ManagedToolSessionFactory,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-session.js';
+import type { ShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import type { ManagedRuntimeProvider } from './managed-runtime-provider.js';
 import type { ManagedRuntimePrepareRequest } from './managed-runtime-protocol.js';
 import type { WorkspaceGenerationGuard } from './workspace-registry.js';

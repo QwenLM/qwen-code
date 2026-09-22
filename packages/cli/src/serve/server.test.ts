@@ -118,6 +118,9 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
+import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
 import {
   BridgeTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
@@ -236,6 +239,7 @@ import {
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 import {
   ManagedPromptServiceError,
   type ManagedPromptService,
@@ -3210,6 +3214,184 @@ describe('createServeApp', () => {
     ).toThrow(/managed-runtime-broker-url/);
   });
 
+  it.each([
+    'managed',
+    'unowned',
+    'missing_activity',
+    'busy',
+    'acpConnections',
+    'memoryTasks',
+  ] as const)(
+    'wires idle reclamation with %s runtime observations',
+    async (mode) => {
+      const bridge = fakeBridge();
+      const reclaim = vi.fn().mockResolvedValue(true);
+      Object.assign(bridge, {
+        getWorkspaceRuntimeLifecycleSnapshot: () => ({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 1,
+          activeWork: false,
+        }),
+        getIdleChannelCandidate: () => ({
+          channelId: 'primary-child',
+          runtimeEpoch: 1,
+          lastUsedAt: 1,
+        }),
+        reclaimIdleChannel: reclaim,
+      });
+      const registry = new ProcessRegistry();
+      const reservation = registry.reserve();
+      const policy = createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'admit',
+      });
+      const runtimeRemoval = {
+        beginDrain: vi.fn(),
+        cancelDrain: vi.fn(),
+        completeDrain: vi.fn(),
+        disposeRuntime: vi.fn().mockResolvedValue(undefined),
+        getActivity: vi.fn(() => ({
+          pendingSessionStarts: mode === 'busy' ? 1 : 0,
+          channelWorkers: 0,
+          voiceSessions: 0,
+        })),
+      };
+      const app = createServeApp(
+        { ...baseOpts, childHeapMode: 'admit' },
+        undefined,
+        {
+          bridge,
+          primaryWorkspaceTrusted: true,
+          voiceCoordinator: new WorkspaceVoiceCoordinator(),
+          getSessionBridges: () => [bridge],
+          managedChildProcesses: {
+            registry,
+            policy,
+            ...(mode === 'unowned'
+              ? {}
+              : {
+                  ownsBridge: (candidate: AcpSessionBridge) =>
+                    candidate === bridge,
+                }),
+          },
+          ...(mode === 'missing_activity'
+            ? {}
+            : { workspaceRuntimeRemoval: runtimeRemoval }),
+        },
+      );
+      const acpHandle = app.locals['acpHandle'] as {
+        getWorkspaceActivity: (workspaceId: string) => {
+          acpConnections: number;
+          memoryTasks: number;
+        };
+      };
+      vi.spyOn(acpHandle, 'getWorkspaceActivity').mockReturnValue({
+        acpConnections: mode === 'acpConnections' ? 1 : 0,
+        memoryTasks: mode === 'memoryTasks' ? 1 : 0,
+      });
+      try {
+        await (app.locals['reclaimIdleAcp'] as IdleAcpReclaimer)(
+          'another-workspace',
+        );
+        expect(reclaim).toHaveBeenCalledTimes(mode === 'managed' ? 1 : 0);
+        expect(runtimeRemoval.disposeRuntime).not.toHaveBeenCalled();
+        expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+      } finally {
+        reservation.cancel();
+      }
+    },
+  );
+
+  it.each(['admit', 'enforce'] as const)(
+    'rejects unwired %s before creating the app',
+    (mode) => {
+      expect(() =>
+        createServeAppImpl({ ...baseOpts, childHeapMode: mode }),
+      ).toThrow('managed child process wiring');
+    },
+  );
+
+  it('rejects an enforce status snapshot without managed process wiring', () => {
+    const policy = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+      mode: 'enforce',
+    });
+    expect(() =>
+      createServeAppImpl({ ...baseOpts, childHeapMode: 'enforce' }, undefined, {
+        bridge: fakeBridge(),
+        getChildHeapPolicySnapshot: () => policy.snapshot(),
+      }),
+    ).toThrow('managed child process wiring');
+  });
+
+  it.each(['off', 'observe', 'admit'] as const)(
+    'rejects enforce backed by a %s policy',
+    (mode) => {
+      expect(() =>
+        createServeAppImpl(
+          { ...baseOpts, childHeapMode: 'enforce' },
+          undefined,
+          {
+            managedChildProcesses: {
+              registry: new ProcessRegistry(),
+              policy: createChildHeapPolicy({
+                budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+                mode,
+              }),
+            },
+          },
+        ),
+      ).toThrow('managed child process wiring');
+    },
+  );
+
+  it.each(['missing-owner', 'unowned-bridge', 'registry-only'] as const)(
+    'rejects enforce with %s wiring',
+    (wiring) => {
+      const bridge = fakeBridge();
+      expect(() =>
+        createServeAppImpl(
+          { ...baseOpts, childHeapMode: 'enforce' },
+          undefined,
+          {
+            ...(wiring === 'registry-only'
+              ? {
+                  workspaceRegistry: createWorkspaceRegistry([
+                    makeWorkspaceRuntimeForTest({
+                      workspaceId: 'primary',
+                      workspaceCwd: '/tmp/enforce-primary',
+                      primary: true,
+                      bridge,
+                    }),
+                    makeWorkspaceRuntimeForTest({
+                      workspaceId: 'secondary',
+                      workspaceCwd: '/tmp/enforce-secondary',
+                      primary: false,
+                      bridge: fakeBridge(),
+                    }),
+                  ]),
+                }
+              : { bridge }),
+            managedChildProcesses: {
+              registry: new ProcessRegistry(),
+              policy: createChildHeapPolicy({
+                budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+                mode: 'enforce',
+              }),
+              ...(wiring === 'missing-owner'
+                ? {}
+                : {
+                    ownsBridge: (candidate: AcpSessionBridge) =>
+                      wiring === 'registry-only' && candidate === bridge,
+                  }),
+            },
+          },
+        ),
+      ).toThrow('managed bridge ownership');
+    },
+  );
+
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {
@@ -4260,6 +4442,31 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
     });
 
+    it('mounts pairing exchange pre-auth and issuance behind the bearer', async () => {
+      const app = createServeApp(
+        { ...nonTrustedEmbedOpts, token: 'runtime-secret' },
+        undefined,
+        { webShellDir },
+      );
+      // The exchange route is registered before `app.use(authenticate)`: an
+      // invalid code gets the pairing-specific 401, not the bearer gate's.
+      const exchange = await request(app)
+        .post('/web-shell/pairing/exchange')
+        .set('Authorization', 'Bearer not-a-real-code');
+      expect(exchange.status).toBe(401);
+      expect(exchange.body.error).toContain('Pairing code expired');
+
+      const denied = await request(app).post('/web-shell/pairing');
+      expect(denied.status).toBe(401);
+      expect(denied.body).toEqual({ error: 'Unauthorized' });
+
+      const issued = await request(app)
+        .post('/web-shell/pairing')
+        .set('Authorization', 'Bearer runtime-secret');
+      expect(issued.status).toBe(200);
+      expect(issued.body.active).toBe(true);
+    });
+
     it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
       // Express non-strict routing matches a raw `//` against `app.get('/')`
       // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.
@@ -4936,6 +5143,71 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('advertises the SSH descriptor and disables its workflow while keeping anchor ownership', async () => {
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const base = makeWorkspaceRuntimeForTest({
+        workspaceId: 'ssh-id',
+        workspaceCwd: '/workspace/ssh-anchor',
+        primary: false,
+        bridge: fakeBridge(),
+      });
+      const ssh = { host: 'user@host', port: 2222, directory: '/srv/project' };
+      const secondary: WorkspaceRuntime = {
+        ...base,
+        routeFileSystemFactory: {
+          ...base.routeFileSystemFactory,
+          sshWorkspace: ssh,
+        },
+      };
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primary.bridge,
+        workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+        daemonEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
+      });
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.body.workspaces).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'primary-id', workflowsEnabled: true }),
+          expect.objectContaining({
+            id: 'ssh-id',
+            cwd: '/workspace/ssh-anchor',
+            ssh,
+            workflowsEnabled: false,
+          }),
+        ]),
+      );
+    });
+
+    it('rejects an injected SSH primary before starting its bridge', () => {
+      const base = makeWorkspaceRuntimeForTest({
+        workspaceId: 'ssh-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const primary: WorkspaceRuntime = {
+        ...base,
+        routeFileSystemFactory: {
+          ...base.routeFileSystemFactory,
+          sshWorkspace: { host: 'host', directory: '/srv/project' },
+        },
+      };
+      expect(() =>
+        createServeApp(baseOpts, undefined, {
+          bridge: primary.bridge,
+          workspaceRegistry: createWorkspaceRegistry([primary]),
+        }),
+      ).toThrow('Start qwen serve in a local workspace');
+    });
+
     it.each([undefined, '25', '256'])(
       'freezes registration capacity %s and does not infer an injected channel limit',
       async (configured) => {

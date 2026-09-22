@@ -18,15 +18,13 @@ import type {
   BridgeManagedRuntimeToolExecuteResult,
   BridgeManagedRuntimeToolManifest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import {
-  canonicalToolName,
-  CONCURRENCY_SAFE_KINDS,
-  convertToFunctionErrorResponse,
-  getFunctionCalls,
-  getResponseText,
-  getThoughtSummary,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { CONCURRENCY_SAFE_KINDS } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { getFunctionCalls } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
+import { getResponseText } from '@qwen-code/qwen-code-core/utils/partUtils.js';
+import { getThoughtSummary } from '@qwen-code/qwen-code-core/utils/thoughtUtils.js';
 import type { BridgePromptContentBlock } from './acp-session-bridge.js';
 import { FileManagedGatewayConversationStore } from './managed-gateway-conversation-store.js';
 import type { ManagedGatewayPromptRequest } from './managed-prompt-types.js';

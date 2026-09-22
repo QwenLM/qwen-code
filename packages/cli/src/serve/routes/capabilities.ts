@@ -46,7 +46,12 @@ function workflowsEnabledForRuntime(
   runtime: WorkspaceRuntime | undefined,
   daemonEnv: Readonly<NodeJS.ProcessEnv>,
 ): boolean {
-  if (!runtime || !runtime.trusted) return false;
+  if (
+    !runtime ||
+    !runtime.trusted ||
+    runtime.routeFileSystemFactory.sshWorkspace
+  )
+    return false;
   const env =
     runtime.env.mode === 'runtime-overlay'
       ? (runtime.env.effectiveEnv ?? {})
@@ -138,6 +143,9 @@ export function registerCapabilitiesRoutes(
       workspaces: entries.map((entry) => ({
         id: entry.workspaceId,
         cwd: entry.workspaceCwd,
+        ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
+          ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
+          : {}),
         ...(entry.displayName !== undefined
           ? { displayName: entry.displayName }
           : {}),

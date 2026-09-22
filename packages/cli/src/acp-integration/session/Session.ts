@@ -280,6 +280,7 @@ import {
   type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -508,6 +509,27 @@ function readDaemonAttachmentReferences(
     });
   }
   return references;
+}
+const MAX_DAEMON_INPUT_ANNOTATIONS = 256;
+function readDaemonInputAnnotations(
+  value: unknown,
+): Array<Record<string, unknown>> | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_DAEMON_INPUT_ANNOTATIONS
+  ) {
+    return undefined;
+  }
+  // Elements are persisted verbatim and replayed into every later load;
+  // drop non-object entries so one malformed element cannot poison renders.
+  // An all-invalid array must collapse to `undefined`, not `[]` — a truthy
+  // empty array would still force a `systemPayload` below.
+  const annotations = (value as unknown[]).filter(
+    (item): item is Record<string, unknown> =>
+      !!item && typeof item === 'object' && !Array.isArray(item),
+  );
+  return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
@@ -6003,6 +6025,9 @@ export class Session implements SessionContext {
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
+            const inputAnnotations = readDaemonInputAnnotations(
+              promptMetadata?.[DAEMON_INPUT_ANNOTATIONS_META_KEY],
+            );
             const declaredSubmission =
               promptMetadata?.[DAEMON_SUBMITTED_PROMPT_META_KEY];
             const submittedPrompt =
@@ -6178,11 +6203,13 @@ export class Session implements SessionContext {
                 promptText,
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
+                  inputAnnotations ||
                   attachmentReferences ||
                   resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
+                      ...(inputAnnotations ? { inputAnnotations } : {}),
                       ...(attachmentReferences ? { attachmentReferences } : {}),
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
@@ -6271,8 +6298,12 @@ export class Session implements SessionContext {
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined
-                    ? { displayText: promptDisplayText, hookContext: '' }
+                  promptDisplayText !== undefined || inputAnnotations
+                    ? {
+                        displayText: promptDisplayText ?? promptText,
+                        hookContext: '',
+                        ...(inputAnnotations ? { inputAnnotations } : {}),
+                      }
                     : undefined,
                   daemonPromptId,
                 );
@@ -16047,11 +16078,9 @@ export class Session implements SessionContext {
 
       case 'unsupported': {
         if (result.originalType === 'unsupported_action') {
-          throw new RequestError(
-            -32004,
-            'This action is not supported in this standalone session.',
-            { errorKind: 'unsupported_action' },
-          );
+          throw new RequestError(-32004, result.reason, {
+            errorKind: 'unsupported_action',
+          });
         }
         // Command returned an unsupported result type
         const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;
@@ -16102,6 +16131,7 @@ export class Session implements SessionContext {
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
+    const sshWorkspace = Boolean(this.config.getExecutionEnvironment?.());
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
@@ -16122,6 +16152,7 @@ export class Session implements SessionContext {
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
+          if (sshWorkspace) return { text: part.text };
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
@@ -16172,6 +16203,9 @@ export class Session implements SessionContext {
             },
           });
         case 'resource_link': {
+          if (sshWorkspace && part.uri.startsWith(FILE_URI_SCHEME)) {
+            return { text: `@${part.uri.slice(FILE_URI_SCHEME.length)}` };
+          }
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
               fileData: {

@@ -3,7 +3,13 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
 
-/** Executes the existing Managed Runtime v1/v2 protocol for the Broker. */
+/**
+ * Executes the existing Managed Runtime v1/v2 protocol for the Broker.
+ *
+ * <p>Acquire and release must be idempotent by Runtime Session identifier.
+ * Attestation must bind the exact provision request, lease, Runtime identity,
+ * and scope before a recovered endpoint is reused.
+ */
 public interface RuntimeTransport {
     default CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {

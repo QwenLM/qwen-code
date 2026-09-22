@@ -56,16 +56,19 @@ service owns the DataSource and schema lifecycle. Tests provide H2 in MySQL mode
 and the MySQL Connector/J driver.
 
 JSON fields in the private Tool execution ledger use Fastjson2. They are opaque
-Broker payloads and are not public Agent Event or Item resources.
+Broker payloads and are not public Agent Event or Item resources. Reference
+detection is disabled while reading so `$ref` and `@type` remain ordinary data,
+and finite decimal values are written without exponent notation so persistence
+does not narrow or overflow them through a floating-point conversion.
 
 ### Tables
 
-| Table                       | Identity                                             | Concurrency constraints                                                                                                                     |
-| --------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `qwen_runtime_binding_slot` | immutable request hash                               | one locked allocation row per request; globally unique non-null Session isolation key; current active binding and last allocated generation |
-| `qwen_runtime_binding`      | `binding_id`; immutable request hash plus generation | unique monotonically increasing generation; version and operation generation fencing                                                        |
-| `qwen_runtime_session`      | globally unique public `runtime_session_id`          | atomic create; version compare-and-set; immutable scope, binding generation, and Session identity                                           |
-| `qwen_tool_execution`       | `execution_call_id`; unique `idempotency_key`        | atomic idempotent create; version compare-and-set; dispatch owner, expiry, and generation fencing                                           |
+| Table                       | Identity                                                                        | Concurrency constraints                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `qwen_runtime_binding_slot` | immutable request hash                                                          | one locked allocation row per request; globally unique non-null Session isolation key; current active binding and last allocated generation |
+| `qwen_runtime_binding`      | `binding_id`; immutable request hash plus generation                            | unique monotonically increasing generation; version and operation generation fencing                                                        |
+| `qwen_runtime_session`      | globally unique public `runtime_session_id`                                     | atomic create; version compare-and-set; immutable scope, binding generation, and Session identity                                           |
+| `qwen_tool_execution`       | hashed plus full `execution_call_id`; unique hashed plus full `idempotency_key` | atomic idempotent create; version compare-and-set; dispatch owner, expiry, and generation fencing                                           |
 
 Request and scope hashes are SHA-256 indexes over length-prefixed immutable
 fields. The original fields remain in each row and are reconstructed and
@@ -104,7 +107,9 @@ binding generation, Harness Session, Runtime Session, Turn, Tool call, request
 digest, and immutable invocation reference. A duplicate idempotency key returns
 the original record so the caller can compare the request and reject changed
 content. Lost or ambiguous dispatches remain queryable by the original
-`executionCallId`.
+`executionCallId`. Both execution and idempotency identifiers use SHA-256 keys
+for bounded, case-sensitive indexing under any database collation, while every
+lookup verifies the complete identifier and fails closed on a collision.
 
 ### Schema lifecycle
 
@@ -124,6 +129,11 @@ Session-isolated bindings use that same UUID as their unique isolation key;
 workspace-isolated bindings keep the key null. The JDBC adapter does not
 authenticate those values; the Java control plane must derive them from its
 trusted admission context.
+
+Tool execution methods intentionally do not accept a separate tenant or
+workspace argument. The embedding service must derive globally unique
+execution and idempotency identifiers from authenticated tenant, workspace,
+and Session context; an untrusted identifier alone is never authorization.
 
 Runtime endpoint tokens are private control-plane credentials. The schema
 stores them because restart recovery requires the original lease, but the

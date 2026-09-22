@@ -11,13 +11,15 @@ import type { ChannelFactory } from '@qwen-code/acp-bridge';
 import type { BridgeExecutionSelection } from '@qwen-code/acp-bridge/bridgeOptions';
 import { isScheduledTaskRunSource } from '@qwen-code/acp-bridge/sessionSource';
 import {
-  getShellConfiguration,
-  QWEN_DIR,
   SessionExecutionEngineError,
-  SessionService,
   type SessionExecutionEngine,
+} from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { QWEN_DIR } from '@qwen-code/qwen-code-core/utils/paths.js';
+import {
+  getShellConfiguration,
   type ShellConfiguration,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { type CliArgs } from '../config/config.js';
 import { loadProjectMcpServers } from '../config/mcpJson.js';
 import { readSettingsSnapshot } from '../config/settings.js';

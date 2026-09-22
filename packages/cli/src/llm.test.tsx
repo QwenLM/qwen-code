@@ -2827,7 +2827,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
 
   // Drives main() to the renderer dispatch: interactive config, no
   // relaunch, TTY stdin — the same harness the kitty-protocol tests use.
-  const interactiveMainSetup = async () => {
+  const interactiveMainSetup = async (screenReader = false) => {
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -2855,7 +2855,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
+      getScreenReader: () => screenReader,
       getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
@@ -2976,6 +2976,23 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     await main();
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalled();
+  });
+
+  it('hands the screen-reader flag to the renderer gate', async () => {
+    await interactiveMainSetup(/* screenReader */ true);
+    selectOpentui(false);
+    mockStartOpenTuiUI.mockResolvedValue(false);
+
+    await main();
+
+    // The gate is what keeps a screen-reader session on ink; dropping this
+    // argument would silently serve OpenTUI, which has no SR render path.
+    expect(mockSelectTuiRenderer).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      expect.anything(),
+      true,
+    );
   });
 });
 
