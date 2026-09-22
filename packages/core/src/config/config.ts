@@ -1083,7 +1083,7 @@ export interface ConfigParameters {
    */
   toolInvocationGuard?: ToolInvocationGuard;
   /** Internal trusted-host integration; never loaded from workspace settings. */
-  shellExecutionSandbox?: Readonly<BwrapPolicy>;
+  shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1538,6 +1538,10 @@ export interface ConfigParameters {
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
+}
+
+export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
+  requestedBackend?: 'auto' | 'bwrap';
 }
 
 export type TerminalImageRenderSupport =
@@ -2539,7 +2543,9 @@ export function deriveConfig(
 }
 
 export class Config {
-  private readonly shellExecutionSandbox: Readonly<BwrapPolicy> | undefined;
+  private readonly shellExecutionSandbox:
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
   private sessionSourceId?: string;
@@ -11055,7 +11061,9 @@ export class Config {
     return this.toolInvocationGuard;
   }
 
-  getShellExecutionSandbox(): Readonly<BwrapPolicy> | undefined {
+  getShellExecutionSandbox():
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined {
     return this.shellExecutionSandbox;
   }
 
