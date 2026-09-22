@@ -696,7 +696,7 @@ class InMemoryRepositoryTest {
     }
 
     @Test
-    void payloadsRejectMutableNumbersAndNonStringKeys() {
+    void payloadsRejectNonJsonValuesAndNonStringKeys() {
         InMemoryToolExecutionRepository repository =
                 new InMemoryToolExecutionRepository(new MutableClock(START));
         Map<String, Object> topLevel = new HashMap<>(reference("digest"));
@@ -717,6 +717,17 @@ class InMemoryRepositoryTest {
                 () -> ToolExecutionRecord.prepared("execution", "key",
                         "binding", 1, "harness", "session", "turn", "tool",
                         "digest", badKey));
+        Map<String, Object> nonFinite = new HashMap<>(reference("digest"));
+        nonFinite.put("temperature", Double.NaN);
+        assertThrows(IllegalArgumentException.class,
+                () -> ToolExecutionRecord.prepared("execution", "key",
+                        "binding", 1, "harness", "session", "turn", "tool",
+                        "digest", nonFinite));
+        nonFinite.put("temperature", Float.POSITIVE_INFINITY);
+        assertThrows(IllegalArgumentException.class,
+                () -> ToolExecutionRecord.prepared("execution", "key",
+                        "binding", 1, "harness", "session", "turn", "tool",
+                        "digest", nonFinite));
 
         ToolExecutionRecord created = repository.findOrCreate(
                 execution("execution"));

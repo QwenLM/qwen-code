@@ -69,6 +69,13 @@ final class BrokerValues {
         }
         // Mutable Number subtypes (AtomicLong, adders) would alias caller
         // state into a record, so only immutable JSON scalars pass.
+        if ((value instanceof Double doubleValue
+                && !Double.isFinite(doubleValue))
+                || (value instanceof Float floatValue
+                        && !Float.isFinite(floatValue))) {
+            throw new IllegalArgumentException(
+                    "JSON number must be finite");
+        }
         if (value == null || value instanceof String || value instanceof Boolean
                 || value instanceof Byte || value instanceof Short
                 || value instanceof Integer || value instanceof Long
@@ -134,17 +141,7 @@ final class BrokerValues {
     }
 
     private static boolean sameJsonNumber(Number first, Number second) {
-        if (!isJsonFinite(first) || !isJsonFinite(second)) {
-            return first.equals(second);
-        }
         return new BigDecimal(first.toString())
                 .compareTo(new BigDecimal(second.toString())) == 0;
-    }
-
-    private static boolean isJsonFinite(Number value) {
-        return !(value instanceof Double doubleValue
-                && !Double.isFinite(doubleValue))
-                && !(value instanceof Float floatValue
-                        && !Float.isFinite(floatValue));
     }
 }

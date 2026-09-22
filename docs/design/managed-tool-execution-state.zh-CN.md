@@ -2,7 +2,7 @@
 
 [English](managed-tool-execution-state.md) | [简体中文](managed-tool-execution-state.zh-CN.md)
 
-状态：已在内存 Repository 边界实现
+状态：已在内存和 JDBC Repository 边界实现
 
 ## 问题
 

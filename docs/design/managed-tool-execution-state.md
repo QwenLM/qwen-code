@@ -2,7 +2,7 @@
 
 [English](managed-tool-execution-state.md) | [简体中文](managed-tool-execution-state.zh-CN.md)
 
-Status: Implemented at the in-memory repository boundary
+Status: Implemented at the in-memory and JDBC repository boundaries
 
 ## Problem
 
