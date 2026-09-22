@@ -12,7 +12,8 @@ const problems = [];
 // Existing on disk says nothing about shipping: `files` publishes `dist/*.js`,
 // and an npm glob does not cross a `/`, so anything the build emits below
 // `dist/` is left out. Ask npm which paths it would actually pack.
-// `--ignore-scripts` keeps this from re-entering `prepublishOnly`.
+// npm pack does not run `prepublishOnly`; `--ignore-scripts` prevents future
+// pack-time hooks from re-entering this verifier.
 let packed;
 try {
   packed = new Set(
@@ -20,6 +21,7 @@ try {
       execSync('npm pack --dry-run --json --ignore-scripts', {
         cwd: root,
         encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
       }),
     )[0].files.map((file) => file.path),
   );

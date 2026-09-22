@@ -252,6 +252,11 @@ describe('runtime shell policy admission', () => {
     { lsp: { enabled: true } },
     { sandbox: { command: 'docker' } },
     { agentExecutionBackend: 'container' },
+    {
+      executionEnvironment: {} as NonNullable<
+        ConfigParameters['executionEnvironment']
+      >,
+    },
     { executionEnvironmentFactory: vi.fn() },
   ])('rejects unsupported startup inputs %j', (overrides) => {
     expect(() => admit({ ...params, ...overrides }, root)).toThrow(
