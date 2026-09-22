@@ -4267,6 +4267,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Read HEAD together with the reflog action that last moved it, in a
    * single subprocess (`%H` and the reflog subject `%gs` on two lines).
    *
+   * `--no-show-signature` is required, not cosmetic: with
+   * `log.showSignature=true` git prints the signature verdict *ahead of* the
+   * formatted output, which shifts both fields by one line and makes an
+   * agent's own signed commit look like it was not created by a commit. The
+   * flag is inert when nothing is signed.
+   *
    * Returns `null` when git cannot answer — not a repository, no HEAD yet,
    * reflog disabled or expired, git missing — so every caller fails closed.
    */
@@ -4276,7 +4282,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return new Promise((resolve) => {
       const child = childProcess.execFile(
         'git',
-        ['log', '-g', '-1', '--format=%H%n%gs', 'HEAD'],
+        ['log', '-g', '-1', '--no-show-signature', '--format=%H%n%gs', 'HEAD'],
         { cwd, timeout: 2000, windowsHide: true },
         (error, stdout) => {
           if (error) {

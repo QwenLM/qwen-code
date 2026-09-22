@@ -40,6 +40,8 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { ShellTool } from './shell.js';
+import { ToolNames } from './tool-names.js';
+import { evaluateAutoMode } from '../permissions/autoMode.js';
 import {
   clearSessionCommits,
   isDestructiveCommand,
@@ -343,6 +345,66 @@ describe.skipIf(process.platform === 'win32')(
       }
     });
 
+    /**
+     * Creates a second branch whose tip differs from `main`'s, then returns
+     * to `main`. A trailing `checkout` / `reset` in a chain has to land HEAD
+     * somewhere *other* than the pre-command HEAD, otherwise the
+     * `head.sha !== preHead` term alone rejects the registration and the
+     * reflog verb goes untested.
+     */
+    function createOtherBranchTip(): string {
+      fs.writeFileSync(path.join(repoDir, 'other.txt'), 'other\n');
+      rawGit('checkout -q -b other');
+      rawGit('add other.txt');
+      rawGit('commit -q -m "other work"');
+      const otherHead = headSha();
+      rawGit('checkout -q main');
+      return otherHead;
+    }
+
+    it('does not register when a later segment checked HEAD out away from the commit', async () => {
+      // Regression ⑥ — the trailing half of ⑤. Here the agent's `git commit`
+      // really does land, and a later segment of the same chain then moves
+      // HEAD off it onto a commit the agent never created. The newest reflog
+      // entry is that move rather than the commit, so nothing registers, and
+      // exempting an amend of it would rewrite somebody else's commit.
+      //
+      // ⑤ pins the leading move, this pins the trailing one. Both are needed:
+      // a criterion that also accepted `checkout` / `reset` entries, or one
+      // that rejected only `pull`, passes ⑤ and fails here.
+      const seedHead = headSha();
+      const otherHead = createOtherBranchTip();
+      expect(headSha()).toBe(seedHead);
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+
+      await runShellCommand(
+        'git add feature.txt && git commit -m "feature" && git checkout -q other',
+      );
+
+      // The commit landed, but the chain left HEAD on `other`'s tip — a
+      // different SHA from preHead, so only the reflog verb can reject it.
+      expect(headSha()).toBe(otherHead);
+      expect(headSha()).not.toBe(seedHead);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
+    it('does not register when a later segment reset HEAD off the commit', async () => {
+      // Regression ⑦ — same shape as ⑥ with `reset` instead of `checkout`,
+      // so neither verb is special-cased by accident.
+      const seedHead = headSha();
+      const otherHead = createOtherBranchTip();
+      expect(headSha()).toBe(seedHead);
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+
+      await runShellCommand(
+        'git add feature.txt && git commit -m "feature" && git reset -q --hard other',
+      );
+
+      expect(headSha()).toBe(otherHead);
+      expect(headSha()).not.toBe(seedHead);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
     it('registers the rewritten HEAD after an amend so amend-of-amend is exempt', async () => {
       // Regression ③: an amend replaces HEAD, so the new SHA has to be
       // registered too — otherwise the second amend in a row is blocked.
@@ -448,6 +510,41 @@ describe.skipIf(process.platform === 'win32')(
       realConfig.setApprovalMode(currentMode);
 
       expect(amendVerdict()).toBeNull();
+    });
+
+    it('resolves the guard against the target dir when the call passes no directory', async () => {
+      // The guard has to inspect the same repository the shell tool registered
+      // in. `ShellToolInvocation` resolves its cwd as
+      // `this.params.directory || this.config.getTargetDir()`, but
+      // `PermissionCheckContext.cwd` is optional and is only set when a call
+      // passes `directory`. Handing `undefined` to `isDestructiveCommand`
+      // lands on `process.cwd()` inside its `git rev-parse`, which in a
+      // process hosting several sessions (ACP, daemon) or several worktrees is
+      // wherever the *process* started — so the exemption could be read out of
+      // one repository's registry while the amend rewrites another's.
+      await commitAndAssertExempt();
+
+      const realConfig = makeFakeConfig({
+        targetDir: repoDir,
+        cwd: repoDir,
+        approvalMode: ApprovalMode.AUTO,
+      });
+      vi.spyOn(realConfig, 'isTrustedFolder').mockReturnValue(true);
+      expect(realConfig.getTargetDir()).toBe(repoDir);
+
+      const decision = await evaluateAutoMode({
+        // No `cwd` on the context — this is the shape a plain shell call has.
+        ctx: { toolName: ToolNames.SHELL, command: AMEND_COMMAND },
+        pmForcedAsk: false,
+        toolParams: {},
+        messages: [{ role: 'user', parts: [{ text: USER_PROMPT }] }],
+        config: realConfig,
+        signal: new AbortController().signal,
+        // Keep the LLM classifier out of it; the assertion is about L5.2.5.
+        skipClassifierReason: 'total_denial',
+      });
+
+      expect(decision.via).not.toBe('blocked:destructive-command');
     });
   },
 );
