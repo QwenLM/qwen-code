@@ -152,6 +152,13 @@ describe('supported language resolution', () => {
     expect(resolveSupportedLanguage('zh-CN')).toBe('zh');
     expect(resolveSupportedLanguage('zh-HK')).toBe('zh');
   });
+
+  it('resolves Azerbaijani tags to az', async () => {
+    const { resolveSupportedLanguage } = await import('./languages.js');
+
+    expect(resolveSupportedLanguage('az')).toBe('az');
+    expect(resolveSupportedLanguage('az-AZ')).toBe('az');
+  });
 });
 
 describe('localizeToolDisplayName', () => {
@@ -189,10 +196,12 @@ describe('localizeToolDisplayName', () => {
     expect(localizeToolDisplayName('MysteryTool')).toBe('MysteryTool');
   });
 
-  // Both translating locales, not just zh: `t()` has no cross-locale
+  // Every strict-parity locale, not just zh: `t()` has no cross-locale
   // fallback, so a tool added to zh.js alone renders its raw English badge
-  // in a zh-TW session, next to fully-translated siblings.
-  it.each(['zh', 'zh-TW'] as const)(
+  // in a zh-TW or az session, next to fully-translated siblings. `ca` stays
+  // outside this guard: it carries 45 of the 68 display names and is not
+  // strictParity, so listing it here would fail on the rest.
+  it.each(['zh', 'zh-TW', 'az'] as const)(
     'has a %s translation for every core tool display name',
     async (locale) => {
       const { setLanguageAsync, localizeToolDisplayName } = await import(

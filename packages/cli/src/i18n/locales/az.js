@@ -183,11 +183,12 @@ export default {
   // ============================================================================
   // Tool display names (chat-stream badge labels)
   // ----------------------------------------------------------------------------
-  // Namespaced `toolDisplayName.<English display name>` keys (from core
-  // `ToolDisplayNames`). Per this file's key-is-default-text convention each
-  // English entry maps to itself; `localizeToolDisplayName` detects that
-  // self-mapping and returns the bare display name. Localized values live in
-  // zh.js / zh-TW.js; other locales fall back to the English display name.
+  // Keyed by `toolDisplayName.<English display name>` (from core
+  // `ToolDisplayNames`). The namespace prevents collisions with same-spelled
+  // generic UI strings (e.g. a standalone "Shell"). A name missing here falls
+  // back to the English display name via `localizeToolDisplayName`. All 67
+  // entries below carry an Azerbaijani label except `Agent`, which stays in
+  // English as a product name.
   // ============================================================================
   'toolDisplayName.Exec': 'Kodu icra et',
   'toolDisplayName.Edit': 'Redaktə et',
@@ -236,6 +237,7 @@ export default {
   'toolDisplayName.Monitor': 'İzlə',
   'toolDisplayName.NotebookEdit': 'Qeyd dəftərini redaktə et',
   'toolDisplayName.ToolSearch': 'Alət axtarışı',
+  'toolDisplayName.ToolCall': 'Alət çağırışı',
   'toolDisplayName.EnterWorktree': 'İş ağacına daxil ol',
   'toolDisplayName.ExitWorktree': 'İş ağacından çıx',
   'toolDisplayName.Workflow': 'İş axını',
@@ -703,17 +705,17 @@ export default {
   // ============================================================================
   // Extensions - Management Dialog
   // ============================================================================
-  'Manage Extensions': 'Genişləndirmələri idarə et',
-  'Extension Details': 'Genişləndirmə haqqında ətraflı məlumat',
-  'View Extension': 'Genişləndirməyə bax',
-  'Update Extension': 'Genişləndirməni yenilə',
-  'Disable Extension': 'Genişləndirməni söndür',
-  'Enable Extension': 'Genişləndirməni aktivləşdir',
-  'Uninstall Extension': 'Genişləndirməni sil',
-  'Select Scope': 'Tətbiq dairəsini seç',
-  'User Scope': 'İstifadəçi üzrə tətbiq dairəsi',
-  'Workspace Scope': 'İş sahəsi üzrə tətbiq dairəsi',
-  'No extensions found.': 'Genişləndirmə tapılmadı.',
+  'Manage Extensions': 'Genişlənmələri idarə et',
+  'Extension Details': 'Genişlənmə haqqında ətraflı məlumat',
+  'View Extension': 'Genişlənməyə bax',
+  'Update Extension': 'Genişlənməni yenilə',
+  'Disable Extension': 'Genişlənməni söndür',
+  'Enable Extension': 'Genişlənməni aktivləşdir',
+  'Uninstall Extension': 'Genişlənməni sil',
+  'Select Scope': 'Əhatə dairəsini seç',
+  'User Scope': 'İstifadəçi üzrə əhatə dairəsi',
+  'Workspace Scope': 'İş sahəsi üzrə əhatə dairəsi',
+  'No extensions found.': 'Genişlənmə tapılmadı.',
   'Updating...': 'Yenilənir...',
   Unknown: 'Naməlum',
   Error: 'Xəta',
@@ -721,10 +723,10 @@ export default {
   'Version:': 'Versiya:',
   'Status:': 'Vəziyyət:',
   'Are you sure you want to uninstall extension "{{name}}"?':
-    '"{{name}}" genişləndirməsini silmək istədiyinizə əminsiniz?',
+    '"{{name}}" genişlənməsini silmək istədiyinizə əminsiniz?',
   'This action cannot be undone.': 'Bu əməliyyatı geri qaytarmaq mümkün deyil.',
   'Extension "{{name}}" updated successfully.':
-    '"{{name}}" genişləndirməsi uğurla yeniləndi.',
+    '"{{name}}" genişlənməsi uğurla yeniləndi.',
   // Extension dialog - missing keys
   'Name:': 'Ad:',
   'MCP Servers:': 'MCP serverləri:',
@@ -745,13 +747,13 @@ export default {
   'User (global)': 'İstifadəçi (qlobal)',
   'Workspace (project-specific)': 'İş sahəsi (layihəyə xas)',
   'Disable "{{name}}" - Select Scope':
-    '"{{name}}" genişləndirməsini söndür: tətbiq dairəsini seç',
+    '"{{name}}" genişlənməsini söndür: əhatə dairəsini seç',
   'Enable "{{name}}" - Select Scope':
-    '"{{name}}" genişləndirməsini aktivləşdir: tətbiq dairəsini seç',
-  'No extension selected': 'Genişləndirmə seçilməyib',
-  '{{count}} extensions installed': '{{count}} genişləndirmə quraşdırılıb',
+    '"{{name}}" genişlənməsini aktivləşdir: əhatə dairəsini seç',
+  'No extension selected': 'Genişlənmə seçilməyib',
+  '{{count}} extensions installed': '{{count}} genişlənmə quraşdırılıb',
   "Use '/extensions install' to install your first extension.":
-    "İlk genişləndirmənizi quraşdırmaq üçün '/extensions install' əmrindən istifadə edin.",
+    "İlk genişlənmənizi quraşdırmaq üçün '/extensions install' əmrindən istifadə edin.",
   // Update status values
   'up to date': 'Ən son versiyadır',
   'update available': 'Yeniləmə mövcuddur',
@@ -811,7 +813,7 @@ export default {
   'Respect .gitignore': '.gitignore qaydalarına əməl et',
   'Respect .qwenignore': '.qwenignore qaydalarına əməl et',
   'Enable Recursive File Search': 'Rekursiv fayl axtarışını aktivləşdir',
-  'Interactive Shell (PTY)': 'İnteraktiv əmr örtüyü (PTY)',
+  'Interactive Shell (PTY)': 'İnteraktiv əmr qabığı (PTY)',
   'Show Color': 'Rəngləri göstər',
   'Auto Accept': 'Avtomatik qəbul',
   'Use Ripgrep': 'Ripgrep alətindən istifadə et',
@@ -902,19 +904,19 @@ export default {
   'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
     'Hazırda bu redaktorlar dəstəklənir. Nəzərə alın ki, bəzi redaktorlar təcrid olunmuş mühit rejimində istifadə edilə bilməz.',
   'Your preferred editor is:': 'Üstünlük verdiyiniz redaktor:',
-  'Manage extensions': 'Genişləndirmələri idarə et',
-  'Manage installed extensions': 'Quraşdırılmış genişləndirmələri idarə et',
-  'Disable an extension': 'Genişləndirməni söndür',
-  'Enable an extension': 'Genişləndirməni aktivləşdir',
+  'Manage extensions': 'Genişlənmələri idarə et',
+  'Manage installed extensions': 'Quraşdırılmış genişlənmələri idarə et',
+  'Disable an extension': 'Genişlənməni söndür',
+  'Enable an extension': 'Genişlənməni aktivləşdir',
   'Install an extension from a git repo or local path':
-    'Git repozitoriyasından və ya lokal yoldan genişləndirmə quraşdır',
-  'Uninstall an extension': 'Genişləndirməni sil',
-  'No extensions installed.': 'Quraşdırılmış genişləndirmə yoxdur.',
-  'Extension "{{name}}" not found.': '"{{name}}" genişləndirməsi tapılmadı.',
+    'Git repozitoriyasından və ya lokal yoldan genişlənmə quraşdır',
+  'Uninstall an extension': 'Genişlənməni sil',
+  'No extensions installed.': 'Quraşdırılmış genişlənmə yoxdur.',
+  'Extension "{{name}}" not found.': '"{{name}}" genişlənməsi tapılmadı.',
   'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
-    'Genişləndirmənin quraşdırılacağı tətbiq dairəsi: "user" (qlobal, standart) və ya "project" (yalnız cari iş sahəsi).',
+    'Genişlənmənin quraşdırılacağı əhatə dairəsi: "user" (qlobal, standart) və ya "project" (yalnız cari iş sahəsi).',
   'Extension "{{name}}" installed successfully and enabled for the current workspace.':
-    '"{{name}}" genişləndirməsi uğurla quraşdırıldı və cari iş sahəsi üçün aktivləşdirildi.',
+    '"{{name}}" genişlənməsi uğurla quraşdırıldı və cari iş sahəsi üçün aktivləşdirildi.',
   'Marketplace "{{name}}" not found.': '"{{name}}" kataloqu tapılmadı.',
   'No marketplace sources added yet.': 'Hələ kataloq mənbəyi əlavə edilməyib.',
   'No marketplaces added yet.': 'Hələ kataloq əlavə edilməyib.',
@@ -930,109 +932,107 @@ export default {
     'Kataloq mənbəyini və onun plagin siyahısını yenidən əldə et.',
   'The name of the marketplace to update.': 'Yenilənəcək kataloqun adı.',
   'Manage marketplace sources for discovering extensions.':
-    'Genişləndirmələri tapmaq üçün kataloq mənbələrini idarə et.',
+    'Genişlənmələri tapmaq üçün kataloq mənbələrini idarə et.',
   'You need at least one command before continuing.':
     'Davam etməzdən əvvəl ən azı bir əmr lazımdır.',
-  'No extensions to update.': 'Yenilənəcək genişləndirmə yoxdur.',
+  'No extensions to update.': 'Yenilənəcək genişlənmə yoxdur.',
   'Usage: /extensions install <source>':
     'İstifadə: /extensions install <source>',
   'Installing extension from "{{source}}"...':
-    '"{{source}}" mənbəyindən genişləndirmə quraşdırılır...',
+    '"{{source}}" mənbəyindən genişlənmə quraşdırılır...',
   'Extension "{{name}}" installed successfully.':
-    '"{{name}}" genişləndirməsi uğurla quraşdırıldı.',
+    '"{{name}}" genişlənməsi uğurla quraşdırıldı.',
   'Failed to install extension from "{{source}}": {{error}}':
-    '"{{source}}" mənbəyindən genişləndirməni quraşdırmaq alınmadı: {{error}}',
+    '"{{source}}" mənbəyindən genişlənməni quraşdırmaq alınmadı: {{error}}',
   'Do you want to continue? [Y/n]: ': 'Davam etmək istəyirsiniz? [Y/n]: ',
   'Do you want to continue?': 'Davam etmək istəyirsiniz?',
-  'Installing extension "{{name}}".':
-    '"{{name}}" genişləndirməsi quraşdırılır.',
+  'Installing extension "{{name}}".': '"{{name}}" genişlənməsi quraşdırılır.',
   '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
-    '**Genişləndirmələr gözlənilməz davranışa səbəb ola bilər. Genişləndirmənin mənbəyini araşdırdığınıza və müəllifə etibar etdiyinizə əmin olun.**',
+    '**Genişlənmələr gözlənilməz davranışa səbəb ola bilər. Genişlənmənin mənbəyini araşdırdığınıza və müəllifə etibar etdiyinizə əmin olun.**',
   'This extension will run the following MCP servers:':
-    'Bu genişləndirmə aşağıdakı MCP serverlərini işə salacaq:',
+    'Bu genişlənmə aşağıdakı MCP serverlərini işə salacaq:',
   local: 'Lokal',
   remote: 'Uzaq',
   'This extension will add the following commands: {{commands}}.':
-    'Bu genişləndirmə aşağıdakı əmrləri əlavə edəcək: {{commands}}.',
+    'Bu genişlənmə aşağıdakı əmrləri əlavə edəcək: {{commands}}.',
   'This extension will append info to your QWEN.md context using {{fileName}}':
-    'Bu genişləndirmə {{fileName}} vasitəsilə QWEN.md kontekstinizə məlumat əlavə edəcək',
+    'Bu genişlənmə {{fileName}} vasitəsilə QWEN.md kontekstinizə məlumat əlavə edəcək',
   'This extension will install the following skills:':
-    'Bu genişləndirmə aşağıdakı bacarıqları quraşdıracaq:',
+    'Bu genişlənmə aşağıdakı bacarıqları quraşdıracaq:',
   'This extension will install the following subagents:':
-    'Bu genişləndirmə aşağıdakı alt agentləri quraşdıracaq:',
+    'Bu genişlənmə aşağıdakı alt agentləri quraşdıracaq:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
-    'Bu genişləndirmə aşağıdakı iş axınlarını (alt agentləri başlada bilən JavaScript skriptlərini) quraşdıracaq:',
+    'Bu genişlənmə aşağıdakı iş axınlarını (alt agentləri başlada bilən JavaScript skriptlərini) quraşdıracaq:',
   'These workflow scripts changed since the installed version: {{names}}.':
     'Bu iş axını skriptləri quraşdırılmış versiyadan bəri dəyişib: {{names}}.',
   'Installation cancelled for "{{name}}".':
     '"{{name}}" üçün quraşdırma ləğv edildi.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
-    '{{originSource}} mənbəyindən genişləndirmə quraşdırırsınız. Bəzi funksiyalar Qwen Code ilə tam işləməyə bilər.',
+    '{{originSource}} mənbəyindən genişlənmə quraşdırırsınız. Bəzi funksiyalar Qwen Code ilə tam işləməyə bilər.',
   '--ref and --auto-update are not applicable for marketplace extensions.':
-    '--ref və --auto-update kataloq genişləndirmələrinə tətbiq edilmir.',
+    '--ref və --auto-update kataloq genişlənmələrinə tətbiq edilmir.',
   'Extension "{{name}}" installed successfully and enabled.':
-    '"{{name}}" genişləndirməsi uğurla quraşdırıldı və aktivləşdirildi.',
+    '"{{name}}" genişlənməsi uğurla quraşdırıldı və aktivləşdirildi.',
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
-    'Quraşdırılacaq genişləndirmənin GitHub URL-i, lokal yolu və ya kataloq mənbəyi (marketplace-url:plugin-name).',
+    'Quraşdırılacaq genişlənmənin GitHub URL-i, lokal yolu və ya kataloq mənbəyi (marketplace-url:plugin-name).',
   'The git ref to install from.': 'Quraşdırma üçün Git istinadı.',
   '--registry is only applicable for npm extensions.':
-    '--registry yalnız npm genişləndirmələrinə tətbiq edilir.',
+    '--registry yalnız npm genişlənmələrinə tətbiq edilir.',
   'Custom npm registry URL (only for npm extensions).':
-    'Fərdi npm reyestrinin URL-i (yalnız npm genişləndirmələri üçün).',
+    'Fərdi npm reyestrinin URL-i (yalnız npm genişlənmələri üçün).',
   '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
-    '--ref npm genişləndirmələrinə tətbiq edilmir. Əvəzinə @version sonluğundan istifadə edin (məsələn, @scope/package@1.2.0).',
+    '--ref npm genişlənmələrinə tətbiq edilmir. Əvəzinə @version sonluğundan istifadə edin (məsələn, @scope/package@1.2.0).',
   'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
-    'Git repozitoriyasının URL-indən, lokal yoldan, ad sahəsi olan npm paketindən (@scope/name) və ya Claude kataloqundan (marketplace-url:plugin-name) genişləndirmə quraşdır.',
+    'Git repozitoriyasının URL-indən, lokal yoldan, ad sahəsi olan npm paketindən (@scope/name) və ya Claude kataloqundan (marketplace-url:plugin-name) genişlənmə quraşdır.',
   Description: 'Təsvir',
   'Delete Session': 'Sessiyanı sil',
   'Enable auto-update for this extension.':
-    'Bu genişləndirmə üçün avtomatik yeniləməni aktivləşdir.',
+    'Bu genişlənmə üçün avtomatik yeniləməni aktivləşdir.',
   'Enable pre-release versions for this extension.':
-    'Bu genişləndirmə üçün ilkin buraxılış versiyalarını aktivləşdir.',
+    'Bu genişlənmə üçün ilkin buraxılış versiyalarını aktivləşdir.',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
-    'Genişləndirmə quraşdırmağın təhlükəsizlik risklərini qəbul et və təsdiq sorğusunu ötür.',
+    'Genişlənmə quraşdırmağın təhlükəsizlik risklərini qəbul et və təsdiq sorğusunu ötür.',
   'The source argument must be provided.':
     'Mənbə arqumenti təqdim edilməlidir.',
   'Extension "{{name}}" successfully uninstalled.':
-    '"{{name}}" genişləndirməsi uğurla silindi.',
-  'Uninstalls an extension.': 'Genişləndirməni sil.',
+    '"{{name}}" genişlənməsi uğurla silindi.',
+  'Uninstalls an extension.': 'Genişlənməni sil.',
   'The name or source path of the extension to uninstall.':
-    'Silinəcək genişləndirmənin adı və ya mənbə yolu.',
+    'Silinəcək genişlənmənin adı və ya mənbə yolu.',
   'Please include the name of the extension to uninstall as a positional argument.':
-    'Silinəcək genişləndirmənin adını mövqe arqumenti kimi daxil edin.',
-  'Enables an extension.': 'Genişləndirməni aktivləşdir.',
+    'Silinəcək genişlənmənin adını mövqe arqumenti kimi daxil edin.',
+  'Enables an extension.': 'Genişlənməni aktivləşdir.',
   'The name of the extension to enable.':
-    'Aktivləşdiriləcək genişləndirmənin adı.',
+    'Aktivləşdiriləcək genişlənmənin adı.',
   'The scope to enable the extension in. If not set, will be enabled in all scopes.':
-    'Genişləndirmənin aktivləşdiriləcəyi tətbiq dairəsi. Təyin edilməsə, bütün tətbiq dairələrində aktivləşdiriləcək.',
+    'Genişlənmənin aktivləşdiriləcəyi əhatə dairəsi. Təyin edilməsə, bütün əhatə dairələrində aktivləşdiriləcək.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
-    '"{{name}}" genişləndirməsi "{{scope}}" tətbiq dairəsi üçün uğurla aktivləşdirildi.',
+    '"{{name}}" genişlənməsi "{{scope}}" əhatə dairəsi üçün uğurla aktivləşdirildi.',
   'Extension "{{name}}" successfully enabled in all scopes.':
-    '"{{name}}" genişləndirməsi bütün tətbiq dairələrində uğurla aktivləşdirildi.',
+    '"{{name}}" genişlənməsi bütün əhatə dairələrində uğurla aktivləşdirildi.',
   'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
-    'Yanlış tətbiq dairəsi: {{scope}}. {{scopes}} variantlarından birindən istifadə edin.',
-  'Disables an extension.': 'Genişləndirməni söndür.',
-  'The name of the extension to disable.': 'Söndürüləcək genişləndirmənin adı.',
+    'Yanlış əhatə dairəsi: {{scope}}. {{scopes}} variantlarından birindən istifadə edin.',
+  'Disables an extension.': 'Genişlənməni söndür.',
+  'The name of the extension to disable.': 'Söndürüləcək genişlənmənin adı.',
   'The scope to disable the extension in.':
-    'Genişləndirmənin söndürüləcəyi tətbiq dairəsi.',
+    'Genişlənmənin söndürüləcəyi əhatə dairəsi.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
-    '"{{name}}" genişləndirməsi "{{scope}}" tətbiq dairəsi üçün uğurla söndürüldü.',
+    '"{{name}}" genişlənməsi "{{scope}}" əhatə dairəsi üçün uğurla söndürüldü.',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
-    '"{{name}}" genişləndirməsi uğurla yeniləndi: {{oldVersion}} → {{newVersion}}.',
+    '"{{name}}" genişlənməsi uğurla yeniləndi: {{oldVersion}} → {{newVersion}}.',
   'Unable to install extension "{{name}}" due to missing install metadata':
-    'Quraşdırma metaməlumatları çatışmadığı üçün "{{name}}" genişləndirməsini quraşdırmaq mümkün deyil',
+    'Quraşdırma metaməlumatları çatışmadığı üçün "{{name}}" genişlənməsini quraşdırmaq mümkün deyil',
   'Extension "{{name}}" is already up to date.':
-    '"{{name}}" genişləndirməsi artıq ən son versiyadadır.',
+    '"{{name}}" genişlənməsi artıq ən son versiyadadır.',
   'Updates all extensions or a named extension to the latest version.':
-    'Bütün genişləndirmələri və ya adı göstərilən genişləndirməni ən son versiyaya yenilə.',
-  'Update all extensions.': 'Bütün genişləndirmələri yenilə.',
-  'The name of the extension to update.': 'Yenilənəcək genişləndirmənin adı.',
+    'Bütün genişlənmələri və ya adı göstərilən genişlənməni ən son versiyaya yenilə.',
+  'Update all extensions.': 'Bütün genişlənmələri yenilə.',
+  'The name of the extension to update.': 'Yenilənəcək genişlənmənin adı.',
   'Either an extension name or --all must be provided':
-    'Genişləndirmənin adı və ya --all təqdim edilməlidir',
-  'List installed extensions':
-    'Quraşdırılmış genişləndirmələri siyahıda göstər',
+    'Genişlənmənin adı və ya --all təqdim edilməlidir',
+  'List installed extensions': 'Quraşdırılmış genişlənmələri siyahıda göstər',
   'Lists installed extensions.':
-    'Quraşdırılmış genişləndirmələri siyahıda göstər.',
+    'Quraşdırılmış genişlənmələri siyahıda göstər.',
   'Path:': 'Yol:',
   'Source:': 'Mənbə:',
   'Type:': 'Növ:',
@@ -1046,34 +1046,33 @@ export default {
   'Workflows:': 'İş axınları:',
   'MCP servers:': 'MCP serverləri:',
   'Link extension failed to install.':
-    'Keçid vasitəsilə genişləndirməni quraşdırmaq alınmadı.',
+    'Keçid vasitəsilə genişlənməni quraşdırmaq alınmadı.',
   'Extension "{{name}}" linked successfully and enabled.':
-    '"{{name}}" genişləndirməsinə keçid uğurla yaradıldı və genişləndirmə aktivləşdirildi.',
+    '"{{name}}" genişlənməsinə keçid uğurla yaradıldı və genişlənmə aktivləşdirildi.',
   'Links an extension from a local path. Updates made to the local path will always be reflected.':
-    'Lokal yoldakı genişləndirməyə keçid yarat. Lokal yolda edilən yeniləmələr həmişə əks olunacaq.',
-  'The name of the extension to link.':
-    'Keçid yaradılacaq genişləndirmənin adı.',
+    'Lokal yoldakı genişlənməyə keçid yarat. Lokal yolda edilən yeniləmələr həmişə əks olunacaq.',
+  'The name of the extension to link.': 'Keçid yaradılacaq genişlənmənin adı.',
   'Set a specific setting for an extension.':
-    'Genişləndirmənin konkret parametrini təyin et.',
+    'Genişlənmənin konkret parametrini təyin et.',
   'Name of the extension to configure.':
-    'Konfiqurasiya ediləcək genişləndirmənin adı.',
+    'Konfiqurasiya ediləcək genişlənmənin adı.',
   'The setting to configure (name or env var).':
     'Konfiqurasiya ediləcək parametr (ad və ya mühit dəyişəni).',
   'The scope to set the setting in.':
-    'Parametrin təyin ediləcəyi tətbiq dairəsi.',
+    'Parametrin təyin ediləcəyi əhatə dairəsi.',
   'List all settings for an extension.':
-    'Genişləndirmənin bütün parametrlərini siyahıda göstər.',
-  'Name of the extension.': 'Genişləndirmənin adı.',
+    'Genişlənmənin bütün parametrlərini siyahıda göstər.',
+  'Name of the extension.': 'Genişlənmənin adı.',
   'Extension "{{name}}" has no settings to configure.':
-    '"{{name}}" genişləndirməsinin konfiqurasiya ediləcək parametrləri yoxdur.',
+    '"{{name}}" genişlənməsinin konfiqurasiya ediləcək parametrləri yoxdur.',
   'Settings for "{{name}}":': '"{{name}}" üçün parametrlər:',
   '(workspace)': '(iş sahəsi)',
   '(user)': '(istifadəçi)',
   '[not set]': '[təyin edilməyib]',
   '[value stored in keychain]': '[dəyər açar zəncirində saxlanılır]',
   'Value:': 'Dəyər:',
-  'Manage extension settings': 'Genişləndirmə parametrlərini idarə et',
-  'Manage extension settings.': 'Genişləndirmə parametrlərini idarə et.',
+  'Manage extension settings': 'Genişlənmə parametrlərini idarə et',
+  'Manage extension settings.': 'Genişlənmə parametrlərini idarə et.',
   'You need to specify a command (set or list).':
     'Əmr göstərməlisiniz (set və ya list).',
   // ============================================================================
@@ -1171,7 +1170,7 @@ export default {
   // Hooks - Config Detail Step
   'Hook details': 'Hadisə emalçısı haqqında ətraflı məlumat',
   'Event:': 'Hadisə:',
-  'Extension:': 'Genişləndirmə:',
+  'Extension:': 'Genişlənmə:',
   'Desc:': 'Təsvir:',
   'No hook config selected': 'Hadisə emalçısının konfiqurasiyası seçilməyib',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
@@ -1212,11 +1211,11 @@ export default {
   User: 'İstifadəçi',
   Skill: 'Bacarıq',
   System: 'Sistem',
-  Extension: 'Genişləndirmə',
+  Extension: 'Genişlənmə',
   'Local Settings': 'Lokal parametrlər',
   'User Settings': 'İstifadəçi parametrləri',
   'System Settings': 'Sistem parametrləri',
-  Extensions: 'Genişləndirmələr',
+  Extensions: 'Genişlənmələr',
   'Session (temporary)': 'Sessiya (müvəqqəti)',
   // Hooks - Event Descriptions (short)
   'Before tool execution': 'Alət icrasından əvvəl',
@@ -1416,7 +1415,7 @@ export default {
   'Analyze only, do not modify files or execute commands':
     'Yalnız təhlil et, faylları dəyişdirmə və əmrləri icra etmə',
   'Require approval for file edits or shell commands':
-    'Fayl redaktələri və ya əmr örtüyü əmrləri üçün təsdiq tələb et',
+    'Fayl redaktələri və ya əmr qabığı əmrləri üçün təsdiq tələb et',
   'Automatically approve file edits': 'Fayl redaktələrini avtomatik təsdiqlə',
   'Use classifier to automatically approve safe tool calls':
     'Təhlükəsiz alət çağırışlarını avtomatik təsdiqləmək üçün təsnifatlandırıcıdan istifadə et',
@@ -1505,7 +1504,7 @@ export default {
   // MCP Server List
   'User MCPs': 'İstifadəçi MCP-ləri',
   'Project MCPs': 'Layihə MCP-ləri',
-  'Extension MCPs': 'Genişləndirmə MCP-ləri',
+  'Extension MCPs': 'Genişlənmə MCP-ləri',
   server: 'server',
   servers: 'serverlər',
   'Add MCP servers to your settings to get started.':
@@ -1697,7 +1696,6 @@ export default {
     'Kimliyin doğrulanması növü mövcud deyil.',
   'No models available for the current authentication type ({{authType}}).':
     'Cari kimlik doğrulama növü ({{authType}}) üçün model yoxdur.',
-  // Needs translation
   ' (not in model registry)': ' (model reyestrində yoxdur)',
 
   // ============================================================================
@@ -1796,9 +1794,9 @@ export default {
   // ============================================================================
   // Dialogs - Shell Confirmation
   // ============================================================================
-  'Shell Command Execution': 'Əmr örtüyü əmrinin icrası',
+  'Shell Command Execution': 'Əmr qabığı əmrinin icrası',
   'A custom command wants to run the following shell commands:':
-    'Fərdi əmr aşağıdakı əmr örtüyü əmrlərini icra etmək istəyir:',
+    'Fərdi əmr aşağıdakı əmr qabığı əmrlərini icra etmək istəyir:',
   // ============================================================================
   // Dialogs - Welcome Back
   // ============================================================================
@@ -2036,7 +2034,7 @@ export default {
   '{{count}} tools': '{{count}} alət',
   '{{count}} prompt': '{{count}} sorğu',
   '{{count}} prompts': '{{count}} sorğu',
-  '(from {{extensionName}})': '({{extensionName}} genişləndirməsindən)',
+  '(from {{extensionName}})': '({{extensionName}} genişlənməsindən)',
   OAuth: 'OAuth',
   'OAuth expired': 'OAuth-un vaxtı bitib',
   'OAuth not authenticated': 'OAuth ilə kimlik doğrulanmayıb',
@@ -2075,7 +2073,7 @@ export default {
   'Switch auth type quickly with /auth.':
     '/auth ilə kimliyin doğrulanması növünü tez dəyişin.',
   'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
-    'Qwen Code-dan ! işarəsindən istifadə edərək istənilən əmr örtüyü əmrini icra edə bilərsiniz (məsələn, !ls).',
+    'Qwen Code-dan ! işarəsindən istifadə edərək istənilən əmr qabığı əmrini icra edə bilərsiniz (məsələn, !ls).',
   'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
     'Əmr pəncərəsini açmaq üçün / yazın; Tab kəsr işarəsi ilə başlayan əmrləri və yadda saxlanılmış sorğuları avtomatik tamamlayır.',
   'You can resume a previous conversation by running qwen --continue or qwen --resume.':
@@ -2196,7 +2194,7 @@ export default {
   Completed: 'Tamamlandı',
   Failed: 'Uğursuz oldu',
   Stopped: 'Dayandırıldı',
-  Shell: 'Əmr örtüyü',
+  Shell: 'Əmr qabığı',
   Monitor: 'İzləyici',
   Command: 'Əmr',
   Dream: 'Yuxu',
@@ -2504,6 +2502,9 @@ export default {
   'Memory files': 'Yaddaş faylları',
   Skills: 'Bacarıqlar',
   Messages: 'Mesajlar',
+  'Startup context': 'Başlanğıc konteksti',
+  Unattributed: 'Aid edilməmiş',
+  'Cached prefix': 'Keşlənmiş prefiks',
   'Run /context detail for per-item breakdown.':
     'Hər element üzrə bölgü üçün /context detail əmrini icra edin.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':

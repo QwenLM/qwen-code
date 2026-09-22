@@ -95,6 +95,7 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
     id: 'az-AZ',
     fullName: 'Azerbaijani',
     nativeName: 'Azərbaycanca',
+    strictParity: true,
   },
 ];
 

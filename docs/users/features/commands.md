@@ -78,7 +78,7 @@ Commands specifically for controlling interface and output language.
 | → `ui [language]`     | Set UI interface language        | `/language ui zh-CN`       |
 | → `output [language]` | Set LLM output language          | `/language output Chinese` |
 
-- Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German), `ja-JP` (Japanese), `pt-BR` (Portuguese - Brazil), `fr-FR` (French), `ca-ES` (Catalan)
+- Available built-in UI languages: `zh-CN` (Simplified Chinese), `zh-TW` (Traditional Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German), `ja-JP` (Japanese), `pt-BR` (Portuguese - Brazil), `fr-FR` (French), `ca-ES` (Catalan), `az-AZ` (Azerbaijani)
 - Output language examples: `Chinese`, `English`, `Japanese`, etc.
 
 ### 1.4 Tool and Model Management
