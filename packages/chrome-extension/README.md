@@ -1,16 +1,19 @@
 # @qwen-code/chrome-bridge
 
 A Chrome extension that brings Qwen Code into the browser as a thin client of a
-local [`qwen serve`](../../docs/users/qwen-serve.md) daemon — no Native
-Messaging host to install.
+local [`qwen serve`](../../docs/users/qwen-serve.md) daemon and provides the
+Chrome side of Browser Use.
 
-It does two things:
+It provides:
 
 - **Side panel** — frames the daemon's Web Shell (chat + tools), the same UI the
   daemon serves to the browser. The panel has no UI of its own.
 - **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
   WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
   drive the real browser when an external CDP MCP adapter is configured.
+- **Browser Use bridge** — connects to the local `com.qwen.browser_use` Native
+  Messaging host, lists open HTTP(S) tabs, and forwards Playwright CDP traffic
+  for tabs claimed by Browser Use.
 - **Readiness warning** — the framed Web Shell stays usable for chat while a
   small status message distinguishes a disabled CDP tunnel from a missing
   browser automation adapter.
@@ -45,19 +48,48 @@ Do not replace this command with `--open-with-auth`. That mode delivers its gene
 Once the daemon is reachable and permits framing, the side panel swaps the
 welcome screen for the chat UI automatically.
 
-## Browser Automation Tools
+## Browser Use
 
-The command above only makes the side panel and Web Shell available. Browser
-automation tools such as console/network inspection, screenshots, and page
-clicking require an explicit external MCP adapter command:
+Browser Use ships with Qwen Code as a built-in skill and SDK runtime, using
+Qwen's standard Node REPL. No separate Qwen extension installation is needed.
+On macOS and Linux, the first browser task automatically registers the shared
+Native Messaging host in the user's installation directory. The SDK can finish
+this local setup before the extension connects; it verifies the live connection
+and protocol instead of reading Chrome's extension preferences. If it cannot
+connect, open Chrome and install or enable the extension in the intended profile,
+then retry. Later sessions reuse an installed Host of the same protocol, and a
+Host installed by a newer Qwen Code is never downgraded. Run
+`node <skill-base>/runtime/scripts/native-host-setup.js status` to inspect the
+installation, `install` to switch it to this Qwen Code's Host from the next
+Host start, or `uninstall` to remove files owned by Browser Use. `<skill-base>`
+is the base directory shown when loading the Browser Use skill. A later Browser
+Use initialization can register the Host again.
+
+The Chrome-launched Host serves multiple independent Qwen sessions per profile.
+Each session controls its own tabs and groups; claiming another session's tab
+returns `TAB_OWNERSHIP_CONFLICT`. A CLI exit leaves other sessions and the Host
+running. Host files persist in the user's installation directory independently
+of individual CLI checkouts. Updating the launcher takes effect on the next
+Host start. Browser Use does not require `qwen serve` or a Chrome debugging port.
+
+Installing the Chrome extension authorizes Browser Use to list and claim open
+top-level HTTP(S) tabs. Its declared `history` permission supports explicit,
+bounded history queries. The existing toolbar action and side panel continue to
+open the Qwen UI.
+
+## Web Shell CDP tunnel
+
+The `qwen serve` command above only makes the side panel and Web Shell
+available. Browser automation through the Web Shell's older CDP tunnel still
+requires an explicit external MCP adapter command:
 
 ```bash
 QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
 qwen serve --allow-origin chrome-extension://<this-extension-id>
 ```
 
-No browser automation adapter is bundled with the main `@qwen-code/qwen-code`
-package. When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
+No adapter for this older CDP tunnel is bundled with `@qwen-code/qwen-code`.
+When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
 Web Shell, but the daemon will not register browser automation MCP tools.
 Install the adapter separately and point the daemon at its executable:
 
@@ -120,7 +152,8 @@ Packaging (`npm run package`) and the release test require the POSIX `zip`
 utility.
 
 ```bash
-npm run package      # -> chrome-extension.zip (manifest at the zip root)
+npm run package        # -> chrome-extension.zip (manifest at the zip root)
+npm run package:store  # -> chrome-extension-store.zip, without the manifest key
 ```
 
 Run the complete release check from the repository root. It builds the main npm
@@ -131,10 +164,25 @@ generated payloads for external Chrome DevTools MCP source signatures:
 npm run test:chrome-extension:release
 ```
 
-The generated manifest version follows this package's version. Upload the zip
-to a GitHub prerelease for alpha side-loading, or to the Chrome Web Store
-Developer Dashboard for managed distribution. The `debugger` permission will
+The generated manifest version follows this package's version. `Release Chrome
+Extension` (`.github/workflows/release-chrome-extension.yml`) packages and
+uploads it on a published stable release, and can be dispatched by hand; its
+`dry_run` default packages and scans without uploading anything. Automatic
+publishing pauses while the repository variable `RELEASE_CHROME_SYNC_PUBLISH`
+is `false`. Nightly and preview builds are not published to the store, because
+every upload takes a version bump and a review; upload the zip to a GitHub
+prerelease for alpha side-loading instead. The `debugger` permission will
 draw manual review and must be justified in the store listing.
+
+**Extension id note:** the manifest's `key` fixes the id of an unpacked build.
+The store rejected that key on the first upload and assigned the listing its
+own id, so the two builds carry different ids. `npm run package` zips the built
+manifest verbatim, for side-loading; `npm run package:store` stages a copy
+without the key, which is what the release workflow uploads. Browser Use treats
+the id as a set (`CHROME_EXTENSION_IDS` in the Browser Use package): the Native
+Messaging registration lists every known origin and the handshake accepts any
+of them, so both builds reach the same Host. Adding an id there also means
+bumping the Host revision, so installed Hosts are replaced rather than reused.
 
 **Version note:** the manifest version is derived from this package's semver
 (e.g. `0.21.2.65535`), which is lower than the legacy side-loaded `1.0.0`

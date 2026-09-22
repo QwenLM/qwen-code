@@ -593,7 +593,7 @@ export const useSlashCommandProcessor = (
   );
 
   useEffect(() => {
-    if (!config) {
+    if (!config || config.getShellExecutionSandbox?.()) {
       return;
     }
 

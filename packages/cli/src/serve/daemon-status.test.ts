@@ -133,25 +133,57 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.limits.maxTotalSessions).toBe(50);
   });
 
-  it('separates enforced process admission from advisory heap limits', async () => {
+  it.each(['admit', 'enforce'] as const)(
+    'managed heap mode %s',
+    async (mode) => {
+      const options = makeOptions();
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
+      const policy = createChildHeapPolicy({ budget, mode });
+      options.opts.daemonMemoryBudget = budget;
+      options.getChildHeapPolicySnapshot = () => policy.snapshot();
+      options.childAdmissionEnforced = true;
+      options.getCommittedAcpChildCount = () => 6;
+      const response = await buildDaemonStatusResponse('summary', options);
+      expect(response.limits.memory).toMatchObject({
+        enforced: mode === 'enforce',
+        childHeap: {
+          mode,
+          admissionEnforced: true,
+          maxConcurrentChildren: 6,
+          perChildCeilingMb: 544,
+        },
+      });
+      expect(response.runtime.memory).toMatchObject({
+        committedAcpChildren: 6,
+      });
+    },
+  );
+
+  it('does not claim heap enforcement from an injected policy snapshot alone', async () => {
     const options = makeOptions();
-    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
-    const policy = createChildHeapPolicy({ budget, mode: 'admit' });
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8192 });
+    const policy = createChildHeapPolicy({ budget, mode: 'enforce' });
     options.opts.daemonMemoryBudget = budget;
+    options.opts.childHeapMode = 'enforce';
     options.getChildHeapPolicySnapshot = () => policy.snapshot();
-    options.childAdmissionEnforced = true;
-    options.getCommittedAcpChildCount = () => 6;
     const response = await buildDaemonStatusResponse('summary', options);
     expect(response.limits.memory).toMatchObject({
       enforced: false,
-      childHeap: {
-        mode: 'admit',
-        admissionEnforced: true,
-        maxConcurrentChildren: 6,
-        perChildCeilingMb: 544,
-      },
+      childHeap: { mode: 'enforce', admissionEnforced: false },
     });
-    expect(response.runtime.memory).toMatchObject({ committedAcpChildren: 6 });
+  });
+
+  it('does not claim heap enforcement during bootstrap without a policy', async () => {
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8192,
+    });
+    options.opts.childHeapMode = 'enforce';
+    const response = await buildDaemonStatusResponse('summary', options);
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: null,
+    });
   });
 
   it('reports the modeled partition without claiming it is applied', async () => {
