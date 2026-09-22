@@ -11,6 +11,7 @@ import {
   splitCommands,
 } from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
+import { detectLineEnding } from './fileSystemService.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { createPatchSmart } from '../tools/diffOptions.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -71,6 +72,16 @@ function stringParam(params: Record<string, unknown>, key: string): string {
 
 function isWrite(toolName: string): boolean {
   return toolName === ToolNames.WRITE_FILE || toolName === ToolNames.EDIT;
+}
+
+function preserveFileFormat(current: string | null, content: string): string {
+  if (current === null) return content;
+  let formatted = content.replace(/\r\n/g, '\n');
+  if (detectLineEnding(current) === 'crlf')
+    formatted = formatted.replace(/\n/g, '\r\n');
+  if (current.startsWith('\uFEFF') && !formatted.startsWith('\uFEFF'))
+    formatted = `\uFEFF${formatted}`;
+  return formatted;
 }
 
 export class SshExecutionEnvironment implements ExecutionEnvironment {
@@ -231,7 +242,10 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
               'The file changed while modifying the proposal. Read it again.',
             );
           }
-          pending.change.proposed = request.modification.newContent;
+          pending.change.proposed = preserveFileFormat(
+            pending.change.current,
+            request.modification.newContent,
+          );
           params['modified_by_user'] = true;
           if (request.toolName === ToolNames.WRITE_FILE) {
             params['content'] = request.modification.newContent;
@@ -301,7 +315,10 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
     if (toolName === ToolNames.WRITE_FILE) {
       return {
         current: read?.content ?? null,
-        proposed: stringParam(params, 'content'),
+        proposed: preserveFileFormat(
+          read?.content ?? null,
+          stringParam(params, 'content'),
+        ),
         hash: read?.hash,
       };
     }
@@ -313,7 +330,9 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
     }
     if (!oldString)
       throw new Error('old_string must not be empty for an existing file.');
-    const pieces = read.content.split(oldString);
+    const pieces = read.content
+      .replace(/\r\n/g, '\n')
+      .split(oldString.replace(/\r\n/g, '\n'));
     if (pieces.length === 1)
       throw new Error('old_string was not found in the remote file.');
     if (pieces.length > 2 && params['replace_all'] !== true)
@@ -322,7 +341,7 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
       );
     return {
       current: read.content,
-      proposed: pieces.join(newString),
+      proposed: preserveFileFormat(read.content, pieces.join(newString)),
       hash: read.hash,
     };
   }
@@ -408,7 +427,10 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
     } else if (payload?.newContent !== undefined) {
       if (!pending.change)
         throw new Error('This SSH tool cannot accept modified file content.');
-      pending.change.proposed = payload.newContent;
+      pending.change.proposed = preserveFileFormat(
+        pending.change.current,
+        payload.newContent,
+      );
     }
   }
 

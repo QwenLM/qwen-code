@@ -16,7 +16,7 @@ environment interface is used by container subagents, not main sessions.
 
 Support a Linux SSH target without installing Qwen or starting a remote service.
 The initial target requires OpenSSH access, Python 3 for per-request filesystem
-operations, and the project's own tools, including Git when Git is used. Local
+operations, Bash for shell commands, and the project's own tools, including Git when Git is used. Local
 OpenSSH supplies SSH config, keys, agent authentication and ProxyJump. Unknown
 host keys require a normal SSH connection before adding the workspace. Password
 prompts are not handled in Web Shell.
@@ -49,8 +49,9 @@ a Python script over SSH and exchange JSON. Shell output uses framed stdout/stde
 installed. Validate paths on the remote host, prevent symlink escapes, preserve
 file modes, and use temporary files plus rename for writes. Conditional edits
 detect stale content. Connection failures are returned without replaying writes
-or commands. Cancellation cannot promise that a disconnected remote command has
-stopped, and the result must say so.
+or commands. Shell commands execute as `bash -c`, including when the local daemon runs on Windows; missing Bash is an error, with no fallback to a different shell. Execute requests send one JSON line and keep SSH stdin open. The remote executor watches for EOF while the command or its output streams remain active, including after output redirection. Cancellation, timeout or output failure terminates the command's process group with SIGTERM followed by SIGKILL after a two-second grace period. Network partitions can delay disconnect detection, and descendants that deliberately leave the process group are outside this cleanup. Cancellation therefore cannot promise that every disconnected remote command has stopped, and the result must say so.
+
+Agent edits compare CRLF and LF consistently while keeping freshness hashes over the original bytes. Existing-file writes, edits and manually revised proposals retain UTF-8 BOM and line-ending format. New files preserve the supplied content.
 
 ### Local agent runtime
 
@@ -108,8 +109,7 @@ trust dialog applies to the remote project. Enable persistence to restore this
 connection after restarting the local daemon. The daemon's primary workspace
 must remain local.
 
-The remote host needs Python 3, a POSIX shell and the tools required by the
-project. File tools accept UTF-8 text; binary previews/uploads use the byte API.
+The remote host needs Python 3 and the tools required by the project. Agent shell commands require Bash; file operations do not. File tools accept UTF-8 text; binary previews/uploads use the byte API.
 Whole text reads and remote writes are limited to 16 MiB, with the existing smaller Web Shell text read/write limits retained. SSH binary uploads also have a 16 MiB limit; larger uploads fail with HTTP 413. Large text reads use line/limit windows. Byte reads seek directly to the requested offset, including in files larger than 16 MiB, and omit a full-file hash for partial windows. Search respects `.gitignore` and `.qwenignore` in
 Git repositories, together with the effective `context.fileFiltering.customIgnoreFiles` (default `.agentignore` and `.aiignore`). An explicit empty custom list retains `.qwenignore`. Non-Git projects containing these ignore files fail explicitly, including configured relative ignore-file paths.
 Search reports incomplete results when entries are unreadable, a file exceeds the text scan cap, Git warns of skipped entries or a checked-out submodule is omitted. Submodule content can be inspected through the SSH shell. Dubious Git ownership is an explicit error and never changes Git trust configuration. Git inspection includes status and working-tree diffs. Above 500 changed files, the overview returns counts without file details, matching the local fast path. Large untracked previews retain the

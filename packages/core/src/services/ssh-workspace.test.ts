@@ -189,6 +189,13 @@ describe('SSH workspace transport', () => {
       directory: '/work/sub',
       onOutput,
     });
+    const shellInput = child.stdin.read().toString();
+    expect(shellInput.endsWith('\n')).toBe(true);
+    expect(JSON.parse(shellInput)).toMatchObject({
+      operation: 'execute',
+      watchStdin: true,
+    });
+    expect(child.stdin.writableEnded).toBe(false);
     finish(
       [
         { stream: 'stdout', data: Buffer.from('output').toString('base64') },

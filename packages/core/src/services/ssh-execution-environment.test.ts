@@ -258,6 +258,86 @@ describe('SshExecutionEnvironment', () => {
     expect((await read(`${remote}/new.txt`)).llmContent).toBe(content);
   });
 
+  it.each(['\n', '\r\n'])(
+    'matches multiline edits with %j arguments and preserves BOM/CRLF',
+    async (ending) => {
+      const file = `${remote}/crlf.txt`;
+      files.set(file, '\uFEFFalpha\r\nbeta\r\ngamma\r\n');
+      await read(file);
+      await execute(ToolNames.EDIT, {
+        file_path: file,
+        old_string: ['alpha', 'beta'].join(ending),
+        new_string: ['alpha', 'changed'].join(ending),
+      });
+      expect(files.get(file)).toBe('\uFEFFalpha\r\nchanged\r\ngamma\r\n');
+      await execute(ToolNames.WRITE_FILE, {
+        file_path: file,
+        content: 'red\ngreen\n',
+      });
+      expect(files.get(file)).toBe('\uFEFFred\r\ngreen\r\n');
+    },
+  );
+
+  it('accepts a whole-file edit copied from a BOM read without duplicating the BOM', async () => {
+    const file = `${remote}/bom.txt`;
+    const content = '\uFEFFalpha\r\nbeta\r\n';
+    files.set(file, content);
+    await read(file);
+    await execute(ToolNames.EDIT, {
+      file_path: file,
+      old_string: content,
+      new_string: '\uFEFFchanged\n',
+    });
+    expect(files.get(file)).toBe('\uFEFFchanged\r\n');
+  });
+
+  it('preserves an existing LF file when replacement arguments contain CRLF', async () => {
+    const file = `${remote}/lf.txt`;
+    files.set(file, 'alpha\nbeta\n');
+    await read(file);
+    await execute(ToolNames.EDIT, {
+      file_path: file,
+      old_string: 'alpha\r\nbeta',
+      new_string: 'changed\r\nlines',
+    });
+    expect(files.get(file)).toBe('changed\nlines\n');
+  });
+
+  it('keeps BOM and CRLF for manually edited proposals and confirmation payloads', async () => {
+    const file = `${remote}/file.txt`;
+    files.set(file, '\uFEFFfirst\r\nsecond\r\n');
+    await read(file);
+    await environment.prepare(
+      {
+        id: 'formatted-modification',
+        toolName: ToolNames.EDIT,
+        params: {
+          file_path: file,
+          old_string: 'first',
+          new_string: 'proposal',
+        },
+        modification: {
+          oldContent: '\uFEFFfirst\r\nsecond\r\n',
+          newContent: 'manual\nproposal\n',
+        },
+      },
+      signal,
+    );
+    expect(
+      await environment.confirmation('formatted-modification', signal),
+    ).toMatchObject({
+      newContent: '\uFEFFmanual\r\nproposal\r\n',
+    });
+    await environment.confirm(
+      'formatted-modification',
+      ToolConfirmationOutcome.ProceedOnce,
+      { newContent: '\uFEFFfinal\ncontent\n' },
+      signal,
+    );
+    await environment.execute('formatted-modification', signal);
+    expect(files.get(file)).toBe('\uFEFFfinal\r\ncontent\r\n');
+  });
+
   it('honors manually edited proposals and confirmation payloads', async () => {
     await read();
     await environment.prepare(

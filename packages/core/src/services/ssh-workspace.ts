@@ -303,6 +303,7 @@ export class SshWorkspaceClient {
       root: this.workspace.directory,
       operation,
       params,
+      ...(operation === 'execute' ? { watchStdin: true } : {}),
     });
     if (Buffer.byteLength(input) > MAX_TRANSPORT_BYTES) {
       return Promise.reject(
@@ -465,6 +466,7 @@ export class SshWorkspaceClient {
         resolve({ stdout, stderr, exitCode: remoteExitCode ?? code });
       });
       if (options.signal?.aborted || this.disposed) cancel();
+      else if (operation === 'execute') child.stdin.write(`${input}\n`);
       else child.stdin.end(input);
     });
   }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   realpathSync,
@@ -21,7 +21,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SSH_WORKSPACE_SCRIPT } from './ssh-workspace-script.js';
 
 interface Reply {
@@ -410,6 +410,106 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     ).toBe(`${join(root, "quoted ' directory")}\nvalue\n`);
     expect(child.stderr).toBe('');
   });
+  it('executes the Bash syntax advertised to the agent', () => {
+    const child = spawnSync('python3', ['-c', SSH_WORKSPACE_SCRIPT], {
+      input: JSON.stringify({
+        root,
+        operation: 'execute',
+        params: {
+          command:
+            '[[ -d . ]] && source /dev/null && set -o pipefail && printf "%s\\n" "$0" {one,two}',
+        },
+      }),
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    expect(child.error).toBeUndefined();
+    const frames = child.stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(frames.at(-1)).toEqual({ ok: true, result: { exitCode: 0 } });
+    expect(frames.filter((frame) => frame.stream === 'stderr')).toEqual([]);
+    const output = frames
+      .filter((frame) => frame.stream === 'stdout')
+      .map((frame) => Buffer.from(frame.data, 'base64').toString())
+      .join('');
+    expect(output).toBe('bash\none\ntwo\n');
+  });
+
+  it.each([
+    ['silent', 'touch started; sleep 4; touch after-disconnect', false],
+    [
+      'redirected output',
+      'exec >/dev/null 2>&1; touch started; sleep 4; touch after-disconnect',
+      false,
+    ],
+    [
+      'TERM-ignoring child',
+      `bash -c 'trap "" TERM; touch started; sleep 4; touch after-disconnect' & wait`,
+      false,
+    ],
+    [
+      'broken output pipe',
+      'touch started; sleep 1; printf output; sleep 3; touch after-disconnect',
+      true,
+    ],
+  ])(
+    'stops the remote process group on disconnect: %s',
+    async (_name, command, closeOutput) => {
+      const child = spawn('python3', ['-c', SSH_WORKSPACE_SCRIPT], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const closed = new Promise<void>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', () => resolve());
+      });
+      child.stdout.resume();
+      child.stderr.resume();
+      child.stdin.on('error', () => {});
+      child.stdin.write(
+        JSON.stringify({
+          root,
+          operation: 'execute',
+          watchStdin: true,
+          params: { command: `printf '%s' "$$" > group-pid; ${command}` },
+        }) + '\n',
+      );
+      try {
+        await vi.waitFor(
+          () => expect(existsSync(join(root, 'started'))).toBe(true),
+          { timeout: 3000 },
+        );
+        const disconnectedAt = Date.now();
+        if (closeOutput) child.stdout.destroy();
+        else child.stdin.end();
+        await closed;
+        expect(Date.now() - disconnectedAt).toBeLessThan(4000);
+        await new Promise((resolve) =>
+          setTimeout(resolve, 4500 - (Date.now() - disconnectedAt)),
+        );
+        expect(existsSync(join(root, 'after-disconnect'))).toBe(false);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          if (existsSync(join(root, 'group-pid'))) {
+            const group = Number(readFileSync(join(root, 'group-pid'), 'utf8'));
+            if (Number.isSafeInteger(group) && group > 1) {
+              try {
+                process.kill(-group, 'SIGKILL');
+              } catch {
+                /* Already exited. */
+              }
+            }
+          }
+          child.kill('SIGKILL');
+        }
+        child.stdin.destroy();
+        await closed;
+      }
+    },
+    10_000,
+  );
+
   it('lists FIFOs without opening them and rejects reading one', () => {
     execFileSync('mkfifo', [join(root, 'pipe')]);
     expect(request('list')).toMatchObject({

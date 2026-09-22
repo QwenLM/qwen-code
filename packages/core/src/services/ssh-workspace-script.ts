@@ -8,7 +8,7 @@ import { getQwenIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
 
 // Sent as a Python -c argument; requests arrive on stdin, never in shell text.
 export const SSH_WORKSPACE_SCRIPT = String.raw`
-import base64, errno, fcntl, fnmatch, hashlib, json, os, re, selectors, stat, subprocess, sys, time, uuid
+import base64, errno, fcntl, fnmatch, hashlib, json, os, re, selectors, signal, stat, subprocess, sys, time, uuid
 
 MAX_BYTES = 16 * 1024 * 1024
 MAX_ENTRIES = 50000
@@ -275,24 +275,47 @@ def dispatch(operation, params):
         command = params.get('command')
         if not isinstance(command, str) or '\0' in command:
             fail('invalid_argument', 'Invalid remote shell command.')
-        process = subprocess.Popen(['/bin/sh', '-c', command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
-        selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
-        try:
-            while selector.get_map():
-                for key, event in selector.select():
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    print(json.dumps({'stream': key.data, 'data': base64.b64encode(chunk).decode('ascii')}), flush=True)
-            code = process.wait()
-            return {'exitCode': code if code >= 0 else 128 - code}
-        finally:
-            selector.close()
-            process.stdout.close()
-            process.stderr.close()
+        with selectors.DefaultSelector() as selector:
+            process = subprocess.Popen(['bash', '-c', command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            completed = False
+            try:
+                streams = {process.stdout, process.stderr}
+                selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+                selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+                # Keeping SSH stdin open makes disconnect/cancel observable on Linux and macOS.
+                if request.get('watchStdin'):
+                    selector.register(sys.stdin, selectors.EVENT_READ, 'control')
+                while streams or process.poll() is None:
+                    for key, event in selector.select(0.1):
+                        if key.data == 'control':
+                            if not os.read(key.fd, 1):
+                                fail('cancelled', 'SSH command connection closed.')
+                            fail('invalid_argument', 'Unexpected SSH command control input.')
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            streams.remove(key.fileobj)
+                            continue
+                        print(json.dumps({'stream': key.data, 'data': base64.b64encode(chunk).decode('ascii')}), flush=True)
+                code = process.wait()
+                completed = True
+                return {'exitCode': code if code >= 0 else 128 - code}
+            finally:
+                if not completed:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        # Do not reap the leader before killing children that ignored TERM.
+                        time.sleep(2)
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                process.wait()
+                process.stdout.close()
+                process.stderr.close()
     if operation == 'stat':
         info = inspect(path)
         return {'kind': kind(info), 'sizeBytes': info.st_size, 'modifiedMs': info.st_mtime * 1000}
@@ -515,7 +538,7 @@ def dispatch(operation, params):
 
 root_fd, request = None, {}
 try:
-    request = json.loads(sys.stdin.buffer.read(32 * 1024 * 1024 + 1))
+    request = json.loads(sys.stdin.buffer.readline(32 * 1024 * 1024 + 1))
     root = request['root']
     if not isinstance(root, str) or not root.startswith('/') or '\0' in root or '..' in root.split('/'):
         fail('invalid_argument', 'Invalid SSH workspace root.')
