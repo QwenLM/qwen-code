@@ -1405,22 +1405,34 @@ function stripSymmetricQuotes(command: string): {
 } {
   const trimmed = trimBashEdgeSeparators(command);
   const quote = trimmed[0];
-  if (quote === '"' || quote === "'") {
-    let escaped = false;
-    for (let i = 1; i < trimmed.length; i++) {
-      const char = trimmed[i];
-      if (quote === '"' && !escaped && char === '\\') {
-        escaped = true;
-        continue;
-      }
-      if (!escaped && char === quote) {
-        return {
-          value: trimmed.slice(1, i) + trimmed.slice(i + 1),
-          quote,
-        };
-      }
-      escaped = false;
+  if (quote !== '"' && quote !== "'") {
+    return { value: trimmed, quote: '' };
+  }
+  // A token that opens and closes with the same quote: dropping the outer
+  // pair keeps every inner `''` / `""` join, so the result means to bash what
+  // the -c script means, and re-wrapping it reproduces the token exactly.
+  if (trimmed.endsWith(quote)) {
+    return { value: trimmed.slice(1, -1), quote };
+  }
+  // Otherwise only glue that bash keeps in the word but `String#trim` drops
+  // (CR, VT, FF, NBSP, ...) may follow the matching close quote. Anything
+  // else (a second quote, `$`, a backslash, an operator, plain text) means
+  // `inner + rest` is not the script bash runs, so hand the raw token back.
+  let escaped = false;
+  for (let i = 1; i < trimmed.length; i++) {
+    const char = trimmed[i];
+    if (quote === '"' && !escaped && char === '\\') {
+      escaped = true;
+      continue;
     }
+    if (!escaped && char === quote) {
+      const rest = trimmed.slice(i + 1);
+      if (/^[^\x20-\x7e\t\n]+$/.test(rest)) {
+        return { value: trimmed.slice(1, i) + rest, quote };
+      }
+      break;
+    }
+    escaped = false;
   }
 
   return { value: trimmed, quote: '' };
@@ -1641,6 +1653,9 @@ export function normalizeMonitorCommand(
 export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
   const { innerCommand, innerArgsSuffix } = parseMonitorShellWrapper(command);
   return (
+    // The raw command too: a CR/VT/FF/NBSP after the `-c` script glues a
+    // top-level `&` into the wrapper token, so the parsed halves never see it.
+    hasNonFinalTopLevelBackgroundOperator(command) ||
     hasNonFinalTopLevelBackgroundOperator(innerCommand) ||
     hasNonFinalTopLevelBackgroundOperator(innerArgsSuffix ?? '')
   );

@@ -1600,6 +1600,42 @@ describe('bash word separators (#12089)', () => {
         ),
       ).toBe(true);
     });
+
+    it.each(NON_SEPARATORS)(
+      'detects a top-level & glued to the wrapper script by a %s',
+      (_name, char) => {
+        expect(
+          hasUnsafeMonitorBackgroundOperator(
+            `bash -c 'sleep 1'${char}& rm -rf /tmp/x`,
+          ),
+        ).toBe(true);
+      },
+    );
+  });
+
+  describe('wrapper tokens that are not one quoted word', () => {
+    // bash reads `'echo safe''; rm -rf /tmp/x'` as the single script
+    // `echo safe; rm -rf /tmp/x`. Unquoting only the first pair would leave
+    // `echo safe'; rm -rf /tmp/x'`, which reads as one read-only `echo`.
+    it.each([
+      `bash -c 'echo safe''; rm -rf /tmp/x'`,
+      `bash -c "echo ok"" && rm -rf /tmp/x"`,
+      `bash -c 'echo'\r'; rm -rf /tmp/x ;'`,
+    ])('keeps the second command of %j visible', (command) => {
+      expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+    });
+
+    it('does not unquote a token with plain text after the close quote', () => {
+      expect(stripShellWrapper(`bash -c 'echo hi'x`)).toBe(`'echo hi'x`);
+    });
+
+    it.each([
+      `bash -c 'tail -f app.log''; rm -rf /tmp/x'`,
+      `bash -c 'echo'\r'; rm -rf /tmp/x ;'`,
+      `bash -c 'grep '\\''ERROR'\\'' app.log'`,
+    ])('spawns %j exactly as written', (command) => {
+      expect(normalizeMonitorCommand(command).spawnCommand).toBe(command);
+    });
   });
 
   describe('stripShellWrapper', () => {
