@@ -6,7 +6,15 @@
 const MAX_DIFF_PRODUCT = 250_000;
 
 function splitLines(text: string): string[] {
-  return text ? text.split('\n') : [];
+  if (!text) return [];
+  const lines = text.split('\n');
+  // A trailing newline terminates the last line rather than starting an empty
+  // one. Counting the segment after it inflates the +/- badge — a one-line new
+  // file rendered as `+2/-0` with a phantom blank row — and the file bodies
+  // `permissionUtils` sends always end with '\n'.
+  return lines.length > 1 && lines[lines.length - 1] === ''
+    ? lines.slice(0, -1)
+    : lines;
 }
 
 export function buildUnifiedDiff(oldText: string, newText: string): string {

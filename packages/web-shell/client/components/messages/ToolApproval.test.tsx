@@ -336,6 +336,68 @@ describe('ToolApproval accessibility', () => {
     expect(container!.textContent).not.toContain('line\nline\nline\nline');
   });
 
+  it('omits edit diffs that exceed the character budget while staying under the line budget', () => {
+    // The sibling test above uses many short lines, so it only ever trips
+    // `tooManyLines`. The char gate decides on its own for any edit with
+    // ≤1000 total lines and >100_000 total chars — 400 long lines per side is
+    // 800 lines but ~119k chars, and also lands on n*m = 160_000, i.e. under
+    // MAX_DIFF_PRODUCT, so nothing else would have stopped the LCS table.
+    const longOld = Array.from(
+      { length: 400 },
+      (_, i) => `old-${i}-${'x'.repeat(140)}`,
+    ).join('\n');
+    const longNew = Array.from(
+      { length: 400 },
+      (_, i) => `new-${i}-${'y'.repeat(140)}`,
+    ).join('\n');
+    expect(longOld.length + longNew.length).toBeGreaterThan(100_000);
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-wide',
+        kind: 'permission',
+        requestId: 'request-edit-wide',
+        sessionId: 'session-edit-wide',
+        title: 'Edit: /outside/wide.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/wide.txt',
+              oldText: longOld,
+              newText: longNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('x'.repeat(140));
+    expect(container!.textContent).not.toContain('y'.repeat(140));
+  });
+
   it('renders generic parameter content even when it equals the title', () => {
     const adapted = extractPendingPermission([
       {
