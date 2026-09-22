@@ -313,8 +313,114 @@ describe('publish-assets', () => {
         return JSON.stringify({
           owner: { login: 'AaronZ345' },
           name: 'qwen-code',
-          url: 'https://github.com/AaronZ345/qwen-code',
           parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
+        });
+      }
+      return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
+    });
+    ghWithInputMock.mockImplementation(() => '{}');
+
+    run({ files: [pngFile('evidence.png')] });
+
+    expect(process.exitCode).toBeUndefined();
+    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+      '\n',
+    );
+    expect(stderr).toContain(
+      'QWEN_REVIEW_ASSETS_REPO points at the reviewed repository',
+    );
+    // The warning is advisory, not a refusal: the publish still runs to
+    // completion because the destination was explicitly designated. Pin the
+    // full success contract so a regression that turned the warning into a
+    // gate would redden here.
+    expect(ghWithInputMock).toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: true, count: 1 }),
+    );
+    const manifest = JSON.parse(
+      readFileSync(join(dir, 'manifest.json'), 'utf8'),
+    );
+    expect(manifest.repo).toBe('qwenlm/qwen-code');
+    expect(manifest.branch).toBe('pr-assets/8346-review');
+  });
+
+  it('folds --reviewed-repo to its upstream before the self-target check', () => {
+    // The flag names the probe TARGET, not the answer: `repo view --repo
+    // <fork>` still resolves the fork, and `parent` folds it to the upstream
+    // that hosts the PR. Passing the fork must warn exactly as the CWD-probe
+    // branch does — otherwise the same (review-target, assets-repo) pair warns
+    // or stays silent purely on whether the caller passed the flag. Reverting
+    // the flag branch to `return args.reviewedRepo` reddens this leg while the
+    // CWD-probe test above stays green.
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'QwenLM/qwen-code';
+    ghMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'repo' && args[1] === 'view') {
+        // The probe carries `--repo AaronZ345/qwen-code`; gh resolves the fork
+        // and reports its upstream in `parent`.
+        expect(args).toContain('--repo');
+        expect(args).toContain('AaronZ345/qwen-code');
+        return JSON.stringify({
+          owner: { login: 'AaronZ345' },
+          name: 'qwen-code',
+          parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
+        });
+      }
+      return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
+    });
+    ghWithInputMock.mockImplementation(() => '{}');
+
+    run({
+      files: [pngFile('evidence.png')],
+      reviewedRepo: 'AaronZ345/qwen-code',
+    });
+
+    expect(process.exitCode).toBeUndefined();
+    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+      '\n',
+    );
+    expect(stderr).toContain(
+      'QWEN_REVIEW_ASSETS_REPO points at the reviewed repository',
+    );
+  });
+
+  it('stays silent when the assets repo is a different repository', () => {
+    // The first absence assertion: a distinct (non-self) destination must not
+    // warn. Kills an always-warn mutation (dropping the `!==` guard) and a
+    // fail-open (treating a resolvable-but-different repo as a match).
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    ghMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'repo' && args[1] === 'view') {
+        return JSON.stringify({
+          owner: { login: 'QwenLM' },
+          name: 'qwen-code',
+          parent: null,
+        });
+      }
+      return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
+    });
+    ghWithInputMock.mockImplementation(() => '{}');
+
+    run({ files: [pngFile('evidence.png')] });
+
+    expect(process.exitCode).toBeUndefined();
+    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+      '\n',
+    );
+    expect(stderr).not.toContain('points at the reviewed repository');
+  });
+
+  it('warns on a non-fork self-target (no parent to fold through)', () => {
+    // A plain (non-fork) checkout reports `parent: null`, so `view.parent ??
+    // view` must fall back to the repo itself. Replacing that with
+    // `view.parent` reddens this leg: a direct clone of the reviewed repo
+    // would then never warn.
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'qwenlm/qwen-code';
+    ghMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'repo' && args[1] === 'view') {
+        return JSON.stringify({
+          owner: { login: 'qwenlm' },
+          name: 'qwen-code',
+          parent: null,
         });
       }
       return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
@@ -332,10 +438,42 @@ describe('publish-assets', () => {
     );
   });
 
+  it('emits the self-target warning before the branch is touched', () => {
+    // R1-5: the warning is hoisted to the top of the Publish section, so a
+    // publish that fails mid-flight (here, the first Contents PUT 401s) still
+    // carries the warning. Moving the call back below the upload would redden
+    // this leg — the throw would pre-empt it.
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'qwenlm/qwen-code';
+    ghMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'repo' && args[1] === 'view') {
+        return JSON.stringify({
+          owner: { login: 'AaronZ345' },
+          name: 'qwen-code',
+          parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
+        });
+      }
+      return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
+    });
+    ghWithInputMock.mockImplementation(() => {
+      throw new Error('HTTP 401: Bad credentials');
+    });
+
+    expect(() => run({ files: [pngFile('evidence.png')] })).toThrow(/401/);
+    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+      '\n',
+    );
+    expect(stderr).toContain(
+      'QWEN_REVIEW_ASSETS_REPO points at the reviewed repository',
+    );
+  });
+
   it('creates the branch when missing, from the default branch head', () => {
     // First ref lookup throws (missing branch); the creation path then asks
     // for the default branch and its head; the post-upload head read follows.
+    // The self-target probe (`repo view`) now runs first — answer it '{}' so
+    // it resolves to no reviewed repo and emits no warning.
     ghMock
+      .mockImplementationOnce(() => '{}')
       .mockImplementationOnce(() => {
         throw new Error('HTTP 404');
       })
@@ -352,7 +490,8 @@ describe('publish-assets', () => {
     });
     // Ref paths keep their slashes literal — GitHub's documented form; %2F
     // routes inconsistently and a 404 here would 422 the create on re-runs.
-    const refCall = (ghMock as Mock).mock.calls[0];
+    // calls[0] is the self-target probe; the branch ref lookup is calls[1].
+    const refCall = (ghMock as Mock).mock.calls[1];
     expect(refCall[1]).toBe(
       'repos/owner/assets/git/ref/heads/pr-assets/8346-review',
     );
@@ -680,8 +819,10 @@ describe('publish-assets — round-2 review pins', () => {
     ghWithInputMock.mockImplementation(() => '{}');
     expect(() => runPublishAssets(baseArgs())).toThrow(/403/);
     expect(ghWithInputMock).not.toHaveBeenCalled();
-    // Rethrown AT the lookup: the default-branch query was never reached.
-    expect(ghMock).toHaveBeenCalledTimes(1);
+    // Rethrown AT the lookup: the default-branch query was never reached. Two
+    // gh calls total — the self-target probe (`repo view`, answered '{}') then
+    // the branch ref lookup that throws.
+    expect(ghMock).toHaveBeenCalledTimes(2);
   });
 
   it('an empty assets repo is named as the condition it is', () => {
@@ -824,6 +965,7 @@ describe('publish-assets — round-3 self-review pins', () => {
     // a broadened swallow still passed; measured vacuous by this PR's own
     // review.)
     ghMock
+      .mockImplementationOnce(() => '{}')
       .mockImplementationOnce(() => {
         throw new Error('HTTP 404: Not Found');
       })
@@ -906,6 +1048,7 @@ describe('publish-assets — round-4 pins', () => {
     // in fact processed answers the retried POST with already-exists, and the
     // publish must proceed. Inverting the swallow condition would fail here.
     ghMock
+      .mockImplementationOnce(() => '{}')
       .mockImplementationOnce(() => {
         throw new Error('HTTP 404: Not Found');
       })

@@ -67,31 +67,42 @@ interface PublishAssetsArgs {
   defaultComment?: boolean;
 }
 
+/** Shape of `gh repo view --json owner,name,parent` (fields we read). */
 interface GhRepoView {
   owner?: { login?: string };
   name?: string;
+  // Present only when the resolved repo is a fork; gh emits no `url` here.
   parent?: {
     owner?: { login?: string };
     name?: string;
   };
 }
 
+// The repository this review is OF, folded to its upstream when the resolved
+// repo is a fork. `gh repo view` resolves through gh's default-repo, which for
+// an origin-only fork clone is the FORK — where the PR does not live; prefer
+// `parent` so the self-target check compares against the repo that actually
+// hosts the PR (the measured "guessed fork repo" incident recorded in
+// lib/platform/github.ts). `--reviewed-repo` names the probe TARGET, not the
+// answer, so both branches fold identically — otherwise the same
+// (review-target, assets-repo) pair warns or stays silent purely on whether
+// the caller passed the flag.
 function resolveReviewedRepoForSelfTargetWarning(
   args: PublishAssetsArgs,
 ): string | undefined {
-  if (args.reviewedRepo !== undefined) {
-    return args.reviewedRepo;
-  }
   try {
+    const viewArgs = args.reviewedRepo
+      ? ['repo', 'view', '--repo', args.reviewedRepo]
+      : ['repo', 'view'];
     const view = JSON.parse(
-      gh('repo', 'view', '--json', 'owner,name,url,parent'),
+      gh(...viewArgs, '--json', 'owner,name,parent'),
     ) as GhRepoView;
     const target = view.parent ?? view;
     const owner = target.owner?.login;
     const name = target.name;
     return owner && name ? `${owner}/${name}` : undefined;
   } catch {
-    return undefined;
+    return undefined; // a warning must never fail the publish
   }
 }
 
@@ -471,6 +482,7 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   }
 
   // ── Publish ───────────────────────────────────────────────────────────────
+  warnIfAssetsRepoTargetsReviewedRepo(repo, args);
   const branch = assetsBranch(args.pr);
   ensureBranch(repo, branch);
   for (const p of prepared) {
@@ -511,7 +523,6 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   const outPath = resolve(args.out);
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  warnIfAssetsRepoTargetsReviewedRepo(repo, args);
 
   // ── Pipeline mode: write the URLs back into the findings artifact ─────────
   if (findings && !args.findingsOut) {
