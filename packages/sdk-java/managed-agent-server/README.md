@@ -59,6 +59,39 @@ The public listener intentionally ignores end-user `Authorization`. The
 optional Runtime Broker listener still requires a separate machine bearer and
 must remain private.
 
+## Private Managed Session store
+
+Flyway V4 creates the private Managed Session journal and resource tables. The
+internal routes under `/internal/managed-session-store/v1/**` provide
+database-time writer leases and generations, head compare-and-set,
+idempotent transaction receipts, exact JSONL transaction bytes, paged restore
+reads, atomic checkpoint-pointer advancement, and transactional resources up
+to 64 KiB. Callers must provide the trusted tenant header and a fresh Base64URL secret in
+`X-Qwen-Managed-Writer-Token`; only its SHA-256 is persisted. Restore,
+transaction-page, and resource reads require the same current, unexpired
+writer secret.
+
+Restore transaction pages are bounded to 8 MiB of unencoded record bytes even
+when the requested item limit is larger. Unknown head states, unsafe counters,
+or missing transaction revisions fail closed as storage corruption.
+
+The routes are disabled by default. Enable them only on a private service
+listener or trusted service network:
+
+```bash
+export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
+```
+
+This is the D1a storage service, not an active Hosted Harness backend yet. The
+TypeScript HTTP adapter and new-Session backend selection remain separate
+follow-up work, so the current Harness still uses its local JSONL/resource
+adapter. Resources larger than 64 KiB fail with
+`managed_session_oss_disabled` until the immutable OSS path is implemented.
+Production deployments must add mTLS or equivalent service authentication;
+the tenant and writer headers are scope and fencing inputs, not a substitute
+for transport identity. Responses under the private prefix use
+`Cache-Control: no-store`.
+
 ## Full WebShell dual-path development entry
 
 The full WebShell can keep an ordinary Qwen daemon for its existing chat,

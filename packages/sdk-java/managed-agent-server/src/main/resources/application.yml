@@ -23,6 +23,8 @@ management:
 
 qwen:
   managed-agent:
+    session-store:
+      enabled: ${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}
     harness:
       enabled: ${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}
       base-url: ${QWEN_MANAGED_AGENT_HARNESS_BASE_URL:http://127.0.0.1:4170}

@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
@@ -39,6 +40,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
@@ -70,6 +72,9 @@ class ManagedAgentServerIntegrationTest {
     private ObjectMapper objectMapper;
 
     @Autowired
+    private ApplicationContext applicationContext;
+
+    @Autowired
     private FixtureHarness harness;
 
     @Autowired
@@ -97,6 +102,9 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code")
                         .value("invalid_request"));
+
+        assertThat(applicationContext.getBeansOfType(
+                ManagedSessionStoreController.class)).isEmpty();
     }
 
     @Test

@@ -2,7 +2,7 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
-Status: D0 storage seam implemented; D1-D3 proposed. Date: 2026-09-21. This design refines the durable-recovery work in [Managed Agent Storage, Events, and Session Recovery](2026-09-20-managed-agent-storage-event-architecture.md). It covers new Hosted Managed Sessions only; importing existing local Sessions is out of scope for the first release.
+Status: D0 and the D1a Java store are implemented; the D1b TypeScript contract client and D2-D3 remain proposed. Date: 2026-09-22. This design refines the durable-recovery work in [Managed Agent Storage, Events, and Session Recovery](2026-09-20-managed-agent-storage-event-architecture.md). It covers new Hosted Managed Sessions only; importing existing local Sessions is out of scope for the first release.
 
 ## 1. Decision
 
@@ -18,13 +18,14 @@ Do not use a shared PVC or one appendable OSS object as the production authority
 
 ## 2. Verified Current Baseline
 
-The current persistence backend is entirely local, but D0 now isolates it behind storage contracts:
+Standalone still uses the local backend, while D0 isolates it behind storage contracts and D1a adds an unselected remote store service:
 
 - `LocalManagedSessionAuthority` reads and appends through a `ManagedSessionJournalHandle`; it no longer owns a transcript path or calls `SessionWriterLease` for normal writes.
 - `LocalJsonlManagedSessionJournalStore` wraps `SessionWriterLease`, scans the normal Session transcript, and preserves the existing JSONL bytes and torn-tail behavior.
 - `LocalManagedSessionResourceStore` implements `ManagedSessionResourceStore` and publishes resources under `<runtimeBaseDir>/resources/<sessionId>/`.
 - `openManagedSession` accepts injected journal/resource stores and defaults to those local adapters.
-- The Spring service persists public Session, Turn, Command, Event, Item, Snapshot, and Runtime Broker state, but it has no private Managed journal or Managed resource catalog.
+- Flyway V4 and the Spring internal API now persist a private Managed journal head, exact transaction bytes, resource catalog, and revision-to-resource references. Database-time leases, monotonic writer generations, head CAS, command idempotency, exact-byte verification, and transactional `MYSQL_INLINE` resources are implemented.
+- The Java store is not selected by `openManagedSession` yet. No current Hosted Harness writes to these tables until the D1b TypeScript HTTP adapters and D2 new-Session routing are wired.
 - The existing JSONL contains `session_execution_engine`, `managed_session_header_v1`, `managed_session_event_v1`, and `managed_session_commit_v1` records. The sibling `<sessionId>.ledger.jsonl` is the prompt terminal ledger, not the private Managed journal.
 
 Consequently, a Runtime or Hosted Harness Pod without durable mounted storage loses the transcript and every resource referenced by it. Uploading only the JSONL is also insufficient because checkpoints and message/tool bodies are stored as separate resources.
@@ -89,7 +90,7 @@ interface ManagedSessionResourceStore {
 }
 ```
 
-This is the implemented D0 Core seam. `appendTransaction` always receives one complete semantic transaction. The local adapter keeps the historical per-line sync and recoverable torn-tail behavior; the D1 HTTP handle will serialize that batch once, acquire or renew its scoped writer grant internally, submit the outer CAS and idempotency metadata derived from the validated header, events, and marker, and return only after Java confirms the exact bytes are committed. The paired HTTP resource adapter will retain staged inline bytes until that commit. Those D1 adapters and server-side semantics are not implemented yet.
+This is the implemented D0 Core seam. `appendTransaction` always receives one complete semantic transaction. The local adapter keeps the historical per-line sync and recoverable torn-tail behavior. The D1a Java endpoint now accepts the complete remote transaction and applies the physical commit semantics. The remaining D1b HTTP handle will serialize that batch once, acquire or renew its scoped writer grant internally, submit the outer CAS and idempotency metadata derived from the validated header, events, and marker, and return only after Java confirms the exact bytes are committed. Its paired HTTP resource adapter will retain staged inline bytes until that commit.
 
 `ManagedSessionAuthority` owns record validation, event sequence rules, command content digests, checkpoint rules, and domain semantics. Store implementations own physical atomicity, writer fencing, exact-byte durability, pagination, and resource verification.
 
@@ -129,17 +130,18 @@ The primary key is `(tenant_id, session_id)`. Every mutating transaction locks t
 
 One row per committed Managed transaction:
 
-| Field                                                             | Purpose                                                                              |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Scope plus `journal_revision`                                     | Ordered primary key                                                                  |
-| `operation`, `command_id`, `content_digest`                       | Idempotency; unique within the Session and operation                                 |
-| `first_sequence`, `last_sequence`, `event_count`                  | Event range                                                                          |
-| `events_digest`, `previous_commit_digest`, `commit_digest`        | Existing hash-chain proof                                                            |
-| `writer_generation`, `activation_epoch`                           | Audit and stale-writer proof                                                         |
-| `record_encoding`, `record_bytes`, `byte_length`, `record_digest` | Exact bounded JSONL transaction bytes; initially `identity` encoding in `MEDIUMBLOB` |
-| `created_at`                                                      | Commit time                                                                          |
+| Field                                                                     | Purpose                                                                              |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Scope plus `journal_revision`                                             | Ordered primary key                                                                  |
+| `operation`, `command_id`, `content_digest`, `command_key_hash`           | Idempotency; raw values remain auditable while the bounded hash backs the unique key |
+| `first_sequence`, `last_sequence`, `event_count`                          | Event range                                                                          |
+| `events_digest`, `previous_commit_digest`, `commit_digest`                | Existing hash-chain proof                                                            |
+| `writer_generation`, `writer_id`, `writer_token_hash`, `activation_epoch` | Audit, authenticated lost-response replay, and stale-writer proof                    |
+| `latest_checkpoint_resource_id`                                           | Optional checkpoint pointer advanced by this transaction                             |
+| `record_encoding`, `record_bytes`, `byte_length`, `record_digest`         | Exact bounded JSONL transaction bytes; initially `identity` encoding in `MEDIUMBLOB` |
+| `created_at`                                                              | Commit time                                                                          |
 
-The first row is a genesis transaction for `session.create`: it contains the exact `session_execution_engine` and Managed header lines, uses sequence zero, and references the definition and root snapshot resources. Later rows contain event records plus their commit marker. This groups the physical creation atomically without changing the exported JSONL record format or the event sequence. The existing 8 MiB transaction limit remains. Private record bytes are never returned by public Agent APIs or copied into `managed_agent_event`.
+The first row is a genesis transaction for `session.create`: it contains the exact `session_execution_engine` and Managed header lines, uses sequence zero, and references the definition and root snapshot resources. Later rows contain event records plus their commit marker. This groups the physical creation atomically without changing the exported JSONL record format or the event sequence. The existing 8 MiB transaction limit remains. `command_key_hash` is SHA-256 over the unambiguous operation/command tuple so the MySQL unique index stays within `utf8mb4` key limits; collision checks still compare the stored raw values and content digest. Private record bytes are never returned by public Agent APIs or copied into `managed_agent_event`.
 
 ### 6.3 `qwen_managed_session_resource`
 
@@ -158,11 +160,11 @@ Exactly one placement is valid for each resource. `MYSQL_INLINE` requires `inlin
 
 ### 6.4 `qwen_managed_session_resource_ref`
 
-Records the resource closure committed by each journal revision. Its key is `(tenant_id, session_id, journal_revision, resource_id)`. The first release retains all Session-owned referenced resources until the Session is explicitly deleted. Cross-Session pins and automatic garbage collection remain disabled until their hold protocol is implemented and tested.
+Records the resource closure committed by each journal revision. The logical key is `(tenant_id, session_id, journal_revision, resource_id)`; V4 uses a SHA-256 Session scope key in the physical primary key to stay within MySQL `utf8mb4` index limits while retaining and checking the raw scope columns. The first release retains all Session-owned referenced resources until the Session is explicitly deleted. Cross-Session pins and automatic garbage collection remain disabled until their hold protocol is implemented and tested.
 
 ## 7. Internal HTTP Protocol
 
-The first implementation adds private routes such as:
+When `qwen.managed-agent.session-store.enabled=true`, the implemented D1a service exposes the following routes. They are disabled by default so an ordinary public standalone deployment cannot accidentally expose private model context before service authentication is configured:
 
 ```text
 POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire
@@ -170,19 +172,23 @@ POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew
 POST /internal/managed-session-store/v1/sessions/{sessionId}/transactions:commit
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/restore
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/transactions
-POST /internal/managed-session-store/v1/sessions/{sessionId}/resources:allocate
-POST /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}:finalize
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}
 POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal
 ```
 
-The control plane passes a short-lived opaque writer grant when creating or loading the Hosted Harness Session. The grant binds tenant, workspace, Session, writer generation, activation epoch, worker identity, and expiry. The database stores only its hash. Production deployments require mTLS or an equivalent service identity in addition to the scoped grant; `tenantId` is scope, not authentication.
+The caller presents a fresh opaque Base64URL writer secret in `X-Qwen-Managed-Writer-Token` when acquiring a writer. Java grants and returns the database generation and expiry, and stores only the secret hash. Journal commits and renewals bind tenant, workspace, Session, writer identity, generation, and an unexpired database-time lease. Restore-head, transaction-page, and resource reads also require the current unexpired secret, so a superseded Harness cannot read private context after takeover. Seal is idempotent and may close an expired grant only while no higher generation has superseded it. A retry with the same writer and secret renews the same unexpired generation; an explicit seal or lease expiry permits a higher generation. Production deployments require mTLS or an equivalent service identity in addition to this scoped bearer; `tenantId` is scope, not authentication.
 
-`transactions:commit` carries staged inline resources and inserts them in the same MySQL transaction as their first journal references. Larger resources use a short-lived signed PUT/GET flow. The object key is server-generated, uploads forbid overwrite, server-side encryption is required, and `finalize` verifies length and SHA-256 before the resource becomes referenceable. Local development may proxy bytes through Java or use the local adapter.
+Every response under the private store prefix carries `Cache-Control: no-store`; tenant, workspace, Session, and resource identifiers are also compared as exact raw values after database lookup so a case-insensitive MySQL collation cannot widen a scope.
+
+Transaction reads first page over revision and byte-length metadata, then fetch full records for a page whose unencoded transaction bytes do not exceed 8 MiB. The item limit therefore cannot expand one restore response to hundreds of MiB.
+
+Restore reads fail closed on unknown lifecycle or recovery states, unsafe head counters, revision gaps, and head/transaction disagreement. These checks report storage corruption rather than returning a partial authority.
+
+`transactions:commit` carries staged inline resources and inserts them in the same MySQL transaction as their first journal references. An optional `latestCheckpointResourceId` must identify a `managed-checkpoint` resource referenced by that transaction and advances the head atomically. The implemented path accepts raw resources up to and including 64 KiB, bounds their aggregate transaction bytes, verifies length and SHA-256, and returns `managed_session_oss_disabled` for larger resources. The D2 `resources:allocate` and `resources/{resourceId}:finalize` signed-object flow is not implemented. Local development continues to use the local adapter until D1b/D2 routing is complete.
 
 ## 8. Commit Protocol
 
-Session creation first stages or publishes the definition and root snapshot according to the same placement rule, then creates the journal head, genesis transaction, inline resource bodies, and initial resource references in one MySQL transaction. For every later semantic transaction:
+Writer acquisition creates a revision-zero fenced head before any journal bytes become visible. The `session.create` genesis commit then inserts the exact engine/header transaction, inline resource bodies, initial resource references, and the head advance to revision one in one MySQL transaction. An abandoned empty head is not a created public Session and can be reclaimed only by a higher writer generation after seal or lease expiry. For every later semantic transaction:
 
 1. Core validates the command, actor, expected sequence, records, and resource closure. Resources up to 64 KiB remain staged in the scoped Harness handle; larger resources are uploaded as immutable OSS objects and finalized. Neither is yet visible from the Session journal.
 2. Harness calls `transactions:commit` with exact record bytes, resource refs, expected journal revision, expected committed sequence, previous commit digest, writer generation, activation epoch, operation, command ID, and content digest.
@@ -241,10 +247,11 @@ Exit condition: standalone behavior and bytes are unchanged; no Java or OSS depe
 
 ### D1: Durable Java store and contract client
 
-- Add the four private tables in the next available Flyway migration.
-- Add the Spring internal API, lease/CAS/idempotency logic, and a TypeScript HTTP adapter.
-- Add shared golden contract fixtures for exact record bytes, digests, error codes, and limits.
-- Implement the transactional `MYSQL_INLINE` resource path and keep OSS disabled initially.
+Status: D1a is implemented; D1b remains.
+
+- Implemented in D1a: four Flyway V4 private tables; the Spring internal API; database-time lease/generation fencing; head CAS and atomic checkpoint-pointer advance; idempotent receipts; exact record-byte storage and verification; paged restore reads; and transactional `MYSQL_INLINE` resources with OSS fail-closed.
+- Remaining in D1b: the TypeScript HTTP journal/resource adapters, a shared golden contract fixture for exact bytes/digests/errors/limits, and an independent-process two-Java-instance MySQL fault test. D1a already exercises two separate store objects against real MySQL, including stale-writer rejection and lost-response replay, but that is not a process-crash proof.
+- Selection of the remote backend for new Hosted Sessions remains D2; D1a is deliberately not on the active Harness path.
 
 Exit condition: two Java instances sharing MySQL reject stale writers and return the same receipt after a lost response.
 

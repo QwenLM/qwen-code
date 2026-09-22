@@ -2,7 +2,7 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
-状态：D0 存储接缝已实现，D1-D3 待实现。日期：2026-09-21。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
+状态：D0 与 D1a Java Store 已实现；D1b TypeScript 契约客户端和 D2-D3 尚待实现。日期：2026-09-22。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
 
 ## 1. 决策
 
@@ -18,13 +18,14 @@ Hosted Managed Session 不再把 Runtime 本地 JSONL 作为生产权威，而�
 
 ## 2. 已核验的当前基线
 
-当前持久化后端仍全部在本地，但 D0 已通过存储契约将它隔离：
+Standalone 仍使用本地后端；D0 已通过存储契约将其隔离，D1a 则增加了尚未被选择的远端 Store 服务：
 
 - `LocalManagedSessionAuthority` 通过 `ManagedSessionJournalHandle` 读写；正常写入不再直接持有 transcript path 或调用 `SessionWriterLease`。
 - `LocalJsonlManagedSessionJournalStore` 包装 `SessionWriterLease`、扫描普通 Session transcript，并保持既有 JSONL 字节与 torn-tail 语义。
 - `LocalManagedSessionResourceStore` 实现 `ManagedSessionResourceStore`，把资源发布到 `<runtimeBaseDir>/resources/<sessionId>/`。
 - `openManagedSession` 支持注入 journal/resource store，默认选择上述本地 adapter。
-- Spring 服务已经保存公共 Session、Turn、Command、Event、Item、Snapshot 和 Runtime Broker 状态，但没有私有 Managed journal 或 Managed 资源目录表。
+- Flyway V4 和 Spring 内部 API 已能保存私有 Managed journal head、事务精确字节、资源目录及 revision 到资源的引用；数据库时间 lease、单调 writer generation、head CAS、command 幂等、精确字节校验和事务化 `MYSQL_INLINE` 均已实现。
+- Java Store 尚未被 `openManagedSession` 选择。在 D1b TypeScript HTTP adapter 与 D2 新 Session 路由接入前，当前 Hosted Harness 不会写入这些表。
 - 现有 JSONL 包含 `session_execution_engine`、`managed_session_header_v1`、`managed_session_event_v1` 和 `managed_session_commit_v1`。同目录的 `<sessionId>.ledger.jsonl` 是 prompt 终态账本，不是私有 Managed journal。
 
 因此，没有持久挂载的 Runtime 或 Hosted Harness Pod 被回收后，会同时丢失 transcript 及其引用的全部资源。只上传 JSONL 也不够，因为 checkpoint、消息和工具正文位于独立资源中。
@@ -89,7 +90,7 @@ interface ManagedSessionResourceStore {
 }
 ```
 
-以上是已经落地的 D0 Core 接缝。`appendTransaction` 每次接收一笔完整的语义事务。本地 adapter 保留历史上的逐行 sync 与可恢复 torn-tail 行为；D1 HTTP handle 将对整批记录只序列化一次，在内部获取或续租 scoped writer grant，从已校验的 header、event 和 marker 派生外层 CAS 与幂等元数据，并仅在 Java 确认精确字节已提交后返回。配套 HTTP resource adapter 会将 inline 暂存字节保留到该次提交。D1 adapter 和服务端语义当前尚未实现。
+以上是已经落地的 D0 Core 接缝。`appendTransaction` 每次接收一笔完整的语义事务。本地 adapter 保留历史上的逐行 sync 与可恢复 torn-tail 行为。D1a Java endpoint 已接收完整远端事务并执行物理提交语义。剩余的 D1b HTTP handle 将对整批记录只序列化一次，在内部获取或续租 scoped writer grant，从已校验的 header、event 和 marker 派生外层 CAS 与幂等元数据，并仅在 Java 确认精确字节已提交后返回；配套 HTTP resource adapter 会将 inline 暂存字节保留到该次提交。
 
 `ManagedSessionAuthority` 负责记录校验、事件 sequence、command content digest、checkpoint 规则和领域语义；Store 实现负责物理原子性、writer fencing、精确字节持久化、分页和资源校验。
 
@@ -129,17 +130,18 @@ interface ManagedSessionResourceStore {
 
 每个已提交 Managed 事务一行：
 
-| 字段                                                              | 用途                                                                |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------- |
-| scope 加 `journal_revision`                                       | 有序主键                                                            |
-| `operation`、`command_id`、`content_digest`                       | 幂等键；在 Session 和 operation 内唯一                              |
-| `first_sequence`、`last_sequence`、`event_count`                  | 事件范围                                                            |
-| `events_digest`、`previous_commit_digest`、`commit_digest`        | 现有摘要链证明                                                      |
-| `writer_generation`、`activation_epoch`                           | 审计与旧 writer 证明                                                |
-| `record_encoding`、`record_bytes`、`byte_length`、`record_digest` | 精确且有界的 JSONL 事务字节；首版用 `MEDIUMBLOB` 的 `identity` 编码 |
-| `created_at`                                                      | 提交时间                                                            |
+| 字段                                                                      | 用途                                                                |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| scope 加 `journal_revision`                                               | 有序主键                                                            |
+| `operation`、`command_id`、`content_digest`、`command_key_hash`           | 幂等键；原值用于审计，有界 hash 支撑唯一索引                        |
+| `first_sequence`、`last_sequence`、`event_count`                          | 事件范围                                                            |
+| `events_digest`、`previous_commit_digest`、`commit_digest`                | 现有摘要链证明                                                      |
+| `writer_generation`、`writer_id`、`writer_token_hash`、`activation_epoch` | 审计、带身份的响应丢失重放与旧 writer 证明                          |
+| `latest_checkpoint_resource_id`                                           | 由本事务推进的可选 checkpoint 指针                                  |
+| `record_encoding`、`record_bytes`、`byte_length`、`record_digest`         | 精确且有界的 JSONL 事务字节；首版用 `MEDIUMBLOB` 的 `identity` 编码 |
+| `created_at`                                                              | 提交时间                                                            |
 
-第一行是 `session.create` 的 genesis transaction：保存精确的 `session_execution_engine` 和 Managed header 两行，使用 sequence zero，并引用 definition 与 root snapshot 资源。后续行才保存 event records 及其 commit marker。这样可以让物理创建原子完成，同时不改变导出 JSONL 的记录格式或 event sequence。保持现有单事务 8 MiB 限额。私有记录字节绝不从公共 Agent API 返回，也不复制到 `managed_agent_event`。
+第一行是 `session.create` 的 genesis transaction：保存精确的 `session_execution_engine` 和 Managed header 两行，使用 sequence zero，并引用 definition 与 root snapshot 资源。后续行才保存 event records 及其 commit marker。这样可以让物理创建原子完成，同时不改变导出 JSONL 的记录格式或 event sequence。保持现有单事务 8 MiB 限额。`command_key_hash` 是无歧义 operation/command 元组的 SHA-256，使 MySQL 唯一索引保持在 `utf8mb4` key 限额内；发生命中时仍比较已保存的原始字段和 content digest。私有记录字节绝不从公共 Agent API 返回，也不复制到 `managed_agent_event`。
 
 ### 6.3 `qwen_managed_session_resource`
 
@@ -158,11 +160,11 @@ interface ManagedSessionResourceStore {
 
 ### 6.4 `qwen_managed_session_resource_ref`
 
-保存每个 journal revision 提交的资源闭包，主键为 `(tenant_id, session_id, journal_revision, resource_id)`。首版在 Session 被显式删除前保留其所有已引用资源；跨 Session pin 和自动 GC 在持有协议完成并验证前保持关闭。
+保存每个 journal revision 提交的资源闭包。逻辑键为 `(tenant_id, session_id, journal_revision, resource_id)`；V4 在物理主键中使用 SHA-256 Session scope key，以满足 MySQL `utf8mb4` 索引长度限制，同时保留并校验原始 scope 列。首版在 Session 被显式删除前保留其所有已引用资源；跨 Session pin 和自动 GC 在持有协议完成并验证前保持关闭。
 
 ## 7. 内部 HTTP 协议
 
-首个实现增加类似以下私有路由：
+设置 `qwen.managed-agent.session-store.enabled=true` 后，D1a 会开放以下私有路由。它们默认关闭，避免普通公共 standalone 部署在服务鉴权尚未配置时意外暴露私有模型上下文：
 
 ```text
 POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire
@@ -170,19 +172,23 @@ POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew
 POST /internal/managed-session-store/v1/sessions/{sessionId}/transactions:commit
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/restore
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/transactions
-POST /internal/managed-session-store/v1/sessions/{sessionId}/resources:allocate
-POST /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}:finalize
 GET  /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}
 POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal
 ```
 
-管控面在创建或加载 Hosted Harness Session 时传入短期 opaque writer grant。grant 绑定 tenant、workspace、Session、writer generation、activation epoch、worker identity 和过期时间，数据库只保存其 hash。生产部署除 scoped grant 外还需 mTLS 或等价服务身份；`tenantId` 只是 scope，不是鉴权凭据。
+调用方在 acquire writer 时通过 `X-Qwen-Managed-Writer-Token` 提交新生成的 opaque Base64URL writer secret。Java 授予并返回数据库 generation 和过期时间，且只保存 secret hash。journal commit 与 renew 会绑定 tenant、workspace、Session、writer 身份、generation 及未过期的数据库时间 lease；读取 restore head、transaction page 和 resource 也要求当前未过期 secret，确保被接管的旧 Harness 无法继续读取私有上下文。seal 保持幂等；只有在尚未被更高 generation 取代时，它才可关闭已过期 grant。相同 writer 与 secret 重试会续租同一未过期 generation；显式 seal 或 lease 过期后才允许更高 generation。生产部署除 scoped bearer 外还需 mTLS 或等价服务身份；`tenantId` 只是 scope，不是鉴权凭据。
 
-`transactions:commit` 携带待提交 inline resources，并在它们首次被 journal 引用的同一 MySQL 事务中写入。较大资源使用短期签名 PUT/GET。Object key 由服务端生成，上传禁止覆盖，强制服务端加密；`finalize` 核验长度和 SHA-256 后资源才可被引用。本地开发可由 Java 代理字节或使用本地适配器。
+私有 Store 前缀下的所有响应均携带 `Cache-Control: no-store`；数据库查询后还会对 tenant、workspace、Session 和 resource ID 的原始值做精确比较，避免不区分大小写的 MySQL collation 扩大 scope。
+
+transaction 读取会先按 revision 与 byte-length 元数据分页，再拉取未编码事务字节总量不超过 8 MiB 的完整记录，因此 item limit 不会把单次恢复响应放大到数百 MiB。
+
+恢复读取对未知 lifecycle/recovery 状态、不安全的 head 计数、revision 缺口以及 head/transaction 不一致统一 fail-closed；这些情况会报告存储损坏，而不会返回残缺权威。
+
+`transactions:commit` 携带待提交 inline resources，并在它们首次被 journal 引用的同一 MySQL 事务中写入。可选的 `latestCheckpointResourceId` 必须指向本事务引用的 `managed-checkpoint` 资源，并与 head 原子推进。已实现路径接收不超过 64 KiB 的原始资源，限制单事务 inline 总字节数，校验长度与 SHA-256，并对更大资源返回 `managed_session_oss_disabled`。D2 的 `resources:allocate` 与 `resources/{resourceId}:finalize` 签名对象流程尚未实现。在 D1b/D2 路由完成前，本地开发继续使用 local adapter。
 
 ## 8. 提交协议
 
-Session 创建时先按相同位置规则暂存或发布 definition 与 root snapshot，再在一个 MySQL 事务中创建 journal head、genesis transaction、inline resource 正文和初始资源引用。后续每个语义事务按以下流程执行：
+writer acquire 会先创建 revision-zero 的 fenced head，此时尚无 journal 字节可见。随后 `session.create` genesis commit 在一个 MySQL 事务中写入精确的 engine/header transaction、inline resource 正文、初始资源引用，并把 head 推进到 revision one。被遗弃的空 head 不代表公共 Session 已创建，只能在 seal 或 lease 过期后由更高 writer generation 接管。后续每个语义事务按以下流程执行：
 
 1. Core 校验 command、actor、expected sequence、records 和资源闭包。不超过 64 KiB 的资源暂存在 scoped Harness handle 中；较大资源以不可变 OSS Object 上传并 finalize。两者此时都尚未从 Session journal 可见。
 2. Harness 调用 `transactions:commit`，携带精确 record 字节、resource refs、expected journal revision、expected committed sequence、previous commit digest、writer generation、activation epoch、operation、command ID 和 content digest。
@@ -241,10 +247,11 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 
 ### D1：Java 长期 Store 与契约客户端
 
-- 在下一个可用 Flyway migration 中增加四张私有表。
-- 增加 Spring 内部 API、lease/CAS/幂等逻辑和 TypeScript HTTP adapter。
-- 为 record 精确字节、摘要、错误码和限额增加双方共用的 golden contract fixture。
-- 实现事务化 `MYSQL_INLINE` 资源路径，初期暂不启用 OSS。
+状态：D1a 已实现，D1b 尚待完成。
+
+- D1a 已实现：Flyway V4 四张私有表；Spring 内部 API；基于数据库时间的 lease/generation fencing；head CAS 与 checkpoint 指针原子推进；幂等回执；精确 record bytes 存储与校验；分页恢复读取；以及 OSS fail-closed 的事务化 `MYSQL_INLINE` 资源。
+- D1b 待实现：TypeScript HTTP journal/resource adapter，双方共享的精确字节/摘要/错误码/限额 golden fixture，以及两个独立 Java 进程共享 MySQL 的故障测试。D1a 已在真实 MySQL 上以两个独立 Store 对象覆盖旧 writer 拒绝与响应丢失重放，但这不等价于进程崩溃证明。
+- 新建 Hosted Session 选择远端 backend 仍属于 D2；D1a 有意不进入当前 Harness 活跃链路。
 
 退出条件：两个共享 MySQL 的 Java 实例能拒绝旧 writer，并在提交响应丢失后返回同一回执。
 

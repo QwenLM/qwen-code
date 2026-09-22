@@ -982,7 +982,7 @@
           <a href="#acceptance">验收标准</a>
         </nav>
         <div class="sidebar-note">
-          方案版本 v1.8 · 2026-09-22<br />
+          方案版本 v1.9 · 2026-09-22<br />
           核心决策：一个 Session 一个固定执行引擎；Managed Harness
           从第一轮起负责完整模型循环；公开事件先可靠提交，再向客户端推送。
         </div>
@@ -1035,13 +1035,14 @@
             </div>
           </div>
           <p class="lead">
-            v1.8 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线、
+            v1.9 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线、
             v1.5 的统一 Session 身份和 v1.6 的事件可靠投影边界，并补充 Java
             管控面、Hosted Harness、Runtime Broker 与 Tool Runtime
-            的职责及通信架构图；v1.8 进一步记录 daemon workspace 配额边界和
-            Managed Session 长期存储 D0 接缝。Java 在创建前生成全局唯一 RFC
-            UUID， 公共 API、qwen Session Authority、Managed Harness、JSONL 和
-            Runtime Broker scope 使用完全相同的
+            的职责及通信架构图；v1.8 记录 daemon workspace 配额边界和 Managed
+            Session 长期存储 D0 接缝，v1.9 补充 D1a Java/MySQL 私有 Store
+            的实现边界。Java 在创建前生成全局唯一 RFC UUID， 公共 API、qwen
+            Session Authority、Managed Harness、JSONL 和 Runtime Broker scope
+            使用完全相同的
             <code>sessionId</code>。不得再生成或持久化第二套 Harness Session
             ID。 首版仍采用单 Java + qwen Sidecar、预发布静态
             AgentBundle、Session 独占 Runtime， 复用现有产品 REST/SSE
@@ -3418,9 +3419,8 @@ reconnect / history → SessionReplayService
             >。
           </p>
           <div class="callout" style="margin-top: 18px">
-            <strong>2026-09-22 私有 Session 存储进度：</strong>D0
-            存储接缝已落地。Core 现在通过
-            <code>ManagedSessionJournalStore</code> /
+            <strong>2026-09-22 私有 Session 存储进度：</strong>D0 与 D1a
+            已落地。Core 现在通过 <code>ManagedSessionJournalStore</code> /
             <code>ManagedSessionJournalHandle</code> 和
             <code>ManagedSessionResourceStore</code> 工作；<code
               >LocalJsonlManagedSessionJournalStore</code
@@ -3429,27 +3429,39 @@ reconnect / history → SessionReplayService
             精确字节、逐行 sync、writer barrier 与 torn-tail 恢复语义。<code
               >openManagedSession</code
             >
-            已支持注入其他 journal/resource backend。
+            已支持注入其他 journal/resource backend。Spring 的 Flyway V4 已增加
+            journal head、精确 transaction bytes、resource catalog 和
+            revision/resource ref 四张私有表；内部 HTTP API
+            已实现基于数据库时间的 writer lease/generation、head CAS、checkpoint
+            指针原子推进、幂等回执、分页读取，以及不超过 64 KiB 的事务化
+            <code>MYSQL_INLINE</code>
+            资源；当前未过期 writer secret
+            同时保护恢复、分页和资源读取。私有路由默认关闭，仅在受信服务网络显式设置
+            <code>qwen.managed-agent.session-store.enabled=true</code> 后开放。
           </div>
           <div class="callout warning">
-            <strong>尚未完成：</strong>D0 只是可替换存储边界，不代表 Hosted
-            Session 已长期化。D1 仍需在 Java 管控面增加四张私有表、内部 HTTP
-            API、writer lease/generation、CAS、幂等回执、精确 record bytes 和
-            <code>MYSQL_INLINE</code> 资源事务；D2 才接入大于 64 KiB 的 OSS
-            不可变资源；D3 完成跨 Harness/Runtime/Workspace
-            恢复门禁与生产故障验证。详细方案见
+            <strong>尚未完成：</strong>D1a Java Store 尚未进入 Hosted Harness
+            活跃链路，因此当前 Hosted Session 仍未长期化。D1b 还需 TypeScript
+            HTTP journal/resource adapter、共享 golden contract fixture
+            和两个独立 Java 进程的 MySQL 故障验证；D2 才为新建 Hosted Session
+            选择远端 backend，并接入大于 64 KiB 的 OSS 不可变资源；D3 完成跨
+            Harness/Runtime/Workspace 恢复门禁与生产故障验证。详细方案见
             <a
               href="https://github.com/doudouOUC/qwen-code/blob/feature/managed-agents-p0-p8/docs/design/2026-09-21-managed-session-durable-store.zh-CN.md"
               >《Managed Session 长期权威存储》</a
             >。
           </div>
           <div class="callout danger">
-            <strong>当前验证边界：</strong>P0/P1 事件切片仍以
-            <code>c818c21910</code> 的 H2 测试为证，尚不代表跨节点通知已经完成。
-            P3 Runtime 恢复切片已增加真实 MySQL 下两个独立 JVM
-            的单物理资源/单次执行证明，并覆盖 local-process 接管、UID
-            条件删除、身份冲突、私有 attestation、有界退避、in-flight 调用超时
-            和超时后续接。 Kubernetes release 使用持久 UID 作为删除
+            <strong>当前验证边界：</strong>D1a 以 Spring MockMvc 与 H2 MySQL
+            兼容模式证明 64 KiB inline 资源及 writer/commit/read HTTP
+            契约，并以真实 MySQL 上的两个独立 Store 对象证明 schema
+            升级、精确字节、幂等回执、generation 接管和旧 writer
+            拒绝；它尚不是两个独立 Java 进程的崩溃/网络故障证据。 P0/P1
+            事件切片仍以 <code>c818c21910</code> 的 H2
+            测试为证，尚不代表跨节点通知已经完成。 P3 Runtime 恢复切片已增加真实
+            MySQL 下两个独立 JVM 的单物理资源/单次执行证明，并覆盖 local-process
+            接管、UID 条件删除、身份冲突、私有 attestation、有界退避、in-flight
+            调用超时 和超时后续接。 Kubernetes release 使用持久 UID 作为删除
             precondition； resourceVersion
             保留作观测与诊断，不用于普通删除，避免 Pod 状态更新造成误冲突。真实
             集群验收还必须证明部署配置提供的不可变
@@ -3608,7 +3620,7 @@ reconnect / history → SessionReplayService
           <div class="section-head">
             <div>
               <div class="section-index">17 / CURRENT GAP</div>
-              <h2>现有基础与主要缺口（v1.8 代码快照）</h2>
+              <h2>现有基础与主要缺口（v1.9 代码快照）</h2>
             </div>
           </div>
           <div class="grid-2">
@@ -3647,6 +3659,10 @@ reconnect / history → SessionReplayService
                 <li>
                   有界 Harness 事件批处理、原子状态推进与本机提交后 SSE 直推。
                 </li>
+                <li>
+                  私有 Managed Session Store 的 Flyway V4、Spring 内部 API、
+                  writer fencing、精确事务字节、幂等 CAS 与 64 KiB inline 资源。
+                </li>
               </ul>
             </article>
             <article class="card accent-amber">
@@ -3665,8 +3681,9 @@ reconnect / history → SessionReplayService
                 <li>AgentBundle/Manifest 版本一致性。</li>
                 <li>Artifact Store 和 RuntimeTemplate。</li>
                 <li>
-                  Harness 私有 journal 的 D0 接缝已完成；D1-D3 的 MySQL/OSS
-                  资源闭包、共享 Session Authority 和可替换 Harness 尚待实现。
+                  Harness 私有 journal 的 D0 接缝和 D1a Java Store 已完成；D1b
+                  TypeScript adapter、D2 Hosted backend 选择/OSS 资源闭包及 D3
+                  恢复门禁尚待实现。
                 </li>
                 <li>
                   真实 Kubernetes、真实 Harness/Runtime 的故障、网络、容量与
@@ -3694,7 +3711,7 @@ reconnect / history → SessionReplayService
         </section>
 
         <footer class="footer">
-          Managed Agent 双链路技术方案 · v1.8 · 2026-09-22 · 单文件展示<br />
+          Managed Agent 双链路技术方案 · v1.9 · 2026-09-22 · 单文件展示<br />
           核心原则：一个 Session 一个固定执行引擎；一个模型循环
           owner；工具副作用结果不确定时不自动重放。
         </footer>
