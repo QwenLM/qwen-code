@@ -321,9 +321,15 @@ final class JdbcRepositoryContract {
         assertEquals(ownerA.getDispatchGeneration(),
                 renewedA.getDispatchGeneration());
         assertEquals(ownerA.getVersion() + 1, renewedA.getVersion());
-        ToolExecutionRecord cancelling = first.compareAndSet(renewedA,
-                renewedA.withState(
-                        ToolExecutionRecord.State.CANCEL_REQUESTED, true));
+        ToolExecutionRecord executing = first.compareAndSet(renewedA,
+                renewedA.withState(ToolExecutionRecord.State.EXECUTING,
+                        false),
+                prefix + "-dispatcher-a",
+                renewedA.getDispatchGeneration());
+        ToolExecutionRecord cancelling = second.requestCancel(executionId,
+                executing.getVersion());
+        assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                cancelling.getState());
         assertNull(second.claimDispatch(executionId,
                 prefix + "-dispatcher-b", Duration.ofMinutes(30)));
         assertTrue(second.hasActiveByRuntimeSession(
@@ -332,23 +338,23 @@ final class JdbcRepositoryContract {
         expire(dataSource, "qwen_tool_execution",
                 "dispatch_lease_until", "execution_call_id", executionId);
 
-        ToolExecutionRecord ownerB = second.claimDispatch(executionId,
-                prefix + "-dispatcher-b", Duration.ofMinutes(30));
-        assertEquals(2, ownerB.getDispatchGeneration());
-        assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
-                ownerB.getState());
-        assertTrue(ownerB.isCancelRequested());
+        assertNull(second.claimDispatch(executionId,
+                prefix + "-dispatcher-b", Duration.ofMinutes(30)));
+        ToolExecutionRecord unknown = second.findByExecutionCallId(
+                executionId);
+        assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+        assertEquals(prefix + "-dispatcher-a", unknown.getDispatchOwner());
+        assertTrue(unknown.isCancelRequested());
         assertNull(first.renewDispatch(executionId,
                 prefix + "-dispatcher-a", ownerA.getDispatchGeneration(),
                 Duration.ofMinutes(30)));
-        ToolExecutionRecord renewedB = second.renewDispatch(executionId,
-                prefix + "-dispatcher-b", ownerB.getDispatchGeneration(),
-                Duration.ofMinutes(30));
         assertNull(first.compareAndSet(cancelling,
-                cancelling.withResult(result("error"), 1, START)));
-        Map<String, Object> result = result("success");
-        ToolExecutionRecord settled = second.compareAndSet(renewedB,
-                renewedB.withResult(result, 2, START));
+                cancelling.withResult(result("error"), 1, START),
+                prefix + "-dispatcher-a",
+                cancelling.getDispatchGeneration()));
+        Map<String, Object> result = result("cancelled");
+        ToolExecutionRecord settled = second.resolveUnknown(unknown, result,
+                START);
         assertEquals(result, settled.getResult());
         assertFalse(first.hasActiveByRuntimeSession(
                 prefix + "-runtime-session"));
@@ -360,7 +366,7 @@ final class JdbcRepositoryContract {
                 new JdbcToolExecutionRepository(dataSource);
         ToolExecutionRecord restored = reconstructed
                 .findByExecutionCallId(executionId);
-        assertEquals("success", restored.getExecutionStatus());
+        assertEquals("cancelled", restored.getExecutionStatus());
         assertEquals(result, restored.getResult());
         ToolExecutionRecord changed = execution(prefix + "-changed",
                 idempotencyKey, prefix + "-changed-digest");

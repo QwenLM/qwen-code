@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** Durable identity, ownership, and result for one Tool execution. */
@@ -87,6 +88,10 @@ public final class ToolExecutionRecord {
         if ((dispatchOwner == null) != (dispatchLeaseUntil == null)) {
             throw new IllegalArgumentException(
                     "dispatch owner and lease must be set together");
+        }
+        if (state == State.CANCEL_REQUESTED && !cancelRequested) {
+            throw new IllegalArgumentException(
+                    "CANCEL_REQUESTED requires cancelRequested");
         }
         if (dispatchOwner != null) {
             BrokerValues.requireId(dispatchOwner, "dispatchOwner");
@@ -250,9 +255,11 @@ public final class ToolExecutionRecord {
     }
 
     public ToolExecutionRecord withUnknown() {
+        // The last claim stays on the record so recovery can attest which
+        // dispatcher and lease may still be executing physically.
         return copy(State.UNKNOWN, null, null, lastSequence,
-                cancelRequested, null, null, dispatchGeneration, version,
-                null);
+                cancelRequested, dispatchOwner, dispatchLeaseUntil,
+                dispatchGeneration, version, null);
     }
 
     public ToolExecutionRecord resolveUnknown(
@@ -270,8 +277,9 @@ public final class ToolExecutionRecord {
                     "resolution executionStatus is required");
         }
         return copy(State.SETTLED, (String) status, resolutionResult,
-                lastSequence, cancelRequested, null, null,
-                dispatchGeneration, version, resolutionTime);
+                lastSequence, cancelRequested, dispatchOwner,
+                dispatchLeaseUntil, dispatchGeneration, version,
+                resolutionTime);
     }
 
     ToolExecutionRecord withDispatch(String owner, Instant leaseUntil,
@@ -301,7 +309,19 @@ public final class ToolExecutionRecord {
                 && reference.equals(other.reference);
     }
 
-    boolean sameRequest(ToolExecutionRecord other) {
+    boolean sameDispatch(ToolExecutionRecord other) {
+        return other != null
+                && Objects.equals(dispatchOwner, other.dispatchOwner)
+                && Objects.equals(dispatchLeaseUntil,
+                        other.dispatchLeaseUntil)
+                && dispatchGeneration == other.dispatchGeneration;
+    }
+
+    boolean hasLiveDispatchAt(Instant now) {
+        return dispatchOwner != null && dispatchLeaseUntil.isAfter(now);
+    }
+
+    public boolean sameRequest(ToolExecutionRecord other) {
         return other != null
                 && idempotencyKey.equals(other.idempotencyKey)
                 && bindingId.equals(other.bindingId)

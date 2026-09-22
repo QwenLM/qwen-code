@@ -110,14 +110,37 @@ public final class JdbcToolExecutionRepository
 
     @Override
     public ToolExecutionRecord compareAndSet(ToolExecutionRecord expected,
-            ToolExecutionRecord replacement) {
+            ToolExecutionRecord replacement, String owner,
+            long dispatchGeneration) {
         requireReplacement(expected, replacement);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             ToolExecutionRecord current = selectByExecutionId(connection,
                     expected.getExecutionCallId(), true);
             if (current == null || !current.sameIdentity(expected)
-                    || current.getVersion() != expected.getVersion()) {
+                    || current.getVersion() != expected.getVersion()
+                    || current.isSettled()
+                    || current.getState()
+                            == ToolExecutionRecord.State.UNKNOWN
+                    || !current.sameDispatch(expected)
+                    || !current.hasLiveDispatchAt(
+                            JdbcRepositorySupport.databaseNow(connection))
+                    || !current.getDispatchOwner().equals(owner)
+                    || current.getDispatchGeneration()
+                            != dispatchGeneration) {
                 return null;
+            }
+            ToolExecutionRecord.State to = replacement.getState();
+            if (to == ToolExecutionRecord.State.PREPARED
+                    || to == ToolExecutionRecord.State.DISPATCHING
+                            && current.getState()
+                                    != ToolExecutionRecord.State.DISPATCHING) {
+                throw new IllegalArgumentException(
+                        "execution state must not move backwards");
+            }
+            if (current.isCancelRequested()
+                    && !replacement.isCancelRequested()) {
+                throw new IllegalArgumentException(
+                        "replacement must not drop a cancellation request");
             }
             ToolExecutionRecord updated = replacement.withVersion(
                     expected.getVersion() + 1);
@@ -151,17 +174,18 @@ public final class JdbcToolExecutionRepository
                     && current.getDispatchLeaseUntil().isAfter(now)) {
                 return null;
             }
-            ToolExecutionRecord.State nextState = current.isCancelRequested()
-                    && (current.getState()
-                                    == ToolExecutionRecord.State.EXECUTING
-                            || current.getState()
-                                    == ToolExecutionRecord.State
-                                            .CANCEL_REQUESTED)
-                    ? ToolExecutionRecord.State.CANCEL_REQUESTED
-                    : ToolExecutionRecord.State.DISPATCHING;
+            if (current.getState() == ToolExecutionRecord.State.EXECUTING
+                    || current.getState()
+                            == ToolExecutionRecord.State.CANCEL_REQUESTED) {
+                ToolExecutionRecord unknown = current.withUnknown()
+                        .withVersion(current.getVersion() + 1);
+                updateExecution(connection, unknown);
+                return null;
+            }
             ToolExecutionRecord claimed = current.withDispatch(ownerId,
                     now.plus(duration),
-                    current.getDispatchGeneration() + 1, nextState)
+                    current.getDispatchGeneration() + 1,
+                    ToolExecutionRecord.State.DISPATCHING)
                     .withVersion(current.getVersion() + 1);
             updateExecution(connection, claimed);
             return claimed;
@@ -196,6 +220,62 @@ public final class JdbcToolExecutionRepository
                     .withVersion(current.getVersion() + 1);
             updateExecution(connection, renewed);
             return renewed;
+        });
+    }
+
+    @Override
+    public ToolExecutionRecord requestCancel(String executionCallId,
+            long expectedVersion) {
+        String id = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            ToolExecutionRecord current = selectByExecutionId(connection, id,
+                    true);
+            if (current == null || current.isSettled()
+                    || current.getVersion() != expectedVersion) {
+                return null;
+            }
+            if (current.isCancelRequested()) {
+                return current;
+            }
+            ToolExecutionRecord requested = current.withState(
+                    current.getState() == ToolExecutionRecord.State.EXECUTING
+                            ? ToolExecutionRecord.State.CANCEL_REQUESTED
+                            : current.getState(),
+                    true);
+            if (current.getState() == ToolExecutionRecord.State.PREPARED) {
+                requested = requested.withResult(
+                        Map.of("executionStatus", "cancelled"),
+                        current.getLastSequence(),
+                        JdbcRepositorySupport.databaseNow(connection));
+            }
+            ToolExecutionRecord updated = requested.withVersion(
+                    current.getVersion() + 1);
+            updateExecution(connection, updated);
+            return updated;
+        });
+    }
+
+    @Override
+    public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        if (expected == null) {
+            throw new IllegalArgumentException("expected is required");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            ToolExecutionRecord current = selectByExecutionId(connection,
+                    expected.getExecutionCallId(), true);
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()
+                    || current.getState()
+                            != ToolExecutionRecord.State.UNKNOWN) {
+                return null;
+            }
+            ToolExecutionRecord resolved = current.resolveUnknown(
+                    resolutionResult, resolutionTime)
+                    .withVersion(current.getVersion() + 1);
+            updateExecution(connection, resolved);
+            return resolved;
         });
     }
 
@@ -386,6 +466,7 @@ public final class JdbcToolExecutionRepository
 
     private static void requireCandidate(ToolExecutionRecord candidate) {
         if (candidate == null || candidate.getVersion() != 0
+                || candidate.getLastSequence() != 0
                 || candidate.getState()
                         != ToolExecutionRecord.State.PREPARED
                 || candidate.getDispatchOwner() != null) {
@@ -398,9 +479,13 @@ public final class JdbcToolExecutionRepository
             ToolExecutionRecord replacement) {
         if (expected == null || replacement == null
                 || !expected.sameIdentity(replacement)
-                || replacement.getVersion() != expected.getVersion()) {
+                || !expected.sameDispatch(replacement)
+                || replacement.getVersion() != expected.getVersion()
+                || replacement.getLastSequence()
+                        < expected.getLastSequence()) {
             throw new IllegalArgumentException(
-                    "replacement must preserve execution identity and version");
+                    "replacement must preserve execution identity, dispatch"
+                            + " claim, version, and result sequence");
         }
     }
 }

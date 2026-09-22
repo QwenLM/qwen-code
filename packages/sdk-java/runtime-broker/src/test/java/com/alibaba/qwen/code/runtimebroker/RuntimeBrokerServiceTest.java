@@ -383,7 +383,7 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
-    void secondBrokerTakesOverExpiredDispatchWithoutReexecution()
+    void expiredExecutingDispatchBecomesUnknownWithoutReexecution()
             throws Exception {
         InMemoryRuntimeBindingRepository bindings =
                 new InMemoryRuntimeBindingRepository();
@@ -417,15 +417,19 @@ class RuntimeBrokerServiceTest {
 
             first.close();
             clock.advance(Duration.ofSeconds(2));
-            Map<String, Object> resumed = second.getExecution(
+            RuntimeBrokerException unknown = assertThrows(
+                    RuntimeBrokerException.class,
+                    () -> second.getExecution(HARNESS_SESSION,
+                            RUNTIME_SESSION,
+                            (String) created.get("executionCallId"), null));
+            assertEquals("runtime_broker_execution_unknown",
+                    unknown.getCode());
+            Map<String, Object> resolved = second.resolveUnknownExecution(
                     HARNESS_SESSION, RUNTIME_SESSION,
-                    (String) created.get("executionCallId"), null);
-
-            assertEquals(created.get("executionCallId"),
-                    resumed.get("executionCallId"));
-            assertEquals("success", result(waitForSettled(second,
-                    (String) created.get("executionCallId")))
-                            .get("executionStatus"));
+                    (String) created.get("executionCallId"),
+                    UnknownExecutionResolution.ACCEPTED_UNKNOWN);
+            assertEquals("runtime_broker_execution_unknown",
+                    result(resolved).get("errorCode"));
             assertEquals(1, transport.executions.get());
         } finally {
             first.close();
@@ -553,7 +557,11 @@ class RuntimeBrokerServiceTest {
                 "execution-accepted", "key-accepted", "binding-accepted",
                 1, HARNESS_SESSION, RUNTIME_SESSION, "turn-1", "tool-1",
                 "args-1", reference("args-1")));
-        executions.compareAndSet(prepared, prepared.withUnknown());
+        ToolExecutionRecord claimed = executions.claimDispatch(
+                prepared.getExecutionCallId(), "test-owner",
+                Duration.ofMinutes(1));
+        executions.compareAndSet(claimed, claimed.withUnknown(),
+                "test-owner", claimed.getDispatchGeneration());
         FakeTransport transport = new FakeTransport();
         RuntimeBrokerService service = durableService("broker-a",
                 request -> CompletableFuture.completedFuture(LEASE),

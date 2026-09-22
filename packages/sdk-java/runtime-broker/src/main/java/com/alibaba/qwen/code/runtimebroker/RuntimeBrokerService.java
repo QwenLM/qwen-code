@@ -275,8 +275,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw conflict("runtime_broker_execution_not_unknown",
                         "Tool execution outcome is not unknown.");
             }
-            ToolExecutionRecord updated = executionRepository.compareAndSet(
-                    current, current.resolveUnknown(result, Instant.now()));
+            ToolExecutionRecord updated = executionRepository.resolveUnknown(
+                    current, result, Instant.now());
             if (updated != null) {
                 return executionSnapshot(updated);
             }
@@ -503,8 +503,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             == ToolExecutionRecord.State.UNKNOWN) {
                 return current;
             }
+            ToolExecutionRecord claimed = executionRepository.claimDispatch(
+                    executionCallId, brokerOwnerId, dispatchLeaseDuration);
+            if (claimed == null) {
+                return executionRepository.findByExecutionCallId(
+                        executionCallId);
+            }
             ToolExecutionRecord updated = executionRepository.compareAndSet(
-                    current, current.withUnknown());
+                    claimed, claimed.withUnknown(), brokerOwnerId,
+                    claimed.getDispatchGeneration());
             if (updated != null) {
                 return updated;
             }
@@ -2526,8 +2533,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     || !ownsDispatch(observed)) {
                                 return;
                             }
-                            if (observed.getState()
-                                    == ToolExecutionRecord.State.PREPARED) {
+                            if ("prepared".equals(status.get("state"))) {
                                 if (observed.isCancelRequested()) {
                                     settleOwned(cancelledResult());
                                 } else {
@@ -2770,14 +2776,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     return current;
                 }
                 ToolExecutionRecord updated = executionRepository
-                        .compareAndSet(current, current.withState(
-                                current.getState()
-                                                == ToolExecutionRecord.State.EXECUTING
-                                        || current.getState()
-                                                == ToolExecutionRecord.State.CANCEL_REQUESTED
-                                                        ? ToolExecutionRecord.State.CANCEL_REQUESTED
-                                                        : current.getState(),
-                                true));
+                        .requestCancel(executionCallId,
+                                current.getVersion());
                 if (updated != null) {
                     return updated;
                 }
@@ -2796,7 +2796,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     return current;
                 }
                 ToolExecutionRecord updated = executionRepository
-                        .compareAndSet(current, replacement);
+                        .compareAndSet(current, replacement, brokerOwnerId,
+                                current.getDispatchGeneration());
                 if (updated != null) {
                     return updated;
                 }
@@ -2816,7 +2817,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 String state) {
             switch (state) {
                 case "prepared":
-                    return ToolExecutionRecord.State.PREPARED;
+                    return ToolExecutionRecord.State.DISPATCHING;
                 case "executing":
                     return ToolExecutionRecord.State.EXECUTING;
                 case "cancel_requested":
