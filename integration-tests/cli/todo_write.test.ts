@@ -109,9 +109,13 @@ describe('todo_write', () => {
 
 Use the todo_write tool to create this list.`;
 
-    const result = await rig.run(prompt);
+    const capture = await rig.runWithToolCapture(prompt);
+    const result = capture.result;
 
-    const foundToolCall = await rig.waitForToolCall('todo_write');
+    const todoWriteCalls = capture.toolCalls.filter(
+      (call) => call.name === 'todo_write',
+    );
+    const foundToolCall = todoWriteCalls.length > 0;
 
     // Add debugging information
     if (!foundToolCall) {
@@ -127,22 +131,18 @@ Use the todo_write tool to create this list.`;
     validateModelOutput(result, null, 'Todo write test');
 
     // Check that the tool was called with the right parameters
-    const toolLogs = rig.readToolLogs();
-    const todoWriteCalls = toolLogs.filter(
-      (t) => t.toolRequest.name === 'todo_write',
-    );
-
     expect(todoWriteCalls.length).toBeGreaterThan(0);
 
-    // Parse the arguments to verify they contain our tasks
-    const todoArgs = JSON.parse(todoWriteCalls[0].toolRequest.args ?? '{}');
+    const todoArgs = todoWriteCalls[0].args as {
+      todos?: Array<{ id?: unknown; content?: unknown; status?: unknown }>;
+    };
 
     expect(todoArgs.todos).toBeDefined();
     expect(Array.isArray(todoArgs.todos)).toBe(true);
-    expect(todoArgs.todos.length).toBeGreaterThanOrEqual(3);
+    expect(todoArgs.todos!.length).toBeGreaterThanOrEqual(3);
 
     // Check that all todos have the correct structure
-    for (const todo of todoArgs.todos) {
+    for (const todo of todoArgs.todos!) {
       expect(todo.id).toBeDefined();
       expect(todo.content).toBeDefined();
       expect(['pending', 'in_progress', 'completed', 'cancelled']).toContain(
@@ -153,7 +153,7 @@ Use the todo_write tool to create this list.`;
     // Log success info if verbose
     if (process.env['VERBOSE'] === 'true') {
       console.log('Todo list created successfully');
-      console.log(`Created ${todoArgs.todos.length} todos`);
+      console.log(`Created ${todoArgs.todos!.length} todos`);
     }
   });
 });

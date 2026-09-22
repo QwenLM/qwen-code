@@ -7,6 +7,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { join } from 'node:path';
 import {
+  capturedToolCallPathMatches,
   runForcedToolCallScenario,
   TestRig,
   printDebugInfo,
@@ -209,26 +210,26 @@ describe('file-system', () => {
     );
     const fileName = 'non_existent.txt';
 
-    const result = await rig.run(`In ${fileName}, replace "a" with "b"`);
-
-    await rig.waitForTelemetryReady();
-    const toolLogs = rig.readToolLogs();
-
-    const readAttempt = toolLogs.find(
-      (log) =>
-        log.toolRequest.name === 'read_file' &&
-        log.toolRequest.args?.includes(fileName),
+    const capture = await rig.runWithToolCapture(
+      `In ${fileName}, replace "a" with "b"`,
     );
-    const editAttempt = toolLogs.find(
-      (log) => log.toolRequest.name === 'edit_file',
+    const result = capture.result;
+
+    const readAttempt = capture.toolCalls.find(
+      (call) =>
+        call.name === 'read_file' &&
+        capturedToolCallPathMatches(call, 'file_path', fileName),
     );
-    const successfulReplace = toolLogs.find(
-      (log) => log.toolRequest.name === 'replace' && log.toolRequest.success,
+    const editAttempt = capture.toolCalls.find(
+      (call) => call.name === 'edit_file',
+    );
+    const successfulReplace = capture.toolCalls.find(
+      (call) => call.name === 'replace' && call.success,
     );
 
     // The model can either investigate (and fail) or do nothing.
     // If it chose to investigate by reading, that read must have failed.
-    if (readAttempt && readAttempt.toolRequest.success) {
+    if (readAttempt?.success) {
       console.error(
         'A read_file attempt succeeded for a non-existent file when it should have failed.',
       );
@@ -236,7 +237,7 @@ describe('file-system', () => {
     }
     if (readAttempt) {
       expect(
-        readAttempt.toolRequest.success,
+        readAttempt.success,
         'If model tries to read the file, that attempt must fail',
       ).toBe(false);
     }

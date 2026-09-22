@@ -199,6 +199,140 @@ interface ParsedLog {
   }[];
 }
 
+export interface CapturedToolCall {
+  callId: string;
+  name: string;
+  args: unknown;
+  success?: boolean;
+  error?: string;
+}
+
+export interface ToolCaptureResult {
+  result: string;
+  toolCalls: CapturedToolCall[];
+}
+
+export function getCapturedToolCallStringArg(
+  call: CapturedToolCall,
+  key: string,
+): string | undefined {
+  if (typeof call.args !== 'object' || call.args === null) {
+    return undefined;
+  }
+  const value = (call.args as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+export function capturedToolCallPathMatches(
+  call: CapturedToolCall,
+  key: string,
+  expectedPath: string,
+): boolean {
+  const actualPath = getCapturedToolCallStringArg(call, key);
+  if (actualPath === undefined) {
+    return false;
+  }
+  const normalizedActual = actualPath.replaceAll('\\', '/');
+  const normalizedExpected = expectedPath.replaceAll('\\', '/');
+  return (
+    normalizedActual === normalizedExpected ||
+    normalizedActual.endsWith(`/${normalizedExpected}`)
+  );
+}
+
+type StreamJsonFrame = {
+  type?: unknown;
+  message?: {
+    content?: unknown;
+  };
+  result?: unknown;
+};
+
+export function parseStreamJsonToolCalls(stdout: string): ToolCaptureResult {
+  const toolCalls: CapturedToolCall[] = [];
+  const callsById = new Map<string, CapturedToolCall>();
+  let result = '';
+
+  for (const [index, rawLine] of stdout.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+
+    let frame: StreamJsonFrame;
+    try {
+      frame = JSON.parse(line) as StreamJsonFrame;
+    } catch (error) {
+      throw new Error(
+        `Invalid stream-json frame on line ${index + 1}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    if (frame.type === 'assistant' && Array.isArray(frame.message?.content)) {
+      for (const block of frame.message.content) {
+        if (
+          typeof block !== 'object' ||
+          block === null ||
+          !('type' in block) ||
+          block.type !== 'tool_use' ||
+          !('id' in block) ||
+          typeof block.id !== 'string' ||
+          !('name' in block) ||
+          typeof block.name !== 'string'
+        ) {
+          continue;
+        }
+
+        const captured: CapturedToolCall = {
+          callId: block.id,
+          name: block.name,
+          args: 'input' in block ? block.input : undefined,
+        };
+        toolCalls.push(captured);
+        callsById.set(captured.callId, captured);
+      }
+    }
+
+    if (frame.type === 'user' && Array.isArray(frame.message?.content)) {
+      for (const block of frame.message.content) {
+        if (
+          typeof block !== 'object' ||
+          block === null ||
+          !('type' in block) ||
+          block.type !== 'tool_result' ||
+          !('tool_use_id' in block) ||
+          typeof block.tool_use_id !== 'string'
+        ) {
+          continue;
+        }
+
+        const captured = callsById.get(block.tool_use_id);
+        if (!captured) {
+          continue;
+        }
+        if ('is_error' in block && typeof block.is_error === 'boolean') {
+          captured.success = !block.is_error;
+        }
+        if (
+          block.is_error === true &&
+          'content' in block &&
+          typeof block.content === 'string'
+        ) {
+          captured.error = block.content;
+        }
+      }
+    }
+
+    if (frame.type === 'result' && typeof frame.result === 'string') {
+      result = frame.result;
+    }
+  }
+
+  return { result, toolCalls };
+}
+
 export class TestRig {
   bundlePath: string;
   testDir: string | null;
@@ -444,6 +578,21 @@ export class TestRig {
     });
 
     return promise;
+  }
+
+  async runWithToolCapture(
+    promptOrOptions:
+      | string
+      | { prompt?: string; stdin?: string; stdinDoesNotEnd?: boolean },
+    ...args: string[]
+  ): Promise<ToolCaptureResult> {
+    const stdout = await this.run(
+      promptOrOptions,
+      '--output-format',
+      'stream-json',
+      ...args,
+    );
+    return parseStreamJsonToolCalls(stdout);
   }
 
   runCommand(
