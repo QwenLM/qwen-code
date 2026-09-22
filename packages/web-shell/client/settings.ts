@@ -105,18 +105,18 @@ function warnUnknownItemIds(options?: WebShellSettingsOptions): void {
   }
 }
 
-export function isItemExcluded(
+export function isItemVisible(
   id: WebShellSettingItemId,
   options?: WebShellSettingsOptions,
 ): boolean {
   warnUnknownItemIds(options);
   return (
-    !(options?.includeItems?.includes(id) ?? true) ||
-    Boolean(options?.excludeItems?.includes(id))
+    (options?.includeItems?.includes(id) ?? true) &&
+    !options?.excludeItems?.includes(id)
   );
 }
 
-export function isSettingExcluded(
+export function isSettingVisible(
   key: string,
   options?: WebShellSettingsOptions,
 ): boolean {
@@ -126,9 +126,9 @@ export function isSettingExcluded(
   const ids = (
     Object.keys(SETTING_KEYS) as Array<keyof typeof SETTING_KEYS>
   ).filter((id) => SETTING_KEYS[id] === key);
-  if (ids.length === 0) return options?.includeItems !== undefined;
-  if (ids.some((id) => options?.excludeItems?.includes(id))) return true;
+  if (ids.length === 0) return options?.includeItems === undefined;
+  if (ids.some((id) => options?.excludeItems?.includes(id))) return false;
   const includeItems = options?.includeItems;
-  if (includeItems === undefined) return false;
-  return !ids.some((id) => includeItems.includes(id));
+  if (includeItems === undefined) return true;
+  return ids.some((id) => includeItems.includes(id));
 }
