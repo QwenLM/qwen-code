@@ -97,15 +97,18 @@ export const AUTOMATED_TRIGGER_FRAME =
  */
 const LINE_TERMINATORS = /\r\n?|[\u001c-\u001e\u2028\u2029\u0085\v\f]/g;
 
-/** Format and default-ignorable code points: invisible, so they can hide text. */
-const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
-
 /**
- * The one tag this codebase tells the model to trust. Relayed text is where
- * a third party's words enter a subagent's context, so an opening tag inside
- * it is defused — the analogue of upstream defusing its own `[transcript`
- * markers. Nothing else is touched: mangling `<input type="text">` in a
- * request about HTML would cost the user their words for no gain.
+ * The one tag this codebase tells the model to trust. Both halves of a framed
+ * message are defused of it: the computed text is where a scanned file or an
+ * earlier agent's output lands, which is the likelier carrier, and the
+ * relayed request is the only text that claims to be a user speaking. The
+ * analogue of upstream defusing its own `[transcript` markers.
+ *
+ * Nothing else is rewritten. In particular no invisible or format characters
+ * are stripped: that would quietly delete the ZWNJ that spells a Persian
+ * request, or a variation selector from an emoji, while the frame above the
+ * relay promises it is verbatim. They cannot forge a frame anyway — only a
+ * line break starts a line, and every line break is normalized first.
  */
 const TRUSTED_TAG_OPENER = /<(\/?\s*system-reminder\b)/gi;
 
@@ -125,28 +128,20 @@ function userWords(text: string): string {
   ).trim();
 }
 
-/** `\n`-normalized text with two spaces in front of every line. */
-function indent(text: string): string {
-  return '  ' + text.replace(LINE_TERMINATORS, '\n').split('\n').join('\n  ');
-}
-
 /**
- * The computed task text as the subagent sees it: normalized line breaks,
- * every line indented. Nothing is stripped — the script's text reaches the
- * agent as written, it just cannot start a line at column zero.
+ * Text as a framed message carries it: every line break normalized, the one
+ * trusted tag defused, and two spaces in front of every line so that a frame
+ * is something only the harness can write at column zero.
  */
-export function indentComputed(text: string): string {
-  return indent(text);
-}
-
-/**
- * A relayed user request as the subagent sees it. Indented like the computed
- * text, and additionally stripped of invisible characters and defused of
- * trusted-tag openers: this is the only text in the message that claims to
- * be a user speaking, so it is also the most valuable to forge into.
- */
-export function indentRelayed(text: string): string {
-  return indent(text.replace(INVISIBLE, '').replace(TRUSTED_TAG_OPENER, '‹$1'));
+export function indentFramed(text: string): string {
+  return (
+    '  ' +
+    text
+      .replace(LINE_TERMINATORS, '\n')
+      .replace(TRUSTED_TAG_OPENER, '\u2039$1')
+      .split('\n')
+      .join('\n  ')
+  );
 }
 
 /**
@@ -167,14 +162,14 @@ export function frameSubagentPrompt(
     case 'off':
       return prompt;
     case 'automated':
-      return `${AUTOMATED_TRIGGER_FRAME}\n${COMPUTED_TASK_FRAME}\n${indentComputed(prompt)}`;
+      return `${AUTOMATED_TRIGGER_FRAME}\n${COMPUTED_TASK_FRAME}\n${indentFramed(prompt)}`;
     case 'relay':
       return (
-        `${USER_REQUEST_FRAME}\n${indentRelayed(provenance.userText)}\n\n` +
-        `${COMPUTED_TASK_FRAME}\n${indentComputed(prompt)}`
+        `${USER_REQUEST_FRAME}\n${indentFramed(provenance.userText)}\n\n` +
+        `${COMPUTED_TASK_FRAME}\n${indentFramed(prompt)}`
       );
     case 'computed-only':
-      return `${COMPUTED_TASK_FRAME}\n${indentComputed(prompt)}`;
+      return `${COMPUTED_TASK_FRAME}\n${indentFramed(prompt)}`;
     default: {
       const exhaustive: never = provenance;
       void exhaustive;
