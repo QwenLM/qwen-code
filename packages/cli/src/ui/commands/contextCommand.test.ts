@@ -1015,13 +1015,10 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('charges the builtin-clamp deficit to the mcp row, not to messages', async () => {
-      // Under `tools.codeModeOnly` the declarations collapse to a few control
-      // tools while an `alwaysLoadTools` MCP server still bills every schema
-      // the detail loop sees, so the billed tools exceed the declared ones and
-      // `displayBuiltinTools` clamps at 0. The clamp deficit must come out of
-      // the mcp row — the row whose billing overshoots the declarations;
-      // otherwise `attributedOverhead` silently takes it out of `messages`.
+    it('bills the declared mcp schema to the mcp row, not to messages', async () => {
+      // The detail loop bills only declared tools, so a declared MCP schema
+      // lands on the mcp row and the rows must still partition the provider
+      // total exactly: `messages` absorbs only the calibrated remainder.
       // Own value properties shadow the prototype's getters (Object.assign
       // would trip the setter-less `schema` accessor on DeclarativeTool).
       const mcpToolDouble = Object.defineProperties(
@@ -1040,7 +1037,7 @@ describe('collectContextData (contextCommand)', () => {
         },
       ) as DiscoveredMCPTool;
       const tools = [skillToolDouble, mcpToolDouble];
-      const declared = [skillToolSchema];
+      const declared = [skillToolSchema, mcpToolDouble.schema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
@@ -1060,12 +1057,10 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      // The fixture does put the clamp in force: billed skill definition plus
-      // mcp schemas exceed the declared tools.
-      expect(
-        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
-          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
-      ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
+      // The mcp schema is declared, so the guard bills it to the mcp row.
+      expect(data.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
+      );
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
     });

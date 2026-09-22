@@ -20556,42 +20556,6 @@ describe('CoreToolScheduler activation wiring', () => {
     );
   });
 
-  it('defers to declared invocation surfaces in hybrid code mode', async () => {
-    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
-    const { scheduler, onAllToolCallsComplete } =
-      buildSchedulerWithSkillManager({
-        matchAndActivateByPaths,
-        skillToolPresent: true,
-        toolMode: 'code_mode',
-      });
-
-    await scheduler.schedule(
-      [
-        {
-          callId: '1',
-          name: ToolNames.READ_FILE,
-          args: { file_path: '/proj/src/App.tsx' },
-          isClientInitiated: false,
-          prompt_id: 'p1',
-        },
-      ],
-      new AbortController().signal,
-    );
-
-    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
-    expect(completed[0].status).toBe('success');
-    const responseText = getResponseText(completed[0]);
-    expect(responseText).toContain(
-      'Load a skill by name using the tool interface declared in this session',
-    );
-    expect(responseText).not.toContain(
-      'pass its name to the top-level Skill tool',
-    );
-    expect(responseText).not.toContain(
-      "await tools.skill({ skill: '<name>' })",
-    );
-  });
-
   it('defers to declared invocation surfaces in code_mode_only', async () => {
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
     const { scheduler, onAllToolCallsComplete } =

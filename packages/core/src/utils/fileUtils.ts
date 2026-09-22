@@ -35,6 +35,7 @@ import {
   shouldRequirePDFPageRange,
 } from './pdf.js';
 import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
+import { getCurrentCodeModeAllowedNames } from './code-mode-allowed-names.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
 import {
   extensionForMimeType,
@@ -1670,9 +1671,14 @@ export async function processSingleFileContent(
                 declaredTools.has('exec') &&
                 !zoomDeclared &&
                 !hasToolCallBridge);
+            const ambientAllowedNames = getCurrentCodeModeAllowedNames();
             const zoomAvailable = useNestedZoom
               ? registry
-                  ?.getCodeModeBindingPlan()
+                  ?.getCodeModeBindingPlan(
+                    ambientAllowedNames === undefined
+                      ? undefined
+                      : new Set(ambientAllowedNames),
+                  )
                   .bindings.some((binding) => binding.name === 'zoom_image')
               : zoomDeclared ||
                 (hasToolCallBridge &&

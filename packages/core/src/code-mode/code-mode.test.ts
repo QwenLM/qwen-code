@@ -249,6 +249,9 @@ describe('code mode exposure', () => {
     ]);
     expect(declarations[0]?.description).toContain('"name":"read_file"');
     expect(declarations[0]?.description).not.toContain('"name":"write_file"');
+    // Every binding is already declared top-level, so no schema section
+    // follows: the description must not promise one.
+    expect(declarations[0]?.description).not.toContain('declared below');
     expect(declarations[1]?.description).toContain(
       'declare const tools: { read_file(args:',
     );
@@ -422,6 +425,31 @@ describe('code mode exposure', () => {
     expect(declarations.map((item) => item.name)).toEqual(['exec']);
     expect(declarations[0]?.description).toContain('tools.read_file');
     expect(declarations[0]?.description).not.toContain('tools.write_file');
+  });
+
+  it('keeps a permission-deferred binding on the session surface but not on a filtered one', async () => {
+    // The eager-deferral immunity the docs promise holds on the session
+    // surface only: an AgentCore surface (subagent, headless agent, arena)
+    // narrows the nested binding set by its own allowlist, so a tool demoted
+    // by `tools.eager` has no nested binding there.
+    const registry = new ToolRegistry(
+      makeFakeConfig({ toolMode: ToolMode.CodeModeOnly }),
+    );
+    registry.registerTool(new MockTool({ name: 'exec' }));
+    registry.registerPermissionDeferredFactory(
+      'write_file',
+      async () => new MockTool({ name: 'write_file' }),
+    );
+    await registry.warmAll();
+
+    const sessionDescription = registry
+      .getFunctionDeclarations()
+      .find((item) => item.name === 'exec')?.description;
+    expect(sessionDescription).toContain('tools.write_file(args:');
+
+    const declarations = registry.getFunctionDeclarationsFiltered(['exec']);
+    expect(declarations.map((item) => item.name)).toEqual(['exec']);
+    expect(declarations[0]?.description).not.toContain('write_file');
   });
 
   it('keeps exec structured across Gemini, OpenAI, and Anthropic tool conversion', async () => {

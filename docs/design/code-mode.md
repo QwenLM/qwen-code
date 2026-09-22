@@ -65,8 +65,11 @@ When either bridge half is absent or the agent surface is filtered, `exec`
 includes signatures for nested tools whose schemas are otherwise unavailable.
 In `code_mode_only`, all nested declarations live in the `exec` description.
 Both bridge tools are hidden, deferred reminders and the incomplete-bridge
-warning are skipped, and `tools.eager` / `tools.visible` do not reduce those
-nested schemas. Callable tools remain available through `exec`.
+warning are skipped, and on the session surface `tools.eager` /
+`tools.visible` do not reduce those nested schemas. Callable tools remain
+available through `exec`. An AgentCore surface (subagent, headless agent,
+arena) narrows the nested binding set by its own allowlist, so a tool demoted
+by `tools.eager` has no nested binding there.
 
 Nested bindings prefer an exact canonical JavaScript name over names rewritten
 to that property. Other collisions retain canonical-name ordering; omitted

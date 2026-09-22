@@ -59,9 +59,10 @@ CodeModeOnly。
 
 任一桥接工具缺失或智能体调用面经过过滤时，`exec` 会为无法从其他途径取得
 schema 的嵌套工具附上签名。在 `code_mode_only` 中，所有嵌套声明集中在 `exec`
-描述中；两个桥接工具都被隐藏，延迟提醒和桥接不完整的警告被跳过。
+描述中；两个桥接工具都被隐藏，延迟提醒和桥接不完整的警告被跳过。在会话层，
 `tools.eager` 和 `tools.visible` 不会减少这些嵌套 schema，仍可调用的工具继续
-通过 `exec` 使用。
+通过 `exec` 使用。AgentCore 层（subagent、headless agent、arena）会按自身的
+allowlist 收窄嵌套绑定集合，因此被 `tools.eager` 降级的工具在该层没有嵌套绑定。
 
 嵌套绑定优先保留与 JavaScript 属性精确一致的规范名称，再考虑改写为该属性的
 名称。其他碰撞沿用规范名称字典序；被省略的绑定不出现在嵌套签名中，

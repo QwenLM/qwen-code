@@ -1757,10 +1757,12 @@ export class AgentCore {
       forNestedBinding &&
       isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
       // An MCP tool name must fall through to the exact-name and pattern
-      // checks below: they are the only place a server-level narrowing in
-      // the allowlist can be honored.
+      // checks below once the allowlist mentions MCP at all: they are the
+      // only place a server-level or exact-tool narrowing can be honored.
       (!toolName.startsWith('mcp__') ||
-        (this.executionAllowedMcpPatterns?.length ?? 0) === 0) &&
+        !this.executionAllowedTools?.some((name) =>
+          name.startsWith('mcp__'),
+        )) &&
       this.executionAllowedExactTools?.has(ToolNames.EXEC) &&
       getToolExposure(toolName) === 'code-mode-callable'
     ) {
@@ -2393,12 +2395,16 @@ export class AgentCore {
         prompt_id: promptId,
         response_id: responseId,
         wasOutputTruncated,
-        ...(toolName === ToolNames.EXEC &&
-        isCodeModeEnabled(this.runtimeContext.getToolMode?.())
-          ? {
-              codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
-            }
-          : {}),
+        // The narrowed binding set rides on every code-mode agent request:
+        // exec dispatch gates on it, and the scheduler exposes it as the
+        // ambient allowlist so reachability hints resolve against the
+        // surface this agent actually received.
+        ...(this.codeModeAllowedToolNames !== undefined
+          ? { codeModeAllowedToolNames: this.codeModeAllowedToolNames }
+          : toolName === ToolNames.EXEC &&
+              isCodeModeEnabled(this.runtimeContext.getToolMode?.())
+            ? { codeModeAllowedToolNames: [] }
+            : {}),
       };
 
       if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {

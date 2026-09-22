@@ -41,6 +41,7 @@ import { iconvEncode } from './iconvHelper.js';
 import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
 import { ToolMode } from '../tools/code-mode.js';
+import { runWithCodeModeAllowedNames } from './code-mode-allowed-names.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import {
@@ -1415,6 +1416,7 @@ describe('fileUtils', () => {
       declared: string[];
       deferred: string[];
       bindings: string[];
+      allowedNames?: string[];
       hint: string;
     }>([
       {
@@ -1475,6 +1477,27 @@ describe('fileUtils', () => {
         bindings: ['zoom_image'],
         hint: '',
       })),
+      {
+        // A declared zoom_image is directly callable: the guidance must not
+        // route it through exec.
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', 'exec', 'zoom_image'],
+        deferred: [],
+        bindings: ['zoom_image'],
+        hint: ' If details are too small, call zoom_image with coordinates normalized from 0 to 1000.',
+      },
+      {
+        // The session plan binds zoom_image, but the calling agent's
+        // narrowed plan does not: the guidance must not advertise it.
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', 'exec'],
+        deferred: ['zoom_image'],
+        bindings: ['zoom_image'],
+        allowedNames: ['read_file'],
+        hint: '',
+      },
     ])(
       'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
       async ({
@@ -1483,6 +1506,7 @@ describe('fileUtils', () => {
         declared,
         deferred,
         bindings,
+        allowedNames,
         hint,
       }) => {
         await sharp({
@@ -1491,19 +1515,23 @@ describe('fileUtils', () => {
           .png()
           .toFile(testImageFilePath);
         mockMimeGetType.mockReturnValue('image/png');
-        const result = await processSingleFileContent(testImageFilePath, {
-          ...mockConfig,
-          getCodeModeOnly: () => codeModeOnly,
-          getToolMode: () => toolMode,
-          getToolRegistry: () => ({
-            getFunctionDeclarations: () => declared.map((name) => ({ name })),
-            getDeferredToolSummary: () => deferred.map((name) => ({ name })),
-            getCodeModeBindingPlan: () => ({
-              bindings: bindings.map((name) => ({ name })),
-              collisions: [],
+        const result = await runWithCodeModeAllowedNames(allowedNames, () =>
+          processSingleFileContent(testImageFilePath, {
+            ...mockConfig,
+            getCodeModeOnly: () => codeModeOnly,
+            getToolMode: () => toolMode,
+            getToolRegistry: () => ({
+              getFunctionDeclarations: () => declared.map((name) => ({ name })),
+              getDeferredToolSummary: () => deferred.map((name) => ({ name })),
+              getCodeModeBindingPlan: (allowed?: ReadonlySet<string>) => ({
+                bindings: bindings
+                  .filter((name) => !allowed || allowed.has(name))
+                  .map((name) => ({ name })),
+                collisions: [],
+              }),
             }),
-          }),
-        } as unknown as Config);
+          } as unknown as Config),
+        );
         const parts = result.llmContent as Part[];
         expect(parts[0]).toEqual({
           text: `Image overview: 20x10; oriented source: 20x10.${hint}`,

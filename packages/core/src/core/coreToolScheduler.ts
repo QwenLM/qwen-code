@@ -228,6 +228,7 @@ import {
   runWithToolCallSource,
   type CodeModeToolResult,
 } from '../code-mode/tool-call-runtime.js';
+import { runWithCodeModeAllowedNames } from '../utils/code-mode-allowed-names.js';
 import { isCodeModeToolCallAllowed, ToolMode } from '../tools/code-mode.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
@@ -5604,26 +5605,30 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
-              ? runWithToolCallRuntime(
-                  {
-                    parentCallId: callId,
-                    allowedToolNames:
-                      scheduledCall.request.codeModeAllowedToolNames,
-                    dispatch: (name, args, nestedSignal, onResult) =>
-                      this.dispatchCodeModeTool(
-                        name,
-                        args,
-                        scheduledCall.request,
-                        nestedSignal,
-                        onResult,
-                      ),
-                  },
-                  execute,
-                )
-              : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
-                : execute();
+            return runWithCodeModeAllowedNames(
+              scheduledCall.request.codeModeAllowedToolNames,
+              () =>
+                scheduledCall.request.name === ToolNames.EXEC
+                  ? runWithToolCallRuntime(
+                      {
+                        parentCallId: callId,
+                        allowedToolNames:
+                          scheduledCall.request.codeModeAllowedToolNames,
+                        dispatch: (name, args, nestedSignal, onResult) =>
+                          this.dispatchCodeModeTool(
+                            name,
+                            args,
+                            scheduledCall.request,
+                            nestedSignal,
+                            onResult,
+                          ),
+                      },
+                      execute,
+                    )
+                  : scheduledCall.request.source === 'code_mode'
+                    ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                    : execute(),
+            );
           }),
         );
       } else {
@@ -5645,26 +5650,30 @@ export class CoreToolScheduler {
                 liveOutputCallback,
                 shellExecutionConfig,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
-              ? runWithToolCallRuntime(
-                  {
-                    parentCallId: callId,
-                    allowedToolNames:
-                      scheduledCall.request.codeModeAllowedToolNames,
-                    dispatch: (name, args, nestedSignal, onResult) =>
-                      this.dispatchCodeModeTool(
-                        name,
-                        args,
-                        scheduledCall.request,
-                        nestedSignal,
-                        onResult,
-                      ),
-                  },
-                  execute,
-                )
-              : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
-                : execute();
+            return runWithCodeModeAllowedNames(
+              scheduledCall.request.codeModeAllowedToolNames,
+              () =>
+                scheduledCall.request.name === ToolNames.EXEC
+                  ? runWithToolCallRuntime(
+                      {
+                        parentCallId: callId,
+                        allowedToolNames:
+                          scheduledCall.request.codeModeAllowedToolNames,
+                        dispatch: (name, args, nestedSignal, onResult) =>
+                          this.dispatchCodeModeTool(
+                            name,
+                            args,
+                            scheduledCall.request,
+                            nestedSignal,
+                            onResult,
+                          ),
+                      },
+                      execute,
+                    )
+                  : scheduledCall.request.source === 'code_mode'
+                    ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                    : execute(),
+            );
           }),
         );
       }

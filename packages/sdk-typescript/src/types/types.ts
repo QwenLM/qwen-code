@@ -431,11 +431,14 @@ export interface QueryOptions {
    * refresh (resume, MCP discovery, the first plan-mode entry in a
    * session, a subagent definition change) re-declares.
    * These bridge and warning rules apply to direct and hybrid code modes.
-   * In hybrid mode, exec retains callable nested bindings; their schemas are
-   * included in exec when either bridge tool is unavailable. CodeModeOnly
-   * hides both bridge tools, includes callable deferred tools' full schemas
-   * in exec, and skips deferred reminders and this warning; tools.eager does
-   * not make those nested tools unreachable or reduce their schema tokens.
+   * In hybrid mode, while `exec` itself is registered (container execution
+   * warns and falls back to direct tools without it), exec retains callable
+   * nested bindings; their schemas are included in exec when either bridge
+   * tool is unavailable. CodeModeOnly hides both bridge tools, includes
+   * callable deferred tools' full schemas in exec, and skips deferred
+   * reminders and this warning; on the session surface tools.eager does not
+   * make those nested tools unreachable or reduce their schema tokens, while
+   * agent surfaces narrow the nested binding set by their own allowlists.
    * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -504,11 +507,15 @@ export interface QueryOptions {
    *   tool-set refresh (resume, MCP discovery, the first plan-mode
    *   entry in a session, a subagent definition change) re-declares (#9827).
    *   These bridge and warning rules apply to direct and hybrid code modes.
-   *   In hybrid mode, exec retains callable nested bindings; their schemas are
-   *   included in exec when either bridge tool is unavailable. CodeModeOnly
-   *   hides both bridge tools, includes callable deferred tools' full schemas
-   *   in exec, and skips deferred reminders and this warning; tools.eager does
-   *   not make those nested tools unreachable or reduce their schema tokens.
+   *   In hybrid mode, while `exec` itself is registered (container
+   *   execution warns and falls back to direct tools without it), exec
+   *   retains callable nested bindings; their schemas are included in
+   *   exec when either bridge tool is unavailable. CodeModeOnly hides
+   *   both bridge tools, includes callable deferred tools' full schemas
+   *   in exec, and skips deferred reminders and this warning; on the
+   *   session surface tools.eager does not make those nested tools
+   *   unreachable or reduce their schema tokens, while agent surfaces
+   *   narrow the nested binding set by their own allowlists.
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
