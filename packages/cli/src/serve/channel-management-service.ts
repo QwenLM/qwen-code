@@ -155,13 +155,6 @@ export interface CreateChannelManagementServiceOptions {
   workspaceCwd: string;
   store: ChannelManagementSettingsStore | WorkspaceChannelSettingsStore;
   manager: ChannelManagementWorkerManager | ChannelWorkerManager;
-  /**
-   * Reports an operator's explicit runtime decision about one channel, so the
-   * daemon can tell "stopped on purpose" apart from "not running yet" — a
-   * workspace that registers later restores its own startup channels, and a
-   * stop the operator just performed must survive that.
-   */
-  onRuntimeIntent?: (name: string, enabled: boolean) => void;
 }
 
 export class ChannelManagementError extends Error {
@@ -521,7 +514,6 @@ export function createChannelManagementService(
         { name, workspaceCwd: opts.workspaceCwd },
         true,
       );
-      opts.onRuntimeIntent?.(name, true);
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },
@@ -539,7 +531,6 @@ export function createChannelManagementService(
         { name, workspaceCwd: opts.workspaceCwd },
         false,
       );
-      opts.onRuntimeIntent?.(name, false);
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },
