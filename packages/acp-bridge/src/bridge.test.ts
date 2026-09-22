@@ -578,6 +578,7 @@ describe('createAcpSessionBridge', () => {
     it('retains a detached session whose only work is an admitted background turn', async () => {
       let conditionalCloseCalls = 0;
       const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
         extMethodImpl: async (method, params) => {
           if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
           if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
@@ -602,11 +603,22 @@ describe('createAcpSessionBridge', () => {
       expect(
         bridge.getSessionSummary(session.sessionId).backgroundTurn,
       ).toMatchObject({ turnId: admittedBackgroundTurn.turnId });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
 
       await bridge.detachClient(session.sessionId, session.clientId);
       await new Promise((resolve) => setTimeout(resolve, 40));
       expect(conditionalCloseCalls).toBe(0);
       expect(bridge.sessionCount).toBe(1);
+
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId: session.sessionId,
+        source: 'background_notification',
+        reason: 'end_turn',
+        turnId: admittedBackgroundTurn.turnId,
+      });
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
 
       await bridge.shutdown();
     });
