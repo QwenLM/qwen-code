@@ -738,11 +738,12 @@ function attachDispatchTranscript(
   try {
     const { jsonlPath, options } = buildAgentTranscriptAttach(config, agentId, {
       agentName,
-      // The prompt the SCRIPT dispatched, seeded as the transcript's first
+      // The message the agent was asked, seeded as the transcript's first
       // user record — the same shape AgentTool writes, so a reader that
       // recovers a launch prompt from a transcript needs no workflow-
-      // specific branch. A retry re-uses the first attempt's record rather
-      // than seeding a second one.
+      // specific branch. It carries the provenance frames, because that is
+      // what the model read. A retry re-uses the first attempt's record
+      // rather than seeding a second one.
       initialUserPrompt: append ? undefined : prompt,
       appendToExisting: append,
       retryAttempt: append ? attempt : undefined,

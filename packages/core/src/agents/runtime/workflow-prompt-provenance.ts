@@ -101,11 +101,13 @@ const LINE_TERMINATORS = /\r\n?|[\u001c-\u001e\u2028\u2029\u0085\v\f]/g;
 const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 
 /**
- * Tags the model is told to trust. Relayed text is the one place a third
- * party's words enter a subagent's context, so an opening tag inside it is
- * defused — the analogue of upstream defusing its own `[transcript` markers.
+ * The one tag this codebase tells the model to trust. Relayed text is where
+ * a third party's words enter a subagent's context, so an opening tag inside
+ * it is defused — the analogue of upstream defusing its own `[transcript`
+ * markers. Nothing else is touched: mangling `<input type="text">` in a
+ * request about HTML would cost the user their words for no gain.
  */
-const TRUSTED_TAG_OPENER = /<(\/?\s*(?:system-reminder|channel|input)\b)/gi;
+const TRUSTED_TAG_OPENER = /<(\/?\s*system-reminder\b)/gi;
 
 /**
  * A user turn carries harness-authored scaffolding as well as what the user
@@ -193,7 +195,10 @@ export function frameSubagentPrompt(
 function latestUserRequest(config: Config): string | undefined {
   let history;
   try {
-    history = config.getGeminiClient?.()?.getHistory?.();
+    const client = config.getGeminiClient?.();
+    // Shallow: this only reads, and a long session's full history is a deep
+    // copy nobody needs here.
+    history = client?.getHistoryShallow?.() ?? client?.getHistory?.();
   } catch (error) {
     // A session without a chat yet (or a stub in a test) has no request to
     // relay; that is `computed-only`, not a failed dispatch.
