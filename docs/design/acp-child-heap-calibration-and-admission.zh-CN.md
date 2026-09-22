@@ -112,7 +112,7 @@
 
 实现 PR 必须覆盖两个 parser 和所有受支持的子进程工厂、最后一个名额的竞争、取消、同步与异步启动失败、终止重叠、清理失败、关闭、零容量、多会话共享、满容量时注册、继承堆参数，以及 REST、ACP、standalone 和 runtime coordinator 的错误原因保留。
 
-执行聚焦包测试、build、typecheck、bundle 和真实 daemon E2E，确认实际子进程参数和状态输出。本地功能验证只能证明参数传递、准入和清理，不能证明负载容量。首次开启应使用隔离 daemon，先在同一宿主分区上将实际负载与 `admit` 对比，记录完成情况、老生代峰值、major GC 和延迟；发生堆 OOM、任务丢失或超出负载自身容忍度的延迟时，以 `admit` 重启回滚，不自动切换模式重启。更广泛的生产发布仍需明确 GC 与延迟阈值。
+执行聚焦包测试、build、typecheck、bundle 和真实 daemon E2E，确认实际子进程参数和状态输出。本地功能验证只能证明参数传递、准入和清理，不能证明负载容量。首次开启应使用隔离 daemon，先在同一宿主分区上将实际负载与 `admit` 对比。采样前先挂接 SSE 或 WebSocket watcher，再读取 `GET /daemon/status?detail=full`；将 `runtime.memory.children.heap` 与 `limits.memory.childHeap.perChildCeilingMb` 对比，并记录完成情况、老生代峰值、major GC 和延迟。heap 块的每个字段都是所有上报子进程中的独立最大值，采样由 watcher 控制，`reported` 表示覆盖数量。发生堆 OOM、任务丢失或超出负载自身容忍度的延迟时，以 `admit` 重启回滚，不自动切换模式重启。更广泛的生产发布仍需明确 GC 与延迟阈值。
 
 实现验收要求默认值和已有模式不变、每类受支持工厂都下发唯一固定 old-space 参数、清理完成前共享容量计数、状态真实，以及保留回滚信息的容量错误不变。中英文设计必须继续区分本地功能验证与历史 Node 24 校准证据。实现涉及策略、spawn 参数处理、CLI parser 与 daemon 接线、状态和 SDK 类型、相关测试及当前用户文档；已有包装层与传输行为需要回归覆盖，而不是新错误协议。
 

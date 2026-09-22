@@ -471,8 +471,9 @@ interface DaemonStatusRuntimeMemory {
      * all while children keep running. Publishing zeros there would assert
      * that no child needs any heap.
      *
-     * Observational. Nothing here sizes a child or refuses a spawn; see
-     * `limits.memory.enforced`, which stays `false`.
+     * Observational. Nothing in this block sizes a child or refuses a spawn;
+     * `limits.memory.enforced` reports whether the modeled child ceiling is
+     * currently applied.
      */
     heap: {
       /** Committed high-water. Rises with the ceiling the child was given, so

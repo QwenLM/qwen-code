@@ -497,8 +497,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Total memory budget in MB for the daemon process tree. When unset, ' +
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
-          'way. It does not change how any `qwen --acp` child is sized; the ' +
-          'one consumer today is adaptive live-journal growth: one ' +
+          'way. In `admit` and `enforce` modes it determines managed ACP ' +
+          'child capacity; `enforce` also applies the modeled per-child ' +
+          'old-space ceiling. It also sizes one ' +
           'daemon-wide pool of ' +
           JOURNAL_GROWTH_POOL_FRACTION * 100 +
           '% of the effective budget (capped at ' +

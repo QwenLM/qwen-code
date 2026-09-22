@@ -35,6 +35,26 @@ describe('applyChildHeapLimit', () => {
   });
 
   it.each([
+    '--report-filename="C:\\tools\\hook.cjs"',
+    '--report-filename="C:\\\\tools\\\\hook.cjs"',
+    '--report-filename=C:\\tools\\hook.cjs',
+  ])('rewrites NODE_OPTIONS to the value Node itself reads: %s', (value) => {
+    const read = (nodeOptions: string) =>
+      execFileSync(
+        process.execPath,
+        ['-e', 'process.stdout.write(process.report.filename)'],
+        {
+          env: { ...process.env, NODE_OPTIONS: nodeOptions },
+          encoding: 'utf8',
+          timeout: 10_000,
+        },
+      );
+    const env = { NODE_OPTIONS: value };
+    applyChildHeapLimit([], env, 544);
+    expect(read(env.NODE_OPTIONS)).toBe(read(value));
+  });
+
+  it.each([
     ['--max-old-space-size-percentage=50'],
     ['--max_old_space_size_percentage', '50'],
   ])('rejects percentage flags in argv and NODE_OPTIONS: %j', (...args) => {
