@@ -12,7 +12,10 @@ import {
 } from '../../adapters/toolClassification';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { getTranslator, I18nProvider } from '../../i18n';
-import { WebShellCustomizationProvider } from '../../customization';
+import {
+  WebShellCustomizationProvider,
+  type MarkdownRenderContext,
+} from '../../customization';
 import {
   TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
@@ -2223,6 +2226,53 @@ describe('tool row rendering', () => {
 });
 
 describe('thinking rows in the compact summary', () => {
+  it('passes each expanded thought streaming state to the Markdown customization', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const transformMarkdown = vi.fn(
+      (content: string, context: MarkdownRenderContext) =>
+        `${content} ${context.isStreaming ? 'pending' : 'settled'}`,
+    );
+    const customization = { markdown: { transformMarkdown } };
+    const tools = [makeTool({ toolName: 'ReadFile' })];
+    const render = (isStreaming: boolean) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={customization}>
+              <ToolGroup
+                tools={tools}
+                thoughts={[{ content: 'thought citation', isStreaming }]}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+    };
+
+    render(true);
+    act(() => container.querySelector('button')?.click());
+    const thoughtHeader = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    );
+    expect(thoughtHeader).not.toBeNull();
+    act(() => thoughtHeader?.click());
+    expect(container.textContent).toContain('thought citation pending');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: true,
+    });
+
+    render(false);
+    expect(container.textContent).toContain('thought citation settled');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: false,
+    });
+  });
+
   it('expands a single-agent compact summary before opening agent details', () => {
     const onOpenSubagent = vi.fn();
     const container = renderToolGroup(
