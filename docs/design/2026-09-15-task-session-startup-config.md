@@ -54,8 +54,9 @@ preparation follows existing owned-session cleanup without killing siblings in
 the shared child. A definite standalone selection rejection removes the owned
 recording so the same id can be retried, with best-effort empty-directory cleanup.
 Timeouts and channel failures retain the existing uncertain-outcome recovery;
-failed cleanup enters existing containment. SDK confirmation mismatch after a
-readable success response is reported directly, without recovery/adoption.
+cleanup whose outcome cannot be confirmed enters existing containment. SDK
+confirmation mismatch after a readable success response is reported directly,
+without recovery/adoption.
 Startup selection emits session state changes, not a shared
 `settings_changed` event.
 

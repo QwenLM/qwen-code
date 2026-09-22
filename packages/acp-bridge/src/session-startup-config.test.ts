@@ -152,6 +152,41 @@ describe('session startup configuration', () => {
     }
   });
 
+  it('maps the unknown-model internal-error wire shape to startup_config_rejected', async () => {
+    // `switchModel` refuses an unregistered model with a plain Error, which
+    // ACP serializes as internalError; the detail survives in data.details.
+    const detail = "Model 'qwen-typo' not found for authType 'openai'";
+    const setSessionConfigOption = vi.fn().mockRejectedValue({
+      code: -32603,
+      message: 'Internal error',
+      data: { details: detail },
+    });
+    await expect(
+      applySessionStartupConfig(
+        { setSessionConfigOption },
+        'session',
+        startupConfig,
+      ),
+    ).rejects.toMatchObject({
+      code: 'startup_config_rejected',
+      message: detail,
+    });
+    for (const shape of [
+      { code: -32603, message: 'Internal error' },
+      { code: -32603, message: 'Internal error', data: { details: 42 } },
+      { code: -32603, message: 'Internal error', data: null },
+    ]) {
+      setSessionConfigOption.mockRejectedValueOnce(shape);
+      await expect(
+        applySessionStartupConfig(
+          { setSessionConfigOption },
+          'session',
+          startupConfig,
+        ),
+      ).rejects.toBe(shape);
+    }
+  });
+
   it('only selects the model when reasoning is omitted and no reasoning option exists', async () => {
     const modelServiceId = 'gpt-4.1(openai)';
     const setSessionConfigOption = vi.fn().mockResolvedValue({

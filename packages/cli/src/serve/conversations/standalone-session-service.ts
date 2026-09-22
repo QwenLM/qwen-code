@@ -2811,8 +2811,7 @@ export class StandaloneSessionService {
           );
         } catch (cleanupError) {
           debugLogger.warn(
-            'Could not discard the rolled-back standalone directory',
-            cleanupError,
+            `Could not discard the rolled-back standalone directory for ${sessionId}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
           );
         }
         this.directoryStates.delete(sessionId);

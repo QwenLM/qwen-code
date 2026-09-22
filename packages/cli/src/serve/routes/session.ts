@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseSessionStartupConfig } from '@qwen-code/acp-bridge/sessionStartupConfig';
+import {
+  isSessionStartupConfigError,
+  parseSessionStartupConfig,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -3600,6 +3603,37 @@ export function registerSessionRoutes(
           branchBaseCommit,
           daemonLog,
         );
+      }
+      // A definite startup-config rejection already closed the live
+      // session in the bridge, but the recording the spawn persisted
+      // survives — and reserveCreate would answer every retry of this
+      // caller-supplied id with 409 session_id_conflict. Roll the
+      // recording back the way the other spawn-failure paths do.
+      // Uncertain outcomes keep it: the close result is unknown.
+      if (
+        requestedSessionId !== undefined &&
+        isSessionStartupConfigError(err) &&
+        err.code === 'startup_config_rejected'
+      ) {
+        await runWithWorkspaceRuntimeStorage(runtime, () =>
+          deleteDaemonSessionIfOrphan({
+            sessionId: requestedSessionId,
+            service: createWorkspaceRuntimeSessionService(runtime),
+            bridge: runtime.bridge,
+            coordinator: archiveCoordinator,
+          }),
+        ).catch((cleanupError: unknown) => {
+          daemonLog?.warn(
+            'startup rejection recording rollback failed; the session id may stay occupied',
+            {
+              sessionId: requestedSessionId,
+              error:
+                cleanupError instanceof Error
+                  ? cleanupError.message
+                  : String(cleanupError),
+            },
+          );
+        });
       }
       // Only the plain creation path can promise that the initialize
       // handshake preceded every durable mutation: `branch`/`worktree`

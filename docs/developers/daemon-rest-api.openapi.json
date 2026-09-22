@@ -286,7 +286,7 @@
             }
           },
           "422": {
-            "description": "startup_config_rejected: the requested selection was rejected or could not be confirmed. The new live session is closed.",
+            "description": "startup_config_rejected: the requested selection was rejected or could not be confirmed. The daemon closes the new live session and rolls back the persisted recording of a caller-supplied sessionId on a best-effort basis, so the id can be retried; verify the live-session set through GET /daemon/status?detail=full.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4439,7 +4439,7 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo", "plan"]
+            "enum": ["plan", "default", "auto-edit", "auto", "yolo"]
           }
         },
         "additionalProperties": false,

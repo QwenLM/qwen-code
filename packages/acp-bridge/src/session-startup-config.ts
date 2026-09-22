@@ -96,16 +96,35 @@ export function parseSessionStartupConfig(
 
 function rejectInvalidSelection(error: unknown): never {
   if (
-    error !== null &&
-    typeof error === 'object' &&
-    'code' in error &&
-    error.code === -32602 &&
-    'message' in error &&
-    typeof error.message === 'string'
+    error === null ||
+    typeof error !== 'object' ||
+    !('code' in error) ||
+    !('message' in error) ||
+    typeof error.message !== 'string'
   ) {
+    throw error;
+  }
+  if (error.code === -32602) {
     throw new SessionStartupConfigError(
       'startup_config_rejected',
       error.message,
+    );
+  }
+  // A non-RequestError rejection from the setter (e.g. an unregistered
+  // model refused by `switchModel`) crosses ACP as internalError; the
+  // deterministic detail survives only in `data.details`. Transport,
+  // timeout and auth failures never take this shape and stay unmapped.
+  if (
+    error.code === -32603 &&
+    'data' in error &&
+    error.data !== null &&
+    typeof error.data === 'object' &&
+    'details' in error.data &&
+    typeof error.data.details === 'string'
+  ) {
+    throw new SessionStartupConfigError(
+      'startup_config_rejected',
+      error.data.details,
     );
   }
   throw error;

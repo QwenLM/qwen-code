@@ -8,6 +8,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  APPROVAL_MODES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
@@ -751,6 +752,15 @@ describe('REST integration documentation contract', () => {
         },
       },
     });
+    // The published enum must cover every approval mode the standalone
+    // route's parseApprovalMode accepts — a narrower list certifies a
+    // request set the daemon implements but generated clients refuse.
+    const standalone = schemas['CreateStandaloneSessionRequest'] as {
+      properties?: Record<string, { enum?: string[] }>;
+    };
+    expect(standalone.properties?.['approvalMode']?.enum).toEqual([
+      ...APPROVAL_MODES,
+    ]);
     expect(schemas['Session']).toMatchObject({
       properties: {
         startupConfigApplied: {
