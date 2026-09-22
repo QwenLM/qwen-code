@@ -59,7 +59,7 @@ import { AddMenu } from './composer/AddMenu';
 import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getShadowAwareActiveElement } from '../utils/dom';
-import { popoverTopEdge } from '../utils/popoverRoom';
+import { POPOVER_MIN_HEIGHT, popoverTopEdge } from '../utils/popoverRoom';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
   getComposerTagIconUrl,
@@ -139,8 +139,6 @@ import {
 import styles from './ChatEditor.module.css';
 
 const MAX_DROP_DIALOG_ROWS = 100;
-// Matches the @ reference panel's minimum height.
-const SEARCH_PANEL_MIN_HEIGHT = 96;
 
 export type ComposerToolbarAction =
   | 'approvalMode'
@@ -2184,26 +2182,35 @@ export const ChatEditor = memo(
     } = core.searchState;
 
     // The panel opens upward from the composer; a soft keyboard can leave less
-    // room above it than the CSS cap, which would slide the search box under
-    // the header. When not even the minimum height fits, the panel overlaps
-    // the top of the composer instead.
-    const [searchPanelFit, setSearchPanelFit] = useState<{
-      room: number;
-      shift: number;
-    }>();
+    // room above it than the panel needs, which would slide the search box
+    // under the header. When the room is smaller than the panel, the panel
+    // overlaps the top of the composer instead. The two custom properties are
+    // written straight to the panel node: they change on every frame the
+    // composer moves, and publishing them through state would re-render the
+    // whole composer each time.
     useLayoutEffect(() => {
       const container = containerRef.current;
       if (!searchMode || !container) return undefined;
+      // The panel is rendered in the same commit, so its ref is already
+      // populated; capture the node because the panel never unmounts while
+      // searchMode stays true.
+      const panel = searchUiRef.current;
+      if (!panel) return undefined;
       let frame: number | null = null;
       const update = () => {
         const room =
           container.getBoundingClientRect().top - popoverTopEdge(container) - 8;
-        const next = {
-          room: Math.max(SEARCH_PANEL_MIN_HEIGHT, room),
-          shift: Math.max(0, SEARCH_PANEL_MIN_HEIGHT - room),
-        };
-        setSearchPanelFit((prev) =>
-          prev?.room === next.room && prev.shift === next.shift ? prev : next,
+        // The panel's height is content-driven — with no matches it is just
+        // the search bar — so measure it instead of always charging the
+        // minimum height. jsdom reports 0, hence the fallback.
+        const panelHeight = panel.offsetHeight || POPOVER_MIN_HEIGHT;
+        panel.style.setProperty(
+          '--chat-editor-search-room',
+          `${Math.max(panelHeight, room)}px`,
+        );
+        panel.style.setProperty(
+          '--chat-editor-search-shift',
+          `${Math.max(0, panelHeight - room)}px`,
         );
       };
       const scheduleUpdate = () => {
@@ -2216,6 +2223,9 @@ export const ChatEditor = memo(
       update();
       const resizeObserver = new ResizeObserver(scheduleUpdate);
       resizeObserver.observe(container);
+      // The panel is absolutely positioned, so a change in match count does
+      // not resize the container; observe it directly to re-fit.
+      resizeObserver.observe(panel);
       window.addEventListener('resize', scheduleUpdate);
       window.addEventListener('scroll', scheduleUpdate, true);
       return () => {
@@ -2224,7 +2234,7 @@ export const ChatEditor = memo(
         window.removeEventListener('resize', scheduleUpdate);
         window.removeEventListener('scroll', scheduleUpdate, true);
       };
-    }, [searchMode]);
+    }, [searchMode, searchUiRef]);
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
       const custom = renderComposerTag?.({
@@ -2785,14 +2795,6 @@ export const ChatEditor = memo(
             <div
               ref={searchUiRef}
               className={styles.searchPanel}
-              style={
-                searchPanelFit === undefined
-                  ? undefined
-                  : ({
-                      '--chat-editor-search-room': `${searchPanelFit.room}px`,
-                      '--chat-editor-search-shift': `${searchPanelFit.shift}px`,
-                    } as CSSProperties)
-              }
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
             >

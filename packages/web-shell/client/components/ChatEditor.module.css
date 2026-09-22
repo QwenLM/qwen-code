@@ -2735,7 +2735,8 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .container {
-  --chat-editor-max-height: min(480px, 60dvh);
+  --chat-editor-composer-cap: min(480px, 60dvh);
+  --chat-editor-max-height: var(--chat-editor-composer-cap);
 }
 
 /* The workspace/Git row lives inside the capped box; without its height added
@@ -2744,7 +2745,8 @@
    is the pull-up the editing row gives up below it. */
 .editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
   --chat-editor-max-height: calc(
-    min(480px, 60dvh) + var(--chat-editor-context-row-height, 44px) + 8px
+    var(--chat-editor-composer-cap) +
+      var(--chat-editor-context-row-height, 44px) + 8px
   );
 }
 

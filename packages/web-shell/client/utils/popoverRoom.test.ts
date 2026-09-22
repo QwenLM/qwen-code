@@ -68,4 +68,22 @@ describe('popoverTopEdge', () => {
 
     expect(popoverTopEdge(anchor)).toBe(0);
   });
+
+  // The desktop empty-chat pane clips with overflow-y: auto, so `auto` alone
+  // must bound the popover even with no other clipping ancestor.
+  it('treats an auto-scrolling pane as a clipping edge', () => {
+    const pane = document.createElement('div');
+    const anchor = document.createElement('div');
+    pane.style.overflowY = 'auto';
+    pane.append(anchor);
+    document.body.append(pane);
+    mockTops(
+      new Map<Element, number>([
+        [pane, 70],
+        [anchor, 200],
+      ]),
+    );
+
+    expect(popoverTopEdge(anchor)).toBe(70);
+  });
 });

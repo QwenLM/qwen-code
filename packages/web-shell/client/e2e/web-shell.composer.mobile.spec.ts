@@ -670,6 +670,49 @@ test('mobile attachments stay reachable above a soft keyboard @smoke', async ({
     .toBe(true);
 });
 
+// 412x360 is below the height at which the strip stays readable (see the
+// design doc), so the strip is a sliver either way; what the height-cap rule
+// must hold even there is that showing the workspace row never shrinks it.
+test('mobile workspace row does not shrink the attachments strip @smoke', async ({
+  page,
+}, testInfo) => {
+  const stripHeight = async (
+    target: Page,
+    scenario: WebShellDaemonScenario,
+    withRow: boolean,
+  ): Promise<number> => {
+    await target.setViewportSize({ width: 412, height: 360 });
+    await installScenario(target, scenario, testInfo);
+    await target.goto('/');
+    const textarea = target.locator(COMPOSER_TEXTAREA);
+    await expect(textarea).toBeVisible();
+    if (withRow) {
+      await expect(target.locator('[data-web-shell-git-branch]')).toBeVisible({
+        timeout: 10_000,
+      });
+    }
+    await textarea.tap();
+    await pasteFiles(textarea, ['first.png', 'notes-one.txt', 'notes-two.txt']);
+    const strip = target.locator('[data-web-shell-composer-attachments]');
+    // Attached, not visible: when the cap rule is broken the strip collapses
+    // to 0px, and the comparison below — not the wait — should be what fails.
+    await expect(strip).toBeAttached();
+    return strip.evaluate((element) => element.getBoundingClientRect().height);
+  };
+  const withRow = await stripHeight(page, createGitWorkspaceScenario(), true);
+  const secondPage = await page.context().newPage();
+  try {
+    const withoutRow = await stripHeight(
+      secondPage,
+      createWebShellDaemonScenario(),
+      false,
+    );
+    expect(withRow).toBeGreaterThanOrEqual(withoutRow);
+  } finally {
+    await secondPage.close();
+  }
+});
+
 // Pastes each file as its own clipboard event, like a phone keyboard does.
 async function pasteFiles(textarea: Locator, names: string[]): Promise<void> {
   await textarea.evaluate(async (element, fileNames) => {
