@@ -5,7 +5,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import fs from 'node:fs';
 import yargs from 'yargs';
 const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
@@ -154,12 +153,7 @@ describe('qwen sandbox tool boundary', () => {
     expect(process.exitCode).toBe(42);
     expect(mocks.stdout).not.toHaveBeenCalled();
   });
-  it('forwards redirected stdin and byte-exact output', async () => {
-    vi.spyOn(fs, 'fstatSync').mockReturnValue({
-      isFIFO: () => true,
-      isFile: () => false,
-    } as unknown as ReturnType<typeof fs.fstatSync>);
-    vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from([0x00, 0xff]));
+  it('inherits redirected stdin and preserves byte-exact output', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     mocks.execute.mockImplementationOnce(
       async (_policy, _payload, onOutput: (event: object) => void) => {
@@ -181,13 +175,56 @@ describe('qwen sandbox tool boundary', () => {
     await run({ '--': ['cat'] });
 
     expect(mocks.execute.mock.calls[0]?.[1]).toMatchObject({
-      stdin: Buffer.from([0x00, 0xff]),
+      inheritStdin: true,
     });
     expect(mocks.execute.mock.calls[0]?.[6]).toEqual({
       streamStdout: true,
       streamRawOutput: true,
     });
     expect(write).toHaveBeenCalledWith(Buffer.from([0xff, 0x00]));
+  });
+  it('aborts the confined command when a downstream reader closes', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(false);
+    mocks.execute.mockImplementationOnce(
+      async (
+        _policy,
+        _payload,
+        onOutput: (event: object) => void,
+        signal: AbortSignal,
+      ) => {
+        onOutput({
+          type: 'raw_data',
+          chunk: Buffer.from('payload'),
+          stream: 'stdout',
+        });
+        return {
+          result: new Promise((resolve) => {
+            signal.addEventListener(
+              'abort',
+              () =>
+                resolve({
+                  exitCode: null,
+                  error: null,
+                  aborted: true,
+                }),
+              { once: true },
+            );
+          }),
+        };
+      },
+    );
+    const completion = run({ '--': ['yes'] });
+    await vi.waitFor(() => expect(write).toHaveBeenCalled());
+
+    process.stdout.emit(
+      'error',
+      Object.assign(new Error('broken pipe'), { code: 'EPIPE' }),
+    );
+
+    await completion;
+    expect(mocks.execute.mock.calls[0]?.[3].aborted).toBe(true);
+    expect(process.exitCode).toBe(141);
+    expect(mocks.stderr.mock.calls.flat().join('\n')).not.toContain('EPIPE');
   });
   it('waits for redirected output backpressure before completing', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockReturnValue(false);

@@ -21,12 +21,6 @@ interface SandboxArgs {
   '--'?: string[];
 }
 
-function readRedirectedStdin(): Buffer | undefined {
-  if (process.stdin.isTTY) return undefined;
-  const input = fs.fstatSync(0);
-  return input.isFIFO() || input.isFile() ? fs.readFileSync(0) : undefined;
-}
-
 export const sandboxCommand: CommandModule = {
   command: 'sandbox [cmd...]',
   describe: 'Inspect tool confinement, verify it, or run one confined command',
@@ -135,46 +129,73 @@ export const sandboxCommand: CommandModule = {
         ),
       );
       if (command.length) {
-        const stdin = readRedirectedStdin();
-        const pendingDrains = new Map<'stdout' | 'stderr', Promise<unknown>>();
-        // env resolves PATH inside confinement and receives literal argv.
-        const handle = await executeBwrap(
-          policy,
-          {
-            executable: '/usr/bin/env',
-            args: ['--', ...command],
-            cwd: policy.workspace,
-            env,
-            stdin,
-          },
-          (event) => {
-            if (event.type === 'raw_data') {
-              const streamKey = event.stream;
-              const stream =
-                streamKey === 'stderr' ? process.stderr : process.stdout;
-              if (!stream.write(event.chunk) && !pendingDrains.has(streamKey)) {
-                const drained = once(stream, 'drain');
-                pendingDrains.set(streamKey, drained);
-                const clearDrain = () => {
-                  if (pendingDrains.get(streamKey) === drained)
-                    pendingDrains.delete(streamKey);
-                };
-                void drained.then(clearDrain, clearDrain);
+        const pendingDrains = new Map<'stdout' | 'stderr', Promise<void>>();
+        let outputError: NodeJS.ErrnoException | undefined;
+        const handleOutputError = (error: NodeJS.ErrnoException) => {
+          if (outputError || controller.signal.aborted) return;
+          outputError = error;
+          cancellationExitCode = error.code === 'EPIPE' ? 141 : 1;
+          controller.abort();
+        };
+        process.stdout.on('error', handleOutputError);
+        process.stderr.on('error', handleOutputError);
+        try {
+          // env resolves PATH inside confinement and receives literal argv.
+          const handle = await executeBwrap(
+            policy,
+            {
+              executable: '/usr/bin/env',
+              args: ['--', ...command],
+              cwd: policy.workspace,
+              env,
+              inheritStdin: !process.stdin.isTTY,
+            },
+            (event) => {
+              if (event.type === 'raw_data') {
+                const streamKey = event.stream;
+                const stream =
+                  streamKey === 'stderr' ? process.stderr : process.stdout;
+                if (
+                  !stream.write(event.chunk) &&
+                  !pendingDrains.has(streamKey)
+                ) {
+                  const drained = once(stream, 'drain').then(
+                    () => undefined,
+                    (error: unknown) => {
+                      if (
+                        error instanceof Error &&
+                        (error as NodeJS.ErrnoException).code === 'EPIPE'
+                      )
+                        return;
+                      throw error;
+                    },
+                  );
+                  pendingDrains.set(streamKey, drained);
+                  const clearDrain = () => {
+                    if (pendingDrains.get(streamKey) === drained)
+                      pendingDrains.delete(streamKey);
+                  };
+                  void drained.then(clearDrain, clearDrain);
+                }
               }
-            }
-          },
-          controller.signal,
-          false,
-          {},
-          { streamStdout: true, streamRawOutput: true },
-        );
-        const result = await handle.result;
-        await Promise.all([...pendingDrains.values()]);
-        if (result.error && !result.aborted) throw result.error;
-        process.exitCode = result.aborted
-          ? cancellationExitCode
-          : (result.exitCode ?? 1);
-        return;
+            },
+            controller.signal,
+            false,
+            {},
+            { streamStdout: true, streamRawOutput: true },
+          );
+          const result = await handle.result;
+          await Promise.all([...pendingDrains.values()]);
+          if (outputError && outputError.code !== 'EPIPE') throw outputError;
+          if (result.error && !result.aborted) throw result.error;
+          process.exitCode = result.aborted
+            ? cancellationExitCode
+            : (result.exitCode ?? 1);
+          return;
+        } finally {
+          process.stdout.removeListener('error', handleOutputError);
+          process.stderr.removeListener('error', handleOutputError);
+        }
       }
       if (!args.verify) return;
       const fixture = fs.mkdtempSync(

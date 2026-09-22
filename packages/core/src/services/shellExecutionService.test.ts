@@ -513,6 +513,25 @@ describe('ShellExecutionService', () => {
       expect(mockCpSpawn).toHaveBeenCalledTimes(1);
     });
 
+    it('inherits stdin without creating a JavaScript pipe', async () => {
+      const child = pipe();
+      const handle = await ShellExecutionService.executeLaunch(
+        { ...launch(), inheritStdin: true },
+        onOutputEventMock,
+        new AbortController().signal,
+        false,
+        shellExecutionConfig,
+      );
+      expect(mockCpSpawn.mock.calls[0][2].stdio).toEqual([
+        'inherit',
+        'pipe',
+        'pipe',
+      ]);
+      expect(child.stdin.end).not.toHaveBeenCalled();
+      child.emit('exit', 0, null);
+      await handle.result;
+    });
+
     it('surfaces a stdin error only when the process leaves no exit information', async () => {
       const child = pipe();
       const input = { ...launch(), stdin: Buffer.from('request') };
@@ -561,6 +580,24 @@ describe('ShellExecutionService', () => {
           {},
         ),
       ).rejects.toThrow('pipe');
+      await expect(
+        ShellExecutionService.executeLaunch(
+          { ...launch(), inheritStdin: true },
+          onOutputEventMock,
+          new AbortController().signal,
+          true,
+          {},
+        ),
+      ).rejects.toThrow('pipe');
+      await expect(
+        ShellExecutionService.executeLaunch(
+          { ...launch(), stdin: 'input', inheritStdin: true },
+          onOutputEventMock,
+          new AbortController().signal,
+          false,
+          {},
+        ),
+      ).rejects.toThrow('both');
       await expect(
         ShellExecutionService.executeLaunch(
           { ...launch(), executable: 'relative' },

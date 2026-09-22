@@ -181,6 +181,7 @@ export interface ProcessLaunch {
   cwd: string;
   env: Readonly<Record<string, string>>;
   stdin?: string | Buffer;
+  inheritStdin?: boolean;
 }
 
 function launchCommand(input: string | ProcessLaunch) {
@@ -786,6 +787,7 @@ export class ShellExecutionService {
       stdin: Buffer.isBuffer(launch.stdin)
         ? Buffer.from(launch.stdin)
         : launch.stdin,
+      inheritStdin: launch.inheritStdin,
     };
     if (
       !path.isAbsolute(snapshot.executable) ||
@@ -806,7 +808,13 @@ export class ShellExecutionService {
     ) {
       throw new Error('Invalid process launch argument or environment.');
     }
-    if (shouldUseNodePty && snapshot.stdin !== undefined) {
+    if (snapshot.stdin !== undefined && snapshot.inheritStdin) {
+      throw new Error('Process stdin cannot be both piped and inherited.');
+    }
+    if (
+      shouldUseNodePty &&
+      (snapshot.stdin !== undefined || snapshot.inheritStdin)
+    ) {
       throw new Error('Process stdin requires pipe execution.');
     }
     if (shouldUseNodePty && !snapshot.env['TERM']) {
@@ -941,7 +949,11 @@ export class ShellExecutionService {
       const child = cpSpawn(executable, shellArgs, {
         cwd,
         stdio: [
-          launch?.stdin === undefined ? 'ignore' : 'pipe',
+          launch?.inheritStdin
+            ? 'inherit'
+            : launch?.stdin === undefined
+              ? 'ignore'
+              : 'pipe',
           'pipe',
           'pipe',
         ],
