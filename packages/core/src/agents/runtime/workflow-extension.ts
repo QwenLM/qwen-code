@@ -24,6 +24,7 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { isPathWithin } from '../../extension/agent-plugins-v1/paths.js';
+import { isResourceExhaustion } from '../../skills/skill-load.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { extractAndStripMeta } from './workflow-sandbox.js';
 import {
@@ -140,6 +141,9 @@ export async function loadExtensionWorkflows(
       ? path.resolve(extensionRoot)
       : await fs.realpath(extensionRoot);
   } catch (error) {
+    // Resource exhaustion fails the whole load closed so a later refresh
+    // retries, instead of silently dropping this extension's workflows.
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(
       `failed to load workflows of extension "${owner.name}": ${error}`,
     );
@@ -157,6 +161,9 @@ export async function loadExtensionWorkflows(
     try {
       await collectCandidate(candidate, context);
     } catch (error) {
+      // Resource exhaustion fails the whole load closed; one unreadable
+      // declared path otherwise stays isolated from the rest.
+      if (isResourceExhaustion(error)) throw error;
       debugLogger.warn(
         `skipping workflows path of extension "${owner.name}" that could not be read: ${candidate.candidate}: ${error}`,
       );
@@ -297,6 +304,7 @@ async function collectFile(
   try {
     source = await fs.readFile(filePath, 'utf8');
   } catch (error) {
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(`failed to read workflow ${filePath}: ${error}`);
     return;
   }

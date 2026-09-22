@@ -1918,38 +1918,64 @@ export async function loadSubagentFromDir(
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
-    // Files are read concurrently under a bounded limit; each branch only
-    // awaits fs work before its own refusals.set, and Map.set on distinct
-    // keys is atomic on the single-threaded event loop, so no locking is
-    // needed.
     const loaded = await mapWithConcurrency(
       files.filter((file) => file.endsWith('.md')),
       SKILL_LOAD_CONCURRENCY,
-      async (file): Promise<SubagentConfig | null> => {
+      async (
+        file,
+      ): Promise<
+        | { config: SubagentConfig }
+        | { refusal: unknown }
+        | { exhaustion: unknown }
+      > => {
         const filePath = path.join(baseDir, file);
 
         try {
           const content = await fs.readFile(filePath, 'utf8');
-          return parseSubagentContent(
-            content,
-            filePath,
-            'extension',
-            new SubagentValidator(),
-          );
+          return {
+            config: parseSubagentContent(
+              content,
+              filePath,
+              'extension',
+              new SubagentValidator(),
+            ),
+          };
         } catch (error) {
-          if (isResourceExhaustion(error)) {
-            // Fail the whole refresh closed so a later refresh retries,
-            // instead of committing a truncated agent set as successful.
-            throw error;
-          }
+          // Defer the resource-exhaustion rethrow until the batch has
+          // settled and the refusals below are folded: failing the refresh
+          // closed must not discard the refusals the scan already produced.
+          if (isResourceExhaustion(error)) return { exhaustion: error };
           warnInvalidSubagentFile(filePath, error);
-          if (refusals) recordExecutionRefusal(refusals, error);
-          return null;
+          return { refusal: error };
         }
       },
     );
 
-    return loaded.filter((subagent) => subagent != null);
+    // Fold refusals into the caller's map in input (readdir) order rather
+    // than from inside the concurrent items: recordExecutionRefusal keys the
+    // map by lowercased DECLARED name, so two files declaring the same name
+    // share a key — folding in input order keeps the winner the last file in
+    // readdir order (the pre-concurrency serial behavior) instead of
+    // whichever read happened to finish last.
+    let firstExhaustion: unknown;
+    for (const item of loaded) {
+      if ('exhaustion' in item) {
+        firstExhaustion ??= item.exhaustion;
+        continue;
+      }
+      if ('refusal' in item && refusals) {
+        recordExecutionRefusal(refusals, item.refusal);
+      }
+    }
+    if (firstExhaustion !== undefined) {
+      // Fail the whole refresh closed so a later refresh retries, instead of
+      // committing a truncated agent set as successful.
+      throw firstExhaustion;
+    }
+
+    return loaded
+      .filter((item): item is { config: SubagentConfig } => 'config' in item)
+      .map((item) => item.config);
   } catch (error) {
     // Resource exhaustion at the directory level (e.g. readdir EMFILE) fails
     // the whole refresh; a missing or unreadable directory stays an empty set.

@@ -11,6 +11,9 @@ import {
   validateConfig,
   parsePriorityField,
   normalizeSkillPriority,
+  mapWithConcurrency,
+  scheduleWithConcurrency,
+  SKILL_LOAD_CONCURRENCY,
 } from './skill-load.js';
 import {
   parseModelField,
@@ -371,6 +374,44 @@ Valid skill.
           code: 'EMFILE',
         }),
       );
+
+      await expect(loadSkillsFromDir(testBaseDir)).rejects.toThrow('EMFILE');
+    });
+
+    it('rejects the whole load when only some skill reads hit resource exhaustion', async () => {
+      // The production case is one fd-exhausted read among many successful
+      // ones: a survivor-tolerant loader (rethrow only when NOTHING loaded)
+      // would commit the truncated set and pass an all-fail fixture green.
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'good',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+        {
+          name: 'bad',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce(
+          `---
+name: good
+description: Good skill
+---
+
+Body.
+`,
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error('EMFILE: too many open files'), {
+            code: 'EMFILE',
+          }),
+        );
 
       await expect(loadSkillsFromDir(testBaseDir)).rejects.toThrow('EMFILE');
     });
@@ -942,5 +983,75 @@ Symlinked skill body.
       expect(normalizeSkillPriority({})).toBe(0);
       expect(normalizeSkillPriority([5])).toBe(0);
     });
+  });
+});
+describe('mapWithConcurrency', () => {
+  it('returns every item in input order across batch boundaries', async () => {
+    // More items than the limit forces a second batch; the staggered delays
+    // invert completion order, so a push-in-completion-order or a dropped
+    // batch offset (results[j] instead of results[i + j]) turns this red.
+    const n = SKILL_LOAD_CONCURRENCY + 3;
+    const items = [...Array(n).keys()];
+    const out = await mapWithConcurrency(
+      items,
+      SKILL_LOAD_CONCURRENCY,
+      async (i) => {
+        await new Promise((resolve) => setTimeout(resolve, (n - i) % 3));
+        return i;
+      },
+    );
+    expect(out).toEqual(items);
+  });
+
+  it('settles every item in the batch before rethrowing the first original rejection', async () => {
+    const items = [...Array(6).keys()];
+    const ran: number[] = [];
+    const original = Object.assign(new Error('EMFILE: too many open files'), {
+      code: 'EMFILE',
+    });
+    await expect(
+      mapWithConcurrency(items, SKILL_LOAD_CONCURRENCY, async (i) => {
+        await new Promise((resolve) => setTimeout(resolve, i === 1 ? 0 : 5));
+        if (i === 1) throw original;
+        ran.push(i);
+        return i;
+      }),
+    ).rejects.toBe(original);
+    // A barrier swap that rejects on the first failure (Promise.all) escapes
+    // before the siblings finish, so they never record their run.
+    expect(ran.sort()).toEqual([0, 2, 3, 4, 5]);
+  });
+});
+
+describe('scheduleWithConcurrency', () => {
+  it('returns every item in input order across batch boundaries', async () => {
+    const n = SKILL_LOAD_CONCURRENCY + 3;
+    const items = [...Array(n).keys()];
+    const out = await scheduleWithConcurrency(
+      items,
+      SKILL_LOAD_CONCURRENCY,
+      async (i) => {
+        await new Promise((resolve) => setTimeout(resolve, (n - i) % 3));
+        return i;
+      },
+    );
+    expect(out).toEqual(items);
+  });
+
+  it('settles every item in the batch before rethrowing the first original rejection', async () => {
+    const items = [...Array(6).keys()];
+    const ran: number[] = [];
+    const original = Object.assign(new Error('ENOENT: dangling entry'), {
+      code: 'ENOENT',
+    });
+    await expect(
+      scheduleWithConcurrency(items, SKILL_LOAD_CONCURRENCY, async (i) => {
+        await new Promise((resolve) => setTimeout(resolve, i === 1 ? 0 : 5));
+        if (i === 1) throw original;
+        ran.push(i);
+        return i;
+      }),
+    ).rejects.toBe(original);
+    expect(ran.sort()).toEqual([0, 2, 3, 4, 5]);
   });
 });

@@ -47,15 +47,23 @@ export function isResourceExhaustion(error: unknown): boolean {
 }
 
 /**
- * Upper bound on the **total** number of manifest reads in flight across all
- * loading levels at once. Loading nests (extensions fan out to per-extension
- * command/skill/agent scans, which fan out to per-file reads), so a per-level
- * cap cannot express a global descriptor budget. All loaders share one
- * semaphore so the guarantee is on total open descriptors. 8 measured no
- * wall-clock loss versus 64 (the default 4-thread libuv pool is the real
- * bottleneck either way) while keeping peak descriptors far below even a
- * container's low LimitNOFILE — see the EMFILE rethrow below for why headroom
- * here matters.
+ * Upper bound on the number of per-entry manifest reads in flight at once,
+ * shared by the gated loaders (extension skills, extension agents and plugin
+ * skills — the three `mapWithConcurrency` callers). Loading nests
+ * (extensions fan out to per-extension skill/agent scans, which fan out to
+ * per-file reads), so a per-level cap cannot express a shared budget.
+ *
+ * The gate bounds admissions to those manifest callbacks, not every open
+ * descriptor in the process: the commands `glob` traversal
+ * (`loadCommandsFromDir` in extensionManager.ts), the extensions-root
+ * readdir, the per-extension sync config/hooks reads, `loadExtensionWorkflows`
+ * and the managed `SkillManager.loadSkillsFromDir` (skill-manager.ts, an
+ * unbounded `Promise.all` this module does not cover) all sit outside it.
+ *
+ * 8 measured no wall-clock loss versus 64 (the default 4-thread libuv pool
+ * is the real bottleneck either way) while keeping peak descriptors far
+ * below even a container's low LimitNOFILE — see the EMFILE rethrow below
+ * for why headroom here matters.
  */
 export const SKILL_LOAD_CONCURRENCY = 8;
 
@@ -69,10 +77,10 @@ export const SKILL_LOAD_CONCURRENCY = 8;
 export const EXTENSION_SCAN_CONCURRENCY = 8;
 
 /**
- * Module-wide semaphore shared by every loader level (extensions, commands,
- * skills, agents, plugin skills) so the in-flight descriptor budget is
- * global, not per-level. Intentionally tiny; avoids pulling in a dependency
- * for what is ~30 lines.
+ * Module-wide semaphore shared by the gated manifest readers (extension
+ * skills, extension agents and plugin skills — the `mapWithConcurrency`
+ * callers), so their in-flight read budget is shared, not per-loader.
+ * Intentionally tiny; avoids pulling in a dependency for what is ~30 lines.
  */
 class CountdownGate {
   private readonly queue: Array<() => void> = [];

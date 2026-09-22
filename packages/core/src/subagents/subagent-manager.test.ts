@@ -521,6 +521,123 @@ You are a helpful assistant.
       await expect(loadSubagentFromDir(projectDir)).rejects.toThrow('EMFILE');
     });
 
+    it('rejects the whole load when only some agent reads hit resource exhaustion', async () => {
+      // The production case is one fd-exhausted read among many successful
+      // ones: a survivor-tolerant loader (rethrow only when NOTHING loaded)
+      // would commit the truncated set and pass an all-fail fixture green.
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      vi.mocked(fs.readdir).mockResolvedValue(['good.md', 'bad.md'] as never);
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce(
+          '---\nname: agent1\ndescription: First agent\n---\nYou are a benchmark agent prompt.',
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error('EMFILE: too many open files'), {
+            code: 'EMFILE',
+          }),
+        );
+
+      await expect(loadSubagentFromDir(projectDir)).rejects.toThrow('EMFILE');
+    });
+
+    it('returns agent configs in readdir order even when completion order inverts', async () => {
+      // This loader's output order feeds the first-wins dedup over
+      // unqualified names, so it must be deterministic input order, not
+      // whichever read happened to finish first.
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      vi.mocked(fs.readdir).mockResolvedValue(['zeta.md', 'alpha.md'] as never);
+      vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+        if (String(filePath).includes('zeta.md')) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return '---\nname: agent1\ndescription: First agent\n---\nYou are a benchmark agent prompt.';
+        }
+        return '---\nname: agent2\ndescription: Second agent\n---\nYou are a benchmark agent prompt.';
+      });
+
+      const configs = await loadSubagentFromDir(projectDir);
+      expect(configs.map((config) => config.name)).toEqual([
+        'agent1',
+        'agent2',
+      ]);
+    });
+
+    it('keeps the executor refusals a scan recorded before resource exhaustion rejected it', async () => {
+      // A refusal must survive the load failing: otherwise a by-name
+      // dispatch of the refused name falls through to the same-named
+      // builtin exactly when its extension is missing from the load.
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      vi.mocked(fs.readdir).mockResolvedValue([
+        'explore.md',
+        'bad.md',
+      ] as never);
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce(
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error('EMFILE: too many open files'), {
+            code: 'EMFILE',
+          }),
+        );
+
+      const refusals = new Map<string, SubagentError>();
+      await expect(loadSubagentFromDir(projectDir, refusals)).rejects.toThrow(
+        'EMFILE',
+      );
+      expect(refusals.get('explore')).toBeInstanceOf(SubagentError);
+      expect(refusals.get('explore')?.message).toMatch(
+        /invalid executor block/,
+      );
+
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        { agents: [], agentExecutorRefusals: refusals } as never,
+      ]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue([] as any);
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
+
+    it('resolves a duplicated declared name to the last file in readdir order, not completion order', async () => {
+      // Two files declaring the same name share one refusal key. Folding the
+      // per-file errors in input (readdir) order keeps the winner the last
+      // file in readdir order — the pre-concurrency serial behavior; writes
+      // from inside the concurrent items would let the delayed a.md win.
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      vi.mocked(fs.readdir).mockResolvedValue(['a.md', 'b.md'] as never);
+      vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+        if (String(filePath).includes('a.md')) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return '---\nname: reviewer\nname: explore\ndescription: Reviewer agent\nexecutor: {kind: invalid, command: runner}\n---\nReview the project.';
+        }
+        return '---\nname: reviewer\ndescription: Reviewer agent\nexecutor: {kind: invalid, command: runner}\n---\nReview the project.';
+      });
+
+      const refusals = new Map<string, SubagentError>();
+      expect(await loadSubagentFromDir(projectDir, refusals)).toEqual([]);
+      expect(refusals.get('reviewer')?.message).toContain('b.md');
+      // The extra declared name a.md carries is recorded either way.
+      expect(refusals.get('explore')).toBeInstanceOf(SubagentError);
+      expect(refusals.get('explore')?.message).toContain('a.md');
+    });
+
     it.each([
       { yamlName: '123', name: '123' },
       { yamlName: 'true', name: 'true' },

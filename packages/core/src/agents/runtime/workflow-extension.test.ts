@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -50,6 +50,40 @@ describe('loadExtensionWorkflows', () => {
 
   it('returns nothing when the extension ships no workflows directory', async () => {
     expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([]);
+  });
+
+  it('fails closed when a workflow read hits resource exhaustion', async () => {
+    // A swallowed EMFILE would silently drop the extension's workflows from
+    // the committed load; the refresh must reject so a later one retries.
+    await write('workflows/audit.js', workflowSource('audit'));
+    const spy = vi.spyOn(fs, 'readFile').mockRejectedValue(
+      Object.assign(new Error('EMFILE: too many open files'), {
+        code: 'EMFILE',
+      }),
+    );
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('EMFILE');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('fails closed when the workflows directory listing hits resource exhaustion', async () => {
+    await write('workflows/audit.js', workflowSource('audit'));
+    const spy = vi.spyOn(fs, 'readdir').mockRejectedValue(
+      Object.assign(new Error('EMFILE: too many open files'), {
+        code: 'EMFILE',
+      }),
+    );
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('EMFILE');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('reads the default directory, qualified and sorted by name', async () => {

@@ -100,6 +100,7 @@ import {
 } from '../telemetry/types.js';
 import {
   EXTENSION_SCAN_CONCURRENCY,
+  isResourceExhaustion,
   loadSkillsFromDir,
   scheduleWithConcurrency,
 } from '../skills/skill-load.js';
@@ -461,12 +462,13 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
     nodir: true,
     dot: true,
     follow: true,
-    // fast-glob caps its own traversal workers at CPU_COUNT (its settings
-    // default), so one glob call opens at most ~cpu-count descriptors at
-    // once regardless of the commands tree depth. Combined with the small
-    // EXTENSION_SCAN_CONCURRENCY outer bound, concurrent traversals stay
-    // inside the shared descriptor budget enforced by the manifest readers'
-    // gate (SKILL_LOAD_CONCURRENCY in skill-load.ts).
+    // This traversal is NOT admitted through the shared descriptor gate
+    // (SKILL_LOAD_CONCURRENCY in skill-load.ts): the installed glob@10
+    // (path-scurry) has no worker/concurrency knob to cite. Its measured
+    // descriptor footprint is small regardless — path-scurry opens, drains
+    // and closes each directory inside one libuv threadpool task — and at
+    // most EXTENSION_SCAN_CONCURRENCY traversals run at once (one per
+    // in-flight extension).
   };
 
   try {
@@ -503,6 +505,12 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
+  // Executor-refusal tombstones recorded by loadExtension when a scan dies
+  // of resource exhaustion mid-load, keyed by extension name. Merged into
+  // the cache by refreshCacheWithSnapshot when the refresh rejects, so a
+  // by-name dispatch of a refused name keeps refusing instead of falling
+  // through to a same-named builtin while the extension is absent (R10-2).
+  private readonly failedScanTombstones = new Map<string, Extension>();
   private storeSnapshot: ExtensionStoreSnapshot | undefined;
   private readonly mutationListeners = new Set<ExtensionMutationListener>();
   private nextMutationId = 0;
@@ -1391,13 +1399,20 @@ export class ExtensionManager {
     // leave the committed fingerprint stale so the next check still sees it.
     // Stamping post-load would mask that change until something else moved.
     // The residual "truncated load sticks" concern is closed at the loader
-    // entrances instead: resource-exhaustion errors (EMFILE/ENFILE/…, see
-    // `isResourceExhaustion` in skill-load.ts) are rethrown, so a load that
-    // died mid-scan never reaches this stamp.
+    // entrances and the commit boundaries instead: resource-exhaustion errors
+    // (EMFILE/ENFILE/…, see `isResourceExhaustion` in skill-load.ts) are
+    // rethrown by the per-entry loaders, by the extensions-root readdir
+    // below, and by loadExtension's catch-all, so a load that died mid-scan
+    // rejects the refresh and never reaches this stamp.
     const dirFingerprintBeforeLoad =
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
-    const { value: extensions, snapshot } =
-      await this.extensionStore.readConsistent(async () => {
+    // Tombstones are only meaningful within one refresh attempt: recorded by
+    // loadExtension as a scan dies, merged into the cache by the catch below
+    // when the refresh rejects.
+    this.failedScanTombstones.clear();
+    let refreshed: { value: Extension[]; snapshot: ExtensionStoreSnapshot };
+    try {
+      refreshed = await this.extensionStore.readConsistent(async () => {
         let loaded: Extension[];
         if (requestedNames.length > 0) {
           loaded = (
@@ -1420,6 +1435,24 @@ export class ExtensionManager {
           })),
         };
       });
+    } catch (error) {
+      // A resource-exhaustion rejection means the scan died mid-load. The
+      // previous cache and fingerprint baseline stay in place so the next
+      // call retries — but preserve the executor refusals the failed scan did
+      // record, or a by-name dispatch of one of those names falls through to
+      // a same-named builtin while its extension is absent from the cache
+      // (R10-2). An extension already in the cache keeps its previous,
+      // complete entry.
+      if (isResourceExhaustion(error) && this.failedScanTombstones.size > 0) {
+        const cache = new Map(this.extensionCache ?? []);
+        for (const [name, tombstone] of this.failedScanTombstones) {
+          if (!cache.has(name)) cache.set(name, tombstone);
+        }
+        this.extensionCache = cache;
+      }
+      throw error;
+    }
+    const { value: extensions, snapshot } = refreshed;
     const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
       nextCache.set(extension.name, extension);
@@ -1688,7 +1721,13 @@ export class ExtensionManager {
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);
-    } catch {
+    } catch (error) {
+      // A missing or unreadable extensions directory stays an empty set (the
+      // first-run shape), but resource exhaustion must fail the refresh
+      // closed: swallowing it here would commit an empty cache and stamp it
+      // as up to date, silently uninstalling every extension for the
+      // session.
+      if (isResourceExhaustion(error)) throw error;
       return [];
     }
 
@@ -1846,6 +1885,9 @@ export class ExtensionManager {
     }
 
     let extension: Extension | undefined;
+    // Declared here so the catch can preserve refusals the scan recorded
+    // before it died — see the resource-exhaustion branch below.
+    let agentExecutorRefusals: Map<string, SubagentError> | undefined;
     try {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
@@ -1879,7 +1921,7 @@ export class ExtensionManager {
             path.join(effectiveExtensionPath, contextFileName),
           )
           .filter((contextFilePath) => fs.existsSync(contextFilePath));
-        const agentExecutorRefusals = new Map<string, SubagentError>();
+        agentExecutorRefusals = new Map<string, SubagentError>();
         // commands / skills / agents live in disjoint directories with no
         // shared state, so their directory scans run concurrently; each
         // loader already swallows its own per-entry failures.
@@ -1966,7 +2008,37 @@ export class ExtensionManager {
 
       return extension;
     } catch (e) {
-      if (options.throwOnError) throw e;
+      if (options.throwOnError || isResourceExhaustion(e)) {
+        // Resource exhaustion fails the whole refresh closed so a later
+        // refresh retries, instead of committing a cache with this extension
+        // silently dropped. Preserve the executor refusals the scan recorded
+        // before it died — without them a by-name dispatch of a refused name
+        // falls through to a same-named builtin while the extension is
+        // absent from the cache (R10-2). refreshCacheWithSnapshot merges the
+        // tombstones into the cache when it rethrows the refresh rejection.
+        if (
+          !options.throwOnError &&
+          extension !== undefined &&
+          agentExecutorRefusals !== undefined &&
+          agentExecutorRefusals.size > 0
+        ) {
+          const tombstone: Extension = {
+            ...extension,
+            contextFiles: [],
+            commands: [],
+            skills: [],
+            agents: [],
+            workflows: [],
+            agentExecutorRefusals,
+          };
+          // A tombstone must not advertise subresources the failed scan
+          // never loaded — it exists to carry the refusals.
+          delete tombstone.mcpServers;
+          delete tombstone.hooks;
+          this.failedScanTombstones.set(extension.name, tombstone);
+        }
+        throw e;
+      }
       debugLogger.warn(
         `Warning: Skipping extension in ${(e as Error & { manifestPath?: string }).manifestPath ?? extension?.path ?? extensionDir}: ${getErrorMessage(
           e,
@@ -1994,7 +2066,12 @@ export class ExtensionManager {
       const configContent = fs.readFileSync(metadataFilePath, 'utf-8');
       const metadata = JSON.parse(configContent) as ExtensionInstallMetadata;
       return metadata;
-    } catch (_e) {
+    } catch (error) {
+      // A missing or unparsable sidecar means "no install metadata";
+      // resource exhaustion must fail the load closed instead of being
+      // laundered into absent metadata — which would make a linked
+      // extension silently vanish from the refresh.
+      if (isResourceExhaustion(error)) throw error;
       return undefined;
     }
   }
