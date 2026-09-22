@@ -62,3 +62,33 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_session (
     INDEX idx_runtime_session_binding
         (binding_id, runtime_generation, session_state)
 );
+
+CREATE TABLE IF NOT EXISTS qwen_tool_execution (
+    execution_call_id_hash CHAR(64) PRIMARY KEY,
+    execution_call_id VARCHAR(512) NOT NULL,
+    idempotency_key_hash CHAR(64) NOT NULL,
+    idempotency_key VARCHAR(512) NOT NULL,
+    binding_id VARCHAR(512) NOT NULL,
+    runtime_generation BIGINT NOT NULL,
+    harness_session_id VARCHAR(512) NOT NULL,
+    runtime_session_id VARCHAR(512) NOT NULL,
+    runtime_session_key CHAR(64) NOT NULL,
+    turn_id VARCHAR(512) NOT NULL,
+    tool_call_id VARCHAR(512) NOT NULL,
+    request_digest VARCHAR(512) NOT NULL,
+    reference_json LONGTEXT NOT NULL,
+    execution_state VARCHAR(32) NOT NULL,
+    execution_status VARCHAR(32),
+    result_json LONGTEXT,
+    last_sequence BIGINT NOT NULL,
+    cancel_requested BOOLEAN NOT NULL,
+    dispatch_owner VARCHAR(512),
+    dispatch_lease_until DATETIME(6),
+    dispatch_generation BIGINT NOT NULL,
+    record_version BIGINT NOT NULL,
+    settled_at DATETIME(6),
+    CONSTRAINT uq_tool_execution_idempotency
+        UNIQUE (idempotency_key_hash),
+    INDEX idx_tool_execution_session
+        (runtime_session_key, execution_state)
+);
