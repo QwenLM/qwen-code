@@ -11,6 +11,7 @@ import { readBundledReference } from '../../skills/bundled-reference.js';
 import type { Config } from '../../config/config.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { ToolMode } from '../code-mode.js';
 import { ToolNames } from '../tool-names.js';
 
 /**
@@ -94,6 +95,13 @@ async function buildTool({
     getLlmClient: () => undefined,
     isAgentTeamEnabled: () => team,
     isTodoWriteEnabled: () => todo,
+    // Declared rather than left absent: the resolver fails open on what it
+    // cannot read, so an omitted `getToolMode` is indistinguishable from
+    // `Direct` and an omitted `getVisibleTools` from "nothing is visible", and
+    // the bridge row below would reach its route through two `undefined` reads
+    // instead of through the shape it claims to measure.
+    getToolMode: () => ToolMode.Direct,
+    getVisibleTools: () => new Set<string>(),
     // The delegation reference's route, as `bundled-reference.ts` reads it: a
     // skill manager plus a registered Skill tool means the description
     // carries a pointer, and their absence means it carries the reference.
@@ -137,6 +145,11 @@ function paramDescription(tool: AgentTool, name: string): string {
   return description;
 }
 
+/** Whitespace runs collapsed to one space, so re-flowed prose still matches. */
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ');
+}
+
 /** What the model is actually charged for: description plus the schema. */
 function surfaceLength(tool: AgentTool): number {
   return (
@@ -166,9 +179,13 @@ describe('AgentTool per-turn size budgets', () => {
     // The bridge sentence is the only difference from the pointer shape, so
     // assert the delta too: a reworded or duplicated bridge sentence moves it.
     const pointer = await buildTool();
-    expect(
-      tool.description.length - pointer.description.length,
-    ).toBeLessThanOrEqual(160);
+    const bridge = tool.description.length - pointer.description.length;
+    // Floored as well as capped, and both bounds are load-bearing: a resolver
+    // change that stops emitting the bridge sentence lands this delta at 0,
+    // which the ceiling alone passes, and the row would keep reporting green
+    // while measuring the pointer shape instead of the bridge one.
+    expect(bridge).toBeGreaterThanOrEqual(100);
+    expect(bridge).toBeLessThanOrEqual(160);
   });
 
   it('keeps the description within its budget with no subagents configured', async () => {
@@ -265,8 +282,15 @@ describe('AgentTool per-turn size budgets', () => {
       .map((paragraph) => paragraph.trim())
       .filter((paragraph) => paragraph.length >= 40);
     expect(paragraphs.length).toBeGreaterThan(3);
+    // Collapsed on both sides, for the comparison only: SKILL.md hard-wraps
+    // its paragraphs while `agent.ts` writes prose as single unwrapped lines,
+    // so a paste-back in the destination file's own style has no newline to
+    // match and a raw comparison waves it through. Both floors above still run
+    // on the uncollapsed paragraph, so neither side collapses into a fragment
+    // too short to mean anything.
+    const collapsedPointer = collapseWhitespace(pointer.description);
     for (const paragraph of paragraphs) {
-      expect(pointer.description).not.toContain(paragraph);
+      expect(collapsedPointer).not.toContain(collapseWhitespace(paragraph));
     }
     // The direction, kept as a record rather than as the gate.
     expect(inlined.description.length).toBeGreaterThan(
@@ -435,10 +459,22 @@ describe('AgentTool per-turn size budgets', () => {
   it('keeps the whole model-visible surface within its budget when the reference is inlined', async () => {
     // Measured at 14,056 (10,412 description + 3,644 schema). The team shape
     // sits 2,331 above this — 984 of description plus 1,347 of schema for the
-    // three parameters `isAgentTeamEnabled()` declares — and, exactly as
-    // before this PR, that combination is left to the per-part rows rather
-    // than to a surface total.
+    // three parameters `isAgentTeamEnabled()` declares — so it gets its own
+    // surface row below instead of being left to the per-part rows: none of
+    // them bounds that schema half.
     const tool = await buildTool({ skills: false });
     expect(surfaceLength(tool)).toBeLessThanOrEqual(14_430);
+  });
+
+  it('keeps the whole model-visible surface within its budget when team and inline stack', async () => {
+    // The largest surface this PR creates, measured at 16,387 (11,396
+    // description + 4,991 schema) — above both the 14,430 the row before it
+    // bounds and the 13,374 every session paid before the move. No per-part
+    // row reaches it: `name`, `plan_mode_required` and `read_only` are
+    // declared only when `isAgentTeamEnabled()`, so they are deliberately
+    // absent from DEFAULT_SHAPE_PARAM_BUDGETS (the ratchet row compares the
+    // team-off shape), and the description rows never see the schema at all.
+    const tool = await buildTool({ team: true, todo: true, skills: false });
+    expect(surfaceLength(tool)).toBeLessThanOrEqual(16_760);
   });
 });

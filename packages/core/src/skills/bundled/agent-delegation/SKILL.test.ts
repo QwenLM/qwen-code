@@ -35,16 +35,20 @@ function skillProse(): string {
 }
 
 /**
- * The frontmatter `description` is a per-request surface as well, and a
- * separate one from the body: the session-start prelude renders bundled
- * entries verbatim into the `<available_skills>` block (`environmentContext.ts`
- * keeps them whole while trimming towards `MAX_SKILL_LISTING_CHARS`). So a kept
- * rule widened into `description:` — the natural lever, since it is what lets
- * the model recall the skill — would be charged on every request, and the
- * body-only negative half below would never see it.
+ * The frontmatter `description` and `when_to_use` are per-request surfaces
+ * as well, and separate ones from the body: the session-start prelude renders
+ * bundled entries verbatim into the `<available_skills>` block
+ * (`environmentContext.ts` keeps them whole while trimming towards
+ * `MAX_SKILL_LISTING_CHARS`), and `renderAvailableSkillsBlock` appends
+ * `when_to_use` inside `<description>`. So a kept rule widened into either
+ * field — the natural lever, since it is what lets the model recall the
+ * skill — would be charged on every request, and the body-only negative half
+ * below would never see it.
  */
 function skillFrontmatter(): string {
-  return collapse(loadSkill().description);
+  const skill = loadSkill();
+  // Optional, because the render's gate is truthiness rather than presence.
+  return collapse(`${skill.description} ${skill.whenToUse ?? ''}`);
 }
 
 /**
@@ -178,6 +182,14 @@ describe('bundled agent-delegation skill', () => {
     });
     it('is not in the description', async () => {
       expect(await agentDescription()).not.toContain(anchor);
+    });
+    // The move only saves what the listing does not charge again: a bundled
+    // entry is kept whole by `trimSkillEntriesTowardsBudget`, so a moved rule
+    // widened into the frontmatter would be paid for on every request with
+    // the skill never loaded, and `skillProse()` above — body-only — would
+    // not see it.
+    it('is not in the skill frontmatter either', () => {
+      expect(skillFrontmatter()).not.toContain(anchor);
     });
   });
 
@@ -350,6 +362,11 @@ describe('bundled agent-delegation skill', () => {
       );
       expect(description).not.toContain('Never delegate understanding');
       expect(description).not.toContain('## Writing the prompt');
+      // What must survive the opt-out, not only what it removes: a resident
+      // block gated on the delegation surface would vanish for a user who
+      // opted out while every negative assertion above stayed green.
+      expect(description).toContain("Don't race");
+      expect(description).toContain('## When to fork');
     },
   );
 
@@ -380,6 +397,10 @@ describe('bundled agent-delegation skill', () => {
     );
     expect(description).not.toContain('Never delegate understanding');
     expect(description).not.toContain('## Writing the prompt');
+    // The surviving-anchor half as well. This is the lever a user is likelier
+    // to set, and it carried no positive assertion at all.
+    expect(description).toContain("Don't race");
+    expect(description).toContain('## When to fork');
   });
 
   /**
@@ -390,9 +411,10 @@ describe('bundled agent-delegation skill', () => {
    * same rule more strongly and stays in every shape, so keeping both would
    * have charged every request for the same instruction twice.
    *
-   * Asserted in all three shapes because the surviving rule is the one that
-   * has to hold in each: were it ever gated behind the reference, a session
-   * that never loads the skill would lose the rule entirely.
+   * Asserted in every shape, one per route and per opt-out lever, because the
+   * surviving rule is the one that has to hold in each: were it ever gated
+   * behind the reference, a session that never loads the skill would lose the
+   * rule entirely.
    */
   it("keeps Don't race and drops the sentence it already covers", async () => {
     const dropped = 'do not fabricate or predict what it found';
@@ -403,6 +425,7 @@ describe('bundled agent-delegation skill', () => {
       await agentDescription(),
       await agentDescription({ skills: false }),
       await agentDescription({ bundledDisabled: true }),
+      await agentDescription({ skillDisabledByName: true }),
     ]) {
       expect(description).not.toContain(dropped);
       expect(description).toContain(surviving);
