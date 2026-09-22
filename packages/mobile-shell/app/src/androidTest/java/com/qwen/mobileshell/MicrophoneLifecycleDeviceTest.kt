@@ -2,6 +2,7 @@ package com.qwen.mobileshell
 
 import android.Manifest
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.webkit.PermissionRequest
 import android.webkit.WebView
 import androidx.lifecycle.Lifecycle
@@ -25,8 +26,7 @@ class MicrophoneLifecycleDeviceTest {
     }
 
     @Test fun grantedConnectionClosesWhenActivityStops() {
-        instrumentation.uiAutomation.grantRuntimePermission(
-            instrumentation.targetContext.packageName, Manifest.permission.RECORD_AUDIO)
+        grantMicrophonePermission()
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         lateinit var view: WebView
         val request = AudioRequest()
@@ -59,8 +59,7 @@ class MicrophoneLifecycleDeviceTest {
     }
 
     @Test fun reconnectAfterMicrophoneGrantStartsTextOnly() {
-        instrumentation.uiAutomation.grantRuntimePermission(
-            instrumentation.targetContext.packageName, Manifest.permission.RECORD_AUDIO)
+        grantMicrophonePermission()
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         lateinit var second: WebView
         scenario.onActivity { activity ->
@@ -76,6 +75,13 @@ class MicrophoneLifecycleDeviceTest {
         scenario.moveToState(Lifecycle.State.CREATED)
         scenario.onActivity { activity -> assertSame(second, field(activity, "webView")) }
         scenario.close()
+    }
+
+    private fun grantMicrophonePermission() {
+        val command = "pm grant ${instrumentation.targetContext.packageName} ${Manifest.permission.RECORD_AUDIO}"
+        ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand(command)).use {
+            it.readBytes()
+        }
     }
 
     private fun attach(activity: MainActivity): WebView {
