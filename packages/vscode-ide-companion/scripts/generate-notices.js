@@ -407,6 +407,26 @@ export async function collectDependencies(
   }
 }
 
+/**
+ * Order notice entries by package name, then version, using plain code-unit
+ * comparison so the result is identical under every locale. The collected set
+ * of entries does not depend on traversal order, but the order it was
+ * collected in does: the v0.24.4 release commit merely moved one key inside
+ * the `dependencies` block and every section of NOTICES.txt shifted, failing
+ * the up-to-date check on main (#12479, #12481, #12486). Sorting makes the
+ * file a function of what is installed, not of how package.json is laid out.
+ *
+ * @template {{name: string, version: string}} T
+ * @param {T[]} entries - Collected dependency entries
+ * @returns {T[]} The same entries, sorted
+ */
+export function sortDependencyEntries(entries) {
+  const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...entries].sort(
+    (a, b) => compare(a.name, b.name) || compare(a.version, b.version),
+  );
+}
+
 async function main() {
   try {
     const packageJsonPath = path.join(packagePath, 'package.json');
@@ -417,8 +437,9 @@ async function main() {
     const visitedDirs = new Set();
     const directDependencies = Object.keys(packageJson.dependencies);
 
-    // Sequential on purpose: the traversal order is the file's order, and it
-    // must not depend on which filesystem read finishes first.
+    // Sequential on purpose: the traversal must not depend on which
+    // filesystem read finishes first. The output order does not come from the
+    // traversal at all — see sortDependencyEntries.
     for (const depName of directDependencies) {
       await collectDependencies(
         depName,
@@ -428,7 +449,9 @@ async function main() {
       );
     }
 
-    const dependencyEntries = Array.from(allDependencies.values());
+    const dependencyEntries = sortDependencyEntries(
+      Array.from(allDependencies.values()),
+    );
 
     const licensePromises = dependencyEntries.map(({ name, version, dir }) =>
       getDependencyLicense(name, version, dir),

@@ -93,11 +93,26 @@ jobs:
           node-version-file: '.nvmrc'
           package-manager-cache: false
 
+      # Bounded retry, same recipe as e2e.yml: the v0.24.4 release (run
+      # 35746011401, #12480) lost its macos-15-intel leg here to a registry
+      # connect timeout while corepack fetched pnpm itself, and a plain re-run
+      # passed. A deterministically broken tree still fails all three attempts.
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Verify published export renderer'
         # An exported transcript loads its renderer from unpkg, pinned to this
@@ -246,11 +261,23 @@ jobs:
           node-version-file: '.nvmrc'
           package-manager-cache: false
 
+      # Same bounded retry as the prepare job's install above (#12480).
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Install VSCE'
         run: |-

@@ -16,6 +16,7 @@ import {
   getFallbackLicenseText,
   normalizeRepositoryUrl,
   runNoticeGeneration,
+  sortDependencyEntries,
 } from './generate-notices.js';
 
 describe('runNoticeGeneration', () => {
@@ -202,6 +203,33 @@ describe('collectDependencies', () => {
     await collectDependencies('hoisted', companion, dependencies, new Set());
 
     expect([...dependencies.keys()]).toEqual(['hoisted@2.0.0', 'leaf@3.1.0']);
+  });
+});
+
+describe('sortDependencyEntries', () => {
+  it('orders entries independently of how they were collected', () => {
+    const entries = [
+      { name: 'zod', version: '4.4.3' },
+      { name: '@modelcontextprotocol/sdk', version: '1.30.0' },
+      { name: 'zod-to-json-schema', version: '3.25.2' },
+      { name: 'zod', version: '3.25.76' },
+      { name: '@agentclientprotocol/sdk', version: '0.14.1' },
+    ];
+    const expected = [
+      '@agentclientprotocol/sdk@0.14.1',
+      '@modelcontextprotocol/sdk@1.30.0',
+      'zod@3.25.76',
+      'zod@4.4.3',
+      'zod-to-json-schema@3.25.2',
+    ];
+
+    const format = (list) => list.map((e) => `${e.name}@${e.version}`);
+    expect(format(sortDependencyEntries(entries))).toEqual(expected);
+    expect(format(sortDependencyEntries([...entries].reverse()))).toEqual(
+      expected,
+    );
+    // The input is left untouched.
+    expect(entries[0].name).toBe('zod');
   });
 });
 
