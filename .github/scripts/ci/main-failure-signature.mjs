@@ -240,13 +240,9 @@ function renderPerCommitBody({ analysis, occurrence }) {
     'A main-branch CI run failed on `main` before any test result was',
     'reported, so this issue is tracked per commit.',
     '',
-    `- Workflow: ${analysis.workflow}`,
-    ...(analysis.failedJobs.length
-      ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
-      : []),
-    `- Run: ${occurrence.runUrl}`,
-    `- Run ID: ${occurrence.runId}`,
-    `- Commit: ${occurrence.sha}`,
+    PER_COMMIT_HEADER_START,
+    renderPerCommitHeader({ analysis, occurrence }),
+    PER_COMMIT_HEADER_END,
     '',
     'This issue is labeled for autofix so the existing agent can create a repair PR.',
     '',
@@ -276,11 +272,98 @@ function cappedTestLines(tests) {
  */
 const RECURRENCE_HEADING_STRIP = /\n*##\s+Recurrences\s*$/;
 
-// The single-valued per-commit header block written by renderPerCommitBody.
-// The merge arm re-renders it from the newest occurrence (R1-2); the optional
-// failed-jobs group matches failedJobLines' two-space-indented bullets.
-const PER_COMMIT_HEADER =
-  /- Workflow: .*\n(?:- Failed jobs:\n(?:  - .*\n)*)?- Run: .*\n- Run ID: .*\n- Commit: .*/;
+// The per-commit identity block is machine-owned. The explicit delimiters
+// keep human notes and identity-looking bullets outside the replacement range.
+// The legacy parser below accepts the pre-delimiter shape for one migration,
+// then every refreshed body is written in the delimited form.
+const PER_COMMIT_HEADER_START = '<!-- qwen-main-ci-failure-header -->';
+const PER_COMMIT_HEADER_END = '<!-- /qwen-main-ci-failure-header -->';
+const PER_COMMIT_INTRO =
+  'A main-branch CI run failed on `main` before any test result was\nreported, so this issue is tracked per commit.';
+const PER_COMMIT_FOOTER =
+  'This issue is labeled for autofix so the existing agent can create a repair PR.';
+
+function parsePerCommitHeaderBlock(block) {
+  const lines = block.trim().split('\n');
+  let cursor = 0;
+  const workflow = lines[cursor++]?.match(/^- Workflow: (.+)$/)?.[1];
+  if (!workflow) return null;
+
+  const failedJobLines = [];
+  if (lines[cursor] === '- Failed jobs:') {
+    cursor += 1;
+    while (lines[cursor]?.startsWith('  - ')) {
+      failedJobLines.push(lines[cursor]);
+      cursor += 1;
+    }
+  }
+
+  const runUrl = lines[cursor++]?.match(/^- Run: (\S+)$/)?.[1];
+  const runId = lines[cursor++]?.match(/^- Run ID: (\S+)$/)?.[1];
+  const sha = lines[cursor++]?.match(/^- Commit: (\S+)$/)?.[1];
+  if (!runUrl || !runId || !sha || cursor !== lines.length) return null;
+  return { workflow, runUrl, runId, sha, failedJobLines };
+}
+
+function extractPerCommitHeader(head) {
+  const markedStart = head.indexOf(PER_COMMIT_HEADER_START);
+  if (markedStart !== -1) {
+    const contentStart = markedStart + PER_COMMIT_HEADER_START.length;
+    const markedEnd = head.indexOf(PER_COMMIT_HEADER_END, contentStart);
+    if (markedEnd !== -1) {
+      const parsed = parsePerCommitHeaderBlock(
+        head.slice(contentStart, markedEnd),
+      );
+      if (parsed) {
+        return {
+          ...parsed,
+          replaceStart: markedStart,
+          replaceEnd: markedEnd + PER_COMMIT_HEADER_END.length,
+        };
+      }
+    }
+  }
+
+  // Existing issues created before the delimiters are still adopted, but only
+  // when the complete canonical intro/header/footer shape is present. A note
+  // inserted into this range makes the parser fail closed and leaves the body
+  // untouched instead of treating human text as machine state.
+  const legacyStart = head.indexOf(`${PER_COMMIT_INTRO}\n\n`);
+  if (legacyStart === -1) return null;
+  const contentStart = legacyStart + PER_COMMIT_INTRO.length + 2;
+  const legacyEnd = head.indexOf(`\n\n${PER_COMMIT_FOOTER}`, contentStart);
+  if (legacyEnd === -1) return null;
+  const parsed = parsePerCommitHeaderBlock(head.slice(contentStart, legacyEnd));
+  return parsed
+    ? { ...parsed, replaceStart: contentStart, replaceEnd: legacyEnd }
+    : null;
+}
+
+function renderPerCommitHeader({ analysis, occurrence, failedJobLines: prior = [] }) {
+  const jobs = analysis.failedJobs.length
+    ? failedJobLines(analysis.failedJobs)
+    : prior;
+  return [
+    `- Workflow: ${analysis.workflow}`,
+    ...(jobs.length ? ['- Failed jobs:', ...jobs] : []),
+    `- Run: ${occurrence.runUrl}`,
+    `- Run ID: ${occurrence.runId}`,
+    `- Commit: ${occurrence.sha}`,
+  ].join('\n');
+}
+
+function replacePerCommitHeader(head, headerBlock) {
+  const header = extractPerCommitHeader(head);
+  if (!header) return head;
+  const replacement = [
+    PER_COMMIT_HEADER_START,
+    headerBlock,
+    PER_COMMIT_HEADER_END,
+  ].join('\n');
+  return `${head.slice(0, header.replaceStart)}${replacement}${head.slice(
+    header.replaceEnd,
+  )}`;
+}
 
 /**
  * The standard per-test head: signature + per-test markers, the prose, and
@@ -319,12 +402,12 @@ function renderPerTestHead({ analysis, bodyMarkers, testLines }) {
  * emits its bullet anyway). The bullet omits the timestamp the stub header
  * never recorded.
  */
-function stubHeaderBullet(head, lines, occurrence) {
-  const runId = head.match(/- Run ID: (\S+)/)?.[1];
+function stubHeaderBullet(header, lines, occurrence) {
+  const runId = header?.runId;
   if (!runId || runId === String(occurrence?.runId)) return lines;
   if (lines.some((line) => line.includes(`[run ${runId}]`))) return lines;
-  const sha = String(head.match(/- Commit: (\S+)/)?.[1] ?? '').slice(0, 12);
-  const runUrl = head.match(/- Run: (\S+)/)?.[1] ?? '';
+  const sha = String(header.sha ?? '').slice(0, 12);
+  const runUrl = header.runUrl ?? '';
   return [...lines, `- \`${sha}\` · [run ${runId}](${runUrl})`];
 }
 
@@ -379,22 +462,19 @@ export function renderIssueBody({
     const workflowMarker = workflowBridgeMarker(analysis.workflow);
     const { head, lines, tail } = splitOccurrenceBlock(existingBody);
     const withoutHeading = head.replace(RECURRENCE_HEADING_STRIP, '');
+    const existingHeader = extractPerCommitHeader(withoutHeading);
     // R1-2: re-render the single-valued header fields from the newest
     // occurrence, so the lane, step, commit, run and run-id lines always
     // describe the run being recorded — never a stale predecessor. The job
     // bullets stay in the head prose: splitOccurrenceBlock re-ingests every
     // `- ` line below the block marker as a recurrence, so they must not
     // move into it.
-    const headerBlock = [
-      `- Workflow: ${analysis.workflow}`,
-      ...(analysis.failedJobs.length
-        ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
-        : []),
-      `- Run: ${occurrence.runUrl}`,
-      `- Run ID: ${occurrence.runId}`,
-      `- Commit: ${occurrence.sha}`,
-    ].join('\n');
-    const refreshed = withoutHeading.replace(PER_COMMIT_HEADER, headerBlock);
+    const headerBlock = renderPerCommitHeader({
+      analysis,
+      occurrence,
+      failedJobLines: existingHeader?.failedJobLines,
+    });
+    const refreshed = replacePerCommitHeader(withoutHeading, headerBlock);
     // R1-8: the bridge funnels every unidentifiable failure of a workflow
     // onto one open issue, and every landing used to add one sha marker to
     // the head permanently — past GitHub's 65,536-character body limit,
@@ -431,16 +511,20 @@ export function renderIssueBody({
     const hasAnyBridge = new RegExp(
       `<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->`,
     ).test(prose);
+    const canAdoptBridge =
+      adoptsStubShape &&
+      !hasAnyBridge &&
+      existingHeader?.workflow === analysis.workflow;
     const mergedHead = [
       ...shaMarkers.map((marker) => `<!-- ${marker} -->`),
-      ...(adoptsStubShape && !hasAnyBridge
+      ...(canAdoptBridge
         ? [`<!-- ${workflowMarker} -->`]
         : []),
       '',
       prose,
     ].join('\n');
     const { nextLines, footer } = recurrenceBlock({
-      lines: stubHeaderBullet(withoutHeading, lines, occurrence),
+      lines: stubHeaderBullet(existingHeader, lines, occurrence),
       occurrence,
       maxOccurrences,
     });
@@ -496,7 +580,7 @@ export function renderIssueBody({
     ? renderPerTestHead({ analysis, bodyMarkers, testLines })
     : withoutHeading;
   const adoptLines = adoptsStub
-    ? stubHeaderBullet(head, lines, occurrence)
+    ? stubHeaderBullet(extractPerCommitHeader(head), lines, occurrence)
     : lines;
   const prose = tail ? `${headProse}\n\n${tail}` : headProse;
 

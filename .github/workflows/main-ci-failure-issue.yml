@@ -114,8 +114,6 @@ jobs:
           # so its output is reproducible under test.
           WORKFLOW_RUN_AT: '${{ github.event.workflow_run.updated_at }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
-          # The dedupe search is scoped to this login (R1-4); it must match the
-          # identity that files the issues, or the lookup would never find them.
           AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
         run: |-
           shopt -s nullglob
@@ -144,13 +142,6 @@ jobs:
           # no identifiable test this is the per-commit marker instead.
           existing_issue=''
           while read -r marker; do
-            # The workflow bridge is a static, published, human-writable token,
-            # so the lookup cannot grant on marker shape alone (R1-4): the
-            # search is scoped to the bot's own issues, `sort:created-desc`
-            # pins `.[0]` to the newest carrier instead of GitHub's relevance
-            # order (R1-5), and the downloaded body must actually carry the
-            # marker before the number is emitted — an issue that merely
-            # quotes the marker is skipped and the loop continues.
             candidate="$(
               gh issue list \
                 --repo "${REPO}" \
@@ -234,11 +225,6 @@ jobs:
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
 
           if [[ -n "${EXISTING_ISSUE}" ]]; then
-            # The lookup above is already scoped to the bot, but this job is
-            # the one that would overwrite a body and hand the autofix agent a
-            # tier-0 task — verify authorship here, with the token that can
-            # actually write, and fall through to `gh issue create` when the
-            # matched issue was not filed by the bot (R1-4).
             existing_author="$(gh issue view "${EXISTING_ISSUE}" \
               --repo "${REPO}" \
               --json author \

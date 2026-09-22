@@ -962,6 +962,90 @@ test('a foreign-workflow merge records the run but never adds its bridge', () =>
   );
 });
 
+test('a bridge-less stub only adopts a bridge for its recorded workflow', () => {
+  const stubAnalysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const bridge = `<!-- ${workflowBridgeMarker('E2E Tests')} -->`;
+  const bridgeLessStub = renderIssueBody({
+    analysis: stubAnalysis,
+    occurrence: OCCURRENCE,
+  }).replace(`${bridge}\n`, '');
+  const foreign = analyzeLogs(
+    'Qwen Code CI',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const merged = renderIssueBody({
+    analysis: foreign,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: bridgeLessStub,
+  });
+  assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('Qwen Code CI')} -->`));
+  assert.ok(!merged.includes(bridge));
+  assert.ok(merged.includes('[run 302]'));
+});
+
+test('a per-commit merge preserves prior failed jobs when the latest run has none', () => {
+  const previous = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const latest = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const merged = renderIssueBody({
+    analysis: latest,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: renderIssueBody({
+      analysis: previous,
+      occurrence: OCCURRENCE,
+    }),
+  });
+  assert.ok(merged.includes('- Failed jobs:'));
+  assert.ok(merged.includes('windows-latest'));
+  assert.ok(merged.includes('- Run ID: 302'));
+});
+
+test('machine header promotion ignores human identity-looking bullets above it', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const stub = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  const existing = [
+    'Maintainer note: keep this context while the issue is open.',
+    '- Run: https://example.invalid/runs/human-note',
+    '- Run ID: 999',
+    '- Commit: human-note-sha',
+    '',
+    stub,
+  ].join('\n');
+  const merged = renderIssueBody({
+    analysis,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: existing,
+  });
+  assert.ok(merged.includes('Maintainer note: keep this context'));
+  assert.ok(merged.includes('[run 301]'));
+  assert.ok(!merged.includes('[run 999]'));
+  assert.ok(merged.includes('[run 302]'));
+});
+
 // R1-8: the bridge funnels every unidentifiable failure of a workflow onto
 // one open issue, so the per-commit sha markers must stay capped — keeping
 // the newest, never the bridge — or the body crosses GitHub's 65,536-char
