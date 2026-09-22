@@ -62,5 +62,6 @@
 ## 后续工作
 
 - 默认开启 `agents.crossSessionMessaging`，让用户的会话无需改设置即可被联系。
-- 程序经 ACP 驱动的会话的入站投递。
+- 程序经 ACP 驱动的会话上挂起的消息——被接受的那些已经会投递，参见
+  [被接受的跨会话消息抵达由程序驱动的会话](2026-09-21-acp-accepted-peer-delivery.zh-CN.md)。
 - Windows 命名管道，Qwen Code 会话与本端点同时支持。

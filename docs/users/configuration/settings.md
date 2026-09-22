@@ -431,11 +431,17 @@ See [Memory](../features/memory) for details on how auto-memory works and how to
 | `agents.crossSessionInbound`   | enum             | What happens to inbound cross-session messages: `accept` delivers them, `hold` parks them for `/peers` review without letting the model act, and `refuse` opts this session out. Unset means [user-minted controllers](../features/commands.md#trusted-controllers) and this session's own child processes auto-deliver, while other sessions use [review-class parity](../features/commands.md#6-messaging-another-running-session); other messages are held for review. A workspace may only tighten this (`hold` or `refuse`, when stricter than the operator-set value or the unset default); an effective unrecognized value holds every message.                                                                                                                                      | `undefined` |
 
 In a session a program drives over ACP, including one the daemon
-manages, `agents.crossSessionInbound: hold` turns messages away with a
-`refused` receipt rather than parking them: nobody is watching a hold
-list on such a session's behalf, so a parked message would wait for a
-decision that cannot be made. Messages its gate accepts are delivered
-as usual.
+manages, nothing is ever parked: nobody is watching a hold list on such
+a session's behalf, so a parked message would wait for a decision that
+cannot be made. Every message that would have been held is turned away
+instead — not only under `agents.crossSessionInbound: hold`, but also
+the ones the unset default holds, such as a sender in another review
+class or one that asserted no class. A sender is told `refused` when the
+reason will not change while the session runs, and `expired` when it was
+momentary, such as an approval mode that could not be read while the
+session tore down; the same message can land on a later attempt.
+Messages its gate accepts are delivered as usual, as a background turn
+of that session's own.
 
 #### permissions
 

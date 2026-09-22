@@ -147,6 +147,12 @@ would mostly contribute stale records.
 receipts; what it cannot do is take a message in. That is the next step,
 and the protocol page says so rather than leaving a reader to discover it.
 
+> Superseded in part (2026-09-21): a hosted session now takes a message
+> its gate accepts, as a background turn of its own, and turns away one
+> that would have been held. See
+> [Accepted cross-session messages reach a session a program drives](2026-09-21-acp-accepted-peer-delivery.md);
+> the protocol page's §8 bullet describes current behaviour.
+
 **`kind` is still a self-report.** `serve` comes from the environment
 marker the daemon sets on its children, which a process could set for
 itself. It labels a listing; nothing reads it to decide anything.
@@ -164,6 +170,8 @@ itself. It labels a listing; nothing reads it to decide anything.
   the slot through.
 - `packages/core/src/ipc/inbound-gate.ts`,
   `packages/cli/src/peerMessaging/peer-messaging.ts` — `ownsSessionId`
-  for a process hosting several sessions.
+  for a process hosting several sessions. (Since 2026-09-21 the host
+  answers `resolveSessionId`, with a name rather than a yes, and the
+  gate's membership test is derived from it.)
 - `packages/cli/src/acp-integration/acpAgent.ts` — binding the inbox,
   registering and removing each hosted session's record.

@@ -115,6 +115,11 @@ socket。在 `disposeSessions` 中，关闭在生成 abort 之后等待——缓
 **仅出站。**托管会话可以发送，也能收到自己的回执；它不能做的是接收
 消息。那是下一步，协议页面写明了这一点，而不是留给读者自己去发现。
 
+> 部分已被取代（2026-09-21）：托管会话现在会收下闸门判为接受的消息，
+> 作为它自己的一轮后台轮次，并把本该挂起的那些挡回去。参见
+> [被接受的跨会话消息抵达由程序驱动的会话](2026-09-21-acp-accepted-peer-delivery.zh-CN.md)；
+> 协议页 §8 的条目描述的是当前行为。
+
 **`kind` 仍是自我声明。**`serve` 来自 daemon 在其子进程上设置的环境
 标记，进程自己也可以设置它。它只是列表的标签；没有任何东西依据它做
 决定。
@@ -131,6 +136,7 @@ socket。在 `disposeSessions` 中，关闭在生成 abort 之后等待——缓
   传递下去。
 - `packages/core/src/ipc/inbound-gate.ts`、
   `packages/cli/src/peerMessaging/peer-messaging.ts`——为托管多个会话
-  的进程提供 `ownsSessionId`。
+  的进程提供 `ownsSessionId`。（2026-09-21 起宿主回答的是
+  `resolveSessionId`，给出名字而不是是否，闸门的成员判定由它派生。）
 - `packages/cli/src/acp-integration/acpAgent.ts`——绑定收件箱，注册和
   移除每个托管会话的记录。

@@ -400,6 +400,10 @@ describe('DroppedNotificationTally', () => {
   });
 
   it('evicts a queued peer message like any other terminal notification', () => {
+    // What the rule does with one, not what its callers hand it: the ACP
+    // Session keeps cross-session messages out of this rule altogether,
+    // and the TUI produces none. This pins that the rule itself has no
+    // per-kind exception, for the caller that decides otherwise.
     const queue: TestItem[] = Array.from(
       { length: MAX_BACKGROUND_NOTIFICATION_QUEUE },
       (_, index) => ({ kind: 'peer', taskId: `msg_${index}` }),

@@ -281,7 +281,7 @@ In order:
 2. **Settled ids.** A `msgId` the gate already decided repeats its earlier verdict.
 3. **Policy.** `agents.crossSessionInbound` set to `accept`, `hold` or `refuse` wins. Unset: a process the session started or a trusted controller is accepted; otherwise a message is accepted only when `fromMode` names the same review class the receiver is in, and held in every other case, including when `fromMode` is absent.
 4. **Hold.** Up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`; a mode change re-evaluates the backlog.
-5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A full queue is `dropped` with `queue-full` too.
+5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers — 20 at a session a program drives over ACP, whose messages wait in its background-notification queue. A full queue is `dropped` with `queue-full` too.
 
 A sender does not have to discover the limits the hard way: a Qwen Code
 session mirrors them per address and refuses its own send before writing
@@ -325,12 +325,17 @@ that look like the envelope are defanged inside `content`.
   flag records that still collide.
 - **Holds at an ACP-driven session.** A session a program drives over
   ACP — daemon-spawned or not — takes a message its gate accepts, and
-  answers `refused` to one that would be held: a hold is a question put
-  to a person, and nobody is watching a hold list on its behalf. Where
-  a held message should surface for those sessions — its client, or the
-  daemon's own API — is still open, and until it is settled, setting
-  `agents.crossSessionInbound` to `hold` on such a session turns its
-  messages away rather than parking them.
+  turns away one that would be held: a hold is a question put to a
+  person, and nobody is watching a hold list on its behalf. Every reason
+  a message would be held is turned away this way, not only an explicit
+  `hold` setting. The receipt depends on the reason: one the session
+  will keep giving — its setting, a sender in another review class, a
+  sender that asserted no class — is `refused`, which tells the sender
+  to stop; one that was momentary — a mode or a setting that could not
+  be read while the session tore down — is `expired`, and the same
+  message can land on a later attempt. Where a held message should
+  surface for those sessions — its client, or the daemon's own API — is
+  still open.
 - **One duplicate window for every session behind an inbox.** The
   30-second identical-body check (§6) is keyed by the sender alone, so
   the same body sent to two sessions of one process inside that window

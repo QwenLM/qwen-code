@@ -17,6 +17,14 @@
  * notifications that carry irreplaceable results survive and the repetitive
  * ones are the first to go.
  *
+ * What a caller hands this rule is the caller's own business: the ACP
+ * `Session` keeps cross-session messages out of it, because a message is
+ * someone else's, was receipted `delivered`, and cannot be produced
+ * again — it holds an allowance of its own instead. The rule itself does
+ * not special-case a kind; a `peer` entry handed to it is evicted like
+ * any other, and the summary can name one, for a caller that decides
+ * differently.
+ *
  * Overflow discards are not silent: the caller records each one in a
  * {@link DroppedNotificationTally} and folds one summary line into the next
  * compatible drained turn. A caller may omit already-cancelled monitor pulses

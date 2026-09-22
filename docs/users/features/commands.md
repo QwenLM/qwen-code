@@ -1050,11 +1050,14 @@ you have open. Several of them share one process and one inbox, so a
 sender has to name the session it means — every Qwen Code session does
 that automatically.
 
-Messages sent _to_ one are refused rather than held. Holding is a
+A message sent _to_ one is delivered if its gate accepts it: it becomes a
+background turn of that session's own, handled once the session is idle.
+A message the gate would have held is refused instead. Holding is a
 question put to a person, and nobody is watching a held-message list on a
-driven session's behalf; a sender is told at once instead of
-waiting out an expiry. Where a held message should surface for those
-sessions is not settled yet.
+driven session's behalf; a sender is told at once instead of waiting out
+an expiry. Where a held message should surface for those sessions is not
+settled yet. Such a session keeps at most 20 accepted messages waiting,
+and turns the next sender away with a queue-full receipt it can retry.
 
 A session registers unless its own settings turn
 `agents.crossSessionMessaging` off. Turned off, it stays invisible,

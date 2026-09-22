@@ -147,5 +147,7 @@ the endpoint on anything else it covers.
 
 - Turn `agents.crossSessionMessaging` on by default, so a user's sessions
   can be reached without a settings change.
-- Inbound delivery to sessions a program drives over ACP.
+- Held messages at sessions a program drives over ACP — accepted ones
+  are delivered; see
+  [Accepted cross-session messages reach a session a program drives](2026-09-21-acp-accepted-peer-delivery.md).
 - Windows named pipes, for Qwen Code sessions and this endpoint alike.
