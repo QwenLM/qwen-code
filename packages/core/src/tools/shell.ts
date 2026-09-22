@@ -24,6 +24,7 @@ import type {
   ToolConfirmationPayload,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { registerSessionCommit } from '../permissions/destructive-commands.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -2874,6 +2875,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       !this.config.getShellExecutionSandbox?.() &&
       commitCtx.attributableInCwd
     ) {
+      // Record the commit in the session registry BEFORE attribution so
+      // the two are independent: `attachCommitAttribution` returns early
+      // on the `gitCoAuthor.commit` toggle, and the Auto-mode
+      // `git commit --amend` exemption (permissions/destructive-commands
+      // `isAmendOfSessionCommit`) must keep working for users who turned
+      // commit attribution off. Running it first also means an
+      // attribution failure can't cost us the registration.
+      await this.trackSessionCommit(cwd, preHead);
+
       // `git commit --amend` rewrites HEAD in place, so the standard
       // parent-vs-postHead diff (`${postHead}~1..${postHead}`) would
       // span the entire amended commit (the amended commit's parent
@@ -4177,6 +4187,40 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return sha.length > 0 ? sha : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Record the commit this command just created in the session registry
+   * (`permissions/destructive-commands.ts`) so a later
+   * `git commit --amend` of it is recognised as "made by the agent in
+   * this session" and exempted from the Auto-mode destructive-command
+   * block.
+   *
+   * Same success criterion as {@link attachCommitAttribution}: HEAD
+   * movement, not the shell exit code. A compound
+   * `git commit -m "x" && npm test` can land the commit and then fail,
+   * and gating on `exitCode !== 0` would leave a real agent commit
+   * unregistered — its amend would then be blocked. Conversely, a failed
+   * commit (`git commit` with nothing staged) leaves HEAD alone, so the
+   * pre-existing HEAD is never registered and amending somebody else's
+   * commit stays blocked.
+   *
+   * An amend also moves HEAD (it rewrites the commit), so the rewritten
+   * SHA is registered here too and a second consecutive amend keeps
+   * working.
+   *
+   * Deliberately independent of the `gitCoAuthor.commit` attribution
+   * toggle: that setting governs whether AI credit is written into the
+   * commit, not whether the agent may amend its own work.
+   */
+  private async trackSessionCommit(
+    cwd: string,
+    preHead: string | null,
+  ): Promise<void> {
+    const postHead = await this.getGitHead(cwd);
+    if (postHead !== null && postHead !== preHead) {
+      registerSessionCommit(postHead);
     }
   }
 
