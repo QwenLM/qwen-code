@@ -89,6 +89,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['web', 'serveWebShell'],
   ['open', 'open'],
   ['open-with-auth', 'open-with-auth'],
+  ['token-qr', 'tokenQr'],
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
   ['experimental-lsp', 'experimentalLsp'],

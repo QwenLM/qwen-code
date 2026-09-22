@@ -1237,3 +1237,53 @@ describe('serve startup import boundary', () => {
     testMs,
   );
 });
+
+describe('serve tokenQr resolution', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = {
+      ...originalEnv,
+      QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
+    };
+    mockRunQwenServe.mockResolvedValue({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  async function startWith(args: string) {
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(args);
+    void handler(argv as Parameters<typeof handler>[0]);
+    await vi.waitFor(() => {
+      expect(mockRunQwenServe).toHaveBeenCalled();
+    });
+  }
+
+  it('sets tokenQr from the --token-qr flag', async () => {
+    await startWith('--token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: true }),
+    );
+  });
+
+  it('passes an explicit --no-token-qr through as false', async () => {
+    await startWith('--no-token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: false }),
+    );
+  });
+
+  it('leaves tokenQr unset by default', async () => {
+    await startWith('--no-web');
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty('tokenQr');
+  });
+});

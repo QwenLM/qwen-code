@@ -116,7 +116,10 @@ import {
 } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
-import { printRemoteQuickstart } from './remote-quickstart.js';
+import {
+  printRemoteQuickstart,
+  tokenQrNoEffectReason,
+} from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -4060,10 +4063,11 @@ async function runQwenServeImpl(
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* / serve.channels ` +
+        `policy.* / serve.channels / serve.tokenQr ` +
         `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
-        `to apply context.fileName / policy.* / serve.channels overrides.`,
+        `to apply context.fileName / policy.* / serve.channels / ` +
+        `serve.tokenQr overrides.`,
     );
   }
   assertExecutionSandboxSupported(
@@ -10062,6 +10066,64 @@ async function runQwenServeImpl(
       // way in.
       const boundAddress =
         typeof addr === 'object' && addr ? addr.address : opts.hostname;
+      // The settings source is resolved here rather than in the yargs
+      // command layer so the serve fast path (which never runs that
+      // handler) honors serve.tokenQr identically. An explicit flag
+      // (either polarity) wins over the setting; the setting applies
+      // only when the flag was omitted.
+      const settingTokenQr = bootSettings?.serve?.tokenQr;
+      if (
+        opts.tokenQr === undefined &&
+        settingTokenQr !== undefined &&
+        typeof settingTokenQr !== 'boolean'
+      ) {
+        // Validated here rather than in the shared settings reader:
+        // throwing there would discard the whole summary — policy.* and
+        // serve.channels with it, silently downgrading permission
+        // mediation to its default — because of a display knob. Name the
+        // field and its type, never the value: a malformed value may be a
+        // literal token pasted into the setting, and a `${VAR}` placeholder
+        // outside INTERNAL_SECRET_ENV_VARS is substituted before it reaches
+        // here — echoing either would re-publish a live bearer into
+        // captured stderr on every boot.
+        writeStderrLine(
+          `qwen serve: serve.tokenQr must be a boolean; ignoring a ${typeof settingTokenQr} value.`,
+        );
+      }
+      // A workspace settings file may carry serve.tokenQr, but only
+      // operator-owned scopes may set it. The interactive CLI warns about
+      // the drop via getSettingsWarnings; the serve fast path has no
+      // LoadedSettings, so the one path that reads the key names it itself.
+      for (const ignoredKey of bootSettings?.ignoredWorkspaceKeys ?? []) {
+        writeStderrLine(
+          `qwen serve: ${ignoredKey} in workspace settings ` +
+            `(${path.join(boundWorkspace, '.qwen', 'settings.json')}) is ` +
+            'ignored; it is honored from user, system, and system-defaults ' +
+            'scopes only.',
+        );
+      }
+      // One resolved posture, not a requested/vetoed boolean pair whose two
+      // falses mean opposite things: the veto is derived from the flag
+      // alone, so a settings-level `false` only declines the opt-in and
+      // leaves the default policy suppression in charge.
+      const tokenQrMode =
+        opts.tokenQr === false
+          ? ('veto' as const)
+          : opts.tokenQr === true || settingTokenQr === true
+            ? ('force' as const)
+            : ('policy' as const);
+      // Name why a requested QR cannot print instead of discarding the
+      // request silently — the same silent-no-op shape this flag exists to
+      // remove. Outside the `if (token)` block on purpose: a loopback bind
+      // with no bearer is the commonest inert case, and it must be reported
+      // too.
+      const tokenQrNoEffect = tokenQrNoEffectReason({
+        requested: tokenQrMode === 'force',
+        webShellMounted,
+        boundAddress,
+        generated: generatedToken,
+      });
+      if (tokenQrNoEffect) writeStderrLine(tokenQrNoEffect);
       if (token) {
         void printRemoteQuickstart({
           bind: opts.hostname,
@@ -10071,6 +10133,7 @@ async function runQwenServeImpl(
           token,
           generated: generatedToken,
           web: webShellMounted,
+          tokenQrMode,
         });
       }
       // Operator log on stderr too (systemd/docker/k8s default
