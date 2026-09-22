@@ -31,10 +31,7 @@ import {
   formatVisionBridgeNoticeDisplay,
   isVisionBridgeNoticeDisplay,
 } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
-import {
-  ToolNames,
-  ToolNamesMigration,
-} from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { AGENT_TOOL_NAMES } from '../../utils/agent-tool-names.js';
 import { isTerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
@@ -64,17 +61,6 @@ import {
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
 import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
-
-// Names that resolve to the agent tool: the canonical name plus whatever
-// legacy request aliases core's migration map declares (e.g. 'task').
-// Tool-usage stats key on the raw request name, so the scrollback
-// sub-agent count must accept all of them.
-const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
-  ToolNames.AGENT,
-  ...Object.entries(ToolNamesMigration)
-    .filter(([, canonical]) => canonical === ToolNames.AGENT)
-    .map(([legacy]) => legacy),
-]);
 
 // How many of the subagent's prior tool calls to list above an approval
 // prompt — enough to show what led up to the request without pushing the
