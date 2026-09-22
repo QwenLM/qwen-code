@@ -641,18 +641,28 @@ function detectCompressedPrefixLength(
 }
 
 /**
- * Frozen historical openings — never sync these to a producer change;
- * current output is recognized by the sentinel. Matching is `startsWith`,
- * not equality: producers emit longer strings. A real first prompt that
- * only opens with `<background-tasks>` or `<plan-mode-active>` must still
- * count as a turn, so these stay the historical openings, not the bare tags.
+ * Frozen historical attachment templates from before the sentinel. Never
+ * sync these to a producer change; current output is recognized by the
+ * sentinel. `startsWith` (not equality) allows a producer to append dynamic
+ * rows after the static template. These are the full static templates, not
+ * a bare `<background-tasks>` or `<plan-mode-active>` tag.
  */
 const LEGACY_POST_COMPACT_ATTACHMENT_PREFIXES = [
-  'The following files were recently accessed before context was compacted.',
-  'Recently accessed file (full current content embedded):',
-  'Recent visual snapshots preserved from before context was compacted',
-  '<plan-mode-active>\nYou are currently in PLAN mode.',
-  '<background-tasks>\nThe following background subagent tasks were active at compaction.',
+  'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
+  'Recently accessed file (full current content embedded):\n\n',
+  'Recent visual snapshots preserved from before context was compacted (most recent last). Each image corresponds to a tool result or user-pasted image earlier in the conversation:',
+  '<plan-mode-active>\n' +
+    'You are currently in PLAN mode. You may research, read files, and ' +
+    'propose plans, but you may not execute modification tools (' +
+    'write_file, edit, run_shell_command, etc.) ' +
+    'until the user exits plan mode. The summary above may not reflect this ' +
+    'constraint — honor plan mode regardless.\n' +
+    '</plan-mode-active>',
+  '<background-tasks>\n' +
+    'The following background subagent tasks were active at compaction. ' +
+    'The summary above does not include their per-task state. Use ' +
+    '`task_stop` / `send_message` to interact; do not assume they ' +
+    'completed.\n',
 ];
 
 function isPostCompactAttachmentEntry(content: Content | undefined): boolean {
