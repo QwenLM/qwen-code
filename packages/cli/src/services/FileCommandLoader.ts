@@ -309,6 +309,12 @@ export class FileCommandLoader implements ICommandLoader {
     const validDef = validationResult.data;
     if (extensionRoot) {
       validDef.prompt = hydrateExtensionText(validDef.prompt, extensionRoot);
+      if (validDef.description !== undefined) {
+        validDef.description = hydrateExtensionText(
+          validDef.description,
+          extensionRoot,
+        );
+      }
     }
 
     // Use factory to create command
@@ -369,6 +375,21 @@ export class FileCommandLoader implements ICommandLoader {
     const validDef = validationResult.data;
     if (extensionRoot) {
       validDef.prompt = hydrateExtensionText(validDef.prompt, extensionRoot);
+      if (validDef.frontmatter) {
+        for (const key of [
+          'description',
+          'when_to_use',
+          'argument-hint',
+        ] as const) {
+          const value = validDef.frontmatter[key];
+          if (typeof value === 'string') {
+            validDef.frontmatter[key] = hydrateExtensionText(
+              value,
+              extensionRoot,
+            );
+          }
+        }
+      }
     }
 
     // Convert to CommandDefinition format

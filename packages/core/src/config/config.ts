@@ -3339,6 +3339,8 @@ export class Config {
     this.overrideExtensions = params.overrideExtensions;
     this.managedExtensionsDir = resolveManagedExtensionsDir(
       params.managedExtensionsDir,
+      undefined,
+      { alreadyResolved: true },
     );
     this.noBrowser = params.noBrowser ?? false;
     this.folderTrustFeature = params.folderTrustFeature ?? false;

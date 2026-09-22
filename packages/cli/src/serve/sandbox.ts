@@ -995,8 +995,14 @@ export async function start_sandbox(
   // allow access to host.docker.internal
   args.push('--add-host', 'host.docker.internal:host-gateway');
 
+  // Track every container-side mount destination so the managed root mount
+  // below can skip a destination that is already covered: the daemon rejects
+  // two --volume flags with one destination.
+  const mountedDestinations = new Set<string>();
+
   // mount current directory as working directory in sandbox (set via --workdir)
   args.push('--volume', `${workdir}:${containerWorkdir}`);
+  mountedDestinations.add(containerWorkdir);
 
   // Mount user settings at /home/node/.qwen and at the canonical host path
   // used by QWEN_HOME, unless that host path is already covered by a broader
@@ -1030,6 +1036,7 @@ export async function start_sandbox(
     '--volume',
     `${userSettingsDirRealPath}:${userSettingsDirInSandbox}`,
   );
+  mountedDestinations.add(userSettingsDirInSandbox);
   if (
     (!userSettingsCoveredByRuntime || runtimeSameAsUserSettings) &&
     userSettingsDirInSandbox !== userSettingsDirContainerPath
@@ -1038,6 +1045,7 @@ export async function start_sandbox(
       '--volume',
       `${userSettingsDirRealPath}:${userSettingsDirContainerPath}`,
     );
+    mountedDestinations.add(userSettingsDirContainerPath);
   }
 
   // Pass QWEN_HOME so the sandboxed CLI resolves the global qwen dir to the
@@ -1053,49 +1061,34 @@ export async function start_sandbox(
       '--volume',
       `${runtimeBaseDirRealPath}:${runtimeBaseDirContainerPath}`,
     );
+    mountedDestinations.add(runtimeBaseDirContainerPath);
   }
   if (!runtimeSameAsUserSettings) {
     args.push('--env', `QWEN_RUNTIME_DIR=${runtimeBaseDirContainerPath}`);
   }
 
   // mount os.tmpdir() as os.tmpdir() inside container
-  args.push('--volume', `${os.tmpdir()}:${getContainerPath(os.tmpdir())}`);
+  const containerTmpdir = getContainerPath(os.tmpdir());
+  args.push('--volume', `${os.tmpdir()}:${containerTmpdir}`);
+  mountedDestinations.add(containerTmpdir);
 
   // mount gcloud config directory if it exists
   const gcloudConfigDir = path.join(os.homedir(), '.config', 'gcloud');
   if (fs.existsSync(gcloudConfigDir)) {
-    args.push(
-      '--volume',
-      `${gcloudConfigDir}:${getContainerPath(gcloudConfigDir)}:ro`,
-    );
+    const containerGcloudConfigDir = getContainerPath(gcloudConfigDir);
+    args.push('--volume', `${gcloudConfigDir}:${containerGcloudConfigDir}:ro`);
+    mountedDestinations.add(containerGcloudConfigDir);
   }
 
   // mount ADC file if GOOGLE_APPLICATION_CREDENTIALS is set
   if (process.env['GOOGLE_APPLICATION_CREDENTIALS']) {
     const adcFile = process.env['GOOGLE_APPLICATION_CREDENTIALS'];
     if (fs.existsSync(adcFile)) {
-      args.push('--volume', `${adcFile}:${getContainerPath(adcFile)}:ro`);
-      args.push(
-        '--env',
-        `GOOGLE_APPLICATION_CREDENTIALS=${getContainerPath(adcFile)}`,
-      );
+      const containerAdcFile = getContainerPath(adcFile);
+      args.push('--volume', `${adcFile}:${containerAdcFile}:ro`);
+      mountedDestinations.add(containerAdcFile);
+      args.push('--env', `GOOGLE_APPLICATION_CREDENTIALS=${containerAdcFile}`);
     }
-  }
-
-  // Mount the deployment-managed extension root read-only and point the
-  // forwarded flag at the container path: the child re-validates it at
-  // argv-parse time, and no default mount covers an out-of-workspace root.
-  const managedExtensionsDir = cliConfig?.getManagedExtensionsDir();
-  if (managedExtensionsDir) {
-    const containerManagedDir = getContainerPath(managedExtensionsDir);
-    args.push('--volume', `${managedExtensionsDir}:${containerManagedDir}:ro`);
-    cliArgs = cliArgs.map((arg, index, argv) => {
-      if (arg.startsWith('--managed-extensions='))
-        return `--managed-extensions=${containerManagedDir}`;
-      if (index > 0 && argv[index - 1] === '--managed-extensions')
-        return containerManagedDir;
-      return arg;
-    });
   }
 
   // mount paths listed in SANDBOX_MOUNTS
@@ -1119,8 +1112,33 @@ export async function start_sandbox(
         }
         writeStderrLine(`SANDBOX_MOUNTS: ${from} -> ${to} (${opts})`);
         args.push('--volume', mount);
+        mountedDestinations.add(to);
       }
     }
+  }
+
+  // Mount the deployment-managed extension root read-only and point the
+  // forwarded flag at the container path: the child re-validates it at
+  // argv-parse time, and no default mount covers an out-of-workspace root.
+  // A root that coincides with a mount pushed above (the workspace, the
+  // tmpdir, a SANDBOX_MOUNTS entry) keeps that mount instead of failing the
+  // container start with a duplicate destination.
+  const managedExtensionsDir = cliConfig?.getManagedExtensionsDir();
+  if (managedExtensionsDir) {
+    const containerManagedDir = getContainerPath(managedExtensionsDir);
+    if (!mountedDestinations.has(containerManagedDir)) {
+      args.push(
+        '--volume',
+        `${managedExtensionsDir}:${containerManagedDir}:ro`,
+      );
+    }
+    cliArgs = cliArgs.map((arg, index, argv) => {
+      if (arg.startsWith('--managed-extensions='))
+        return `--managed-extensions=${containerManagedDir}`;
+      if (index > 0 && argv[index - 1] === '--managed-extensions')
+        return containerManagedDir;
+      return arg;
+    });
   }
 
   // expose env-specified ports on the sandbox

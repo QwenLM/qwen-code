@@ -16,6 +16,7 @@ import {
   type ExtensionManagerOptions,
 } from './extensionManager.js';
 import { ExtensionStore } from './extension-store.js';
+import { Config } from '../config/config.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import type { SubagentConfig, SubagentError } from '../subagents/types.js';
 import { resolveManagedExtensionsDir } from './managed-extension-dir.js';
@@ -112,7 +113,7 @@ describe('managed extensions', () => {
     });
     fs.writeFileSync(
       path.join(extensionPath, 'skills', 'test', 'SKILL.md'),
-      '---\nname: test\ndescription: Test skill\n---\nRead ${extensionPath}/data and ${CLAUDE_PLUGIN_ROOT}/bin.',
+      '---\nname: test\ndescription: Inspect ${CLAUDE_PLUGIN_ROOT}/data\n---\nRead ${extensionPath}/data and ${CLAUDE_PLUGIN_ROOT}/bin.',
     );
     fs.writeFileSync(path.join(extensionPath, 'QWEN.md'), 'Extension context');
     const before = inventory(managed);
@@ -137,6 +138,9 @@ describe('managed extensions', () => {
       expect(extension.contextFiles).toEqual([
         path.join(extensionPath, 'QWEN.md'),
       ]);
+      expect(extension.skills?.[0].description).toBe(
+        `Inspect ${extensionPath}/data`,
+      );
       expect(extension.skills?.[0].body).toBe(
         `Read ${extensionPath}/data and ${extensionPath}/bin.`,
       );
@@ -622,6 +626,42 @@ describe('managed extensions', () => {
     expect(subject.getLoadedExtensions()).toEqual([]);
   });
 
+  it('constructs without re-validating after the root disappears', async () => {
+    writeExtension(managed, 'valid');
+    const first = manager();
+    await first.refreshCache();
+    expect(
+      first.getLoadedExtensions().map((extension) => extension.name),
+    ).toEqual(['valid']);
+    fs.rmSync(managed, { recursive: true });
+    // The fail-hard validation lives at the process boundary. A second
+    // manager (or Config) constructed in a running process after the root
+    // disappeared must degrade to an empty managed set instead of throwing.
+    const second = manager();
+    await second.refreshCache();
+    expect(second.getLoadedExtensions()).toEqual([]);
+    const config = new Config({
+      sessionId: 'managed-root-vanished',
+      model: '',
+      targetDir: workspace,
+      cwd: workspace,
+      debugMode: false,
+      chatRecording: false,
+      interactive: false,
+      trustedFolder: true,
+      managedExtensionsDir: managed,
+      telemetry: { enabled: false },
+      disableAllHooks: true,
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: false,
+    });
+    try {
+      expect(config.getManagedExtensionsDir()).toBe(managed);
+    } finally {
+      await config.shutdown();
+    }
+  });
+
   it('rechecks managed ownership when committing a previously prepared user install', async () => {
     const replacement = writeExtension(temporary, 'replacement', {
       name: 'portable',
@@ -769,18 +809,31 @@ describe('managed extensions', () => {
       resolveManagedExtensionsDir(['first', 'second'] as unknown as string),
     ).toThrow('one non-empty directory');
     expect(() =>
-      manager({ managedExtensionsDir: path.join(temporary, 'missing') }),
+      resolveManagedExtensionsDir(path.join(temporary, 'missing')),
     ).toThrow(/Invalid --managed-extensions.*missing/);
+    const missing = manager({
+      managedExtensionsDir: path.join(temporary, 'missing'),
+    });
+    await missing.refreshCache();
+    expect(missing.getLoadedExtensions()).toEqual([]);
     const file = path.join(temporary, 'file');
     fs.writeFileSync(file, 'not a directory');
-    expect(() => manager({ managedExtensionsDir: file })).toThrow(
+    expect(() => resolveManagedExtensionsDir(file)).toThrow(
       /Invalid --managed-extensions.*not a directory/,
     );
+    const fileRoot = manager({ managedExtensionsDir: file });
+    await fileRoot.refreshCache();
+    expect(fileRoot.getLoadedExtensions()).toEqual([]);
     await manager().refreshCache();
     if (process.platform !== 'win32' && process.getuid?.() !== 0) {
       fs.chmodSync(managed, 0);
       try {
-        expect(() => manager()).toThrow(/Invalid --managed-extensions.*EACCES/);
+        expect(() => resolveManagedExtensionsDir(managed)).toThrow(
+          /Invalid --managed-extensions.*EACCES/,
+        );
+        const unreadable = manager();
+        await unreadable.refreshCache();
+        expect(unreadable.getLoadedExtensions()).toEqual([]);
       } finally {
         fs.chmodSync(managed, 0o755);
       }

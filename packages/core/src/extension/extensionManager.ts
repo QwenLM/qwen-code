@@ -561,6 +561,8 @@ export class ExtensionManager {
     this.configDir = this.extensionStore.extensionsDir;
     this.managedExtensionsDir = resolveManagedExtensionsDir(
       options.managedExtensionsDir,
+      undefined,
+      { alreadyResolved: true },
     );
     assertManagedExtensionStateSeparation(this.managedExtensionsDir, [
       this.configDir,
@@ -2018,9 +2020,41 @@ export class ExtensionManager {
       }
 
       if (source === 'managed') {
+        // A managed package is never rewritten on disk, so hydrate every
+        // frontmatter-derived string the way the install-time rewrite would
+        // have. filePath and skillRoot are excluded on purpose: they are
+        // real on-disk locations, and a directory may legitimately be named
+        // "${extensionPath}".
         extension.skills = extension.skills?.map((skill) => ({
           ...skill,
+          description: hydrateExtensionText(
+            skill.description,
+            effectiveExtensionPath,
+          ),
           body: hydrateExtensionText(skill.body, effectiveExtensionPath),
+          ...(skill.whenToUse !== undefined
+            ? {
+                whenToUse: hydrateExtensionText(
+                  skill.whenToUse,
+                  effectiveExtensionPath,
+                ),
+              }
+            : {}),
+          ...(skill.argumentHint !== undefined
+            ? {
+                argumentHint: hydrateExtensionText(
+                  skill.argumentHint,
+                  effectiveExtensionPath,
+                ),
+              }
+            : {}),
+          ...(skill.paths !== undefined
+            ? {
+                paths: skill.paths.map((pattern) =>
+                  hydrateExtensionText(pattern, effectiveExtensionPath),
+                ),
+              }
+            : {}),
         }));
       }
 

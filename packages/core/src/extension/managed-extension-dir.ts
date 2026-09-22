@@ -6,10 +6,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('Extension:managedDir');
 
 export function resolveManagedExtensionsDir(
   value: string | undefined,
   cwd?: string,
+  options?: { alreadyResolved?: boolean },
 ): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || value.length === 0) {
@@ -18,6 +22,27 @@ export function resolveManagedExtensionsDir(
     );
   }
   const directory = path.resolve(cwd ?? '', value);
+  // A value that crossed the process boundary (argv coercion, serve option
+  // setup) was already validated there. Re-throwing from a later Config or
+  // ExtensionManager construction would hard-fail every new session and
+  // extension route of a healthy process when a deployment-owned root
+  // flickers, so construction degrades to "no managed packages" instead —
+  // loadExtensionsFromExtensionsDir lists an unreadable root as empty.
+  if (options?.alreadyResolved) {
+    try {
+      if (!fs.statSync(directory).isDirectory()) {
+        throw new Error('not a directory');
+      }
+      fs.accessSync(directory, fs.constants.R_OK | fs.constants.X_OK);
+    } catch (error) {
+      debugLogger.warn(
+        `Managed extensions root "${directory}" is unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }. Continuing without managed packages.`,
+      );
+    }
+    return directory;
+  }
   try {
     if (!fs.statSync(directory).isDirectory()) {
       throw new Error('not a directory');

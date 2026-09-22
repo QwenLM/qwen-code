@@ -106,8 +106,16 @@ describe('FileCommandLoader', () => {
 
   it('hydrates managed command paths and prompts without changing source files', async () => {
     const root = path.join(process.cwd(), 'managed-command');
-    const markdown = 'Use ${CLAUDE_PLUGIN_ROOT}/script and ${extensionPath}';
-    const source = 'prompt = "Use ${CLAUDE_PLUGIN_ROOT}/script"';
+    const markdown = [
+      '---',
+      'description: Deploy with ${CLAUDE_PLUGIN_ROOT}',
+      '---',
+      'Use ${CLAUDE_PLUGIN_ROOT}/script and ${extensionPath}',
+    ].join('\n');
+    const source = [
+      'prompt = "Use ${CLAUDE_PLUGIN_ROOT}/script"',
+      'description = "Deploy with ${CLAUDE_PLUGIN_ROOT}"',
+    ].join('\n');
     mock({
       [root]: {
         'qwen-extension.json': JSON.stringify({
@@ -127,11 +135,27 @@ describe('FileCommandLoader', () => {
     const commands = await new FileCommandLoader(config).loadCommands(signal);
     expect(commands).toHaveLength(2);
     for (const command of commands) {
+      expect(command.description).toBe(`[managed] Deploy with ${root}`);
       const result = await command.action?.(createMockCommandContext(), '');
       expect(result?.type).toBe('submit_prompt');
-      expect(JSON.stringify(result)).toContain(root);
-      expect(JSON.stringify(result)).not.toContain('${CLAUDE_PLUGIN_ROOT}');
-      expect(JSON.stringify(result)).not.toContain('${extensionPath}');
+      // Assert against the prompt text itself: JSON.stringify doubles every
+      // backslash, so a path assertion against the serialized result cannot
+      // pass on a Windows host.
+      const content =
+        (result as { content?: PromptPipelineContent } | undefined)?.content ??
+        [];
+      const text = content
+        .map((part) =>
+          typeof part === 'string'
+            ? part
+            : 'text' in part
+              ? (part.text ?? '')
+              : '',
+        )
+        .join('');
+      expect(text).toContain(root);
+      expect(text).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+      expect(text).not.toContain('${extensionPath}');
     }
     const fs = await import('node:fs/promises');
     expect(
