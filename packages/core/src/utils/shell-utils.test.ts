@@ -1576,19 +1576,43 @@ describe('resolveCommandPath', () => {
     });
   });
 
-  // Root cause: the probe ran in opts.cwd but its result string was validated
-  // and cached as-is, so a relative hit (PATH empty or `.` entry) was being
-  // resolved against the process cwd downstream -- probe-cwd and spawn-cwd
-  // disagreed on the file. Fix: absolutize the probe output against opts.cwd
-  // before accessSync; an absolute hit passes through unchanged.
-  it('absolutizes a relative probe hit against opts.cwd', () => {
-    mockPlatform.mockReturnValue('linux');
-    mockExecFileSync.mockReturnValueOnce('zzprobe_x\n');
-    mockAccessSync.mockImplementationOnce(() => undefined);
-    const probeCwd = path.resolve('/probe');
-    const expected = path.resolve(probeCwd, 'zzprobe_x');
-    const { path: hit } = resolveCommandPath('zzprobe_x', { cwd: probeCwd });
-    expect(hit).toBe(expected);
-    expect(mockAccessSync).toHaveBeenCalledWith(expected, expect.anything());
+  it('absolutizes a relative probe hit against opts.cwd and takes only the first win32 hit', async () => {
+    const originalPlatform = process.platform;
+    try {
+      const probeCwd = path.resolve('/probe');
+
+      mockPlatform.mockReturnValue('linux');
+      mockExecFileSync.mockReturnValueOnce('zzprobe_x\n');
+      mockAccessSync.mockImplementationOnce(() => undefined);
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      const expected = path.resolve(probeCwd, 'zzprobe_x');
+      const { path: hit } = resolveCommandPath('zzprobe_x', { cwd: probeCwd });
+      expect(hit).toBe(expected);
+      expect(mockAccessSync).toHaveBeenCalledWith(expected, expect.anything());
+
+      mockExecFileSync.mockReturnValueOnce(
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\nD:\\shims\\pwsh.exe\r\n',
+      );
+      mockAccessSync.mockImplementationOnce(() => undefined);
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+      });
+      const win = resolveCommandPath('pwsh', { cwd: probeCwd });
+      expect(win.error).toBeUndefined();
+      expect(win.path).toBe('C:\\Program Files\\PowerShell\\7\\pwsh.exe');
+      expect(mockAccessSync).toHaveBeenLastCalledWith(
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+        expect.anything(),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
   });
 });

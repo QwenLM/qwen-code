@@ -1032,7 +1032,7 @@ export class HookRunner {
         );
       } else {
         const error = result.error || new Error('Unknown error');
-        this.asyncRegistry.fail(hookId, error);
+        this.asyncRegistry.fail(hookId, error, result.output);
         debugLogger.warn(
           `Async hook failed: ${hookId} (${hookName}): ${error.message}`,
         );

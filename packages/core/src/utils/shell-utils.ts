@@ -2349,15 +2349,17 @@ export function resolveCommandPath(
           // Capture the finder's stderr so a miss does not leak into the user's session.
           stdio: ['ignore', 'pipe', 'pipe'],
           cwd: probeCwd,
-        }).trim();
+        });
       } catch {
         return { path: null, error: undefined };
       }
 
       if (!result) return { path: null, error: undefined };
-      const resolved = path.isAbsolute(result)
-        ? result
-        : path.resolve(probeCwd, result);
+      const first = result.split(/\r?\n/)[0]?.trim();
+      if (!first) return { path: null, error: undefined };
+      const resolved = path.isAbsolute(first)
+        ? first
+        : path.resolve(probeCwd, first);
       accessSync(resolved, fsConstants.X_OK);
       return { path: resolved, error: undefined };
     } else {
@@ -2372,19 +2374,17 @@ export function resolveCommandPath(
           // Capture the finder's stderr so a miss does not leak into the user's session.
           stdio: ['ignore', 'pipe', 'pipe'],
           cwd: probeCwd,
-        }).trim();
+        });
       } catch {
         return { path: null, error: undefined };
       }
 
       if (!result) return { path: null, error: undefined };
-      // Absolutize against the probe cwd: `command -v` prints a relative hit
-      // whenever PATH has an empty or `.` entry, and a same-named binary in
-      // the process cwd (a cloned repo, the workspace) would otherwise be
-      // validated and cached as the resolved interpreter.
-      const resolved = path.isAbsolute(result)
-        ? result
-        : path.resolve(probeCwd, result);
+      const first = result.split(/\r?\n/)[0]?.trim();
+      if (!first) return { path: null, error: undefined };
+      const resolved = path.isAbsolute(first)
+        ? first
+        : path.resolve(probeCwd, first);
       accessSync(resolved, fsConstants.X_OK);
       return { path: resolved, error: undefined };
     }

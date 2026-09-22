@@ -1559,5 +1559,45 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.decision).toBe('block');
       expect(result.finalOutput?.reason).toBe('gate says block');
     });
+
+    const nonGatingEvents: HookEventName[] = [
+      HookEventName.UserPromptSubmit,
+      HookEventName.UserPromptExpansion,
+      HookEventName.SessionStart,
+      HookEventName.SessionEnd,
+      HookEventName.SubagentStart,
+      HookEventName.MessageDisplay,
+      HookEventName.Notification,
+      HookEventName.InstructionsLoaded,
+    ];
+
+    it.each(nonGatingEvents)(
+      '%s on a blocking outcome with no payload leaves finalOutput untouched',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [blockingResult(eventName, undefined)],
+          eventName,
+        );
+        expect(result.finalOutput).toBeUndefined();
+      },
+    );
+
+    it.each(nonGatingEvents)(
+      '%s on a blocking outcome with a payload keeps the payload as-is',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [
+            blockingResult(eventName, {
+              systemMessage: 'a message only, no deny',
+            }),
+          ],
+          eventName,
+        );
+        expect(result.finalOutput?.decision).toBeUndefined();
+        expect(result.finalOutput?.systemMessage).toBe(
+          'a message only, no deny',
+        );
+      },
+    );
   });
 });

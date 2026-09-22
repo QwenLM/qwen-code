@@ -22,17 +22,84 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('HOOK_AGGREGATOR');
 
-/**
- * The two todo events gate on `finalOutput.decision === 'block'` and read
- * neither 'deny' nor `continue`, so a denial written for them has to use that
- * literal.
- */
-function isBlockLiteralEvent(eventName: HookEventName): boolean {
+const BLOCKING_REASON_FALLBACK = 'Hook exited with a blocking error';
+
+const STOP_REQUEST_BLOCKS: ReadonlySet<HookEventName> = new Set([
+  HookEventName.Stop,
+  HookEventName.SubagentStop,
+  HookEventName.PostToolBatch,
+  HookEventName.PreToolUse,
+]);
+
+function isAskingForApproval(
+  output: HookOutput,
+  eventName: HookEventName,
+): boolean {
+  if (eventName !== HookEventName.PreToolUse) return false;
   return (
-    eventName === HookEventName.TodoCreated ||
-    eventName === HookEventName.TodoCompleted
+    output.hookSpecificOutput?.['permissionDecision'] === 'ask' ||
+    output.decision === 'ask'
   );
 }
+
+function isStopRequestThatBlocks(
+  output: HookOutput,
+  eventName: HookEventName,
+): boolean {
+  if (output.continue !== false) return false;
+  if (!STOP_REQUEST_BLOCKS.has(eventName)) return false;
+  return !isAskingForApproval(output, eventName);
+}
+
+type DenyShapeFn = (output: HookOutput, reason: string) => HookOutput;
+
+const DENY_SHAPE: Partial<Record<HookEventName, DenyShapeFn>> = {
+  PermissionRequest: (output, reason) => {
+    const specific = { ...(output.hookSpecificOutput ?? {}) };
+    const previous = specific['decision'];
+    const decision =
+      previous && typeof previous === 'object' && !Array.isArray(previous)
+        ? { ...(previous as Record<string, unknown>) }
+        : {};
+    decision['behavior'] = 'deny';
+    decision['message'] = reason;
+    specific['decision'] = decision;
+    return {
+      ...output,
+      decision: 'deny',
+      reason,
+      hookSpecificOutput: specific,
+    };
+  },
+  PreToolUse: (output, reason) => {
+    const specific = { ...(output.hookSpecificOutput ?? {}) };
+    specific['permissionDecision'] = 'deny';
+    specific['permissionDecisionReason'] = reason;
+    return {
+      ...output,
+      decision: 'deny',
+      reason,
+      hookSpecificOutput: specific,
+    };
+  },
+  TodoCreated: (output, reason) => ({ ...output, decision: 'block', reason }),
+  TodoCompleted: (output, reason) => ({ ...output, decision: 'block', reason }),
+  Stop: (output, reason) => ({
+    ...output,
+    continue: false,
+    stopReason: reason,
+  }),
+  SubagentStop: (output, reason) => ({
+    ...output,
+    continue: false,
+    stopReason: reason,
+  }),
+  PostToolBatch: (output, reason) => ({
+    ...output,
+    continue: false,
+    stopReason: reason,
+  }),
+};
 
 /**
  * Aggregated result from multiple hook executions
@@ -116,65 +183,23 @@ export class HookAggregator {
     output: HookOutput | undefined,
     eventName: HookEventName,
   ): HookOutput | undefined {
-    if (output && this.blocksAction(output, eventName)) {
-      return output;
-    }
-
-    const denied: HookOutput = {
-      ...output,
-      decision: isBlockLiteralEvent(eventName) ? 'block' : 'deny',
-    };
-    const reason =
-      typeof denied.reason === 'string' && denied.reason
-        ? denied.reason
-        : 'Hook exited with a blocking error';
-    denied.reason = reason;
-
-    const forced = { ...denied.hookSpecificOutput };
-    if (eventName === HookEventName.PermissionRequest) {
-      const previous = forced['decision'];
-      const decision =
-        previous && typeof previous === 'object' && !Array.isArray(previous)
-          ? { ...(previous as Record<string, unknown>) }
-          : {};
-      decision['behavior'] = 'deny';
-      decision['message'] = reason;
-      forced['decision'] = decision;
-      denied.hookSpecificOutput = forced;
-    } else if ('permissionDecision' in forced) {
-      // PreToolUse reads these before the top-level pair.
-      forced['permissionDecision'] = 'deny';
-      forced['permissionDecisionReason'] = reason;
-      denied.hookSpecificOutput = forced;
-    }
-
-    return this.createSpecificHookOutput(denied, eventName);
-  }
-
-  private blocksAction(output: HookOutput, eventName: HookEventName): boolean {
-    const specific = output.hookSpecificOutput;
-    if (eventName === HookEventName.PermissionRequest) {
-      // Its consumer reads nothing else, so neither a top-level decision nor a
-      // stop request can stand in for a nested deny.
-      const decision = specific?.['decision'];
-      return (
-        !!decision &&
-        typeof decision === 'object' &&
-        (decision as { behavior?: unknown }).behavior === 'deny'
-      );
-    }
-    if (isBlockLiteralEvent(eventName)) {
-      return output.decision === 'block';
+    if (!output) {
+      const shape = DENY_SHAPE[eventName];
+      return shape ? shape({}, BLOCKING_REASON_FALLBACK) : undefined;
     }
     if (isBlockingHookOutput(eventName, output)) {
-      return true;
+      return output;
     }
-    // A stop request halts on its own, except where an ask prompts first and one
-    // approval runs what the hook exited 2 to block -- only PreToolUse reads asks.
-    const asks =
-      eventName === HookEventName.PreToolUse &&
-      (specific?.['permissionDecision'] === 'ask' || output.decision === 'ask');
-    return output.continue === false && !asks;
+    if (isStopRequestThatBlocks(output, eventName)) {
+      return output;
+    }
+    const shape = DENY_SHAPE[eventName];
+    if (!shape) return output;
+    const reason =
+      typeof output.reason === 'string' && output.reason
+        ? output.reason
+        : BLOCKING_REASON_FALLBACK;
+    return shape(output, reason);
   }
 
   /**
