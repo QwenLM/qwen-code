@@ -595,6 +595,34 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).toContain('newest');
   });
 
+  it('offers the way back when the newest page folds to nothing', async () => {
+    // A page can carry records that project to no rows at all — telemetry the
+    // fold drops, or updates this view does not keep — while still reporting
+    // history behind it. The button is the only way to that history, so it
+    // cannot be conditioned on the table having rows.
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page([], { hasMore: true, nextCursor: 'older-1' }),
+    );
+    const container = await render(loadPage);
+
+    expect(
+      container.querySelector('[data-testid="trajectory-load-older"]'),
+    ).not.toBeNull();
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('older');
+  });
+
   it('holds the older bar in place once the walk has reached the start', async () => {
     const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
       opts.cursor

@@ -514,6 +514,41 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       )}
 
       <div className={styles.tableWrap}>
+        {/* Outside the scrolled box on purpose: inside it, its height
+              would offset every virtual row from the coordinates the
+              virtualizer computes. It also stays mounted at a fixed height
+              once a walk has begun — the box below it is `flex: 1`, so a bar
+              that appeared, changed size or unmounted would move the rows by
+              its own height, which is the same displacement the prepend
+              correction exists to avoid.
+
+              Outside the row-count branch too: a page can project to no rows
+              at all while still reporting history behind it, and this button
+              is the only way to reach it. What the table holds does not
+              decide whether there is more to fetch. */}
+        {(hasOlder || loadingOlder || atCapacity || pageCount > 1) && (
+          <div className={styles.olderBar}>
+            {atCapacity ? (
+              <span className={styles.olderNotice}>
+                {t('trajectory.atCapacity')}
+              </span>
+            ) : !hasOlder && !loadingOlder ? (
+              <span className={styles.olderNotice}>
+                {t('trajectory.atStart')}
+              </span>
+            ) : (
+              <button
+                type="button"
+                className={styles.olderButton}
+                onClick={loadOlder}
+                disabled={loadingOlder || status === 'loading'}
+                data-testid="trajectory-load-older"
+              >
+                {loadingOlder ? t('common.loading') : t('trajectory.loadOlder')}
+              </button>
+            )}
+          </div>
+        )}
         {visualRows.length === 0 ? (
           // An error with nothing folded is already stated by the alert above;
           // repeating it here as a placeholder would say it twice.
@@ -523,92 +558,58 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
             </div>
           )
         ) : (
-          <>
-            {/* Outside the scrolled box on purpose: inside it, its height
-                would offset every virtual row from the coordinates the
-                virtualizer computes. It also stays mounted at a fixed height
-                once a walk has begun — the box below it is `flex: 1`, so a bar
-                that appeared, changed size or unmounted would move the rows by
-                its own height, which is the same displacement the prepend
-                correction exists to avoid. */}
-            {(hasOlder || loadingOlder || atCapacity || pageCount > 1) && (
-              <div className={styles.olderBar}>
-                {atCapacity ? (
-                  <span className={styles.olderNotice}>
-                    {t('trajectory.atCapacity')}
-                  </span>
-                ) : !hasOlder && !loadingOlder ? (
-                  <span className={styles.olderNotice}>
-                    {t('trajectory.atStart')}
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    className={styles.olderButton}
-                    onClick={loadOlder}
-                    disabled={loadingOlder || status === 'loading'}
-                    data-testid="trajectory-load-older"
-                  >
-                    {loadingOlder
-                      ? t('common.loading')
-                      : t('trajectory.loadOlder')}
-                  </button>
-                )}
-              </div>
-            )}
+          <div
+            ref={scrollRef}
+            className={styles.scroll}
+            role="grid"
+            tabIndex={0}
+            aria-label={t('trajectory.title')}
+            aria-rowcount={visualRows.length}
+            aria-activedescendant={
+              selectedIndex >= 0 ? rowDomId(selectedIndex) : undefined
+            }
+            onKeyDown={handleKeyDown}
+            onScroll={(event) => {
+              scrollTopRef.current = event.currentTarget.scrollTop;
+            }}
+            data-testid="trajectory-rows"
+          >
             <div
-              ref={scrollRef}
-              className={styles.scroll}
-              role="grid"
-              tabIndex={0}
-              aria-label={t('trajectory.title')}
-              aria-rowcount={visualRows.length}
-              aria-activedescendant={
-                selectedIndex >= 0 ? rowDomId(selectedIndex) : undefined
-              }
-              onKeyDown={handleKeyDown}
-              onScroll={(event) => {
-                scrollTopRef.current = event.currentTarget.scrollTop;
-              }}
-              data-testid="trajectory-rows"
+              className={styles.virtualBody}
+              style={{ height: `${virtualizer.getTotalSize()}px` }}
             >
-              <div
-                className={styles.virtualBody}
-                style={{ height: `${virtualizer.getTotalSize()}px` }}
-              >
-                {virtualizer.getVirtualItems().map((item) => {
-                  const entry = visualRows[item.index]!;
-                  return (
-                    <div
-                      key={item.key}
-                      id={rowDomId(item.index)}
-                      className={styles.virtualRow}
-                      style={{
-                        height: `${ROW_HEIGHT}px`,
-                        transform: `translateY(${item.start}px)`,
-                      }}
-                      role="row"
-                      aria-rowindex={item.index + 1}
-                    >
-                      {entry.kind === 'turn' ? (
-                        <TurnHeaderRow
-                          turn={entry.turn}
-                          selected={entry.key === selectedKey}
-                          onSelect={() => selectRow(entry.key)}
-                        />
-                      ) : (
-                        <RecordRow
-                          row={entry.row}
-                          selected={entry.key === selectedKey}
-                          onSelect={() => selectRow(entry.key)}
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+              {virtualizer.getVirtualItems().map((item) => {
+                const entry = visualRows[item.index]!;
+                return (
+                  <div
+                    key={item.key}
+                    id={rowDomId(item.index)}
+                    className={styles.virtualRow}
+                    style={{
+                      height: `${ROW_HEIGHT}px`,
+                      transform: `translateY(${item.start}px)`,
+                    }}
+                    role="row"
+                    aria-rowindex={item.index + 1}
+                  >
+                    {entry.kind === 'turn' ? (
+                      <TurnHeaderRow
+                        turn={entry.turn}
+                        selected={entry.key === selectedKey}
+                        onSelect={() => selectRow(entry.key)}
+                      />
+                    ) : (
+                      <RecordRow
+                        row={entry.row}
+                        selected={entry.key === selectedKey}
+                        onSelect={() => selectRow(entry.key)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          </>
+          </div>
         )}
       </div>
     </div>
