@@ -32,12 +32,22 @@ const MIN_EDGE = 480;
  * Highest first. Pixels buy far more legibility than JPEG quality does, so a
  * frame that does not fit at the top gives quality away to keep its size.
  *
- * Measured on a glyph-packed 1080p editor and terminal, every candidate filling
- * the same 190 KiB: at 871x490 q=0.75 two vision models misread the stack trace
- * and one invented a symbol; at 959x539 q=0.90 both still got the line numbers
- * wrong; at 1494x840 q=0.45 both transcribed every character correctly. Below
- * that quality the artefacts start costing what the extra pixels win, which is
- * where this ladder stops.
+ * Measured on a glyph-packed 1080p editor and terminal whose error box carries
+ * a verification code and a `file:line:column` found nowhere else on screen,
+ * transcribed by two vision models. Byte counts are what those frames actually
+ * encoded to, which is the point: the decisive pair costs the same.
+ *
+ *   871x490  q=0.75  16.5 KiB  both models invented characters
+ *   959x539  q=0.90  31.7 KiB  both misread the code and the line number
+ *   1494x840 q=0.45  31.6 KiB  one model exact, the other off by one digit
+ *   1674x941 q=0.35  33.2 KiB  both exact
+ *
+ * At 959x539 and 1494x840 — the same bytes to a tenth of a KiB — the frame with
+ * more pixels and less quality is the readable one. So resolution is what
+ * carries small glyphs and quality is what can be spent.
+ *
+ * The ladder stops at 0.45 because nothing below it has been needed to fit, not
+ * because lower is worse: 0.35 read no worse here. It is a conservative floor.
  */
 const QUALITY_STEPS = [0.9, 0.75, 0.6, 0.45] as const;
 

@@ -177,6 +177,16 @@ describe('startScreenShare', () => {
     const last = attempts.at(-1)!;
     expect(last.bytes).toBeLessThanOrEqual(MAX_IMAGE_BYTES);
     expect(frame.width).toBe(last.width);
+    // The payload itself, not just the encode log: without this, delivering
+    // the wrong attempt's bytes — or none — passes. The fake blob is a zero
+    // fill, so base64 round-trips to exactly the logged length.
+    expect(atob(frame.image).length).toBe(last.bytes);
+    // Three encodes is what the proportional aim costs here (q0.9 native,
+    // q0.45 native, q0.45 aimed); a fixed shrink step would need four. Without
+    // this the aim is indistinguishable from `scale *= 0.95`, which on a dense
+    // 4K share would exhaust the encode budget and refuse a frame the aim
+    // delivers.
+    expect(attempts).toHaveLength(3);
     // The budget is there to be used: measured against real encoders, a frame
     // delivered at half the limit loses stack-trace detail that the same bytes
     // at more pixels keep.
