@@ -93,10 +93,29 @@ jobs:
           node-version-file: '.nvmrc'
           package-manager-cache: false
 
-      # Bounded retry, same recipe as e2e.yml: the v0.24.4 release (run
-      # 35746011401, #12480) lost its macos-15-intel leg here to a registry
-      # connect timeout while corepack fetched pnpm itself, and a plain re-run
-      # passed. A deterministically broken tree still fails all three attempts.
+      # The v0.24.4 release (run 35746011401, #12480) lost its macos-15-intel
+      # leg to a registry connect timeout while corepack downloaded pnpm
+      # itself, and a plain re-run passed. Fetch pnpm on its own, with the
+      # bounded retry e2e.yml uses, so the store cache below (which runs
+      # `corepack pnpm store path`) and the install find it already on disk.
+      # The store cache only covers dependencies: it saves most registry
+      # traffic on a hit, but a miss still downloads, so the install keeps
+      # its own retry. A deterministically broken tree fails all attempts.
+      - name: 'Fetch pnpm'
+        shell: 'bash'
+        run: |-
+          for attempt in 1 2 3; do
+            corepack install && break
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            echo "::warning::corepack install failed (attempt ${attempt}), retrying."
+            sleep $((attempt * 15))
+          done
+
+      - name: 'Cache pnpm store'
+        uses: './.github/actions/pnpm-store-cache'
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
@@ -263,7 +282,22 @@ jobs:
           node-version-file: '.nvmrc'
           package-manager-cache: false
 
-      # Same bounded retry as the prepare job's install above (#12480).
+      # Same pnpm fetch, store cache and retries as the prepare job (#12480).
+      - name: 'Fetch pnpm'
+        shell: 'bash'
+        run: |-
+          for attempt in 1 2 3; do
+            corepack install && break
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            echo "::warning::corepack install failed (attempt ${attempt}), retrying."
+            sleep $((attempt * 15))
+          done
+
+      - name: 'Cache pnpm store'
+        uses: './.github/actions/pnpm-store-cache'
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
