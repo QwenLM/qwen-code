@@ -595,6 +595,40 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).toContain('newest');
   });
 
+  it('holds the older bar in place once the walk has reached the start', async () => {
+    const loadPage = vi.fn(async (opts: { cursor?: string; limit: number }) =>
+      opts.cursor
+        ? page([userText('older', 'rec-0')])
+        : page([userText('newest', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'older-1',
+          }),
+    );
+    const container = await render(loadPage);
+    const bar = container.querySelector('[class*="olderBar"]');
+    expect(bar).not.toBeNull();
+
+    await act(async () =>
+      (
+        container.querySelector(
+          '[data-testid="trajectory-load-older"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+
+    // The rows below the bar are `flex: 1`, so unmounting it when the last
+    // page lands would grow them upward by its height and move the row the
+    // reader is on — the same displacement paging corrects for. The button
+    // gives way to a notice; the bar itself stays.
+    const after = container.querySelector('[class*="olderBar"]');
+    expect(after).not.toBeNull();
+    expect(after).toBe(bar);
+    expect(
+      container.querySelector('[data-testid="trajectory-load-older"]'),
+    ).toBeNull();
+    expect(after?.textContent).toContain('start of the session');
+  });
+
   it('keeps the reader on the same row when an older page lands', async () => {
     const older = [
       userText('older one', 'rec-0'),

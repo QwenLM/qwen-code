@@ -17,11 +17,13 @@ import type { Trajectory } from './types';
  */
 export const TRAJECTORY_PAGE_SIZE = 250;
 /**
- * Pages held at once. The window is re-projected whole on every change, and
- * each page is a full replay of its records, so the product of these two is
- * the ceiling on both the retained bytes and the per-change work. Asking for
- * more per read and holding fewer reads keeps that product where it was while
- * spending fewer round trips to walk the same distance back.
+ * Pages held at once. The window is re-projected whole on every change and
+ * each page is a full replay of its records, so this bounds both the retained
+ * bytes and the per-change work. A backward page can exceed what it was asked
+ * for — the daemon extends it to keep turns and tool pairs whole, up to
+ * `3 * limit` records and its own 4 MB ceiling — so the worst case held here
+ * is nearer 3000 records than 1000. Asking for more per read and holding fewer
+ * reads spends fewer round trips to walk the same distance back.
  */
 export const TRAJECTORY_MAX_PAGES = 4;
 
@@ -95,7 +97,13 @@ interface WindowState {
   hasOlder: boolean;
   status: TrajectoryWindow['status'];
   error?: TrajectoryWindowFailure;
-  /** Which read produced `error`, so a retry can repeat that one. */
+  /**
+   * Which read produced `error`, so a retry can repeat that one. Repeating is
+   * right for a transient read, which is what fails in practice; a walk whose
+   * snapshot the daemon has since invalidated answers the same way every time,
+   * and the header's refresh — which rebuilds from the newest page — is the
+   * way out of that one.
+   */
   errorFrom?: 'newest' | 'older';
   loadingOlder: boolean;
 }

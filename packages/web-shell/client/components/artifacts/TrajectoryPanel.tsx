@@ -43,8 +43,6 @@ export interface TrajectoryPanelProps {
    * tab is waiting to be rewired, which renders as the loading state.
    */
   loadPage?: TrajectoryPageLoader;
-  /** Test seam for the window sizes; production uses the hook's defaults. */
-  windowOptions?: { pageSize?: number; maxPages?: number };
 }
 
 type VisualRow =
@@ -263,10 +261,7 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
   );
 }
 
-export function TrajectoryPanel({
-  loadPage,
-  windowOptions,
-}: TrajectoryPanelProps) {
+export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const { t } = useI18n();
   const {
     trajectory,
@@ -279,7 +274,7 @@ export function TrajectoryPanel({
     loadOlder,
     refresh,
     retry,
-  } = useTrajectoryWindow(loadPage, windowOptions ?? {});
+  } = useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -531,12 +526,20 @@ export function TrajectoryPanel({
           <>
             {/* Outside the scrolled box on purpose: inside it, its height
                 would offset every virtual row from the coordinates the
-                virtualizer computes. */}
-            {(hasOlder || loadingOlder || atCapacity) && (
+                virtualizer computes. It also stays mounted at a fixed height
+                once a walk has begun — the box below it is `flex: 1`, so a bar
+                that appeared, changed size or unmounted would move the rows by
+                its own height, which is the same displacement the prepend
+                correction exists to avoid. */}
+            {(hasOlder || loadingOlder || atCapacity || pageCount > 1) && (
               <div className={styles.olderBar}>
                 {atCapacity ? (
                   <span className={styles.olderNotice}>
                     {t('trajectory.atCapacity')}
+                  </span>
+                ) : !hasOlder && !loadingOlder ? (
+                  <span className={styles.olderNotice}>
+                    {t('trajectory.atStart')}
                   </span>
                 ) : (
                   <button

@@ -3010,6 +3010,7 @@ const EN: Messages = {
   'trajectory.loadOlder': 'Load earlier records',
   'trajectory.atCapacity':
     'Earlier records are beyond the window this panel keeps.',
+  'trajectory.atStart': 'This is the start of the session.',
   'trajectory.loadFailed': (v) =>
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
@@ -6800,6 +6801,7 @@ const ZH: Messages = {
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
   'trajectory.loadOlder': '加载更早的记录',
   'trajectory.atCapacity': '更早的记录超出了本面板保留的范围。',
+  'trajectory.atStart': '这是会话的开头。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.totals': (v) =>

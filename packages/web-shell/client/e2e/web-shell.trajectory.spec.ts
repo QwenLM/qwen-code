@@ -19,7 +19,18 @@ import {
  * so every assertion about scrolling needs rows that are not all mounted.
  */
 const TURNS = 40;
+const OLDER_TURNS = 5;
 const ROWS_PER_TURN = 5;
+/**
+ * The newest page starts after the older one ends. Record and call ids carry
+ * identity, so two pages numbered from 1 would describe the same records twice
+ * and the fold would rightly merge them — the walk has to be one continuous
+ * session, not two copies of its beginning.
+ */
+const NEWEST_FIRST_TURN = OLDER_TURNS + 1;
+const ANCHOR_TURN = OLDER_TURNS + TURNS - 1;
+/** The newest page's last turn, whose row the table opens on. */
+const LAST_TURN = OLDER_TURNS + TURNS;
 const OLDER_CURSOR = 'older-page-1';
 
 function sessionUpdate(update: Record<string, unknown>): DaemonEvent {
@@ -42,9 +53,9 @@ function recordMeta(recordId: string): Record<string, unknown> {
  * a request timing frame, an answer, and a tool call whose own frame carries
  * its duration.
  */
-function transcriptEvents(turns: number): DaemonEvent[] {
+function transcriptEvents(turns: number, firstTurn = 1): DaemonEvent[] {
   const events: DaemonEvent[] = [];
-  for (let turn = 1; turn <= turns; turn += 1) {
+  for (let turn = firstTurn; turn < firstTurn + turns; turn += 1) {
     const callId = `call_${String(turn).padStart(4, '0')}`;
     events.push(
       sessionUpdate({
@@ -116,7 +127,7 @@ async function openTrajectory(
   const scenario = createWebShellDaemonScenario({
     workspaceCwd: '/tmp/qwen-web-shell-e2e',
     transcriptPage: {
-      events: transcriptEvents(TURNS),
+      events: transcriptEvents(TURNS, NEWEST_FIRST_TURN),
       ...(options.older
         ? { hasMore: true, nextCursor: OLDER_CURSOR, older: options.older }
         : {}),
@@ -175,7 +186,7 @@ test.describe('trajectory panel', () => {
       .last();
     await expect(lastRequest).toContainText('qwen3.8-max');
     await expect(lastRequest).toContainText(
-      `${((1000 + TURNS) / 1000).toFixed(1)}s`,
+      `${((1000 + LAST_TURN) / 1000).toFixed(1)}s`,
     );
     await expect(
       page.locator('[data-testid="trajectory-row-tool"]').last(),
@@ -265,14 +276,14 @@ test.describe('trajectory panel', () => {
     const { grid } = await openTrajectory(
       page,
       String(testInfo.project.use.baseURL),
-      { older: { [OLDER_CURSOR]: { events: transcriptEvents(5) } } },
+      { older: { [OLDER_CURSOR]: { events: transcriptEvents(OLDER_TURNS) } } },
     );
 
     // Anchored on a row the reader can see, found by its text: an older page
     // renumbers every row behind it, so the index is not an identity.
     const anchor = page
       .locator('[data-testid="trajectory-rows"] [role="row"]')
-      .filter({ hasText: `Prompt number ${TURNS - 1}` });
+      .filter({ hasText: `Prompt number ${ANCHOR_TURN}` });
     await expect(anchor).toBeVisible();
     const before = await anchor.boundingBox();
     expect(before).not.toBeNull();
@@ -280,7 +291,7 @@ test.describe('trajectory panel', () => {
     await page.getByTestId('trajectory-load-older').click();
     await expect(grid).toHaveAttribute(
       'aria-rowcount',
-      String((TURNS + 5) * ROWS_PER_TURN),
+      String((TURNS + OLDER_TURNS) * ROWS_PER_TURN),
     );
 
     // The rows above grew by a known amount, so the row the reader was on has

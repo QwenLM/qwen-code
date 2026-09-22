@@ -125,7 +125,11 @@
 
 .olderBar {
   display: flex;
+  align-items: center;
   justify-content: center;
+  /* Constant whatever it holds: the rows below are `flex: 1`, so a bar that
+     changed height when its button became a notice would move them. */
+  min-height: 31px;
   padding: 4px 0 6px;
 }
 
