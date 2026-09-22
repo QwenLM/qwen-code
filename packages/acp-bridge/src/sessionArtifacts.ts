@@ -785,10 +785,29 @@ export class SessionArtifactStore {
             warnings,
             options.workspaceAccess === 'metadata-only',
           );
+          // Legacy tool-produced `published + file://` marker artifacts fail
+          // the trust check in normalizeRestoredMarkerArtifact; the
+          // helper pushes a `skipped marker artifact` warning. Strip that
+          // specific warning so the cascade (completeness check, restore
+          // rollback, snapshot reclamation block) doesn't fire.
+          if (
+            !markerArtifact &&
+            artifact.storage === 'published' &&
+            typeof artifact.url === 'string' &&
+            isFileArtifactUrl(artifact.url) &&
+            getWebPreviewSnapshotId(artifact) === undefined &&
+            artifact.source === 'tool' &&
+            artifact.toolName === 'artifact' &&
+            warnings.at(-1)?.startsWith('skipped marker artifact ') &&
+            warnings.at(-1)?.includes('url must use http or https')
+          ) {
+            warnings.pop();
+          }
           if (markerArtifact)
             this.markerArtifacts.set(artifact.id, markerArtifact);
         }
       }
+      let legacyPublishedFileCount = 0;
       for (const artifact of snapshot?.artifacts ?? []) {
         try {
           const input = persistedArtifactToInput(artifact);
@@ -873,6 +892,30 @@ export class SessionArtifactStore {
           this.artifacts.set(stored.id, stored);
           restoredCount++;
         } catch (error) {
+          // Drop legacy tool-produced `published + file:// + restorable`
+          // records quietly: they were written before write-time coercion,
+          // restore-time trust rejects them, and pushing `skipped …`
+          // would (a) trip `isArtifactSnapshotCompletenessWarning`,
+          // (b) count toward the `restoredCount === 0` rollback, and
+          // (c) block snapshot reclamation. The full
+          // `getWebPreviewSnapshotId` preconditions (source='tool',
+          // toolName='artifact') are the same shape a legitimate
+          // artifact-tool emit needs to satisfy; tampered records
+          // whose `toolName`/`source` don't match still flow through
+          // the trust check and produce a `skipped ` warning.
+          const isLegacyFileArtifact =
+            error instanceof Error &&
+            error.message === 'url must use http or https' &&
+            artifact.storage === 'published' &&
+            typeof artifact.url === 'string' &&
+            isFileArtifactUrl(artifact.url) &&
+            getWebPreviewSnapshotId(artifact) === undefined &&
+            artifact.source === 'tool' &&
+            artifact.toolName === 'artifact';
+          if (isLegacyFileArtifact) {
+            legacyPublishedFileCount++;
+            continue;
+          }
           warnings.push(
             `skipped artifact restore: ${
               error instanceof Error ? error.message : String(error)
@@ -880,7 +923,12 @@ export class SessionArtifactStore {
           );
         }
       }
-      if (snapshot.artifacts.length > 0 && restoredCount === 0) {
+      if (
+        snapshot.artifacts.length > legacyPublishedFileCount &&
+        restoredCount === 0
+      ) {
+        // At least one snapshot record wasn't a legacy drop — a real
+        // restore failure. Roll back to preserve live state.
         this.restoreState(previousState);
         const rollbackWarnings = [
           ...baselineWarnings,
@@ -888,6 +936,19 @@ export class SessionArtifactStore {
         ];
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
+      }
+      if (
+        snapshot.artifacts.length > 0 &&
+        legacyPublishedFileCount > 0 &&
+        restoredCount === 0
+      ) {
+        // Every snapshot record was a legacy published file:// drop — no
+        // real restore was attempted. Preserve previous state silently
+        // (no `RESTORE_FAILED` warning: those legacy records were
+        // expected and were already journaled before write-time
+        // coercion landed).
+        this.restoreState(previousState);
+        return [...baselineWarnings];
       }
       if (
         previousState.artifacts.size > 0 &&
@@ -1678,9 +1739,32 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
 
-    const retention = normalizeRetention(input.retention, {
+    let retention = normalizeRetention(input.retention, {
       persistenceAvailable: this.persistence !== undefined,
     });
+    // Local file:// published pages (non-snapshot) must not be persisted:
+    // restore-time trust rules treat them as untrusted, so storing them
+    // as `restorable` produces a dead record whose only effect is to pile
+    // up `skipped artifact restore: …` warnings on every load. Coerce to
+    // `ephemeral` up front; the snapshot path stays restorable via
+    // `getWebPreviewSnapshotId`.
+    if (
+      retention !== 'ephemeral' &&
+      storage === 'published' &&
+      url !== undefined &&
+      isFileArtifactUrl(url) &&
+      getWebPreviewSnapshotId({
+        kind: input.kind,
+        managedId,
+        storage,
+        url,
+        metadata: input.metadata,
+        source,
+        toolName: input.toolName,
+      }) === undefined
+    ) {
+      retention = 'ephemeral';
+    }
     const workspaceStatus = workspacePath
       ? options.workspaceAccess === 'metadata-only'
         ? {

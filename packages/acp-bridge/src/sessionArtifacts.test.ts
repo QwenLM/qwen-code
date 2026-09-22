@@ -7125,6 +7125,90 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  // Issue #12389: a locally published file:// page (artifact tool) was
+  // journaled with retention='restorable' before write-time coercion
+  // landed. Restore must drop the legacy record quietly, not as a
+  // `skipped artifact restore:` warning (which would trip
+  // isArtifactSnapshotCompletenessWarning and could roll back the
+  // whole restore or block snapshot reclamation).
+  it('drops legacy tool-produced published file:// records without skipped warning', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-legacy-published-file',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-legacy-published-file',
+      sequence: 9,
+      artifacts: [
+        {
+          id: 'legacy-published-file',
+          kind: 'link',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          status: 'available',
+          title: 'Legacy local page',
+          url: 'file:///Users/example/.qwen/artifacts/legacy-1/index.html',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    // No 'skipped artifact restore' warning, no rollback — the legacy
+    // record is dropped quietly, live artifact is preserved.
+    expect(warnings).toEqual([]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  // Issue #12389: write-time coercion of tool-produced published file://
+  // records to 'ephemeral', so they never reach the journal.
+  it('coerces tool-produced published file:// records to ephemeral on write', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-write-published-file',
+      workspaceCwd: workspace,
+    });
+    const { changes } = await store.upsertMany(
+      [
+        {
+          title: 'Local published page',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          url: 'file:///Users/example/.qwen/artifacts/new-1/index.html',
+        },
+      ],
+      { trustedPublisher: true },
+    );
+    const artifactId = changes[0]!.artifactId;
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
   it('prunes over-limit restored artifacts and records eviction tombstones', async () => {
     const sourceEvents: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
