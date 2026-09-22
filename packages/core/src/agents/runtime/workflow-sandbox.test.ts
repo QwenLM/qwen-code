@@ -143,86 +143,6 @@ return x;`;
     expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
   });
 
-  // Issue #12217: model-authored scripts commonly start with a header
-  // comment that the user did not strip by hand. The regex must allow
-  // leading line and block comments without re-introducing the T33 risk
-  // (no `/m`, no inner-of-template-literal false match). Exercised through
-  // `compileWorkflowScript` — the production entry — so a regression
-  // surfaces as a V8 syntax error, not just a wrong string.
-  it('compiles a workflow whose meta is preceded by a single-line comment (#12217)', () => {
-    const src = `// note\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
-    const { meta } = compileWorkflowScript(src);
-    expect(meta).toEqual({ name: 'x', description: 'd' });
-  });
-
-  it('compiles a workflow whose meta is preceded by a block comment (#12217)', () => {
-    const src = `/* note */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
-    const { meta } = compileWorkflowScript(src);
-    expect(meta).toEqual({ name: 'x', description: 'd' });
-  });
-
-  it('compiles a workflow whose meta is preceded by mixed comments (#12217)', () => {
-    const src = `// first\n// second\n/* third */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
-    const { meta } = compileWorkflowScript(src);
-    expect(meta).toEqual({ name: 'x', description: 'd' });
-  });
-
-  it('does not match meta inside a template literal even with a leading comment (#12217 × T33)', () => {
-    const src = `// header\nconst banner = \`\nexport const meta = { name: 'fake' }\n\`;\nreturn banner;`;
-    const { meta } = compileWorkflowScript(src);
-    expect(meta).toBeNull();
-  });
-
-  it('does not false-match a brace inside a leading line comment (#12217 review)', () => {
-    // Old regex-anchored approach would call `source.indexOf('{', exportIdx)`
-    // with exportIdx === 0 and latch onto the brace inside the comment,
-    // then the brace-walker would consume `'fake'` and throw
-    // "unbalanced braces" — the return-null behavior is what we want
-    // for an anchor that doesn't really start with `export const meta = `.
-    const src = `// { what: 'fake' }\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
-    const { meta } = compileWorkflowScript(src);
-    expect(meta).toEqual({ name: 'real', description: 'real' });
-  });
-
-  it('does not false-match a meta-looking line inside a leading block comment (#12217 × T33)', () => {
-    const src = `/* header with export const meta = { name: 'fake' } inside */\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
-    const { meta } = compileWorkflowScript(src);
-    expect(meta).toEqual({ name: 'real', description: 'real' });
-  });
-
-  // R1-1 (PR #12245 review round 4): ECMAScript defines four line terminators.
-  // A `//` comment ends at any LineTerminator, not only \n. A header comment
-  // closed by CR, LS or PS would cause skipTrivia to over-consume live code
-  // and stop inside a template literal, re-opening the T33-class false match.
-  it.each([
-    [
-      'CR only',
-      `// header\rexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
-    ],
-    [
-      'LF only',
-      `// header\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
-    ],
-    [
-      'CR+LF',
-      `// header\r\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
-    ],
-    [
-      'LS only',
-      `// header\u2028export const meta = { name: 'real', description: 'd' }\nreturn 1;`,
-    ],
-    [
-      'PS only',
-      `// header\u2029export const meta = { name: 'real', description: 'd' }\nreturn 1;`,
-    ],
-  ])(
-    'handles all four ECMAScript line terminators in leading comment (%s)',
-    (_case, src) => {
-      const { meta } = compileWorkflowScript(src);
-      expect(meta).toEqual({ name: 'real', description: 'd' });
-    },
-  );
-
   // Reported in PR #12245 review: the anchor must tolerate every
   // whitespace spelling Claude Code accepts (`export  const`,
   // `export const meta=`, tabs and newlines around `=`).
@@ -3054,6 +2974,62 @@ describe('createWorkflowSandbox primitives', () => {
 
   // ── Compilation ──────────────────────────────────────────────────────
   describe('compileWorkflowScript', () => {
+    // Issue #12217: model-authored scripts commonly start with a header
+    // comment that the user did not strip by hand. The regex must allow
+    // leading line and block comments without re-introducing the T33 risk
+    // (no `/m`, no inner-of-template-literal false match). Exercised through
+    // `compileWorkflowScript` — the production entry — so a regression
+    // surfaces as a V8 syntax error, not just a wrong string.
+    describe('#12217 leading comments', () => {
+      it('compiles a workflow whose meta is preceded by a single-line comment', () => {
+        const src = `// note\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
+
+      it('compiles a workflow whose meta is preceded by a block comment', () => {
+        const src = `/* note */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
+
+      it('compiles a workflow whose meta is preceded by mixed comments', () => {
+        const src = `// first\n// second\n/* third */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
+
+      it('does not match meta inside a template literal even with a leading comment (#12217 × T33)', () => {
+        const src = `// header\nconst banner = \`\nexport const meta = { name: 'fake' }\n\`;\nreturn banner;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toBeNull();
+      });
+
+      it('does not false-match a brace inside a leading line comment', () => {
+        const src = `// { what: 'fake' }\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'real', description: 'real' });
+      });
+
+      it('does not false-match a meta-looking line inside a leading block comment (#12217 × T33)', () => {
+        const src = `/* header with export const meta = { name: 'fake' } inside */\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'real', description: 'real' });
+      });
+
+      // R1-1: all four ECMAScript LineTerminators in leading comment
+      it.each([
+        ['CR only', `// header\rexport const meta = { name: 'real', description: 'd' }\nreturn 1;`],
+        ['LF only', `// header\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`],
+        ['CR+LF', `// header\r\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`],
+        ['LS only', `// header\u2028export const meta = { name: 'real', description: 'd' }\nreturn 1;`],
+        ['PS only', `// header\u2029export const meta = { name: 'real', description: 'd' }\nreturn 1;`],
+      ])('handles all four ECMAScript line terminators in leading comment (%s)', (_case, src) => {
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'real', description: 'd' });
+      });
+    });
+
     it('compiles a body and hands back its meta', () => {
       const { script, meta } = compileWorkflowScript(
         "export const meta = { name: 'n', description: 'd' }\nawait agent('x');",
