@@ -1012,7 +1012,7 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
-  it.each([undefined, null, 'invalid', {}])(
+  it.each([undefined, null, 'invalid', {}, [null], ['x'], [[null]]])(
     'ignores missing or non-array saved input annotations (%j)',
     (inputAnnotations) => {
       const projected = updates(
@@ -1032,6 +1032,33 @@ describe('createTranscriptReplayMachine', () => {
       });
     },
   );
+
+  it('forwards only object elements from saved input annotations', () => {
+    const valid = {
+      type: 'reference',
+      start: 0,
+      end: 10,
+      text: '@README.md',
+      reference: {
+        id: '@README.md',
+        kind: 'file',
+        value: 'README.md',
+        serialized: '@README.md',
+      },
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-mixed', 'user', {
+        message: { role: 'user', parts: [{ text: '@README.md' }] },
+        systemPayload: {
+          displayText: '@README.md',
+          hookContext: '',
+          inputAnnotations: [valid, null, 'x'],
+        },
+      }),
+    );
+    expect(projected[0]._meta).toMatchObject({ inputAnnotations: [valid] });
+  });
 
   it('strips only a complete final tag-only context part', () => {
     const projected = updates(

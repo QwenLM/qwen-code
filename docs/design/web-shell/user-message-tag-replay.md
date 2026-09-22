@@ -11,7 +11,8 @@ Live Web Shell messages carry `inputAnnotations`, but ACP user-message recording
 - Add optional, opaque `inputAnnotations` to `UserPromptRecordPayload`. Core stores UI metadata without depending on SDK UI types or adding it to model input.
 - ACP snapshots the request annotation array alongside its display text when recording ordinary prompts and deferred custom `/advisor` prompts. Retry and continuation keep the original record. Only the annotation field is copied; unrelated request metadata is excluded.
 - The shared transcript replay machine forwards saved annotation arrays through user-update `_meta`. Existing SDK normalization and Web Shell rendering then restore tags, including paged history and reopening a saved session.
-- Use existing array guards and the renderer's reference/range checks. Missing or non-array annotation fields are ignored. Do not infer references from raw text; older records without annotations remain plain text.
+- Use existing array guards and the renderer's reference/range checks. Missing or non-array annotation fields are ignored, and non-object elements are skipped at recording, replay, and render time. Do not infer references from raw text; older records without annotations remain plain text.
+- The unified read-only chip style intentionally applies to every `ReadonlyComposerTag` consumer, including the queued-prompt strip. The composer editor's own tag chips keep their existing file/non-file styling; restyling the composer is out of scope.
 
 ## Consumers and constraints
 

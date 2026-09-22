@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
+import {
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
+  parseBackgroundNotificationTurn,
+} from './bridgeTypes.js';
 import type {
   SessionUpdate,
   ToolCallContent,
@@ -851,6 +854,18 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
+    // Records written before element validation (or by a hostile writer) can
+    // hold non-object entries; skip them individually so valid tags on the
+    // same record still restore, matching the live echo the client rendered.
+    const savedInputAnnotations: unknown =
+      payload?.[DAEMON_INPUT_ANNOTATIONS_META_KEY];
+    const savedInputAnnotationList: unknown[] = Array.isArray(
+      savedInputAnnotations,
+    )
+      ? savedInputAnnotations
+      : [];
+    const replayedInputAnnotations =
+      savedInputAnnotationList.filter(isObjectRecord);
     const userMeta: UpdateMetaOptions = {
       ...meta,
       extra: {
@@ -859,8 +874,8 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         record.daemonPromptId.trim().length > 0
           ? { promptId: record.daemonPromptId }
           : {}),
-        ...(Array.isArray(payload?.['inputAnnotations'])
-          ? { inputAnnotations: payload['inputAnnotations'] }
+        ...(replayedInputAnnotations.length > 0
+          ? { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: replayedInputAnnotations }
           : {}),
       },
     };
