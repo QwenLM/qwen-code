@@ -66,7 +66,8 @@ public final class InMemoryToolExecutionRepository
     @Override
     public synchronized ToolExecutionRecord compareAndSet(
             ToolExecutionRecord expected,
-            ToolExecutionRecord replacement) {
+            ToolExecutionRecord replacement, String owner,
+            long dispatchGeneration) {
         requireReplacement(expected, replacement);
         ToolExecutionRecord current = recordsById.get(
                 expected.getExecutionCallId());
@@ -76,8 +77,23 @@ public final class InMemoryToolExecutionRepository
                 || current.isSettled()
                 || current.getState() == ToolExecutionRecord.State.UNKNOWN
                 || !current.sameDispatch(expected)
-                || !current.hasLiveDispatchAt(clock.instant())) {
+                || !current.hasLiveDispatchAt(clock.instant())
+                || !current.getDispatchOwner().equals(owner)
+                || current.getDispatchGeneration() != dispatchGeneration) {
             return null;
+        }
+        ToolExecutionRecord.State to = replacement.getState();
+        if (to == ToolExecutionRecord.State.PREPARED
+                || to == ToolExecutionRecord.State.DISPATCHING
+                        && current.getState()
+                                != ToolExecutionRecord.State.DISPATCHING) {
+            throw new IllegalArgumentException(
+                    "execution state must not move backwards");
+        }
+        if (current.isCancelRequested()
+                && !replacement.isCancelRequested()) {
+            throw new IllegalArgumentException(
+                    "replacement must not drop a cancellation request");
         }
         ToolExecutionRecord updated = replacement.withVersion(
                 expected.getVersion() + 1);
@@ -214,6 +230,7 @@ public final class InMemoryToolExecutionRepository
 
     private static void requireCandidate(ToolExecutionRecord candidate) {
         if (candidate == null || candidate.getVersion() != 0
+                || candidate.getLastSequence() != 0
                 || candidate.getState()
                         != ToolExecutionRecord.State.PREPARED
                 || candidate.getDispatchOwner() != null) {
@@ -227,15 +244,12 @@ public final class InMemoryToolExecutionRepository
         if (expected == null || replacement == null
                 || !expected.sameIdentity(replacement)
                 || !expected.sameDispatch(replacement)
-                || replacement.getVersion() != expected.getVersion()) {
+                || replacement.getVersion() != expected.getVersion()
+                || replacement.getLastSequence()
+                        < expected.getLastSequence()) {
             throw new IllegalArgumentException(
                     "replacement must preserve execution identity, dispatch"
-                            + " claim, and version");
-        }
-        if (expected.isCancelRequested()
-                && !replacement.isCancelRequested()) {
-            throw new IllegalArgumentException(
-                    "replacement must not drop a cancellation request");
+                            + " claim, version, and result sequence");
         }
     }
 

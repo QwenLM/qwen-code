@@ -12,22 +12,35 @@ public interface ToolExecutionRepository {
 
     ToolExecutionRecord findByIdempotencyKey(String idempotencyKey);
 
-    /** Mutates only while the caller holds the live dispatch claim. */
+    /** Succeeds only while the stored record still matches {@code expected}
+     * on immutable identity, dispatch claim and version, the record is
+     * neither SETTLED nor UNKNOWN, and the caller presents the stored owner
+     * and generation with an unexpired lease; returns null otherwise.
+     * Implementations must compare and write atomically. */
     ToolExecutionRecord compareAndSet(ToolExecutionRecord expected,
-            ToolExecutionRecord replacement);
+            ToolExecutionRecord replacement, String owner,
+            long dispatchGeneration);
 
-    /** Taking over an expired EXECUTING claim yields UNKNOWN, not a claim. */
+    /** Taking over an expired EXECUTING or CANCEL_REQUESTED claim yields
+     * UNKNOWN, not a claim; an expired DISPATCHING claim is re-granted at the
+     * next generation. */
     ToolExecutionRecord claimDispatch(String executionCallId, String owner,
             Duration leaseDuration);
 
     ToolExecutionRecord renewDispatch(String executionCallId, String owner,
             long dispatchGeneration, Duration leaseDuration);
 
-    /** Records cancellation intent without requiring the dispatch claim. */
+    /** Records cancellation intent without requiring the dispatch claim. A
+     * PREPARED execution settles as cancelled immediately, since no
+     * dispatcher exists to observe the intent. Returns null when the record
+     * is missing, already settled, or no longer at expectedVersion. */
     ToolExecutionRecord requestCancel(String executionCallId,
             long expectedVersion);
 
-    /** Settles an UNKNOWN execution through recovery reconciliation. */
+    /** Settles an UNKNOWN execution through recovery reconciliation. Requires
+     * the immutable identity, the current version and state UNKNOWN, but no
+     * dispatch claim: a takeover-fenced record's claim is expired by
+     * construction, so implementations must not add a lease predicate. */
     ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime);
 

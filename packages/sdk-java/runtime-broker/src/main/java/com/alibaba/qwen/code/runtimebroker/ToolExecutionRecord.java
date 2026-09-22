@@ -40,7 +40,7 @@ public final class ToolExecutionRecord {
     private final long version;
     private final Instant settledAt;
 
-    public ToolExecutionRecord(String executionCallId, String idempotencyKey,
+    ToolExecutionRecord(String executionCallId, String idempotencyKey,
             String bindingId, long runtimeGeneration,
             String harnessSessionId, String runtimeSessionId, String turnId,
             String toolCallId, String requestDigest,
@@ -88,6 +88,10 @@ public final class ToolExecutionRecord {
         if ((dispatchOwner == null) != (dispatchLeaseUntil == null)) {
             throw new IllegalArgumentException(
                     "dispatch owner and lease must be set together");
+        }
+        if (state == State.CANCEL_REQUESTED && !cancelRequested) {
+            throw new IllegalArgumentException(
+                    "CANCEL_REQUESTED requires cancelRequested");
         }
         if (dispatchOwner != null) {
             BrokerValues.requireId(dispatchOwner, "dispatchOwner");
@@ -273,8 +277,9 @@ public final class ToolExecutionRecord {
                     "resolution executionStatus is required");
         }
         return copy(State.SETTLED, (String) status, resolutionResult,
-                lastSequence, cancelRequested, null, null,
-                dispatchGeneration, version, resolutionTime);
+                lastSequence, cancelRequested, dispatchOwner,
+                dispatchLeaseUntil, dispatchGeneration, version,
+                resolutionTime);
     }
 
     ToolExecutionRecord withDispatch(String owner, Instant leaseUntil,
@@ -316,7 +321,7 @@ public final class ToolExecutionRecord {
         return dispatchOwner != null && dispatchLeaseUntil.isAfter(now);
     }
 
-    boolean sameRequest(ToolExecutionRecord other) {
+    public boolean sameRequest(ToolExecutionRecord other) {
         return other != null
                 && idempotencyKey.equals(other.idempotencyKey)
                 && bindingId.equals(other.bindingId)

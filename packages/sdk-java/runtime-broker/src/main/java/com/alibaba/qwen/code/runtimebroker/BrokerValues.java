@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -41,11 +43,12 @@ final class BrokerValues {
 
     static Map<String, Object> immutableMap(Map<String, ?> source) {
         Map<String, Object> copy = new LinkedHashMap<>();
-        for (Map.Entry<String, ?> entry : source.entrySet()) {
-            if (entry.getKey() == null) {
-                throw new IllegalArgumentException("map key must not be null");
+        for (Map.Entry<?, ?> entry : source.entrySet()) {
+            if (!(entry.getKey() instanceof String key)) {
+                throw new IllegalArgumentException(
+                        "map key must be a string");
             }
-            copy.put(entry.getKey(), immutableValue(entry.getValue()));
+            copy.put(key, immutableValue(entry.getValue()));
         }
         return Collections.unmodifiableMap(copy);
     }
@@ -64,8 +67,13 @@ final class BrokerValues {
             }
             return Collections.unmodifiableList(copy);
         }
-        if (value == null || value instanceof String
-                || value instanceof Number || value instanceof Boolean) {
+        // Mutable Number subtypes (AtomicLong, adders) would alias caller
+        // state into a record, so only immutable JSON scalars pass.
+        if (value == null || value instanceof String || value instanceof Boolean
+                || value instanceof Byte || value instanceof Short
+                || value instanceof Integer || value instanceof Long
+                || value instanceof Float || value instanceof Double
+                || value instanceof BigInteger || value instanceof BigDecimal) {
             return value;
         }
         throw new IllegalArgumentException("unsupported JSON value");
