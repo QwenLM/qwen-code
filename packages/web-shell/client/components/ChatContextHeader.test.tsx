@@ -31,6 +31,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   root = null;
+  vi.useRealTimers();
 });
 
 function mount(
@@ -175,5 +176,35 @@ describe('ChatContextHeader', () => {
       'Toggle environment information',
       'Toggle right panel',
     ]);
+  });
+
+  it.each([
+    [
+      { workspaceName: 'api', workspacePath: '/work/api' },
+      'Workspace: api',
+      'api/work/api',
+    ],
+    [{ workspaceName: 'api' }, 'Workspace: api', 'api'],
+    [{}, 'No workspace', 'No workspace'],
+  ])('reveals the workspace details on hover: %j', (props, label, text) => {
+    vi.useFakeTimers();
+    const view = mount(props);
+    const icon = view.querySelector<HTMLElement>(
+      '[data-testid="chat-header-workspace"]',
+    )!;
+    expect(icon.getAttribute('aria-label')).toBe(label);
+    expect(icon.querySelector('.lucide-folder-closed')).not.toBeNull();
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    act(() => {
+      icon.dispatchEvent(new Event('pointermove', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+    });
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(text);
+  });
+
+  it('keeps the workspace icon out of the clickable actions', () => {
+    const view = mount({ workspaceName: 'api', workspacePath: '/work/api' });
+
+    expect(view.querySelectorAll('button')).toHaveLength(1);
   });
 });

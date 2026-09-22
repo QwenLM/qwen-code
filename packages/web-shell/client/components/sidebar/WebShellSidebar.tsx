@@ -47,7 +47,6 @@ import {
   FolderInputIcon,
   GitBranchIcon,
   GitForkIcon,
-  GlobeIcon,
   PencilIcon,
   PinIcon,
   Trash2Icon,
@@ -102,7 +101,6 @@ import {
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
 import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
-import { formatOriginHost } from '../../config/remote-connections';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
@@ -2651,9 +2649,11 @@ export function WebShellSidebar({
 
   const copyWorkspacePath = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
-      void writeClipboardText(candidate.cwd).catch((error: unknown) => {
-        onError(error, t('sidebar.copyWorkspacePathFailed'));
-      });
+      void writeClipboardText(candidate.ssh?.directory ?? candidate.cwd).catch(
+        (error: unknown) => {
+          onError(error, t('sidebar.copyWorkspacePathFailed'));
+        },
+      );
     },
     [onError, t],
   );
@@ -5802,21 +5802,6 @@ export function WebShellSidebar({
                   }}
                 >
                   <span>{t('sidebar.project')}</span>
-                  {!isPageOriginDaemon(workspace.baseUrl) && (
-                    // One daemon serves every workspace below, so the machine
-                    // is named once here instead of badging each row with the
-                    // same fact.
-                    <span
-                      className={styles.projectsHeaderRemote}
-                      data-testid="remote-workspace-indicator"
-                      title={t('sidebar.workspacesOnHost', {
-                        host: formatOriginHost(workspace.baseUrl),
-                      })}
-                    >
-                      <GlobeIcon aria-hidden="true" />
-                      {formatOriginHost(workspace.baseUrl)}
-                    </span>
-                  )}
                   {workspaceOverviewEnabled && projectWorkspaces.length > 1 && (
                     <span
                       className={styles.projectsHeaderCount}
@@ -6119,7 +6104,10 @@ export function WebShellSidebar({
                                         copyPath: () => copyWorkspacePath(ws),
                                       }
                                     : {}),
-                                  ...(localOpenEnabled && ws.trusted && realPath
+                                  ...(localOpenEnabled &&
+                                  ws.trusted &&
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openFolder: () => {
                                           void openWorkspaceFolderLocally(
@@ -6130,7 +6118,8 @@ export function WebShellSidebar({
                                     : {}),
                                   ...(localTerminalEnabled &&
                                   ws.trusted &&
-                                  realPath
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openTerminal: () => {
                                           void openWorkspaceTerminalLocally(
@@ -6149,6 +6138,7 @@ export function WebShellSidebar({
                                   // branch the composer never shows the armed
                                   // intent and the daemon rejects the session.
                                   ...(ws.trusted &&
+                                  !ws.ssh &&
                                   onNewWorktreeSession &&
                                   gitBranch
                                     ? {

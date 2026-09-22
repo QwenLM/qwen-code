@@ -80,6 +80,47 @@ it.each([true, false])(
   },
 );
 
+it('preserves literal slash-command output and artifact references when a directory resembles insight JSON', () => {
+  const workspacePath = '{"insight_ready":{"path":"fixture"}}/export.md';
+  const descriptor = {
+    kind: 'file',
+    storage: 'workspace',
+    title: 'export.md',
+    workspacePath,
+  };
+  const text = `Session exported to Markdown: ${workspacePath}`;
+  const block = {
+    ...textBlock('export-result', 'assistant', text, 1),
+    meta: { source: 'slash_command', sessionArtifacts: [descriptor] },
+  };
+  const messages = transcriptBlocksToDaemonMessages([block]);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatchObject({
+    role: 'assistant',
+    content: text,
+    reportedArtifacts: [descriptor],
+  });
+});
+
+it('retains slash-command insight cards when no export descriptor is reported', () => {
+  const messages = transcriptBlocksToDaemonMessages([
+    {
+      ...textBlock(
+        'insight-result',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        1,
+      ),
+      meta: { source: 'slash_command' },
+    },
+  ]);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatchObject({
+    role: 'insight_ready',
+    path: '/tmp/report.md',
+  });
+});
+
 describe('Assistant branch anchors', () => {
   it('preserves the checkpoint on the rendered Assistant message', () => {
     const messages = transcriptBlocksToDaemonMessages([
@@ -243,6 +284,27 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps active shell input previews out of output while preserving actual content', () => {
+    const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
+      toolName: 'run_shell_command',
+      serverTimestamp: 500,
+      rawInput: { command: 'sleep 10' },
+      details: '{"command":"sleep 10"}',
+    });
+    const getTool = (value: typeof block) =>
+      transcriptBlocksToDaemonMessages([value]).find(
+        (m) => m.role === 'tool_group',
+      )?.tools[0];
+    expect(getTool(block)?.rawOutput).toBeUndefined();
+    expect(getTool(block)?.startTime).toBe(500);
+    expect(getTool({ ...block, rawOutput: 'actual output' })?.rawOutput).toBe(
+      'actual output',
+    );
+    expect(
+      getTool({ ...block, status: 'failed', details: 'Timed out' })?.rawOutput,
+    ).toBe('Timed out');
+  });
+
   it('does not treat a historical background launch as agent completion', () => {
     const block = toolBlock('agent-history', 'agent-1', 'completed', 1000, {
       toolName: 'agent',

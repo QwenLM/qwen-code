@@ -35,10 +35,10 @@ async function mount(
     daemonOrigin: string,
     token?: string,
     options?: {
-      continueRemoteWorkspaceAdd?: boolean;
-      continueRemoteConnectionAdd?: boolean;
+      continueFlow?: 'workspace' | 'connection';
     },
   ) => boolean | void,
+  pairingFailed?: boolean,
 ) {
   await act(async () =>
     root.render(
@@ -50,12 +50,128 @@ async function mount(
         invalidTarget={invalidTarget}
         initialAddress={initialAddress}
         onChangeTarget={onChangeTarget}
+        pairingFailed={pairingFailed}
       >
         {(token) => <p>Connected {token}</p>}
       </StandaloneAuth>,
     ),
   );
 }
+
+it('shows a recoverable pairing failure without probing or caching the invitation', async () => {
+  vi.stubGlobal('fetch', vi.fn());
+  await act(async () =>
+    root.render(
+      <StandaloneAuth
+        baseUrl="http://daemon.test"
+        pairingFailed
+        language="zh-CN"
+      >
+        {() => <p>Connected</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('请扫描新的二维码');
+  expect(fetch).not.toHaveBeenCalled();
+  expect(tokenInput()).not.toBeNull();
+  // Entering a token is the pending step on the rescan screen: the field owns
+  // focus, and the button offers a first Connect — not a Retry of a probe
+  // that never ran — and is enabled although no probe is in flight.
+  expect(document.activeElement).toBe(tokenInput());
+  expect(submitButton().textContent).toBe('连接');
+  expect(submitButton().disabled).toBe(false);
+
+  // Recovery is the point of the `attempt === 0` escape hatch: a manual
+  // Connect after a failed pairing must issue the probe.
+  vi.mocked(fetch).mockResolvedValue(stubResponse({ status: 200 }));
+  await act(submitForm);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+  expect(container.textContent).toContain('Connected');
+});
+
+it('keeps the rescan copy when an empty submit is rejected after a failed pairing', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+  expect(container.textContent).toContain('Scan a fresh QR code');
+
+  await act(submitForm);
+
+  // The empty submit's 401 must not swap the rescan instruction for the
+  // terminal-token copy a phone user cannot act on.
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain('Scan a fresh QR code');
+  expect(container.textContent).not.toContain(
+    'Enter the bearer token from the daemon terminal.',
+  );
+});
+
+it('keeps the token copy when a hand-typed token is rejected after a failed pairing', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'typo-token');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+
+  // A rejected hand-typed credential is a token problem, not a QR problem:
+  // the rescan copy belongs to the boot credential the screen started with,
+  // and the rejected value stays editable.
+  expect(container.textContent).toContain('Invalid or expired token');
+  expect(container.textContent).not.toContain('Pairing failed');
+  expect(tokenInput().value).toBe('typo-token');
+});
+
+// The untrusted-target warning is the stronger state: an attacker-supplied
+// pairing fragment must not replace it with copy that asks for a token.
+it('warns about an unconfirmed target even when pairing failed', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(
+      <StandaloneAuth
+        baseUrl="http://daemon.test"
+        unconfirmedTarget
+        pairingFailed
+      >
+        {(token) => <p>Connected {token}</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('has not connected to before');
+  expect(container.textContent).not.toContain('Pairing failed');
+  // The trust decision is pending, so no field may pre-commit focus.
+  expect(document.activeElement).not.toBe(tokenInput());
+  expect(document.activeElement).not.toBe(addressInput());
+  expect(fetch).not.toHaveBeenCalled();
+});
 function stubResponse({
   status,
   retryAfter,
@@ -106,7 +222,7 @@ async function submitForm() {
     .querySelector('form')!
     .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
 }
-it('retries an invalid token and stores the accepted token per tab', async () => {
+it('retries with the typed token, stores it per tab, and creates no connection', async () => {
   const fetch = vi
     .fn()
     .mockResolvedValueOnce(stubResponse({ status: 401 }))
@@ -129,9 +245,7 @@ it('retries an invalid token and stores the accepted token per tab', async () =>
   expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
     'good',
   );
-  expect(
-    JSON.parse(localStorage.getItem('qwen-remote-connections') || 'null'),
-  ).toEqual(['http://daemon.test']);
+  expect(localStorage.getItem('qwen-remote-connections')).toBeNull();
   expect(fetch.mock.calls[1][1].headers).toEqual({
     Authorization: 'Bearer good',
   });
@@ -161,6 +275,25 @@ it('reports an invalid daemon target without contacting another daemon', async (
   // unreachable in a real browser unless noValidate is set.
   expect(container.querySelector('form')!.noValidate).toBe(true);
   expect(addressInput().value).toBe('not-a-url');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('focuses the address field for an invalid target even when pairing failed', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    true,
+    'not-a-url',
+    undefined,
+    true,
+  );
+  expect(container.textContent).toContain('Invalid daemon address');
+  // The copy asks for a corrected address; the later token-field autoFocus
+  // must not win over the address field's.
+  expect(document.activeElement).toBe(addressInput());
   expect(fetch).not.toHaveBeenCalled();
 });
 it('lets an invalid target be replaced from the connection form', async () => {
@@ -212,7 +345,7 @@ it('preserves remote-add continuation when correcting the daemon target', async 
   expect(onChangeTarget).toHaveBeenCalledWith(
     'http://replacement.example:4170',
     undefined,
-    { continueRemoteWorkspaceAdd: true },
+    { continueFlow: 'workspace' },
   );
 });
 it('preserves connection-add verification when correcting the daemon target', async () => {
@@ -233,7 +366,7 @@ it('preserves connection-add verification when correcting the daemon target', as
   expect(onChangeTarget).toHaveBeenCalledWith(
     'http://replacement.example:4170',
     undefined,
-    { continueRemoteConnectionAdd: true },
+    { continueFlow: 'connection' },
   );
 });
 it('asks before probing a daemon this browser has not connected to', async () => {

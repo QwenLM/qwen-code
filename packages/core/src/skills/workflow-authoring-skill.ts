@@ -16,8 +16,8 @@
  *
  * - The model can load the skill. Point at it.
  * - The model has no way to load any skill (skills are off, the Skill tool is
- *   denied, or it is deferred with no ToolSearch to reveal it). Inline the
- *   reference, or the model writes scripts against nothing.
+ *   denied, or it is deferred with no tool_search + tool_call bridge to reach
+ *   it). Inline the reference, or the model writes scripts against nothing.
  * - The user turned this reference off (the skill by name, or the whole
  *   bundled level). Carry neither: inlining would put back, at a higher
  *   per-turn price, exactly the text they asked to remove.
@@ -95,9 +95,9 @@ export function readWorkflowAuthoringReference(): WorkflowAuthoringReference | n
  * - `skill` — the Skill tool is in the request; the model can load it.
  * - `skill-via-tool-search` — the Skill tool is registered but a `tools.eager`
  *   allowlist can withhold its schema (it is not listed in `tools.visible`);
- *   the model may have to reveal it with ToolSearch first, and the pointer has
- *   to say so. A reveal already made does not change this: `/clear` drops
- *   reveals, and the route is decided only once.
+ *   the model reaches it through the tool_search + tool_call bridge, and the
+ *   pointer has to say so. A re-declaration from a resumed history does not
+ *   change this: `/clear` drops it, and the route is decided only once.
  * - `inline` — no route to any skill; the reference has to travel in the
  *   Workflow tool's own description.
  * - `withheld` — the user turned this reference off; carry nothing.
@@ -140,11 +140,14 @@ export function resolveWorkflowAuthoringRoute(
     if (!Array.isArray(toolNames)) return 'skill';
     if (!toolNames.includes(ToolNames.SKILL)) return 'inline';
     if (isToolDeferredBehindToolSearch(config, ToolNames.SKILL)) {
-      // A withheld schema is only reachable through ToolSearch. Without it
-      // the Skill tool is registered but invisible, which is no route at all.
-      // Whether it is revealed right now is not asked: this is recorded for
-      // the session, and a reveal lasts only until `/clear`.
-      return toolNames.includes(ToolNames.TOOL_SEARCH)
+      // A withheld schema is only reachable through the tool_search +
+      // tool_call bridge. Without BOTH halves the Skill tool is registered
+      // but invisible, which is no route at all — with tool_search alone the
+      // schema can be reviewed but never invoked. Whether it is declared
+      // right now is not asked: this is recorded for the session, and a
+      // resumed-history re-declaration lasts only until `/clear`.
+      return toolNames.includes(ToolNames.TOOL_SEARCH) &&
+        toolNames.includes(ToolNames.TOOL_CALL)
         ? 'skill-via-tool-search'
         : 'inline';
     }
@@ -160,8 +163,8 @@ export function resolveWorkflowAuthoringRoute(
  * the route plus whether the file can actually be read.
  *
  * - `pointer` — names the skill.
- * - `pointer-via-tool-search` — names the skill and says to reveal the Skill
- *   tool with ToolSearch first.
+ * - `pointer-via-tool-search` — names the skill and says to reach it through
+ *   the tool_search + tool_call bridge.
  * - `inline` — carries the reference in full.
  * - `withheld` — says nothing about it.
  *
@@ -228,15 +231,17 @@ export function isToolHiddenBehindToolSearch(
 }
 
 /**
- * The one wording for "fetch this tool's schema first", shared by the tool
- * description, the failure hint and the keyword reminder so the three never
- * phrase it differently.
+ * The one wording for reaching a hidden deferred tool through the
+ * tool_search + tool_call bridge, shared by the tool description, the failure
+ * hint and the keyword reminder so the three never phrase it differently.
+ * tool_search only REVIEWS the schema — invoking still goes through tool_call,
+ * so the sentence must name both halves or it sends the model down a dead end.
  *
  * Conditional on purpose: the description is built once, and a tool can be
- * revealed later in the session (a ToolSearch call, or a resumed history that
- * references it) and dropped again by `/clear`, so neither a flat "it is
- * deferred" nor leaving the sentence out stays true for the whole session.
+ * re-declared later in the session (a resumed history that references it) and
+ * dropped again by `/clear`, so neither a flat "it is deferred" nor leaving
+ * the sentence out stays true for the whole session.
  */
-export function toolSearchRevealSentence(toolDisplayName: string): string {
-  return `If the ${toolDisplayName} tool is not in your tool list, reveal it with ToolSearch first.`;
+export function toolSearchBridgeSentence(toolDisplayName: string): string {
+  return `If the ${toolDisplayName} tool is not in your tool list, review its schema with \`tool_search\` and then invoke it with \`tool_call\`.`;
 }

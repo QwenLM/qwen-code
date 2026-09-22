@@ -74,12 +74,17 @@ persistent instance identity is not cleared by stopping a Browser Use session.
   profiles, and is persisted before use. A storage failure must not publish a
   temporary identity.
 - Stopping and restarting the transport permits a new selection and closes all
-  old connections. The existing second-runtime `BROWSER_USE_BUSY` behavior stays
-  in place.
+  old connections. A second runtime was rejected with `BROWSER_USE_BUSY` when
+  this design landed; the concurrent-session design below replaces that with
+  shared access and removes the error.
 
 ## Concurrent-session follow-up
 
 Tracked in [#11609](https://github.com/QwenLM/qwen-code/issues/11609).
+
+The [concurrent-session design](browser-use-concurrent-sessions.md), implemented
+with validation in progress, defines the shared Native Host topology and session
+ownership boundaries.
 
 Profile identity and Browser Use session identity are separate concepts. Future
 sessions may share one profile while owning different tabs. That work requires

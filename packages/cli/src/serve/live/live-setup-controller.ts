@@ -31,6 +31,31 @@ export interface LiveSetupStatus {
    * `model` names a `realtimeOnly` route, else `liveVoice.apiKey`.
    */
   keyConfigured: boolean;
+  /**
+   * Where the selected model's key comes from. `route`: the `envKey` of its
+   * `realtimeOnly` route — `liveVoice.apiKey` is unused and cannot be set.
+   * `settings`: the free-standing `liveVoice.apiKey`.
+   */
+  keySource: 'route' | 'settings';
+  /** The environment variable a `route` key is read from. Never its value. */
+  keyEnv?: string;
+  /**
+   * Why the resolved route cannot produce a credential (rejected `baseUrl`,
+   * missing `envKey`). Absent when the credential resolves, and when the
+   * only problem is the unset `keyEnv` variable — the card names that one
+   * itself. Never carries the key's value.
+   */
+  keyError?: string;
+  /**
+   * Whether a clear-text `liveVoice.apiKey` is stored (never its value), so
+   * the card can offer `clear` even when the selected model cannot use it.
+   */
+  storedKey: boolean;
+  /**
+   * Why `model` cannot be resolved (ambiguous id, provider without such a
+   * route). Absent when it resolves, to a route or to the free-standing path.
+   */
+  modelError?: string;
   model: string;
   voice: string;
   /** `realtimeOnly` routes from user-scope `modelProviders`, for a picker. */
@@ -141,10 +166,52 @@ export class LiveSetupController {
     }
     const settings = this.deps.loadSettings();
     const live = readLiveVoiceConfiguration(settings);
+    let route: ReturnType<typeof findLiveRealtimeRoute>;
+    let modelError: string | undefined;
+    try {
+      route = findLiveRealtimeRoute(settings, live.model);
+    } catch (error) {
+      modelError =
+        error instanceof LiveProviderConfigError
+          ? error.message
+          : 'The Live Voice model could not be resolved.';
+    }
+    let keyConfigured: boolean;
+    let keyError: string | undefined;
+    if (route) {
+      try {
+        resolveLiveProviderCredential(settings, {
+          allowDisabled: true,
+          ...(this.deps.env ? { env: this.deps.env } : {}),
+        });
+        keyConfigured = true;
+      } catch (error) {
+        keyConfigured = false;
+        // The merely-unset envKey is the one cause the card explains with
+        // its own "not set" sentence; anything else must be named, or the
+        // card asserts a missing variable that is actually set.
+        if (
+          error instanceof LiveProviderConfigError &&
+          error.reason !== 'env_key_missing'
+        ) {
+          keyError = error.message;
+        }
+      }
+    } else {
+      // An unresolvable model has no usable key; the free-standing path is
+      // decided by the stored key alone.
+      keyConfigured =
+        modelError === undefined && configuredKey(settings).length > 0;
+    }
     return {
       v: 1,
       enabled: this.deps.getEnabled(),
-      keyConfigured: this.hasUsableKey(settings),
+      keyConfigured,
+      keySource: route ? 'route' : 'settings',
+      ...(route?.envKey ? { keyEnv: route.envKey } : {}),
+      ...(keyError ? { keyError } : {}),
+      storedKey: configuredKey(settings).length > 0,
+      ...(modelError ? { modelError } : {}),
       model: live.model,
       voice: live.voice,
       models: listLiveRealtimeRoutes(settings).map((route) => ({
@@ -157,23 +224,6 @@ export class LiveSetupController {
       install: this.deps.installer.getStatus(),
       live: this.deps.coordinator.getStatus(),
     };
-  }
-
-  private hasUsableKey(settings: Settings): boolean {
-    try {
-      const { model } = readLiveVoiceConfiguration(settings);
-      // Free-standing path: unchanged, the stored key alone decides.
-      if (!findLiveRealtimeRoute(settings, model)) {
-        return configuredKey(settings).length > 0;
-      }
-      resolveLiveProviderCredential(settings, {
-        allowDisabled: true,
-        ...(this.deps.env ? { env: this.deps.env } : {}),
-      });
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   update(update: LiveSetupUpdate): Promise<LiveSetupStatus> {
