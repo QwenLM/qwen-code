@@ -5,8 +5,8 @@
     <groupId>com.alibaba</groupId>
     <artifactId>qwen-managed-runtime-broker</artifactId>
     <version>0.1.0-alpha</version>
-    <name>Qwen Managed Runtime Broker State</name>
-    <description>Runtime Broker state and repository contracts for Qwen Managed Agents.</description>
+    <name>Qwen Managed Runtime Broker Core</name>
+    <description>Embeddable Runtime Broker orchestration and state contracts for Qwen Managed Agents.</description>
 
     <properties>
         <maven.compiler.release>21</maven.compiler.release>

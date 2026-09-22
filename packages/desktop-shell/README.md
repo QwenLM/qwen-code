@@ -2,6 +2,8 @@
 
 This package is an isolated Tauri 2 shell around the existing Web Shell. It does not contain a second UI.
 
+Window zoom follows `Cmd`/`Ctrl` + `-`/`=`/`0` and `Ctrl`+wheel (a trackpad pinch), and the chosen factor is restored on the next launch. The shortcuts are captured in the webview and applied by the shell, which owns the factor: the webview engines expose no zoom UI, and WebView2's own zoom control is off by default.
+
 ## Runtime layout
 
 `npm run build:runtime` prepares `runtime/qwen-code/` with:
@@ -40,7 +42,7 @@ The daemon log is written to `~/Library/Logs/com.alibaba.qwen-code/desktop-runti
 tail -f ~/Library/Logs/com.alibaba.qwen-code/desktop-runtime.log
 ```
 
-The desktop state (saved workspace, window position) is stored in `~/Library/Application Support/com.alibaba.qwen-code/desktop-state.json`.
+The desktop state (saved workspace, window position, zoom factor) is stored in `~/Library/Application Support/com.alibaba.qwen-code/desktop-state.json`.
 
 ### WebView DevTools
 
