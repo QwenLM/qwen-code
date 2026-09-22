@@ -24,7 +24,11 @@ import {
   sanitizeTerminalText,
   truncateToWidth,
 } from '../../ui/utils/textUtils.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 
 /** Fixed column widths for the human-readable table (exported for tests). */
 export const NAME_COL = 22;
@@ -140,6 +144,7 @@ async function readManagedSessions(): Promise<ManagedSession[]> {
 }
 
 async function handlePs(argv: PsArgs): Promise<void> {
+  ignoreBrokenPipe();
   // listLiveSessions reports "cannot look" as "no peers" rather than
   // throwing, so there is no failure path to surface here.
   const [records, managed] = await Promise.all([

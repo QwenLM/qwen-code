@@ -10,6 +10,7 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 
 const listLiveSessions = vi.fn();
 const listAgentViewSessionStates = vi.fn();
+const ignoreBrokenPipe = vi.fn();
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
@@ -32,6 +33,7 @@ const stdout: string[] = [];
 const stderr: string[] = [];
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
+  ignoreBrokenPipe,
   writeStdoutLine: (line: string) => stdout.push(line),
   writeStderrLine: (line: string) => stderr.push(line),
 }));
@@ -77,6 +79,7 @@ beforeEach(() => {
   stderr.length = 0;
   listLiveSessions.mockReset();
   listAgentViewSessionStates.mockReset();
+  ignoreBrokenPipe.mockReset();
   listAgentViewSessionStates.mockResolvedValue([]);
 });
 
@@ -208,6 +211,19 @@ describe('qwen sessions ps', () => {
     expect(stdout).toHaveLength(2);
     expect(JSON.parse(stdout[0]).pid).toBe(4242);
     expect(JSON.parse(stdout[1]).pid).toBe(7);
+  });
+
+  it('installs the output error guard before reading the managed store', async () => {
+    const rec = record();
+    listLiveSessions.mockResolvedValue([rec]);
+    listAgentViewSessionStates.mockImplementation(() => {
+      expect(ignoreBrokenPipe).toHaveBeenCalledOnce();
+      return Promise.reject(new Error('broken store'));
+    });
+
+    await run({ json: true });
+
+    expect(stdout).toEqual([JSON.stringify(rec)]);
   });
 
   it('keeps registry JSON available when the supervisor store cannot be read', async () => {
