@@ -68,6 +68,8 @@ describe('StandaloneApp', () => {
     testState.throwOnRender = false;
     testState.tokenSurvivesReload = true;
     testState.renderCount = 0;
+    delete (window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean })
+      .__QWEN_CODE_MACOS_TITLEBAR__;
     window.history.replaceState(null, '', '/');
     // jsdom's document is shared across the file; never let one test's
     // document chrome leak into the next test's assertions.
@@ -349,6 +351,19 @@ describe('StandaloneApp', () => {
       enabled: true,
       showLive: true,
     });
+  });
+
+  it('reserves a draggable title bar only when the macOS shell requests it', () => {
+    (
+      window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean }
+    ).__QWEN_CODE_MACOS_TITLEBAR__ = true;
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.className).toBe(
+      'qwen-code-macos-titlebar',
+    );
+    expect(container.querySelector('[data-tauri-drag-region]')).not.toBeNull();
   });
 
   it('round-trips standalone context without a workspace selector', () => {

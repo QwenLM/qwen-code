@@ -17,6 +17,13 @@ type MessageValue =
 
 type Messages = Record<string, MessageValue>;
 
+/** English count plus its noun, pluralised the regular way. */
+function plural(count: string | number | undefined, noun: string): string {
+  const value = typeof count === 'number' ? count : Number(count ?? 0);
+  const safe = Number.isFinite(value) ? value : 0;
+  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
+}
+
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
@@ -1657,8 +1664,10 @@ const EN: Messages = {
     'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceRefreshError':
     'Workspace added, but the workspace list could not be refreshed',
-  'sidebar.addWorkspaceAbsError': 'Path must be absolute',
-  'sidebar.addWorkspaceHint': 'Enter the absolute path to a project directory.',
+  'sidebar.addWorkspaceAbsError':
+    'Enter an absolute path or an SSH workspace URL.',
+  'sidebar.addWorkspaceHint':
+    'Enter a local absolute path or ssh://user@host/absolute/project. SSH requires key authentication, a trusted host key and Python 3 on the remote computer. Shell commands also require Bash; Qwen is not required there.',
   'sidebar.addWorkspaceSuggestions': 'Directory suggestions',
   'sidebar.addWorkspacePersist': 'Keep after daemon restart',
   'sidebar.addWorkspacePersistHint':
@@ -3020,6 +3029,38 @@ const EN: Messages = {
   'tokenUsage.tools': 'Tools',
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  'trajectory.title': 'Trajectory',
+  'trajectory.description': 'See where a run spent its time and tokens',
+  'trajectory.empty': 'No records in this session yet.',
+  'trajectory.noTiming':
+    'No request or tool durations are recorded for these records.',
+  'trajectory.truncated': 'Showing the most recent records of this session.',
+  'trajectory.loadFailed': (v) =>
+    `Could not read the transcript: ${v?.message ?? ''}`,
+  'trajectory.partial':
+    'Part of this transcript could not be read, so some records are missing.',
+  'trajectory.totals': (v) =>
+    `${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
+  'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
+  'trajectory.turnSummary': (v) =>
+    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.request': 'Model request',
+  'trajectory.requestFailed': 'Request failed',
+  'trajectory.ttft': (v) => `TTFT ${v?.duration ?? ''}`,
+  'trajectory.subagentRollup': (v) =>
+    `subagent ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+  'trajectory.badge.user': 'you',
+  'trajectory.badge.message': 'say',
+  'trajectory.badge.thought': 'think',
+  'trajectory.badge.tool': 'tool',
+  'trajectory.badge.subagent': 'sub',
+  'trajectory.badge.shell': 'shell',
+  'trajectory.badge.permission': 'ask',
+  'trajectory.badge.status': 'note',
+  'trajectory.badge.cancelled': 'stop',
+  'trajectory.badge.other': 'other',
+  'trajectory.cancelled': 'Turn cancelled',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -3254,6 +3295,8 @@ const EN: Messages = {
   'workflow.action.retry': 'Retry failed path',
   'workflow.action.rerun': 'Rerun all',
   'workflow.action.unavailable': 'Workflow state changed before the action.',
+  'workflow.action.argsUnavailable':
+    'No restart: its history does not have the args it was launched with.',
   'workflow.action.failed': 'Could not update the workflow.',
   'workflow.history.retry': (v) => `Retried from ${v?.runId ?? ''}`,
   'workflow.history.rerun': (v) => `Rerun from ${v?.runId ?? ''}`,
@@ -3864,6 +3907,20 @@ const EN: Messages = {
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'localControl.open': 'Mobile access',
+  'localControl.expires': (v) =>
+    `One-time QR · Expires in ${v?.seconds ?? ''}s · Refreshes automatically`,
+  'localControl.expired': 'QR code expired. Getting a fresh code…',
+  'localControl.retry': 'Retry',
+  'localControl.noNetwork':
+    'No local network address is available. Open the Web Shell through an address your phone can reach.',
+  'localControl.securePairing':
+    'Scan to grant access until this daemon restarts.',
+  'localControl.insecurePairing':
+    'Scan to grant access until this daemon restarts. Traffic is unencrypted; use a trusted network.',
+  'localControl.securePairingDynamic':
+    "Scan to grant access to this daemon. The device that scans stays signed in until the daemon restarts or that device's tab is closed.",
+  'localControl.insecurePairingDynamic':
+    "Scan to grant access to this daemon. The device that scans stays signed in until the daemon restarts or that device's tab is closed. Traffic is unencrypted; use a trusted network.",
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
@@ -5544,8 +5601,9 @@ const ZH: Messages = {
   'sidebar.addWorkspaceBusyError': '另一个工作区操作正在进行中',
   'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceRefreshError': '工作区已添加，但无法刷新工作区列表',
-  'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',
-  'sidebar.addWorkspaceHint': '请输入项目目录的绝对路径。',
+  'sidebar.addWorkspaceAbsError': '请输入绝对路径或 SSH 工作区地址。',
+  'sidebar.addWorkspaceHint':
+    '请输入本地绝对路径或 ssh://user@host/absolute/project。SSH 需要密钥认证、已确认的主机密钥，以及远端 Python 3。Shell 命令还需要 Bash；远端无需安装 Qwen。',
   'sidebar.addWorkspaceSuggestions': '目录建议',
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
@@ -6800,6 +6858,35 @@ const ZH: Messages = {
   'tokenUsage.tools': '工具',
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  'trajectory.title': '轨迹',
+  'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
+  'trajectory.empty': '这个会话还没有记录。',
+  'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
+  'trajectory.truncated': '只显示这个会话最近的记录。',
+  'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
+  'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
+  'trajectory.totals': (v) =>
+    `${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
+  'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
+  'trajectory.turnSummary': (v) =>
+    `${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.request': '模型请求',
+  'trajectory.requestFailed': '请求失败',
+  'trajectory.ttft': (v) => `首字 ${v?.duration ?? ''}`,
+  'trajectory.subagentRollup': (v) =>
+    `子代理 ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+  'trajectory.badge.user': '用户',
+  'trajectory.badge.message': '回复',
+  'trajectory.badge.thought': '思考',
+  'trajectory.badge.tool': '工具',
+  'trajectory.badge.subagent': '子代理',
+  'trajectory.badge.shell': '终端',
+  'trajectory.badge.permission': '询问',
+  'trajectory.badge.status': '提示',
+  'trajectory.badge.cancelled': '中断',
+  'trajectory.badge.other': '其他',
+  'trajectory.cancelled': '本轮已取消',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
@@ -7008,6 +7095,7 @@ const ZH: Messages = {
   'workflow.action.retry': '重试失败路径',
   'workflow.action.rerun': '全部重跑',
   'workflow.action.unavailable': '操作前工作流状态已发生变化。',
+  'workflow.action.argsUnavailable': '无法重启：历史里没有它启动时用的参数。',
   'workflow.action.failed': '无法更新工作流状态。',
   'workflow.history.retry': (v) => `从 ${v?.runId ?? ''} 续跑`,
   'workflow.history.rerun': (v) => `从 ${v?.runId ?? ''} 全部重跑`,
@@ -7587,6 +7675,19 @@ const ZH: Messages = {
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'localControl.open': '手机访问',
+  'localControl.expires': (v) =>
+    `一次性二维码 · ${v?.seconds ?? ''} 秒后过期 · 自动刷新`,
+  'localControl.expired': '二维码已过期，正在获取新码…',
+  'localControl.retry': '重试',
+  'localControl.noNetwork':
+    '没有可用的局域网地址。请通过手机可访问的地址打开 Web Shell。',
+  'localControl.securePairing': '扫码将授予访问权限，直到 daemon 重启。',
+  'localControl.insecurePairing':
+    '扫码将授予访问权限，直到 daemon 重启。流量未加密，请使用受信任网络。',
+  'localControl.securePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。扫码的设备保持登录，直到 daemon 重启或该设备上的标签页关闭。',
+  'localControl.insecurePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。扫码的设备保持登录，直到 daemon 重启或该设备上的标签页关闭。流量未加密，请使用受信任网络。',
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
@@ -7661,7 +7762,7 @@ const ZH: Messages = {
     '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
   'settings.label.general.cleanupPeriodDays': '清理周期（天）',
   'settings.description.general.cleanupPeriodDays':
-    '~/.qwen/file-history/ 中用于 /rewind 的会话备份保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
+    '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
   'settings.label.general.gitCoAuthor.commit': '归因：commit',
   'settings.description.general.gitCoAuthor.commit':
     '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',
@@ -7712,7 +7813,7 @@ const ZH: Messages = {
     '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用。桥接的查看与调用保持工具声明列表稳定——桥接不会把 reveal 的工具重新声明——从而减少提示词大小且不触碰 prompt-cache 前缀。但声明列表并非不可变：会话仍会在以下情况重新声明——恢复会话时；工具集刷新（MCP 发现、会话中首次进入计划模式、子代理定义变更）在实时历史中发现对某个仍隐藏的 deferred 工具的直接调用时；子代理定义变更改写 agent 工具自身描述时；以及 MCP server 在会话中以 alwaysLoadTools: true 注册时。',
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
-    '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
+    '使用 node-pty 提供交互式 shell 体验。未设置时，明确的单次 prompt 默认使用 child_process；交互式和输入驱动模式默认使用 PTY。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',

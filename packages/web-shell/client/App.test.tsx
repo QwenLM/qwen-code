@@ -311,6 +311,7 @@ const {
   mockUseWorkspaceSessionLiveState,
   mockUseDaemonSessionActivityBridge,
   mockUseDaemonActivePromptBridge,
+  mockPeekSessionCatalogDisplayName,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -849,6 +850,7 @@ const {
     mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
     mockUseDaemonSessionActivityBridge: vi.fn(),
     mockUseDaemonActivePromptBridge: vi.fn(),
+    mockPeekSessionCatalogDisplayName: vi.fn(),
   };
 });
 
@@ -1775,6 +1777,7 @@ vi.mock('./session-catalog/session-catalog-store', async (importOriginal) => {
           : [],
       };
     },
+    peekSessionCatalogDisplayName: mockPeekSessionCatalogDisplayName,
   };
 });
 
@@ -5520,6 +5523,112 @@ describe('task activity key', () => {
         .click();
     });
     expect(mockWorkspace.client.sessionContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('rewires a restored trajectory tab so it can read again', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'trajectory:session-1',
+          tabs: [
+            {
+              id: 'trajectory:session-1',
+              kind: 'trajectory',
+              title: 'Trajectory',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp({ rightPanel: { items: ['trajectory'] } });
+    await flush();
+    await flush();
+
+    // The page loader is a function, so storage cannot carry it. A restored
+    // tab that is not rewired renders forever without ever asking for a page.
+    expect(
+      container.querySelector('button[title="Trajectory"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({ direction: 'backward' }),
+    );
+  });
+
+  it('drops a restored trajectory tab when the host stopped listing it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'trajectory:session-1',
+          tabs: [
+            {
+              id: 'trajectory:session-1',
+              kind: 'trajectory',
+              title: 'Trajectory',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    // The same profile, in a host that no longer opts in. A stored tab must
+    // not be a second way in: it would render the panel and keep fetching
+    // transcript pages for a feature this host has turned off. `terminal` and
+    // `web_preview` gate their restore the same way.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
+    await flush();
+    await flush();
+
+    expect(container.querySelector('button[title="Trajectory"]')).toBeNull();
+    expect(
+      mockWorkspace.client.getSessionTranscriptPage,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('opens one trajectory tab from the panel and reuses it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': { open: true, activeTabId: null, tabs: [] },
+      }),
+    );
+    const { container } = renderApp({ rightPanel: { items: ['trajectory'] } });
+    await flush();
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="right-panel-open-trajectory"]',
+    );
+    expect(entry).not.toBeNull();
+    await act(async () => entry!.click());
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Trajectory"]'),
+    ).not.toBeNull();
+    const persisted = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    );
+    expect(
+      persisted['/tmp/project\0session-1'].tabs.filter(
+        (tab: { kind: string }) => tab.kind === 'trajectory',
+      ),
+    ).toEqual([
+      {
+        id: 'trajectory:session-1',
+        kind: 'trajectory',
+        title: 'Trajectory',
+        sessionId: 'session-1',
+      },
+    ]);
   });
 
   it('reclaims pane-bound token usage tabs restored outside a split view', async () => {
@@ -11055,6 +11164,8 @@ beforeEach(() => {
   mockUseDaemonActivePromptBridge.mockImplementation(
     () => testState.sessionHasActivePrompt,
   );
+  mockPeekSessionCatalogDisplayName.mockReset();
+  mockPeekSessionCatalogDisplayName.mockReturnValue(undefined);
   mockWorkspace.status = 'connected';
   mockWorkspace.brand = undefined;
   mockWorkspace.brandSettled = false;
@@ -15151,6 +15262,53 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('seeds the catalog title before the session finishes loading', async () => {
+    mockPeekSessionCatalogDisplayName.mockImplementation(
+      (_client: unknown, sessionId: string) =>
+        sessionId === 'session-2' ? 'Second session' : undefined,
+    );
+    mockConnection.displayName = undefined;
+    const { container, rerender } = renderApp();
+    const header = () =>
+      container.querySelector('[data-testid="chat-context-header"]')
+        ?.textContent;
+    await flush();
+    mockWorkspace.client.sessionStatus.mockClear();
+
+    // Switching sessions while the transcript is still loading: the title has
+    // to come from the catalog cache, because the status request is gated on
+    // the load finishing.
+    mockConnection.sessionId = 'session-2';
+    mockConnection.loadingTranscript = true;
+    rerender();
+    expect(mockPeekSessionCatalogDisplayName).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'session-2',
+      '/tmp/project',
+    );
+
+    expect(mockWorkspace.client.sessionStatus).not.toHaveBeenCalled();
+    expect(header()).toContain('Second session');
+    expect(header()).not.toContain('New session');
+  });
+
+  it('keeps a catalog title when a status refresh reports no name', async () => {
+    mockPeekSessionCatalogDisplayName.mockReturnValue('Catalog title');
+    mockConnection.displayName = undefined;
+
+    const { container } = renderApp();
+    await flush();
+    await flush();
+
+    // The default status response carries no displayName; a refresh must not
+    // blank the title the catalog already resolved.
+    expect(mockWorkspace.client.sessionStatus).toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]')
+        ?.textContent,
+    ).toContain('Catalog title');
+  });
+
   it('uses the session catalog title when the connection has no display name', async () => {
     mockConnection.displayName = undefined;
     mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
@@ -18340,6 +18498,75 @@ describe('App session callbacks', () => {
     expect(
       new URLSearchParams(window.location.search).has('addRemoteWorkspace'),
     ).toBe(false);
+    window.localStorage.removeItem('qwen-remote-connections');
+  });
+
+  it('withholds the connected daemon affordances while browsing another location', async () => {
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+        'workspace_display_name',
+        'native_directory_picker',
+      ],
+      workspaceCwd: '/srv/local/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/srv/local/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify(['https://remote.example']),
+    );
+    const view = renderApp({}, undefined, true);
+    await flush();
+
+    act(() => {
+      view.container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')
+        ?.click();
+    });
+
+    // The connected location: every affordance describes this daemon, so all
+    // of them are offered and the browse seeds from this filesystem.
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      browseDirectories: true,
+      selectedLocation: window.location.origin,
+      initialPath: '/srv/local/',
+      persistenceSupported: true,
+      displayNameEnabled: true,
+    });
+    expect(testState.latestAddWorkspaceDialogProps?.onPick).toBeTypeOf(
+      'function',
+    );
+
+    act(() => {
+      testState.latestAddWorkspaceDialogProps?.onLocationChange?.(
+        'https://remote.example',
+      );
+    });
+    await flush();
+
+    // Browsing another computer in place: its capabilities are unknowable
+    // without querying it, so the affordances are withheld rather than assumed
+    // from the connected daemon — a native picker would open on the wrong
+    // machine, a Persist switch would draw the target's raw 501 or silently
+    // register a workspace that dies on its next restart, and a cwd from this
+    // filesystem seeds a browse the target answers with an empty list.
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      selectedLocation: 'https://remote.example',
+      initialPath: '/',
+      persistenceSupported: false,
+      displayNameEnabled: false,
+    });
+    expect(testState.latestAddWorkspaceDialogProps?.onPick).toBeUndefined();
+
+    view.unmount();
     window.localStorage.removeItem('qwen-remote-connections');
   });
 
@@ -39514,6 +39741,34 @@ describe('App /goal command', () => {
       container.querySelector('[data-testid="goals-page"]'),
     ).not.toBeNull();
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  // The macOS overlay titlebar inset lives on `.contextShell`'s padding-top;
+  // it reaches the absolutely positioned `.fullPage` views only because they
+  // mount inside the chat pane, which carries the `chatPaneShowingPage`
+  // positioning context (position: relative) whenever a full-page view is
+  // shown. If the views ever move out of the padded shell, the desktop drag
+  // strip overlaps their header controls — pin the ancestor chain.
+  it('keeps full-page views inside the positioned chat pane under the padded shell', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const page = container.querySelector('[data-testid="goals-page"]');
+    expect(page).not.toBeNull();
+    const chatPane = page!.closest('[data-testid="chat-pane-container"]');
+    expect(chatPane).not.toBeNull();
+    expect(chatPane!.className).toContain('chatPaneShowingPage');
+    const contextBody = chatPane!.closest('[data-testid="context-body"]');
+    expect(contextBody).not.toBeNull();
+    let shell: Element | null = contextBody!;
+    while (shell && !shell.className.includes('contextShell')) {
+      shell = shell.parentElement;
+    }
+    expect(shell).not.toBeNull();
   });
 
   it('opens the Goals page for a bare /goal even while a turn is running', async () => {

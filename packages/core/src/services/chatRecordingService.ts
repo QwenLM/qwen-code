@@ -331,7 +331,10 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'realtime_message'
-    | 'turn_result';
+    | 'turn_result'
+    | 'managed_session_header_v1'
+    | 'managed_session_event_v1'
+    | 'managed_session_commit_v1';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -455,11 +458,13 @@ export interface UserPromptRecordPayload {
   /**
    * Core/headless: submitted projection, otherwise expanded pre-hook text.
    * ACP: display projection or raw request text before expansion. ACP omits
-   * this payload when no projection, attachment references, or resource links exist.
+   * this payload when no projection, references, or input annotations exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** UI-only annotations; interpreted by transcript consumers, not the model. */
+  inputAnnotations?: unknown[];
   /** Daemon-owned attachment references used to restore prompt previews. */
   attachmentReferences?: UserPromptAttachmentReference[];
   /** Original ACP resource references, independent of model-input expansion. */

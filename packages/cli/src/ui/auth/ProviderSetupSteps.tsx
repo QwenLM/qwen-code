@@ -185,11 +185,11 @@ function ApiKeyStep({
 
 const MODEL_DESCRIPTION_COLUMN = 28;
 const MODALITY_DISPLAY_ORDER = ['image', 'video', 'audio', 'pdf'] as const;
-const MODEL_CUSTOM_INPUT_FOCUS_INDEX = -2;
-const MODEL_SEARCH_INPUT_FOCUS_INDEX = -1;
-const MAX_MODELS_TO_SHOW = 8;
+export const MODEL_CUSTOM_INPUT_FOCUS_INDEX = -2;
+export const MODEL_SEARCH_INPUT_FOCUS_INDEX = -1;
+export const MAX_MODELS_TO_SHOW = 8;
 
-interface ModelOption {
+export interface ModelOption {
   key: string;
   value: string;
   label: string;
@@ -197,7 +197,7 @@ interface ModelOption {
 
 type ModelRecommendationSource = 'provider' | 'fallback';
 
-function formatModelOptionLabel(model: ModelSpec): string {
+export function formatModelOptionLabel(model: ModelSpec): string {
   const details: string[] = [];
   if (model.contextWindowSize) {
     details.push(`${model.contextWindowSize.toLocaleString('en-US')} tokens`);
@@ -213,7 +213,7 @@ function formatModelOptionLabel(model: ModelSpec): string {
   return `${model.id.padEnd(MODEL_DESCRIPTION_COLUMN)}${suffix}`;
 }
 
-function modelOptionSearchText(item: ModelOption): string {
+export function modelOptionSearchText(item: ModelOption): string {
   return `${item.key} ${item.label} ${item.value}`.toLowerCase();
 }
 

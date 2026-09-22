@@ -474,6 +474,7 @@ describe('Desktop release event', () => {
       getWorkflowJob(releaseWorkflow, 'build'),
       'Install Qwen Code dependencies',
     );
+    expect(install).toContain("shell: 'bash'");
     expect(install).toContain('if [ -f pnpm-lock.yaml ]');
     expect(install).toContain(
       'corepack pnpm install --frozen-lockfile --prefer-offline',

@@ -29,8 +29,11 @@ export interface DialogListItem<T = string> {
  * step at a time, wrapping around, until a non-disabled row is found. When
  * every row is disabled (or the list is empty) the current index is kept.
  */
-export function findNextEnabledIndex<T>(
-  items: ReadonlyArray<DialogListItem<T>>,
+export function findNextEnabledIndex(
+  // Row shapes differ per caller and most never declare the flag; a
+  // `disabled?: boolean` constraint would trip weak-type detection on all of
+  // them, so the flag is read through a cast instead.
+  items: readonly unknown[],
   from: number,
   direction: 'up' | 'down',
 ): number {
@@ -41,7 +44,8 @@ export function findNextEnabledIndex<T>(
   let nextIndex = from;
   for (let i = 0; i < len; i++) {
     nextIndex = (nextIndex + step + len) % len;
-    if (!items[nextIndex]?.disabled) {
+    const row = items[nextIndex] as { disabled?: boolean } | undefined;
+    if (!row?.disabled) {
       return nextIndex;
     }
   }

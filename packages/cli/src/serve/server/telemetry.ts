@@ -45,6 +45,12 @@ interface LegacySessionTelemetryRoute {
 export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
+    path: '/sessions/catalog',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/catalog',
+  },
+  {
+    method: 'POST',
     path: '/session',
     attribution: 'handler_resolved',
     route: 'POST /session',
