@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseUnifiedDiff } from './unifiedDiff';
+import { buildUnifiedDiff, parseUnifiedDiff } from './unifiedDiff';
 
 describe('parseUnifiedDiff', () => {
   it('tracks hunks without confusing file-like content for headers', () => {
@@ -47,6 +47,17 @@ describe('parseUnifiedDiff', () => {
       { type: 'header', oldLine: undefined, newLine: undefined },
       { type: 'add', oldLine: undefined, newLine: 20 },
     ]);
+  });
+
+  it('does not add phantom lines for empty content', () => {
+    expect(buildUnifiedDiff('', 'new')).toBe('+new');
+    expect(buildUnifiedDiff('old', '')).toBe('-old');
+  });
+
+  it('omits oversized diffs before constructing their full output', () => {
+    expect(buildUnifiedDiff('line\n'.repeat(1_000), '')).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
   });
 
   it('keeps supporting headerless generated diffs', () => {

@@ -1,11 +1,25 @@
 const MAX_DIFF_PRODUCT = 250_000;
+const MAX_DIFF_LINES = 1_000;
+const MAX_DIFF_CHARS = 100_000;
+const OMITTED_DIFF = ' Diff omitted because it is too large to display safely.';
+
+function splitLines(text: string): string[] {
+  return text ? text.split('\n') : [];
+}
 
 export function buildUnifiedDiff(oldText: string, newText: string): string {
-  const oldLines = oldText.split('\n');
-  const newLines = newText.split('\n');
+  const oldLines = splitLines(oldText);
+  const newLines = splitLines(newText);
 
   const n = oldLines.length;
   const m = newLines.length;
+
+  if (
+    oldText.length + newText.length > MAX_DIFF_CHARS ||
+    n + m > MAX_DIFF_LINES
+  ) {
+    return OMITTED_DIFF;
+  }
 
   if (n * m > MAX_DIFF_PRODUCT) {
     const removed = oldLines.map((l) => (l ? `-${l}` : '-'));

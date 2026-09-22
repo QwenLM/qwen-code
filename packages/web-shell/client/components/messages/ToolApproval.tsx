@@ -338,7 +338,6 @@ export function ToolApproval({
   const questionId = useId();
   const descId = useId();
   const commandId = useId();
-  const diffId = useId();
 
   // Reset only when a NEW request arrives. Reading the safe default through a
   // ref keeps this keyed strictly to request identity: if the same request's
@@ -559,7 +558,6 @@ export function ToolApproval({
         questionId,
         descriptionText ? descId : null,
         showsCommandBlock || isGoal ? commandId : null,
-        diffs.length > 0 ? diffId : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -606,7 +604,7 @@ export function ToolApproval({
       ) : null}
 
       {diffs.length > 0 && (
-        <div className={styles.content} id={diffId}>
+        <div className={styles.content}>
           {diffs.map((block, index) => (
             <div key={index}>
               <div>{block.path}</div>

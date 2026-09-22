@@ -200,8 +200,19 @@ describe('ToolApproval accessibility', () => {
           .split(' ')
           .map((id) => document.getElementById(id)?.textContent)
           .join(' ');
-        expect(descriptions).toContain('before11966');
-        expect(descriptions).toContain('after11966');
+        expect(descriptions).not.toContain('before11966');
+        expect(descriptions).not.toContain('after11966');
+        const diffRegion = container!.querySelector<HTMLElement>(
+          '[aria-label="File diff"]',
+        )!;
+        expect(diffRegion.tabIndex).toBe(0);
+        const arrowDown = new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => diffRegion.dispatchEvent(arrowDown));
+        expect(arrowDown.defaultPrevented).toBe(false);
       }
       act(() =>
         optionButtons()
