@@ -1203,6 +1203,18 @@ export function createDaemonTurnNavigationStore(
     request: HistoryViewportRequest,
     releaseAnchor: () => void,
   ): Promise<DaemonTurnLocation> {
+    const finishLiveLocation = (location: DaemonTurnLocation) => {
+      publish({
+        selected: {
+          ordinal: hit.turnOrdinal,
+          turnId: hit.turnId,
+          status: 'ready',
+          location,
+        },
+        ...(snapshot.error?.operation === 'locate' ? { error: undefined } : {}),
+      });
+      return location;
+    };
     const valid = () =>
       request.isCurrent() &&
       hit.sessionId === sessionId &&
@@ -1226,7 +1238,11 @@ export function createDaemonTurnNavigationStore(
         block.sourceRecordIds?.includes(hit.recordId),
       );
       if (liveBlock)
-        return { turnId: hit.turnId, blockId: liveBlock.id, view: 'live' };
+        return finishLiveLocation({
+          turnId: hit.turnId,
+          blockId: liveBlock.id,
+          view: 'live',
+        });
       const table = pageTable.getSnapshot();
       for (const range of table.ranges) {
         for (const pageId of range.pageIds) {
@@ -1248,7 +1264,7 @@ export function createDaemonTurnNavigationStore(
       if (location.view === 'live') {
         const alias = livePromptAliases.get(hit.turnId);
         if (hit.role === 'user' && hit.recordId === hit.turnId && alias)
-          return alias;
+          return finishLiveLocation(alias);
         break;
       }
       if (!rangeId) break;

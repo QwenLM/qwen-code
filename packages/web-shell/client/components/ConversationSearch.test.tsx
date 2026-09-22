@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ComponentProps } from 'react';
+import { act, memo, type ComponentProps, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
@@ -18,17 +18,13 @@ const mocks = vi.hoisted(() => ({
   subscribe: () => () => {},
   t: (key: string) => key,
 }));
-vi.mock('../daemon-react-sdk', () => ({
-  useTranscriptStore: () => transcriptStore,
+vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptSnapshot: () => mocks.transcript,
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => historyStore,
 }));
 vi.mock('../i18n', () => ({ useI18n: () => ({ t: mocks.t }) }));
-const transcriptStore = {
-  subscribe: mocks.subscribe,
-  getSnapshot: () => mocks.transcript,
-};
 const historyStore = {
   subscribe: mocks.subscribe,
   getSnapshot: () => mocks.navigation,
@@ -964,3 +960,27 @@ it.each(['nonmatching', 'evicted'] as const)(
     expect(scrollToSearchHit).toHaveBeenCalledWith(hit, expect.any(Function));
   },
 );
+
+it('keeps the memoized timeline unchanged across streaming text and search typing', async () => {
+  const timelineRender = vi.fn();
+  const Timeline = memo(function Timeline({ action }: { action: ReactNode }) {
+    timelineRender();
+    return <div>{action}</div>;
+  });
+  const children = (action: ReactNode) => <Timeline action={action} />;
+  await render({ children });
+  const initialRenders = timelineRender.mock.calls.length;
+  mocks.transcript = {
+    blocks: mocks.transcript.blocks.map((block) =>
+      block.kind === 'assistant'
+        ? { ...block, text: `${block.text} chunk` }
+        : block,
+    ),
+  };
+  await render({ children });
+  expect.soft(timelineRender).toHaveBeenCalledTimes(initialRenders);
+  await open();
+  const openRenders = timelineRender.mock.calls.length;
+  await type('Message');
+  expect(timelineRender).toHaveBeenCalledTimes(openRenders);
+});

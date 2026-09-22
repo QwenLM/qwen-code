@@ -846,3 +846,37 @@ it('preserves a real network boundary failure during search navigation', async (
       ?.newer,
   ).toMatchObject({ kind: 'error', retryable: true });
 });
+
+it('replaces the historical selection when an exact search record becomes live during the page walk', async () => {
+  const { store, client, first, second } = fixture();
+  second.unshift(first.pop()!);
+  await ready(store);
+  const hit = (
+    await store.scanConversation('older MATCH', { isCurrent: () => true })
+  ).hits[0]!;
+  const getPage = vi.mocked(client.getTranscriptPage).getMockImplementation()!;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let waiting = false;
+  vi.mocked(client.getTranscriptPage).mockImplementation(async (options) => {
+    if (options.cursor) {
+      waiting = true;
+      await gate;
+    }
+    return getPage(options);
+  });
+  const pending = store.locateViewportSearchHit(
+    hit,
+    { isCurrent: () => true },
+    () => {},
+  );
+  await vi.waitFor(() => expect(waiting).toBe(true));
+  expect(store.getSnapshot().selected?.location?.view).toBe('historical');
+  store.observeLiveBlocks([second[0]!]);
+  release();
+  const location = await pending;
+  expect(location).toMatchObject({ view: 'live', blockId: 'a1' });
+  expect(store.getSnapshot().selected?.location).toEqual(location);
+});

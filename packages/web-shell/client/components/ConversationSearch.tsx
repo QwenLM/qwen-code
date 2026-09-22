@@ -15,7 +15,7 @@ import {
   type ReactNode,
 } from 'react';
 import { ChevronDownIcon, ChevronUpIcon, SearchIcon } from 'lucide-react';
-import { useTranscriptStore } from '../daemon-react-sdk';
+import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useDaemonHistoryNavigationStore } from '../daemon/session/DaemonSessionProvider';
 import {
   createConversationSearchSnippet,
@@ -59,9 +59,8 @@ export function ConversationSearch({
   registerInteractionBlocker,
 }: ConversationSearchProps) {
   const t = useConversationSearchI18n();
-  const store = useTranscriptStore();
   const history = useDaemonHistoryNavigationStore();
-  const transcript = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const transcript = useAnimationFrameTranscriptSnapshot();
   const navigation = useSyncExternalStore(
     history.subscribe,
     history.getSnapshot,
@@ -306,24 +305,27 @@ export function ConversationSearch({
     }
   };
 
-  const button =
-    active && (Math.max(liveCount, count) > limit || open) ? (
-      <button
-        ref={trigger}
-        type="button"
-        className={className}
-        aria-label={t('chat.searchConversation')}
-        title={t('chat.searchConversation')}
-        onClick={() => setOpen(true)}
-      >
-        <SearchIcon
-          width={14}
-          height={14}
-          strokeWidth={1.8}
-          aria-hidden="true"
-        />
-      </button>
-    ) : undefined;
+  const button = useMemo(
+    () =>
+      active && (Math.max(liveCount, count) > limit || open) ? (
+        <button
+          ref={trigger}
+          type="button"
+          className={className}
+          aria-label={t('chat.searchConversation')}
+          title={t('chat.searchConversation')}
+          onClick={() => setOpen(true)}
+        >
+          <SearchIcon
+            width={14}
+            height={14}
+            strokeWidth={1.8}
+            aria-hidden="true"
+          />
+        </button>
+      ) : undefined,
+    [active, liveCount, count, limit, open, className, t],
+  );
 
   return (
     <>

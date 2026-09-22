@@ -20,6 +20,7 @@ vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
 }));
 vi.mock('../daemon-react-sdk', () => ({
+  useConnection: () => ({ sessionId: 'session' }),
   useTranscriptStore: () => ({
     subscribe: () => () => {},
     getSnapshot: () => observed.transcript,
