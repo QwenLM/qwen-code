@@ -290,7 +290,9 @@ be relinquished rather than replaced is set to its auto value instead of being
 removed.
 
 Sites that only ever set a prop, or only ever remove it, are unaffected and
-were surveyed rather than changed. No renderer-level test was added: the
+were surveyed rather than changed — a judgement that did not hold at the tool
+card's header, where the collapsed branch sets a width the expanded one never
+sets; Decision 50 corrects it. No renderer-level test was added: the
 behaviour lives in the reconciler, and reproducing it needs a real render
 surface, which the pty matrix already covers.
 
@@ -1771,20 +1773,621 @@ two sanitising spans all turn on what arrives beside a key, or on which code poi
 caret happens to sit on, and no scenario produces either. Like the five items of Decision
 39, these four rest on the unit suites.
 
+## Decision 41 — the cursor is read from a ref, and a list wraps where ink's does
+
+Two classes of defect this round were the same shape wearing different clothes: a
+handler answering from the value the last render closed over, and a list stopping at
+its ends where ink's continues round.
+
+The first is Decision 33's stale-cursor class, which that decision closed on two
+handlers and left open everywhere else. It is now closed as a class. A twenty-eight
+line hook holds the pattern — a state value beside a ref mirror re-synced during
+render, a setter stable across renders that writes the ref synchronously, and
+handlers reading the ref — and the shared select hook returns the ref beside the
+index so every dialog that mounts it reads the same way. Six dialogs' wheel
+handlers read it too. Where the state is not a cursor, the same mirror was written
+inline beside the value it shadows: a checked set, two tab indices, and the
+authentication wizard's main and sub menus, each with its own writers. The class is
+closed for cursors and for those; the view and text state beside them is not, and
+is recorded under Follow-ups.
+
+The second is navigation. ink's selection list steps modulo the row count, so down
+past the last row lands on the first. This port clamped. The helper that follows
+ink already existed and was used in one dialog; it is now used at twelve call sites
+across five dialog files, and the local clamping copy beside it was deleted. Its
+signature widened from the shared list-item shape to an untyped readonly array so a
+dialog whose rows are not that shape can use it too, with the disabled test done on
+the row it casts. One dialog keeps clamping on three of its four steps, because
+ink clamps there; it wraps on the fourth, which ink builds as a radio list. Its own
+comment says which is which, so the mix reads as a decision rather than an
+oversight.
+
+Verified on frames, not only by test: a scenario boots in the last approval mode so
+the list's cursor starts at its end, and one down keystroke must land on the first
+row. A clamping implementation produces two identical frames, so the scenario
+discriminates. Both legs wrap the same way in both directions, and the only other
+difference in those frames is the vertical anchoring Decision 34 exempts.
+
+## Decision 42 — the ink theme is applied, once at boot and once per selection
+
+This renderer never asked the theme layer for anything. Its palette was built at
+import time from a hardcoded dark surface, so a named theme in settings, a theme
+picked in the dialog, and the light/dark probe were all inert: the port always
+painted the same colours whatever ink beside it painted. That is a functional gap
+rather than a cosmetic one, and it hid every colour divergence downstream of it.
+
+Two call sites now apply the active ink theme. One is at boot, placed after the
+deferred auto-theme probe has drained, so the theme it maps is the one ink settled
+on and first paint is already correct. The other is inside the theme-selection
+handler, after the shared theme manager commits, so a pick takes effect without a
+restart. The mapping itself gained five tokens it did not carry: the two dimmed
+status colours behind the approval-mode chrome, the symbol colour behind shell
+mode, and the focused and default border colours behind the composer outline and
+the banner panel. Each has a value on both surfaces.
+
+The dark/light mode helpers remain caller-less. The theme layer reaches the port
+through the ink theme, which already carries its own lightness, so the helpers are
+a second path to the same destination and nothing selects between them. Recorded
+under Follow-ups.
+
+Verified on frames with a named theme pinned in the isolated settings directory.
+Under it this renderer's palette and syntax tokens move off the values the
+default-theme run produces, so the wiring is shown to carry a theme through, not
+merely to run. The banner wordmark was originally cited here as that evidence and
+was wrong to cite: its ramp was still hard-coded at the time and did not follow
+the theme on either count, which is Decision 47.
+
+## Decision 43 — five token-level colour divergences, and one separator that no shipped theme can show
+
+Applying the theme made the next layer visible: rows that drew the right shape in
+the wrong token. Five were found and corrected, each by reading the ink component
+that draws the row rather than by matching a colour to the eye.
+
+The message metadata on both sides used the link token where ink uses the accent
+one; under the default dark surface the two happen to be the same colour, which is
+why it survived until a theme separated them. The goal card's colour map was built
+at import time out of the palette object's values, so it held whatever the palette
+was before any theme was applied and never moved afterwards; it now maps a card's
+colour name to a palette key and reads the palette when it draws. The footer's
+status rows were dim where ink paints them with the accent token. The footer's
+approval-mode label was one colour where ink colours it per mode, and its hint row
+was truncated as a single joined string, so narrowing the terminal dropped the
+coloured label whole instead of cutting it; the hint is now a list of coloured
+parts truncated part by part against the same budget, and the two joins ink makes
+— the inter-segment one and the single space before the queued badge — are each
+emitted only where both of their neighbours are actually present. The tool card's
+status glyph was bold where ink's is not.
+
+A sixth row drew the right token pair the wrong way round: a separator in the
+authentication wizard, painted with the dim token where ink uses the default
+border one. It is swapped. What is recorded beside the swap is that no shipped
+theme can show it. Eleven of the fifteen built-in themes pass no semantic tokens
+to the theme constructor and so take its derivation, which reads both of these
+tokens off the same grey field of the colour set; the four that do pass a shared
+semantic set read them off the same grey field of that set; a custom theme that
+omits them takes the derivation too. The swap is therefore observable only under a
+user custom theme that sets exactly one of the two. It is a real divergence and a
+correct fix, and it moves no frame on any theme this repository ships.
+
+Colour was verified by reading the styled capture both legs produce. In a
+truecolor terminal the banner panel's border carries the same source hex on each
+side, so the wiring of Decision 42 reaches the screen and these five token swaps
+land on the right values. The banner wordmark was read on the same frame and did
+not match: its ramp was sampled differently on the two sides, which is Decision 47. In a 256-colour terminal, read under a named theme, the border diverges
+because the two sides downconvert hex to an index by different rules, and the
+wordmark diverges from its second coloured column onward — indices 212, 218, 182
+against 68, 104, 103 — which is the same Decision 47 difference in source ramp
+showing through the conversion, not a second downconvert rule. Colour was read on
+these row families and no others, after the cursor cell of Decision 32, and it is
+a narrower dimension than the geometry the rest of this sweep rests on. The
+downconvert divergence belongs to the two libraries rather than to this port and
+is recorded under Follow-ups.
+
+## Decision 44 — a settled subagent is one summary line, and no roster card
+
+A foreground subagent that finished drew its result body in full, where ink draws
+one line: a glyph, the agent's name, and the description joined with its tool
+count, its own sub-agent count, its duration and its output tokens, plus the
+termination reason when it did not complete. The port drew the body as well as the
+card, so a settled agent occupied a screen ink had already given back.
+
+The summary is derived in the event adapter, from the same segments ink's own
+helper uses, and only for a run that reached one of the three settled states — an
+in-flight agent draws no summary at all. Counting its sub-agents keys on the same
+name set ink's tool message uses, which was moved to a shared module so the two
+sides cannot drift. The line carries three colour runs on screen, as ink's does:
+the glyph in the tone colour, the name in the primary text colour and bold, the
+rest dim and truncated by the shared result-length rule.
+
+The roster card went with it. The end-of-task event narrowed to an identifier, and
+both model layers now splice the card out when it arrives, so the settled row is
+the summary and nothing else. The card's completion flag and its statistics string
+were only ever read to build the row the summary now builds, and the local token
+formatter beside them had a shared equivalent, so all three were deleted rather
+than left unreferenced.
+
+## Decision 45 — the thought body is markdown, and its label carries the elapsed time
+
+An expanded thought printed its text as one dim run. ink renders the same text
+through the markdown component with the secondary text colour, which paints the
+plain text _and_ the headings that colour while leaving inline code and links
+their own. A heading inside a thought therefore read as body text here and as a
+heading there, and a link lost its colour entirely.
+
+The body is now markdown, in a box indented by the same two columns the status
+glyph occupies, so the body gets ink's own width rather than running under the
+gutter. That width was measured rather than derived: an unbroken run inside the
+box breaks at ninety-four columns, which is what ink's body is given at the same
+terminal width. What the box does not decide is where the markdown breaks a line
+of ordinary prose, and there the two sides differ; that difference is recorded
+under Follow-ups. Because the renderer's own inline-text token wins over an
+element's foreground, a dimmed body needs its own token map: one is built beside
+the syntax style on every theme application, rewriting only the inline-text token
+and the heading ones to the dim colour and leaving the code and link tokens
+alone. A theme that omits the inline token keeps it omitted, so the no-colour
+theme still leaves that text uncoloured as ink does. The dim colour it rewrites
+to is read after the palette is assigned, not before.
+
+Two smaller items on the same row. Its collapsed hint was missing the words that
+say the row can be clicked, which ink prints; the clickable flag it consulted was
+hardcoded off at the one call site, so it is gone rather than carried. And a
+thought still streaming had no duration, so its pending label printed without the
+elapsed time ink derives on every render; the label now derives it from the start
+stamp when no duration has been stamped yet.
+
+## Decision 46 — three dialogs rebuilt on the shared chrome, and two frames corrected
+
+The approval-mode, effort and output-style dialogs each carried their own local
+frame: their own border style, their own padding, their own title colour, their own
+footer-hint placement, and their own hand-written row text. Every one of those
+diverged, and none of them diverged in a way a per-dialog fix would have kept
+fixed. All three are rebuilt on the shared dialog frame, list and footer-hint
+components the rest of the port already uses, with their rows built from the same
+display-name and description helpers ink's own dialogs call — so the numbered rows
+now read as ink's read, and a future change to the shared chrome reaches them.
+
+The effort dialog also gained the step ink's has for scoping the setting, reachable
+by Tab, with the workspace-priority warning ink prints when a workspace value
+overrides the one being changed. Its note when the configured effort is not
+available for the model now carries ink's two branches rather than one.
+
+Two frames were corrected beside them. The shell dialog drew a square border, an
+accent-coloured title and a close hint ink does not print, with a column of padding
+either side that ink's box does not spend; it now draws a rounded border in the
+default border colour, a bold primary-coloured title, no close hint, and ink's own
+wording for a resumed session. The authentication wizard's frame spent one more
+column of padding than ink's, printed a close hint ink does not, and drew its
+separator twenty-four columns short; all three are corrected, and its link row is
+underlined and dim as ink paints it.
+
+The machine leg was re-run at this head, widened first: seven scenarios were
+added for the thought card, the settled subagent, the authentication wizard, the
+two stale-cursor bursts, the wrapping list and a named theme, so the matrix now
+holds thirty-four scenarios and sixty-eight runs, none of them erroring. Of the
+ninety-seven checkpoints, twenty-six have identical non-blank content rows and
+sixty-nine diverge, carrying 365 rows only ink draws and 357 only this port draws
+once the two sampled checkpoints — the spinner's phrase rotation and the
+mid-stream indicator, which hold elapsed time and a phrase chosen per tick — are
+counted apart. The identical count therefore reads twenty-six where the previous
+head's read nineteen.
+
+Against the previous head, 143 of the 152 plain captures common to both runs are
+byte-identical with the version the banner prints and the branch the footer
+prints normalised away. The nine that are not divide into the same four transient
+families the previous run named: three on the ink leg of the `@`-completion
+scenario, which in this run printed the extension-refresh notice the archived run
+had not, and six across the mid-stream indicator, `/stats` and the held-phrase
+row, on both legs. None of the nine is a capture this round's changes touch.
+
+Most of the sixty-nine divergences are the vertical anchoring Decision 34
+exempts, the long-token wrap recorded under Follow-ups, or the elapsed time a
+settled card prints. The seven new scenarios read as intended: the subagent's
+summary row matches on both legs down to its separators, and the wrapping list's
+three checkpoints differ only in where the block sits, with the cursor on the
+same row of the list in every frame — one down keystroke from the last row lands
+on the first in both legs, which is the discrimination the scenario was written
+for. The thought card's two checkpoints do not match, and the part that is not
+the long-token wrap is the markdown break-point difference recorded under
+Follow-ups.
+
+## Decision 47 — the wordmark gradient is sampled per line, off the theme's semantic ramp
+
+The banner's wordmark carried a gradient on both legs and the two did not agree.
+Reading the styled capture cell by cell across the six lines of the mark — 221
+coloured cells — showed two independent causes, neither of which is visible in the
+other's absence.
+
+The first is which colours are used. The port hard-coded the ramp the base light
+and dark colour sets declare. ink reads it off the active theme's semantic tokens,
+from the same candidates in the same order: the theme's own gradient when it
+declares a usable one, otherwise the secondary, link and accent text colours,
+otherwise no gradient at all — in which case ink paints the mark uncoloured rather
+than throwing. Eleven of the fifteen built-in themes take the constructor's
+derivation and so do carry their own ramp. The four that pass a shared semantic set
+— the two Qwen themes and the two ANSI themes — inherit the base ramp instead, and
+the gradient they declare never reaches the banner. The port now derives the ramp
+from the ink theme through those same candidates, resolves each stop the way it
+resolves the palette, and treats fewer than two survivors as no ramp.
+
+The second is how the ramp is sampled. ink's gradient component wraps the
+renderer's per-node text transform, which runs once per laid-out line, so each line
+of the mark builds a ramp of its own over a step count of its own width. The steps
+between two stops are not a plain interpolation: the library behind it seeds each
+segment with a rounded share of the step count, rebalances until the segments sum
+to it, and then steps each segment from its own start colour. The port shared one
+ramp across all six lines and lerped on a plain fraction of the widest one. Both
+choices are wrong, and differently: sharing the ramp puts the middle stop at the
+same column on every line, where ink puts it one column earlier on the 36-column
+first line than on the 37-column ones, and the plain fraction leaves the shorter
+line one step short of the last stop. Sampling per line with the library's own
+substep arithmetic reproduces all 221 cells of the ink capture exactly; the
+previous formula reproduces 26 of them.
+
+The arithmetic is reimplemented rather than imported — some twenty-five lines —
+because the library that defines it reaches this package only as a transitive
+dependency of the component ink uses, and depending on it directly would mean
+declaring it. It is pinned by tests against the hexes read off the capture, at both
+line widths, and those tests were shown to fail against the previous formula.
+
+## Decision 48 — two settings ink reads had no reader here
+
+A sweep for settings that change what ink draws found two that this renderer
+accepted from the same merged configuration and then never looked at: the clock
+stamp above an assistant row, and the switch that collapses a tool call to its
+header. Both were confirmed by reading every reference to each key in the package:
+the only readers were ink's own history display. A setting with no reader is worse
+than a missing feature, because the configuration UI offers it and appears to
+honour it.
+
+The stamp needed a time on the shared item type, and two sources for it. A live
+turn has no recorded time to read, so the block is stamped when it opens, with the
+fold's own clock, and later deltas appended to the same streaming block leave that
+stamp alone — one message, one stamp. A resumed session rebuilds the transcript
+from the recording instead, where each assistant record carries its own time; that
+record holds several text parts, so only the first text run of it is stamped and a
+leading reasoning block does not consume the stamp. Shipping the live half alone
+was the divergence the follow-up entry warned about: a resumed session would have
+shown no stamps at all. The label itself is ink's, character for character — a
+24-hour, zero-padded clock in brackets off the English locale, which is what keeps
+`23:00:00` from rendering as a 12-hour clock on a host whose locale differs.
+
+The collapse is ink's rule with ink's four exceptions. A card collapses only when
+the setting is off and the card was not clicked open, and the app-wide full-detail
+toggle is not holding it open, and the call is not still waiting for an answer.
+That last exception is the one that matters: the card is the only surface carrying
+the payload being approved, so a collapsed card would ask the user to approve
+something they cannot read. Ink chooses between two hints by whether the card is
+clickable, and the mouse is on here except under the screen reader, so it takes
+the clickable branch and names the click alone — the same call the thinking
+card's hint already makes.
+
+Both halves are pinned by tests that were shown to fail against the previous
+behaviour: dropping the setting gate, dropping the pending exception, stamping
+every text run instead of the first, reading a 12-hour clock, and naming both
+affordances in the hint where only one applies — each was shown to break
+assertions, and only those.
+
+## Decision 49 — `@` completion asks every source ink asks, behind ink's tabs
+
+This renderer's `@` completion asked the file index and nothing else. ink also
+completes prior sessions of the current project, MCP servers and their resources,
+and installed extensions, and — once more than one category is present — draws a
+tab bar to move between them.
+
+The search itself is reused rather than reimplemented. ink's completion hook takes
+a pattern and two callbacks and owns everything else: the crawler's lifecycle, the
+short delay before it admits a search is slow, the cancellation of a search a newer
+keystroke superseded, and a merge order it documents as an invariant, with sessions
+appended last on every path. Reimplementing that would have meant duplicating the
+invariant in a second place, and the hook has nothing renderer-specific in it. What
+was not reused is ink's navigation state: it keeps its own highlighted index and
+its own visible window, and this composer already has both, built to survive a
+batch of keystrokes handled inside one render. So only the category rules were
+ported — the fixed tab order, the tab set a result list implies, the filter, the
+wrapping step, and the fallback to the first tab when a newer result set no longer
+contains the one on screen. That last one is derived during the render rather than
+corrected after it, which is one render pass cheaper and visibly identical.
+
+Reusing the hook exposed a hazard the local search never had. Leaving `@` — the
+buffer cleared, a slash typed instead — makes the shared hook dispatch a reset, and
+that reset's publication lands after the render in which the same keystroke already
+published the slash results, wiping them. Both forwarded callbacks are therefore
+gated on the mode this composer is actually in, which is updated synchronously as
+the keystroke is handled. The gate also closes, for `@`, a hazard ink still has: a
+search resolving after the buffer was cleared can no longer repopulate a dropdown
+over an empty composer and steal the next Enter. The guard on the shell-mode
+keystroke stays, because slash argument completion is still driven locally and can
+still race it.
+
+Two details of the drawing follow ink rather than this renderer's slash list. The
+tab bar owns the bare left and right arrows only while it is up, with every
+modifier pinned off so word movement and any terminal binding still reach the
+buffer. And in mention mode a label column is shared only by the rows that carry a
+description — a bare path keeps the full width — where in slash mode every row
+shares one. The tab labels are exported from ink's own list component instead of
+being copied, so the two renderers cannot drift on a translation.
+
+## Decision 50 — the card header is one wrapping block, and both states share one shape
+
+Frame-verifying the collapse Decision 48 wired turned up two defects in the tool
+card's header, one of them a regression that only the frames could show.
+
+The first is the collapsed card's own tree shape. Collapsed and expanded returned
+different structures, and this renderer's React binding reconciles children by
+position and type and never clears a prop a re-render drops — the hazard Decision
+11 named, and a site its survey judged unaffected, because the collapsed branch
+sets a width the expanded branch never sets, which is exactly the removal case.
+So the box holding the two-column status glyph was reconciled onto
+the box the expanded header row uses, kept the width it had been given, and the
+expanded card drew the glyph and the first letter of the tool name with everything
+else clipped away. Both states now return one shape: the same header row, with the
+name and hint as separate runs while collapsed and as one wrapping block while
+open, and the body simply absent when collapsed. A test pins the part that jsdom can
+see — that the header row is the same element instance before and after the toggle,
+and that the glyph's box is the only descendant ever carrying a width — which is what
+fails if the two shapes come apart again. The width residue itself is a renderer
+behaviour the unit runtime cannot reproduce; it was read off the terminal, and
+confirmed absent the same way after the fix, including across a resize.
+
+The second is the expanded header's own layout. It was several text nodes side by
+side: the name, the description, the arrow that marks a waiting call. Flex siblings
+cannot reproduce what ink draws, because ink treats the name and the description as
+one wrapping block whose width is the header's own inner width — the card's width
+minus the two columns the status glyph occupies. Three consequences followed, all of
+them visible in a frame: the description's leading space was lost, so the name and
+the command ran together; wrapped rows were indented by eight columns where ink
+indents by four, because a sibling starts after the name rather than under it; and
+the arrow sat where the row ended rather than after the block's last character. The
+header is now a single text node carrying inline styled runs — the name bolded, the
+description and the arrow dim, the arrow in the primary colour as ink paints it — so
+the wrapping is the renderer's own and the geometry matches. The block's width is
+the same value the truncation helper already computed the row cap from, which is why
+the cap and the drawing now agree.
+
+Two residuals remain and are recorded under their own entries rather than here: the
+single cell between the name and the description is uncoloured in ink and dim in
+this port, which is the uncoloured-text divergence, and a token longer than the
+block still breaks earlier here than in ink, which is the long-token wrap.
+
+The stamped assistant row got the same remedy, because its two shapes differ the
+same way and the setting that chooses between them is dialog-settable and needs no
+restart — so a row already on screen switches shape mid-session. Its branches now
+carry keys, and a test pins the part that matters: after the flip the unstamped row
+is gone rather than reshaped in place, which is the assertion that fails when the
+keys are dropped.
+
+The machine leg was re-run at this head, widened by five scenarios first: the stamp
+with the collapsed card, the `@` categories, the away recap, the editor dialog, and
+the session picker's Space preview. The matrix now holds forty-three scenarios and
+eighty-six runs — thirty-eight at 100×40, the three transcript arms at 100×30, the
+narrow boot at 60×24 and the chip row at 58×40 — and not one run errored. Nine ended
+on an idle timeout instead of a settled frame, and all nine are legs that have always
+timed out: the auth wizard's model list on ink, whose spinner never goes idle, and the
+two multi-question arms.
+
+Of the one hundred thirty-one checkpoints, thirty-three have identical non-blank
+content rows. One family dominates the other ninety-eight: the context-file notice
+names a path long enough to be a single unbreakable token, the two legs break it at
+different columns, and nearly every frame that shows the notice shows it differently.
+Dropping the notice and the path fragments it wraps into from both legs leaves
+seventy-three identical and fifty-eight divergent, two of them the sampled checkpoints
+— the spinner's phrase rotation and the mid-stream indicator. Counting those two
+apart, the rest carry 258 rows only ink draws and 288 only this port draws.
+
+Those fifty-six fall in eleven families by primary cause, four of them new to this
+pass. Nine are non-deterministic and no fix can close them: the two sampled
+checkpoints, the two single-frame spinner phrases, the three stamp frames where the
+clock moved on its own, and the elapsed milliseconds on the two sub-agent frames.
+Nineteen are Decision 26 — this port still shows the banner ink has scrolled off, so
+identical content sits at different rows. Ten carry a defect no earlier pass had
+shown: the notice row keeps glyphs from the banner row it displaced, because the
+renderer never repaints a cell whose new content is a space. Four are a dialog that
+does not stretch — ink sizes its approval-mode box to the rest of the viewport and
+fills it with blank rows, this port sizes it to its content, and every row inside the
+box is word for word the same. Four are the card header's long argument wrap, four are
+the trailing scrollbar glyph, two are a scroll offset, two are a row that appears in a
+different order, two are a truncation the two legs disagree about, one is the expanded
+thinking body's indent, and one is the gated-server dialog's paragraph continuation.
+
+The vertical comparison is no longer reported, because Decision 26 made it
+meaningless: this port pins the composer to the bottom of the viewport where ink pins
+it to the top, so 128 of the 129 reconstructed frame pairs differ in position alone.
+Content rows are the comparison that survives that decision.
+
+## Decision 51 — the editor dialog reports a failed save where the user can see it, and its two lists are the shared numbered window
+
+`/editor` persists a preference through the shared settings object, and that write can throw — a read-only file, a scope the process cannot reach. ink catches the failure and prints it inside the dialog, so the user reads why nothing changed and the dialog stays open to try another scope. This renderer swallowed it: the catch closed the dialog on the error path exactly as on the success path, so a failed save was indistinguishable from a saved one and the preference quietly did not move. The write now records an error string instead of closing, the string renders in red above the frame, and the dialog stays mounted. A test drives a throwing setter and asserts both halves — the message on screen and the frame still open — which is what fails when the catch goes back to closing.
+
+The two lists inside the dialog were hand-drawn rows, which cost them the index column and the scroll window every other list here has. Both now run through the shared select hook and widget, so the editor step and the Apply-To step number their rows, window them instead of growing past the frame, and step over the disabled row rather than landing on it. The widget is the same one the confirmation dialogs use, so the numbering, the highlight and the wheel match the rest of the port instead of a one-off; the editor list also re-seats its cursor on the chosen scope's stored preference when the user comes back from Apply-To, which is how ink keys its own.
+
+The dialog drew a title row of its own above the two columns, and its bottom hint wrapped to a second line where ink truncates it inside the left column. The title row is gone — the two column headers are the top rows now, as ink's are — and the hint is clipped to the column's own budget, 45% of the content width less the two columns of padding, which is the truncate box ink puts it in. Tests pin each half: no chrome title row of the dialog's own, and the hint clipped to the left column with a single ellipsis rather than wrapped.
+
+## Decision 52 — `/resume` and `/delete` share ink's session picker, and delete commits a checked set
+
+`/resume` and `/delete` each drew their own session rows, and neither matched the picker ink mounts for both. The rows are now one component, built on the same pieces ink's SessionPicker uses rather than beside them: the shared filter and page size, the relative-time and message-count formatters, the truncation helper, and the search-input hook with its printable-character test. A row carries the two-column cursor marker — an up or down arrow at the window's edges — the title clipped to its own budget, and a meta line of relative time, message count, branch and disabled hint in ink's order. The visible window is derived from the terminal height the same way ink derives it, so the list scrolls rather than running off the frame.
+
+Delete also lacked ink's bulk path. It now mounts the picker with multi-select on and reuses ink's own delete command for both the single and the batch case, so the guard against deleting the live session, the mutex and every outcome message are shared rather than re-worded. Enter commits the checked set ordered by the full list and filtered to the enabled rows, so a search that narrows the view never silently drops a check made before typing; the live session is disabled in place rather than filtered out, matching ink. Resume keeps the single-select picker, with the command's pre-filtered list when `/resume <title>` matched more than one session. The cursor and the checked set both sit behind ref mirrors, so a burst of Space and arrow keys inside one read commits the set the user actually ticked rather than the one the last render drew.
+
+The structure and the batch path are pinned by tests over the rendered rows — the two-line shape, the unknown-count case, the checkbox commit, the disabled live session, the checks hidden while multi-select is off, the window's edge markers and pagination — each shown to fail against the previous hand-drawn rows. The picker's own height is still fixed rather than content-sized; that is recorded under Follow-ups rather than changed here, since it belongs to the spacing family Decision 16 describes.
+
+## Decision 53 — the auth wizard's model step focuses by colour and windows to eight rows, inside ink's square frame
+
+The onboarding wizard's model step drew a `›` cursor glyph beside the focused row, listed every recommended model at once, and had no search field. ink's model step does none of those: it conveys focus by colour alone, windows the list to eight rows, and puts a search field one Tab away that filters the recommendations as the user types. The step now matches — the glyph is gone, and the focused row is green where a checked-but-unfocused row takes the accent colour and a plain row the body colour; the list is a slice of the filtered models capped at ink's shared eight-row constant and scrolls as the focus moves; and the search field uses ink's own option-label and search-text helpers, so the rows read identically and cannot drift on a translation. Those constants and helpers are imported from ink's provider-setup module rather than copied.
+
+The dialog's frame was rounded like every other dialog here, but ink frames its auth dialog with a single border, so the wizard now asks the shared shell for square corners and leaves the rest of the port rounded. It also lacked ink's branch for a provider that ships no recommended models: where the list would be empty, ink drops the recommendations and the search entirely and asks for comma-separated model IDs in a free-text field, with the provider's own defaults as the example. That branch is now drawn, and a separate empty-search result — models exist but none match the query — says so in ink's words rather than showing a blank list.
+
+Tests pin the parts jsdom can see: the no-recommendations branch for a provider without models, the model-IDs error surfacing on an empty submit, the search field filtering the recommended list one Tab away, and the custom-ID field keeping its own caret. The burst cases the step already had — a held Space applying every tick to the same checkbox, and an Enter submitting the tick made in the same read — still pass against the colour-only focus, which is what fails if the glyph comes back or the window stops scrolling.
+
+## Decision 54 — a descriptive list stacks its description under its label and marks the pick in green
+
+Three dialogs draw a list whose rows carry a label with a description beneath it — the auth wizard's radio steps and the arena's stop and select dialogs. All three indented the description two columns past its own label, because the description sat in a sibling that started after the marker rather than under the label, and all three marked the picked row in the body colour where ink uses green. Each row is now a two-column box: a fixed two-column marker holding the `›` or a space, beside a single growing column that stacks the label and the description, so the description lines up under the label instead of past it. The selected row's marker and label take the success green ink uses, and an unselected row stays body-coloured with a dim description.
+
+The change is read off the rendered rows in the three dialogs' own tests, which assert the description's column against the label's and the selected row's colour. The row spacing is untouched — this is the indent and the colour, not the rhythm between rows.
+
+## Decision 55 — the away recap fires because the entry mounts the hook ink's container does
+
+ink fires a recap when the user returns to a session left idle past a threshold: its container mounts a hook that watches the focus and idle edges and, on return, appends a summary row and records it. This renderer never mounted that hook, so the away recap never fired — the setting existed, the hook existed, and nothing between them ran. The hook now mounts in the entry, which is where the live transcript and the streaming-to-idle edge already are, so its gate reads the rows it needs without a second copy of them. Focus comes from a new hook of this renderer's own: @opentui/core already parses the terminal's focus and blur events, but nothing switched focus reporting on, so this hook owns the `?1004` mode for the OpenTUI leg, starts focused, and re-asserts focus on any keypress — ink's own tmux workaround, since a session that does not forward focus events would otherwise stay blurred forever. Only one leg is ever mounted, so the two never both write the mode.
+
+The recap the hook returns lands as its own transcript item, which stops a streaming assistant block before it appends the summary, so it cannot splice into a turn still in progress. The hook records that recap on its own — the result phase of a `/recap` command, never the invocation — mirroring the manual command, so the auto-fired summary reaches the session log the same way. Whether a resumed session redraws it is the result-phase replay gap already under Follow-ups, which covers every slash-command result row rather than this one alone.
+
+Tests cover the focus hook's edges — the mode written on mount and cleared on unmount, the focus and blur events, the keypress re-assertion, the detach, and a stdout that throws — and the recap item's projection into the transcript. The hook's own firing is ink's shared code and is tested there; what this decision adds is the mount, the focus source and the item, each pinned here.
+
+## Decision 56 — the footer's model segment carries the reasoning effort
+
+ink's status line renders a model-with-reasoning preset item, so its model segment carries the reasoning effort beside the name — or `reasoning off` when the model has none. This renderer's footer printed the bare model id and dropped the effort. The segment now goes through the same shared formatter ink's preset uses, which strips a leading provider tag, appends the effort when there is one, and says `reasoning off` when reasoning is explicitly disabled. The effort comes from the same display helper the rest of the port reads, so the footer and any other surface that names the model agree.
+
+A test pins the segment against the preset's output — a model with reasoning off reads as its name followed by `reasoning off` — which is what fails when the footer goes back to the bare id. The divergence was first read off a reconstructed frame, where the two legs' model segments differed by exactly the effort suffix.
+
+## Decision 57 — the pointer follows `ui.mouseTracking`, and so do the two expand hints
+
+ink reads `ui.mouseTracking` in two places: it decides whether the renderer captures the pointer at all, and it decides which of two expand hints a collapsed card shows — `click to expand` while the mouse is live, `ctrl+o to expand` when it is not. This renderer read neither. It created its renderer with the pointer always on, and both expand hints — the collapsed tool card's and the thinking card's — hard-coded the clickable branch, so they advertised a click even under `ui.mouseTracking: false`, a setting with no read point here at all. Both now read it: the renderer is created without pointer capture when the setting is off, which hands right-click menus and OSC 8 link clicks back to the terminal as ink's does, and a live mouse flag is threaded into the transcript so each hint takes the branch that matches.
+
+The hint follows ink's own choice rather than a new rule — clickable while the pointer is live, key-only when it is not — which is the same call the thinking card's hint already made. The flag defaults to live, so the default setting changes nothing on screen; turning it off drops the click affordance from both hints and from the pointer at once. Decision 48 took the clickable branch on the assumption that the mouse is on here except under the screen reader; this decision makes the setting a second gate on that branch, and Decision 58 supplies the screen-reader leg.
+
+Both directions were confirmed on a real terminal: a dedicated scenario with the setting off shows no click affordance in either leg — the collapsed card and the thinking card both read `ctrl+o to expand` — while the same bundle with the default setting still offers the click. Unit tests pin the wiring beside it: the transcript receives the flag as false when the setting is off, and each hint's text follows it.
+
+## Decision 58 — a screen-reader session stays on ink
+
+Screen-reader mode needs plain-text, append-only output on the main screen with no mouse, so a screen reader reads each line once as it lands. This renderer has no path for that: it draws in place on the alternate screen with differential redraws and a live pointer, which a screen reader cannot parse. Serving OpenTUI under the flag would hand such a user in-place redraws that are worse than useless. So the renderer-selection gate now treats screen-reader mode as a second ink-only capability, beside the runtime probe it already had: when the flag is on the gate keeps ink, and in strict mode it throws rather than falling back silently.
+
+The check sits before the runtime probe and outranks it, so a screen-reader session on a runtime that cannot initialise the native FFI still reports the screen-reader reason rather than the FFI one — the capability, not the platform, is why ink is serving. The entry passes the configured screen-reader flag into the gate, so this is a live switch rather than a dead parameter. The plain-text and screen-reader policy modules this renderer carries stay unwired: they are imported only by their own tests, and threading them into a render path is follow-up work, not this change. This decision is the gate that keeps such sessions on ink until they are.
+
+Tests pin both the fallback and its reason, and a mutation that moves the screen-reader check after the runtime probe fails the case asserting the screen-reader reason wins on an unsupported runtime. On a real machine, strict mode throws naming screen-reader rather than the FFI; on a supported bun runtime a screen-reader session stays on ink while the identical run without the flag serves OpenTUI.
+
+## Decision 59 — Space previews a session, in a tree of its own rather than inside the list's frame
+
+The picker Decision 52 built could only act on the row under the cursor. ink's picker has a second mode: Space loads the highlighted session and replaces the list with a preview, so the user can read a transcript before committing to resuming or deleting it. That mode was absent here, which left `/resume` a blind choice among titles and made the picker's own `Space to preview` hint advertise nothing.
+
+The preview is returned as its own tree rather than as a swapped body inside the list's frame, because ink's has no border at all and its transcript spans the full inner width — a narrower body inside the framed shell would not have matched either the geometry or the reading width. Both trees carry a key, and that is load-bearing rather than decorative: this renderer never clears a prop a re-render drops, which is the failure Decision 11 records, so returning the framed list's box with the border style simply omitted left the border drawn on screen. Keying the two shapes apart forces an unmount instead of a reuse.
+
+The transcript comes from replaying the resumed session's events with no config passed in, so a tool group degrades to its name alone. That is not a shortcut — ink's preview passes a null config to the same builder and gets the same degradation, so the two agree on what a preview is willing to show. The meta line counts messages from the list entry when it carries a count and otherwise over the unique user and assistant uuids in the loaded conversation, which is ink's own fallback, and orders its segments count first — the reverse of the row's time-first order, again as ink does.
+
+While the preview is up it owns the whole keyboard: the picker's handler returns before it reads anything else, so a typed letter cannot start a search and an arrow cannot move a cursor that is no longer visible. Esc and ctrl+c come back to the list with the cursor, the checks and the query untouched; Enter resumes the previewed session. A load that resolves after the user has left is discarded rather than drawn over whatever they moved to. The mode is mounted for `/resume` only. `/delete` runs the picker in multi-select, where Space is the checkbox toggle, and the preview is off whenever multi-select is on, so the two never compete for the same key.
+
+Two of ink's guards were not ported, on purpose. Its picker throws when a caller asks for multi-select and preview together; this one resolves the same request by preferring multi-select. Neither production caller asks for both, and a precedence rule costs nothing observable where a throw would turn a wiring mistake into a crash. Its preview is also gated on a session service being present while that mode has already switched off the picker's own keys, so a missing service leaves ink's picker with no way out of a mode it cannot draw; here Esc returns to the list regardless.
+
+ink's own preview carries a defect that was not ported. Its loading branch is an ordinary box and its ready branch is a static block, and the height difference between them makes ink erase content it has already written to the static region and scroll the screen by several rows: the frame this sweep captured on the ink leg was blank, while the raw byte stream beside it carried the whole transcript. The port keeps one shape for both states, so neither the erase nor the scroll can happen. The ink leg's static output was still read as the reference for the intended layout, and the ported body wraps at the same columns and breaks at the same words.
+
+Nine cases pin the mode over the rendered rows: the swap and its Enter, the Esc that preserves the cursor and the query, the preview's exclusive claim on the keyboard with ctrl+c backing out rather than cancelling, both error wordings, the uuid-deduplicated count, Space staying with the checkboxes under multi-select, nothing at all drawn for a flow that did not opt in, and a late load dropped. Two scenarios cover it on a real terminal — one asserting the preview's frame, its borderless geometry and the byte-identical list after Esc, the other asserting that Enter actually restores the session into the main transcript rather than only closing the dialog. Not verified on a real machine: the two error branches, which need a corrupt session file to reach, and scrolling inside a preview longer than the viewport.
+
+## Decision 60 — the row glyph's gap is a column, not a character
+
+The user row and the assistant row each printed their status glyph and the space after it inside one text node, beside a growing sibling that carries the body. When the body is long enough to wrap, the sibling takes the full width and the trailing space is squeezed out, so an answer read `◆︎Answer` with no gap at all. Nothing in the frame matrix had shown it before, because every seeded body was short enough to leave the space room; the preview Decision 59 added was the first to put a deliberately wrapping answer in a transcript.
+
+The gap is now a fixed-width box holding only the glyph, sized by the same constant the tool card's status column uses, so it cannot be traded away by a sibling that needs the room. This is the same failure the warning row had, and the same fix; the shape is worth having in one place rather than rediscovered per row.
+
+A test pins it on both rows — the glyph sits in a two-column box of its own and carries no surrounding whitespace — and fails when either row goes back to an inline space. The frame that exposed the defect now shows the gap and wraps at the columns ink wraps at. One row of the same family was left alone deliberately: the subagent summary line also prints its glyph and space inline, but its three siblings are all plain text and none of them grows, so the squeeze cannot reach it. Changing it would be a guess at a defect no frame has shown.
+
+## Decision 61 — the harness routes a side query by its own marker, not by the absence of the main agent's
+
+The comparison harness answers every request from one fake endpoint, and that endpoint
+serves more than the conversation the scenario scripted. A turn can be followed by a
+session recap, a follow-up suggestion, a title, a next-speaker check, a memory recall,
+a compression pass, and — when the workspace has managed memory on — an extraction
+subagent that reads and writes files. Only the main turn and the subagents it spawns
+should consume the scenario's response table; a side query that takes a table entry
+silently shifts every later reply by one, and the frame that comes out looks like a
+rendering defect rather than a harness defect.
+
+The first test was the main agent's system-prompt prefix, and a request that did not
+carry it was treated as a side query. That is the wrong shape of test, because the
+prefix is not one string: each subagent carries the prompt its own definition gives it,
+so a built-in general-purpose agent and a user's `.md` agent differ, and enumerating
+them is not a thing a harness can keep true. The subagent frame lost its reply.
+
+The replacement — streaming plus a tool declaration means an agent conversation — was
+worse, because it looks like a rule about the wire and is not. The managed memory
+extraction subagent streams and declares tools; it is a subagent in every sense except
+that it belongs to the memory feature rather than to the turn. It took the table entry
+the scenario had written for the second reply, and the recap scenario timed out waiting
+for a row that had already been spent. The follow-up suggestion defeats the rule from
+the other side: it reuses the main agent's prompt verbatim and is identifiable only by
+the last user message.
+
+So the test runs the other way. Each side query is recognised by a marker it owns —
+the recap's own instruction, the suggestion's mode header, the compression directive,
+the extraction subagent's system prompt — and a request that is not streaming is a
+JSON side query. Everything else is an agent conversation and takes the table. The
+three answers a side query gets are the recap's text, an empty string where an empty
+string means "no suggestion" and "nothing to compress", and the canned empty-recall
+JSON. Re-routing on a positive marker rather than on the absence of one is what makes
+the harness survive a new side query: an unrecognised one lands in the agent bucket
+and shifts a reply, which the frame shows, instead of being silently answered from a
+table it was never meant to read.
+
+The re-run confirms it on both the behaviour and the routing. The subagent scenario
+went from erroring after two minutes to settling in twelve seconds, and the recap
+scenario from timing out on its second reply to settling in seventeen. Every request
+the full matrix made was then classified: eighty main turns and two subagent turns
+took the table, and twenty-six JSON side queries, two recaps and fifty-six suggestion
+calls did not. No table entry went to anything but an agent conversation.
+
+## Decision 62 — the palette carries a revision, because the banner's memo cannot see a repaint
+
+Decision 42 made the theme live and Decision 47 took the wordmark's ramp off it, and between them they left a hole no boot frame could show: the banner is memoised, and nothing a theme selection changes appears in its dependency list. The palette is one object mutated in place, so its identity survives `/theme`; the settings object the theme manager writes into is mutated as well, so its identity survives too; and the config is untouched. A banner that was already mounted therefore kept painting the ramp and the border colour it had been built with, and only a resize or a restart brought the new theme in. Every frame the matrix captured boots with the theme already applied, which is why this survived the sweep.
+
+The palette now carries a revision counter, bumped by both mutators, and the banner's memo depends on it. A module-scope counter is not a dependency the hooks lint accepts — it warns that mutating an outer value re-renders nothing — so the line carries a suppression with the reason beside it. The suppression is honest rather than a way past the rule: the re-render comes from the theme-selection handler's own state write, and the counter is what tells the memo that the values it closed over were repainted underneath it.
+
+A test repaints a mounted banner — the same config and settings objects are held across a theme change, and the wordmark's first cell is asserted before and after. Dropping the counter from the dependency list fails it with the old ramp still on screen, which is the mutation that shows the case discriminates. Not verified on a real machine: the light/dark mutator has no production caller (Follow-ups), so only the named-theme path is exercised, and no frame was captured of a theme picked mid-session.
+
+## Decision 63 — the ref mirror reaches two handlers Decision 41 missed
+
+Decision 41 recorded the stale-read class as closed for cursors. It was not. Two handlers sit outside the shared select hook it converted, and both were read off the source rather than off a frame.
+
+The rewind restore-option list keeps its cursor in a reducer, which the shared hook does not reach. Its Enter read the reducer's answer, and a burst cannot have delivered that answer yet: an arrow auto-repeat followed by Enter restored the option highlighted before the arrows moved. The clamp the reducer applies is now a function both sides call, and the handler advances its own mirror before it dispatches, because inside a burst a dispatch does not render and a mirror re-synced during render would still hold the pre-burst index. The render-time write beside it is what keeps the mirror honest across the resets the reducer performs on cancel and on a failed restore.
+
+The permissions dialog's two free-text fields — the rule and the workspace directory — were listed under Follow-ups as string state still read from the closure, and they are the one member of that list whose trigger is a single gesture rather than two keys of different meaning: a pasted path followed by Enter arrives in one read, so the field submitted the empty buffer it held before the paste and the dialog stayed put. Both now sit behind the mirror the cursors use, which lives in a module of its own rather than inside any one dialog, and their backspace and their append write through the mirror as well, so a burst that edits and then submits is coherent end to end. What remains open is the state that gates a branch rather than feeding a submit — a view name, a step, a search query — and stays recorded under Follow-ups.
+
+Three cases pin the rewind handler: a burst that lands on the third option, a burst that clamps into `Never mind` and then re-syncs the mirror for the next one, and keys dropped while the diff still loads. Three pin the permissions fields, one of them editing inside the burst. All six were run against the pre-fix code and fail there — the rewind burst reports the first option instead of the third, and the permissions fields submit nothing at all. Neither defect was reproduced on a real terminal: the burst needs a paste or a held arrow inside one read, which the harness cannot type.
+
+## Decision 64 — the mirror reaches two more reads, and one of them is not a number
+
+Decision 63 closed the two handlers outside the shared select hook. The class had two more members, again read off the source rather than off a frame.
+
+The auth wizard's model step holds which of three targets has focus — the custom-ID field, the search field, the list — in plain state, and its arrows, its Space and its paste handler all read that state off the closure. A held arrow followed by Space therefore typed a space into the field the arrows had already left, instead of toggling the row they had reached. The composer's `@` category tab stepped from the tab the previous render showed, so three arrows inside one read moved one tab rather than three.
+
+The cursor mirror only carries numbers, and a category is a string union, so the mirror was generalised beside it: one half for a numeric cursor, one half for any other value, both writing state and ref together. The wizard's focus and the composer's tab now sit on those two halves, and eight call sites take the mirror from that one module rather than growing a local shape each — the shared select hook, the session picker, the permissions dialog, the composer, the auth wizard, and the MCP, settings and arena dialogs.
+
+The tab is the instructive one, because it already used a functional update and still read stale. Inside a burst a functional update chains correctly — the third arrow does see the second arrow's write — while the value the handler closed over never moves, so an expression mixing the two still starts from the pre-burst tab. The fix is to read the mirror and do the arithmetic on it explicitly, which is what both handlers now do; the wizard's arrows in particular stopped deriving their next index from the render's copy.
+
+Three cases pin this: a three-key burst that lands the Space on the row the arrows of the same read reached, a two-key burst that toggles the row an arrow moved to, and three arrows of one read that carry the tab to Extensions. All three fail on the pre-fix code — the two wizard cases invert which radio glyph is filled, and the tab case finds no extension row and no file row either, because every arrow stepped from `all`. Neither defect was reproduced on a real terminal, for the reason Decision 63 gives. The wizard's review rows still read the closure, and stay recorded under Follow-ups.
+
+## Decision 65 — the approval dialog remembers the row its arrows landed on
+
+ink keeps its own highlighted-mode state and seeds the list index from it, so coming back from the scope step restores the row the arrows last highlighted rather than the mode the config happens to hold. Here the list was seeded from the config every time the scope step closed, which put the cursor back on the current mode and quietly threw away the walk the arrows had made — a user who moved down two rows, checked the scope, and pressed Enter wrote the mode they had started on.
+
+The dialog now keeps the highlighted mode the way ink does, takes it from the list's highlight callback, and seeds the list from it. The scope keeps its own key: the scope is what the trip changes, and the highlight is what survives it.
+
+One case walks the mode list down a row, takes the scope step to Workspace and comes back, then asserts the cursor is on the row the arrows reached. Seeding from the config instead of from the highlight fails it. The case looked green under that mutation at first, and the reason is worth keeping: Enter on the scope step without moving the scope cursor writes the scope it already had, so the key the list re-syncs on never changes, the list is never re-seeded, and the cursor sits where the arrows left it under either version. Moving the scope cursor before Enter is what makes the case discriminate. A re-sync keyed on a value has to see that value actually change, and a case that exercises it has to change it.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for twenty-seven scenarios — twenty-two at 100×40, the
+  reconstructed screen, for forty-three scenarios — thirty-eight at 100×40, the
   three transcript arms at 100×30, the narrow boot at 60×24 and the chip row at
-  58×40 — seventy-eight checkpoints in all, of which twenty-two match byte for
-  byte. Both legs from one bundle and one set of boot arguments.
-- **Colour was not verified, apart from one row family.** The reconstruction is
-  text. Several rows are known to differ only in which theme token they use.
-  A styled capture backs all but three of the seventy-eight checkpoints and was
-  read for one family only — Decision 32's cursor cell — leaving the rest
-  unread.
+  58×40 — one hundred thirty-one checkpoints in all, of which thirty-three match
+  on their non-blank rows as captured, and seventy-three match once the
+  context-file notice and the path fragments it wraps into are dropped from both
+  legs. Both legs from one bundle and one set of boot arguments.
+- **Colour was read on three row families, in two terminal modes, and is unread
+  elsewhere.** The reconstruction is text; colour comes from the styled capture
+  beside it, which the harness writes for every checkpoint but the one taken
+  after quit. Three families were read — Decision 32's cursor cell, and the
+  banner wordmark and the banner panel's border. The two banner families were
+  first read on different frames in different modes: the default-theme boot in
+  truecolor, where only the wordmark diverged, and a named-theme boot in
+  256-colour, where the border diverged too — that one is the two libraries'
+  downconvert rules, recorded under Follow-ups, and the wordmark's is Decision 47. Both were then re-read in truecolor, on the default-theme boot frame and
+  on a Dracula boot frame. Across the six wordmark rows of each, every one of
+  the 221 cells ink paints with the ramp matches this port cell for cell, and
+  the border emits the same source hex on both legs. The 25 cells per frame that
+  still differ are all blank — ink emits no colour for them and this port leaves
+  them at the renderer's own default, which is opaque white. That is the
+  uncoloured-text divergence under Follow-ups, not a ramp difference, and it
+  predates Decision 47. Every other row's colour is unread, and several rows are
+  known to have differed only in which theme token they used before Decision 43.
 - **The scrollbar costs the transcript no column.** Measured at a hundred
   columns with two answer rows of 95 and 96 characters: this renderer fills 99
   columns before it breaks a row where ink fills 98, so the one-column gap sits
@@ -1885,13 +2488,18 @@ What was verified, and how far the verification reaches:
   confirmation and then rotates the mode. The wiring is pinned by a test with
   its negative control — the intermediate mode that must release nothing — and
   the selection rule it consumes was already covered on its own.
-- **Every burst case is unit evidence only.** The acceptance harness writes one
-  character per pty write on purpose, so a keystroke lands in a stdin read of its
-  own, and it never pastes into a dialog input. Neither leg of the matrix can
-  therefore produce the multi-key reads Decisions 33, 34 and 37 are about; those
-  rest on the two dialog suites they added tests to, and on the mutations each of
-  those decisions names in its own coverage paragraph, with no screen evidence
-  behind any of them.
+- **Most burst cases are unit evidence only; the cursor class is not.** The
+  acceptance harness writes one character per pty write on purpose, so a
+  keystroke normally lands in a stdin read of its own, and it never pastes into a
+  dialog input. Two scenarios now break that rule deliberately for the
+  stale-cursor class: each writes three arrow keys, or two arrows and an Enter,
+  in a single pty write, so the keys land in one stdin read and the handler that
+  reads a closed-over cursor answers from the wrong row. Both legs are pinned
+  frame by frame, on two different dialogs, and the second of them is a wrap case
+  as well. What still rests on the unit suites and their mutations is everything
+  else: the paste interleavings Decisions 37 and 39 describe, the retry counter's
+  step guard, the answer lock and the sanitising spans of Decision 40 — none of
+  which a single-channel pty write can produce.
 - **ink's own auth-wizard suite fails locally, and this change is not shown to be
   why.** That file guards nineteen tests behind a check its own comment explains —
   simulated TUI input is unreliable on slow runners — and skips them on CI and on
@@ -1918,13 +2526,14 @@ What was verified, and how far the verification reaches:
 - **A live thought's body streams here.** ink hides it until the thought is
   expanded. Recorded rather than changed: with no scenario producing a live
   thought, a change would be unverifiable in either direction.
-- **`output.showTimestamps` still has no reader here.** ink prints a dim clock
-  row above the assistant row when the setting is on. Wiring it needs a
-  timestamp on the shared item type, stamped where the item is created, and a
-  second source on the resume path, which rebuilds the transcript from the
-  recording rather than from live items. A live-only half would itself be a
-  divergence — a resumed session would show no timestamps at all — so it is
-  deferred whole rather than shipped partial.
+- **The two settings Decision 48 wired are frame-verified in one scenario, at one
+  size.** Both halves were read on the dedicated scenario's frames at 100×40
+  against ink's: the clock row above the assistant row, and the settled card
+  collapsed to its header with the expand hint. Not checked in a frame: any other
+  viewport size, a resumed session — where the stamp comes from the recording
+  rather than from the fold's clock — and the collapsed card's click affordance,
+  which no scenario exercises, so it rests on the unit test that pins the hint's
+  wording and the handler it names.
 - **Which tools actually emit a structured payload mid-execution was not
   traced.** The consolidation makes every payload available on every path, live
   chunks included, so a shell result that reports an ANSI grid while it runs now
@@ -1956,6 +2565,37 @@ What was verified, and how far the verification reaches:
   rows to be subtracted from and they only add rows here. The two differ where ink
   would have squeezed a long result, and closing that gap means introducing a
   distribution this architecture never had.
+- **Decisions 51 through 58 rest on their unit suites and mutations, not on a
+  re-run of the frame matrix over the eight.** The cosmetic divergences behind
+  Decisions 51, 53 and 56 — the editor dialog's rows and hint, the auth frame's
+  corners and its missing no-recommendations branch, the footer's model segment —
+  were read off reconstructed frames during the sweep, and the two gates behind
+  Decisions 57 and 58, `ui.mouseTracking` and screen-reader mode, were each
+  confirmed on a real terminal in both directions, as their entries record. The
+  rest are source-verified against ink. A screen-reader session never reaches the
+  OpenTUI leg at all, since Decision 58 keeps it on ink, so that path has no
+  frame the matrix could compare.
+- **The machine leg was re-run at this head and reproduced the run before it.**
+  All eighty-six runs finished and none errored, and the nine idle timeouts land on
+  the same three ink legs in the same counts as that run. Compared capture by
+  capture, 243 of the 258 are byte-identical to it and three differ only in a
+  spinner glyph or an elapsed figure. The twelve that differ in content differ on
+  both arms at once and in the same way — the spinner's random phrase at two
+  checkpoints, the session identifier at one, and the wall clock at three — so no
+  capture attributes a change to this pass. The comparison tool's own tally
+  reproduces exactly, at thirty-three identical checkpoints of one hundred
+  thirty-one. The split that drops the context-file notice was not recomputed this
+  round; it is a figure from the run whose frames these are.
+- **Decisions 62 through 65 have no frame behind them.** The palette revision,
+  the two mirror reads and the approval dialog's remembered row were all read off
+  the source against ink's, pinned by a unit case each and shown to discriminate
+  by mutation. None of the four is reachable from a captured frame: the burst
+  needs a paste or a held arrow inside one stdin read, which the harness cannot
+  type, and the theme repaint needs a selection made mid-session. The footer's
+  hint row is the same shape from the other side — it truncates segment by
+  segment inside one line, which a case pins at forty-four columns, but the
+  narrowest viewport the matrix runs is fifty-eight, so no frame shows a hint row
+  that had to drop a segment.
 
 ## Follow-ups
 
@@ -1981,10 +2621,11 @@ What was verified, and how far the verification reaches:
   confirmation types — still the shared select widget — do both. Giving a click a
   meaning on the chips, on the free-text row and on the submit and cancel rows is
   its own change, as Decision 21 says; until then the dialog answers keys alone.
-- The `@` completion here asks only the file index. ink also completes
-  sessions, MCP resources and extensions, and draws a category bar to switch
-  between them. That is a feature gap rather than a parity defect and belongs
-  in its own change.
+- Two of the four `@` completion categories Decision 49 added are unit-tested
+  only. The dedicated scenario's work directory holds files and prior sessions,
+  so its frames draw those two tabs and their rows; it declares no MCP server and
+  installs no extension, so neither of those tabs is ever drawn and neither label
+  column is ever measured on screen.
 - The shell-crawler diagnostics that print when the search binary is missing
   are now explained. The renderer library replaces the global console with a
   capture stream and folds console output into its own in-renderer console, so
@@ -2004,14 +2645,26 @@ What was verified, and how far the verification reaches:
   tests — which asserts the constants' own sums rather than the screen. A change
   to the confirmation's geometry will therefore not fail on its own; re-deriving
   them belongs with that change.
+- The session picker's dialog does not shrink to its content. Its box is sized
+  to a fixed height — the viewport less one row — and the list's scroll window is
+  derived from that, so a short list still fills the full height, pushing the
+  composer down and leaving blank rows below the last session. Decision 52 reused
+  ink's row shape and window arithmetic but left this height fixed on purpose: it
+  is the content-sizing half of the spacing family Decision 16 describes, and
+  shrinking it means deriving the box from the rows shown rather than from the
+  viewport, then re-deriving the reserved-row constant and row height the window
+  is computed from.
 - The loading indicator has no subagent token rollup and no tokens-per-second
   segment, both of which ink shows. Its elapsed counter also restarts after a
   parked call in the shell, for the reason Decision 28 records: the row is
   mounted twice in mutually exclusive branches, so the instance that accumulated
   the time is not the one that carries on. Carrying it across the swap means
   owning the accumulator above both mounts.
-- The theme mode helpers have no production caller, so this renderer always
-  paints its dark palette.
+- The dark/light mode helpers have no production caller. Decision 42 wired the
+  ink theme through, so the palette does follow the active theme now; these two
+  helpers are a second path to the same destination that nothing chooses between,
+  and the only code that reaches them is a test fixture resetting the palette.
+  Either they gain a caller or they go.
 - Two dialog list widgets remain where one would do; consolidating them touches
   numbering, colour and scroll arrows at once.
 - A line-by-line comparison against ink's component and rendering source turned
@@ -2058,8 +2711,9 @@ What was verified, and how far the verification reaches:
   need nothing here: the theme one carries only `/theme`'s `NO_COLOR` message,
   which this renderer already routes through the dispatcher's recording wrapper
   (a theme selection adds no row on either side), the arena command's recorder
-  is shared code this renderer runs the same way, and the away-summary site
-  sits in a hook only ink's own container mounts.
+  is shared code this renderer runs the same way, and the away-summary recorder
+  now lives inside the hook this renderer mounts (Decision 55), so the recap it
+  fires is recorded the same way ink's is and needs no site of its own here.
 - An auxiliary model pick is a different kind of row. ink reports a fast, voice
   or vision selection as a success item — its own glyph and colour — while every
   model outcome here, primary or auxiliary, goes through one info row, so the
@@ -2077,22 +2731,37 @@ What was verified, and how far the verification reaches:
   scope for a sweep that measures itself against ink's behaviour as it stands;
   it is recorded here so the divergence between the two renderers is not
   re-reported as a porting gap.
-- The stale-cursor class is open everywhere except the two handlers Decision 33
-  touched. Read from the source: the shared select hook, the arena dialog's model
-  list, the composer's completion rows, and the auth wizard's four list steps plus
-  its main and sub menus all answer from the row the last render drew. The mirror
-  shape is already set by the question flow and the line editor, so this is one
-  change over those widgets and their tests, not a per-dialog one — and each site
-  needs its own burst case, since a mutation that fails the question dialog proves
-  nothing about a list it does not touch.
+- The stale-read class is closed for cursors and open for everything beside
+  them. Decision 41 put the numeric cursors behind a ref mirror — the shared
+  select hook and its exposed ref, the composer's completion rows, and each
+  dialog's own tab, checked set and wizard menus — Decision 63 added the
+  two handlers that claim had missed, the rewind restore-option cursor and the
+  permissions dialog's two free-text fields, and Decision 64 added the auth
+  wizard's model-step focus and the composer's `@` category tab, so no handler
+  now answers from a row or a buffer the last render drew — the wizard's review
+  rows excepted, which still read the closure and are recorded beside them. What
+  still does is the same root cause
+  over the state that gates a branch rather than feeding a submit: a dialog's
+  view name, its step, its focused zone, its search query and its editor
+  preference scope are all read from the render closure at the branches that
+  gate on them. Read from the source across six dialogs, not reproduced on a
+  machine. The trigger is narrower than the cursor class was: it needs two keys
+  of different meaning — a Tab or an Escape and an Enter — inside one stdin
+  read, and ink's isomorphic code reads its own render closure the same way, so
+  single-key behaviour matches. Closing it means rewriting each dialog's branch
+  structure around a mirror rather than adding one beside a value, which is why
+  it is recorded and not done; if it is done, per dialog, each site needs a
+  batched-press case of its own, since a mutation that fails one dialog's gate
+  proves nothing about another's.
 - Decision 37's latch stops a field, not a step. The wizard's list steps and its
   review row still run one branch per key. The review row applied the plan twice
   for a burst of two Enters — two writer calls, read off a scratch test at this
   head — and the protocol and endpoint rows have the same shape read from the
   source: each of their selects advances a step, so a second Enter in the same
   read skips the step between. ink's steps are the same shape, so closing this is
-  not a divergence to land ahead of ink's, and it belongs with the widget pass
-  above, which the same one-action-per-read latch would cover.
+  not a divergence to land ahead of ink's, and it belongs with the pass over the
+  dialog branch structure described above, which the same one-action-per-read
+  latch would cover.
 - The latch stops keys, not a paste. Every field it settles also subscribes to the
   renderer's paste event, and that subscription never consults the latch: a read
   carrying the Enter that moves the wizard and then a bracketed paste would let
@@ -2199,3 +2868,157 @@ What was verified, and how far the verification reaches:
   still to be picked off the screen with no user input involved — the outcome
   Decision 39's bound exists to prevent, reachable from a payload it does not
   cover.
+- Text this renderer draws with no colour of its own still carries an explicit
+  foreground, where ink's carries none, and the reach is wider than blank cells.
+  Read off styled captures of the same boot frame on both legs: the blank cells
+  either side of the banner logo are emitted by ink with the foreground left
+  unset, so the terminal's own default paints them, and by this renderer with an
+  explicit white. That part is invisible as things stand — the cells are spaces
+  and the background is unset on both sides — but it is not the same instruction,
+  and it would show on any terminal whose default foreground is not white the
+  moment a selection or an inverse run covers one of those cells. The visible
+  part is a whole row class: the extension-refresh notice on that same frame is
+  emitted by ink with no foreground on any of its cells and by this renderer in
+  its dim token. ink's comes out unset because that theme takes its primary from
+  the dark base tokens, whose foreground is the empty string, and an empty colour
+  emits no instruction at all, so on a terminal whose default is lighter than the
+  dim token that row reads darker here. Closing it means a way to say "no colour"
+  to the renderer, which the element's foreground prop does not offer.
+- One palette key carries two jobs, which is why the foreground above cannot
+  simply be left unset. The mapping's `text` is both the colour this port paints
+  its own plain text with and the anchor for the markdown syntax `default` token,
+  and the theme booted here leaves ink's primary empty, so the mapping falls back
+  to the theme's hljs foreground to keep both alive. Honouring ink's "no colour"
+  for plain text means splitting the two roles first; until then this renderer
+  names a foreground for unstyled markdown that ink leaves to the terminal.
+- The no-colour theme is not honoured. ink reaches it by setting every colour in
+  the set to the empty string; this renderer's mapping preserves those empty
+  strings, and its theme application then filters them all out, so the palette
+  keeps the built-in dark surface it was initialised with and paints a full
+  colour scheme where ink paints none. The filter is right — an empty string
+  means "unset", and assigning one would degrade to a colour the renderer
+  guesses at — so what is missing is a branch that recognises the theme as a
+  whole being empty and drops the surface with it.
+- A hex colour is downconverted to a 256-colour palette index by different rules
+  on the two sides. Measured, not inferred: the banner panel's border under a
+  named theme, in a 256-colour capture, lands on palette index 103 under ink and
+  61 here. The same border on the default-theme boot frame, in a truecolor
+  capture, carries an identical source hex on both legs — so the two sides start
+  from the same colour and part company in the conversion. ink's index is exactly
+  what the round-each-channel-to-six-levels formula gives for that hex; this
+  renderer's conversion happens inside the renderer library's native layer, which
+  is not readable from the JavaScript bundle, so its rule was not established —
+  only its output. Nothing in this port chooses the index, so there is no site to
+  fix; a change would have to come from the library. Recorded because it is the
+  one measured colour divergence that survives every fix in this round, and
+  because it will be re-found by anyone who compares the two legs on a terminal
+  that is not truecolor.
+- The auto-theme module this renderer carries has no caller. Only its own test
+  imports it; the theme reaches the port through the ink theme manager, which
+  resolves the light/dark probe on its own side of the boundary. Either it gains
+  a caller or it goes, and the same question covers the dark/light mode helpers
+  recorded above.
+- The two markdown implementations break a line in different places, and put a
+  list item's bullet in different columns. Both were measured on one body
+  rendered through each. The width is not the cause: an unbroken run inside the
+  thought body's box breaks at ninety-four columns here, which is the width
+  ink's own body is given. A body of four-character words then fills eighty-nine
+  of those ninety-four columns here and ninety-four under ink, and a body of
+  one-character words fills ninety-three here where ninety-four would fit — both
+  consistent with this side counting the space after a line's last word against
+  the line, though that rule was inferred from the measurements rather than read
+  out of the renderer. ink's own four lines do not follow one rule that was
+  established here: they hold nineteen words at the fourth column, eighteen at
+  the fifth, nineteen at the fourth and four at the fifth. Separately, ink draws
+  a list item's bullet at the fifth column of the same body where this side
+  draws it at the fourth. Both divergences belong to the two markdown renderers
+  rather than to this port and neither has a site here to fix. Recorded because
+  Decision 45 moved the thought body onto markdown, so this is where they show,
+  and because any other body this port renders as markdown carries them too.
+- A single unbreakable token wraps at a different column on each side, and this is
+  the one divergence that touches almost every frame the matrix captures. The
+  context-file notice names a path with no space in it, so the whole path is one
+  token. ink moves the token to a row of its own and then hard-breaks it at
+  ninety-eight columns; this port fills the row the token started on and breaks
+  at whatever column that leaves — ninety-five on the frame that was measured.
+  Both are defensible and neither is a width constant that can be copied across,
+  because the two sides disagree about whether a token too long for the remaining
+  row is moved or broken in place. It is recorded rather than fixed for the same
+  reason the markdown wrap above is: the rule lives in the layout, not in a
+  number this port chooses.
+- The renderer does not repaint a cell whose new content is a space. Measured on
+  ten frames, and it does not heal: the session picker's nine checkpoints and the
+  preview scenario's one all carry the extension-refresh notice with box-drawing
+  glyphs standing in six of its spaces — the glyphs of the banner row that sat
+  there before the picker pushed it off the top. The same notice renders clean on
+  the frames where the row it lands on was blank first, and the picker's own box
+  on the same frame is clean throughout, so this is not a failure to clear the
+  screen; it is a differential write that skips blank cells on the assumption the
+  cell underneath is already blank. That assumption holds only while the
+  renderer's own buffer agrees with the terminal's, and a scroll that moves rows
+  up breaks the agreement for the row that was displaced. The write happens in
+  the renderer library's native layer, so there is no site here to fix; recorded
+  because it is visible garbage on a real terminal, and because a workaround
+  would have to force a full repaint whenever the viewport scrolls.
+- A modal dialog is sized to its content here and to the rest of the viewport
+  under ink. ink's approval-mode box runs from the row after the command to the
+  bottom of the screen — thirty-five rows, twenty-two of them blank inside the
+  box, with the key hint near the bottom — where this port draws thirteen rows and
+  leaves the space above the box empty. Every row inside the two boxes is word for
+  word the same, including the selected mark, so this is the box's height alone.
+  It is the same family as the session picker's box not shrinking, and it is
+  recorded rather than fixed for the same reason: sizing a dialog to the viewport
+  is a layout decision that reaches every dialog at once.
+- Two rows truncate under ink and wrap or overflow here. The completion list's
+  argument hint is clipped to an ellipsis in its own column under ink, and wraps
+  to a second row aligned under the column's start here. The chip row on a narrow
+  terminal clips each chip's label to an ellipsis under ink and prints the labels
+  whole here, which costs the gaps between them. Neither row was compared against
+  ink's truncation site, so whether the budget is a shared constant or two is not
+  established.
+- The gated-server dialog's body paragraph indents its continuation row by one
+  column. Both legs agree on the first row of the paragraph and on the eighty-eight
+  columns of text the row carries; only the row after a break gains a leading space
+  here. It is the same shape as the markdown divergences recorded above and may
+  share their cause.
+- ink loses the right-hand corner of the gated-server dialog's box. That dialog is
+  indented one column further than ink's other dialogs, its top and bottom borders
+  run to ninety-four dashes, and the closing corner is absent from the frame — the
+  box does not close. The same border on the approval-mode and session-picker
+  dialogs, at one column less indent, closes on both legs. This port draws a closed
+  box one column narrower, so on this row the port is the one that is right, and
+  the divergence is recorded rather than matched.
+- ink has a frame where the session picker is almost entirely absent. Pressing the
+  preview key unmounts the list, and the capture taken before the preview body is
+  drawn holds three rows — the banner's last row, the notice and the command — with
+  no list, no preview and no composer. The next checkpoint is the list again, so it
+  is one frame of transition rather than a missing feature, and this port draws the
+  full preview body at the same checkpoint. Recorded so the empty frame is not
+  re-reported as a porting gap.
+- The stats dialog carries its own copy of the ref mirror rather than calling the
+  shared hook, and rebuilds its writer on every render. Both are cosmetic: the copy
+  performs the same double write, and nothing memoises on the writer's identity. It
+  belongs with the consolidation of the two dialog list widgets rather than landing
+  on its own.
+- The dialog chrome declares a close handler it never reads. Every caller that
+  needs to close does it from its own key handler, so the prop is a dead affordance
+  in the type and not on screen. That chrome's test pins the rounded outline and
+  the title's colour and weight, but not the square outline the auth dialog asks
+  for, so a change to the one border style that differs would pass.
+- Three branches have a shape no run reaches. The composer's unfocused border
+  colour is exercised by a test alone, since the single production mount leaves the
+  flag at its default. The footer's approval-mode colour dims a mode the enum does
+  not declare where ink leaves the label uncoloured, and the enum is closed, so
+  neither arm runs. The shared list walk types its rows as unknown and reads the
+  disabled flag through a cast, because the row shapes differ per caller and a
+  declared flag would trip weak-type detection on every caller that never sets it.
+- The banner gradient counts code points where the library ink renders through
+  counts UTF-16 units, so a logo row holding a surrogate pair would ramp one step
+  differently. The bundled logo holds none — it is box-drawing characters, all
+  inside the basic plane — but the banner also accepts a custom one, so an emoji in
+  a user's logo would colour differently on the two sides.
+- The clock label above an assistant row exists twice. This port calls the shared
+  formatter Decision 48 added; ink's display component still formats the same
+  24-hour bracketed time inline, with an identical locale call. Pointing ink at the
+  shared one would edit the very file the frame evidence was captured against, so
+  the second copy stays and the two are only kept equal by hand.

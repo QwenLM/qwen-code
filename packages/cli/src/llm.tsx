@@ -1327,7 +1327,12 @@ export async function main() {
       const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      const selection = selectTuiRenderer();
+      const selection = selectTuiRenderer(
+        undefined,
+        undefined,
+        process.env,
+        config.getScreenReader(),
+      );
       if (selection.renderer === 'opentui') {
         try {
           const { startOpenTuiUI } = await import(
