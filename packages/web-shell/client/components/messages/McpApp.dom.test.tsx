@@ -101,12 +101,13 @@ function appDisplay(overrides: Partial<McpAppDisplay> = {}): McpAppDisplay {
 function renderApp(
   display: McpAppDisplay,
   theme: (typeof WebShellThemeId)[keyof typeof WebShellThemeId] = WebShellThemeId.Dark,
+  baseUrl = 'http://127.0.0.1:4170',
 ): { container: HTMLElement; rerender: (node: ReactNode) => void } {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   const wrap = (node: ReactNode) => (
-    <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+    <McpAppHostContext.Provider value={baseUrl}>
       <ThemeProvider value={theme}>{node}</ThemeProvider>
     </McpAppHostContext.Provider>
   );
@@ -233,7 +234,7 @@ describe('McpApp host lifetime', () => {
     });
   });
 
-  it('retries an unreachable isolated origin through an opaque inline sandbox then shows fallback', async () => {
+  it('retries an unreachable isolated origin through an isolated data document then shows fallback', async () => {
     vi.useFakeTimers();
     try {
       const { container } = renderApp(appDisplay());
@@ -241,14 +242,43 @@ describe('McpApp host lifetime', () => {
         await vi.advanceTimersByTimeAsync(10_000);
       });
       const iframe = container.querySelector('iframe');
-      expect(iframe?.getAttribute('src')).toContain('mode=opaque');
-      expect(iframe?.getAttribute('sandbox')).toBe('allow-scripts allow-forms');
-      expect(container.textContent).toContain('restricted App sandbox');
+      expect(iframe?.getAttribute('src')).toContain('mode=data');
+      expect(iframe?.getAttribute('sandbox')).toBe(
+        'allow-scripts allow-forms allow-same-origin',
+      );
+      expect(new URL(iframe!.src).hostname).toBe('127.0.0.1');
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10_000);
       });
       expect(container.textContent).toContain('Demo result');
       expect(iframe?.getAttribute('src')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts remote Apps in data mode and closes after one failed handshake', async () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = renderApp(
+        appDisplay(),
+        WebShellThemeId.Dark,
+        'https://daemon.example.com/proxy',
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const iframe = container.querySelector('iframe');
+      expect(iframe?.src).toContain('/proxy/mcp-app-sandbox?');
+      expect(iframe?.src).toContain('mode=data');
+      expect(appBridgeMocks.constructed).toBe(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(iframe?.getAttribute('src')).toBeNull();
+      expect(container.textContent).toContain('Demo result');
+      expect(appBridgeMocks.constructed).toBe(1);
+      expect(appBridgeMocks.close).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }

@@ -162,22 +162,129 @@ describe('MCP App sandbox', () => {
     );
   });
 
-  it('serves the opaque fallback on the existing channel with an immutable restrictive CSP', async () => {
-    const response = await request(makeApp()).get('/mcp-app-sandbox').query({
-      hostOrigin: 'http://localhost:4170',
-      mode: 'opaque',
-    });
+  it('isolates large Unicode HTML as a data document and pins message peers', async () => {
+    const response = await request(makeApp())
+      .get('/mcp-app-sandbox')
+      .query({
+        hostOrigin: 'http://localhost:4170',
+        mode: 'data',
+        csp: JSON.stringify({ frameDomains: ['https://*.tableau.com'] }),
+      });
     expect(response.status).toBe(200);
     expect(response.headers['location']).toBeUndefined();
     expect(response.headers['content-security-policy']).toMatch(
-      /^sandbox allow-scripts allow-forms;/,
+      /^sandbox allow-scripts allow-forms allow-same-origin;/,
     );
-    expect(response.headers['content-security-policy']).not.toContain(
-      'allow-same-origin',
+    expect(response.headers['content-security-policy']).toContain(
+      'frame-src data: https://*.tableau.com',
     );
     expect(response.headers['cache-control']).toContain('no-store');
-    expect(response.text).toContain('const opaque = true;');
-    expect(response.text).toContain('sandbox-proxy-ready');
+    const script = response.text.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    const inner = {
+      setAttribute: vi.fn(),
+      style: {},
+      contentWindow: { postMessage: vi.fn() },
+      src: '',
+    };
+    const parent = { postMessage: vi.fn() };
+    const addEventListener = vi.fn();
+    runInNewContext(script!, {
+      window: {
+        self: {},
+        top: {},
+        parent,
+        location: { origin: 'http://localhost:4170' },
+        addEventListener,
+      },
+      document: { createElement: () => inner, body: { appendChild: vi.fn() } },
+      btoa,
+    });
+    const onMessage = addEventListener.mock.calls[0][1];
+    const prefix = '<body>圖表 📊</body>';
+    const html =
+      prefix + 'x'.repeat(4 * 1024 * 1024 - Buffer.byteLength(prefix));
+    expect(Buffer.byteLength(html)).toBe(4 * 1024 * 1024);
+    const ready = {
+      method: 'ui/notifications/sandbox-resource-ready',
+      params: { html },
+    };
+    onMessage({ source: parent, origin: 'https://evil.example', data: ready });
+    expect(inner.src).toBe('');
+    onMessage({ source: parent, origin: 'http://localhost:4170', data: ready });
+    expect(inner.src).toMatch(/^data:text\/html;charset=utf-8;base64,/);
+    expect(inner.src.length).toBeLessThan(4096);
+    const bootstrap = Buffer.from(inner.src.split(',')[1], 'base64').toString(
+      'utf8',
+    );
+    const bootstrapListener = vi.fn();
+    const childDocument = { open: vi.fn(), write: vi.fn(), close: vi.fn() };
+    const proxy = { postMessage: vi.fn() };
+    runInNewContext(bootstrap.match(/<script>([\s\S]*?)<\/script>/)![1], {
+      window: {
+        parent: proxy,
+        addEventListener: bootstrapListener,
+        removeEventListener: vi.fn(),
+      },
+      document: childDocument,
+    });
+    expect(proxy.postMessage).toHaveBeenCalledWith(
+      { method: 'qwen/data-ready' },
+      'http://localhost:4170',
+    );
+    onMessage({
+      source: {},
+      origin: 'null',
+      data: { method: 'qwen/data-ready' },
+    });
+    expect(inner.contentWindow.postMessage).not.toHaveBeenCalled();
+    onMessage({
+      source: inner.contentWindow,
+      origin: 'null',
+      data: { method: 'qwen/data-ready' },
+    });
+    expect(inner.contentWindow.postMessage).toHaveBeenCalledWith({ html }, '*');
+    const load = bootstrapListener.mock.calls[0][1];
+    load({ source: {}, origin: 'http://localhost:4170', data: { html } });
+    load({ source: proxy, origin: 'null', data: { html } });
+    expect(childDocument.write).not.toHaveBeenCalled();
+    load({ source: proxy, origin: 'http://localhost:4170', data: { html } });
+    expect(childDocument.write).toHaveBeenCalledWith(html);
+    expect(childDocument.close).toHaveBeenCalledOnce();
+    expect(inner).not.toHaveProperty('srcdoc');
+    parent.postMessage.mockClear();
+    onMessage({ source: {}, origin: 'null', data: 'wrong-peer' });
+    onMessage({
+      source: inner.contentWindow,
+      origin: 'http://localhost:4170',
+      data: 'wrong-origin',
+    });
+    expect(parent.postMessage).not.toHaveBeenCalled();
+    onMessage({ source: inner.contentWindow, origin: 'null', data: 'right' });
+    expect(parent.postMessage).toHaveBeenCalledWith(
+      'right',
+      'http://localhost:4170',
+    );
+  });
+
+  it('accepts only currently trusted canonical remote parents in data mode', async () => {
+    let trusted = true;
+    const app = express();
+    disposers.push(
+      mountMcpAppSandbox(
+        app,
+        (origin) => trusted && origin === 'https://host.example',
+      ),
+    );
+    const get = (hostOrigin: string, mode = 'data') =>
+      request(app).get('/mcp-app-sandbox').query({ hostOrigin, mode });
+    expect((await get('https://host.example')).status).toBe(200);
+    expect((await get('https://host.example', '')).status).toBe(400);
+    expect((await get('https://evil.example')).status).toBe(400);
+    expect((await get('https://host.example/path')).status).toBe(400);
+    expect((await get('https://user@host.example')).status).toBe(400);
+    expect((await get('null')).status).toBe(400);
+    trusted = false;
+    expect((await get('https://host.example')).status).toBe(400);
   });
 
   it('settles a registration when shutdown races initial listener startup', async () => {

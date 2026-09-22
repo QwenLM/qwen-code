@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application } from 'express';
+import type { Application, Request } from 'express';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 
@@ -44,7 +44,10 @@ export function parseMcpAppCsp(value: unknown): McpAppResourceCsp | undefined {
   }
 }
 
-export function buildMcpAppCsp(csp?: McpAppResourceCsp): string {
+export function buildMcpAppCsp(
+  csp?: McpAppResourceCsp,
+  dataMode = false,
+): string {
   const resources = sanitizeCspDomains(csp?.resourceDomains).join(' ');
   const connections = sanitizeCspDomains(csp?.connectDomains).join(' ');
   const frames = sanitizeCspDomains(csp?.frameDomains).join(' ');
@@ -58,7 +61,11 @@ export function buildMcpAppCsp(csp?: McpAppResourceCsp): string {
     `media-src 'self' data: blob: ${resources}`.trim(),
     `connect-src 'self' ${connections}`.trim(),
     `worker-src 'self' blob: ${resources}`.trim(),
-    frames ? `frame-src ${frames}` : "frame-src 'none'",
+    dataMode
+      ? `frame-src data: ${frames}`.trim()
+      : frames
+        ? `frame-src ${frames}`
+        : "frame-src 'none'",
     "form-action 'none'",
     "object-src 'none'",
     baseUris ? `base-uri ${baseUris}` : "base-uri 'none'",
@@ -77,9 +84,10 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
       (() => {
         if (window.self === window.top) return;
         const hostOrigin = __HOST_ORIGIN__;
-        const opaque = __OPAQUE_ORIGIN__;
+        const dataMode = __DATA_MODE__;
+        let pendingHtml;
         const inner = document.createElement('iframe');
-        inner.setAttribute('sandbox', opaque ? 'allow-scripts allow-forms' : 'allow-scripts allow-forms allow-same-origin');
+        inner.setAttribute('sandbox', 'allow-scripts allow-forms allow-same-origin');
         inner.style.cssText = 'width:100%;height:100%;border:0;background:transparent';
         document.body.appendChild(inner);
 
@@ -89,14 +97,35 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
             if (event.data?.method === 'ui/notifications/sandbox-resource-ready') {
               const params = event.data.params || {};
               if (typeof params.html === 'string') {
-                inner.srcdoc = params.html;
+                if (dataMode) {
+                  pendingHtml = params.html;
+                  // Keep the navigation URL small; large Apps travel over postMessage.
+                  const bootstrap = '<meta charset="utf-8"><script>(' + (() => {
+                    window.addEventListener('message', function load(event) {
+                      if (event.source !== window.parent || event.origin !== __PROXY_ORIGIN__ || typeof event.data?.html !== 'string') return;
+                      window.removeEventListener('message', load);
+                      document.open();
+                      document.write(event.data.html);
+                      document.close();
+                    });
+                    window.parent.postMessage({ method: 'qwen/data-ready' }, __PROXY_ORIGIN__);
+                  }).toString().replaceAll('__PROXY_ORIGIN__', JSON.stringify(window.location.origin)) + ')();<\/script>';
+                  inner.src = 'data:text/html;charset=utf-8;base64,' + btoa(bootstrap);
+                } else {
+                  inner.srcdoc = params.html;
+                }
               }
               return;
             }
             inner.contentWindow?.postMessage(event.data, '*');
             return;
           }
-          if (event.source === inner.contentWindow && event.origin === (opaque ? 'null' : window.location.origin)) {
+          if (event.source === inner.contentWindow && event.origin === (dataMode ? 'null' : window.location.origin)) {
+            if (dataMode && event.data?.method === 'qwen/data-ready' && pendingHtml !== undefined) {
+              inner.contentWindow.postMessage({ html: pendingHtml }, '*');
+              pendingHtml = undefined;
+              return;
+            }
             window.parent.postMessage(event.data, hostOrigin);
           }
         });
@@ -110,7 +139,10 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
   </body>
 </html>`;
 
-function parseHostOrigin(value: unknown): string | undefined {
+function parseHostOrigin(
+  value: unknown,
+  allowsOrigin: (origin: string) => boolean,
+): string | undefined {
   if (typeof value !== 'string') return undefined;
   try {
     const url = new URL(value);
@@ -123,7 +155,10 @@ function parseHostOrigin(value: unknown): string | undefined {
         .every((octet) => /^\d+$/.test(octet) && Number(octet) <= 255);
     if (
       ['http:', 'https:'].includes(url.protocol) &&
-      (['localhost', '[::1]'].includes(url.hostname) || ipv4Loopback)
+      url.origin === value &&
+      (['localhost', '[::1]'].includes(url.hostname) ||
+        ipv4Loopback ||
+        allowsOrigin(url.origin))
     ) {
       return url.origin;
     }
@@ -133,7 +168,10 @@ function parseHostOrigin(value: unknown): string | undefined {
   return undefined;
 }
 
-export function mountMcpAppSandbox(app: Application): () => void {
+export function mountMcpAppSandbox(
+  app: Application,
+  allowsOrigin: (origin: string, req: Request) => boolean = () => false,
+): () => void {
   const pending = new Map<
     string,
     { hostOrigin: string; csp: string; expiresAt: number }
@@ -166,7 +204,7 @@ export function mountMcpAppSandbox(app: Application): () => void {
       MCP_APP_SANDBOX_HTML.replace(
         '__HOST_ORIGIN__',
         JSON.stringify(resource.hostOrigin),
-      ).replace('__OPAQUE_ORIGIN__', 'false'),
+      ).replace('__DATA_MODE__', 'false'),
     );
   });
   const start = () => {
@@ -199,7 +237,11 @@ export function mountMcpAppSandbox(app: Application): () => void {
     return port;
   };
   app.get('/mcp-app-sandbox', async (req, res, next) => {
-    const hostOrigin = parseHostOrigin(req.query['hostOrigin']);
+    const dataMode = req.query['mode'] === 'data';
+    const hostOrigin = parseHostOrigin(
+      req.query['hostOrigin'],
+      (origin) => dataMode && allowsOrigin(origin, req),
+    );
     if (!hostOrigin) {
       res.status(400).end();
       return;
@@ -208,19 +250,20 @@ export function mountMcpAppSandbox(app: Application): () => void {
       res.status(503).end();
       return;
     }
-    if (req.query['mode'] === 'opaque') {
+    if (dataMode) {
       res
         .set({
-          'Content-Security-Policy': `sandbox allow-scripts allow-forms; ${buildMcpAppCsp(parseMcpAppCsp(req.query['csp']))}`,
+          'Content-Security-Policy': `sandbox allow-scripts allow-forms allow-same-origin; ${buildMcpAppCsp(parseMcpAppCsp(req.query['csp']), true)}`,
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'origin',
         })
         .type('html')
         .send(
           MCP_APP_SANDBOX_HTML.replace(
             '__HOST_ORIGIN__',
             JSON.stringify(hostOrigin),
-          ).replace('__OPAQUE_ORIGIN__', 'true'),
+          ).replace('__DATA_MODE__', 'true'),
         );
       return;
     }

@@ -8,6 +8,7 @@ import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
+import { TLSSocket } from 'node:tls';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
@@ -2139,7 +2140,17 @@ export function createServeApp(
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
     (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
-      mountMcpAppSandbox(app);
+      mountMcpAppSandbox(app, (origin, req) => {
+        if (originAllowlist.allows(origin)) return true;
+        if (!opts.token || listenerIdentityOf(req).kind !== 'primary')
+          return false;
+        const scheme =
+          req.socket instanceof TLSSocket && req.socket.encrypted
+            ? 'https'
+            : 'http';
+        // Match the existing self-origin rule; forwarded headers are not authority.
+        return origin === new URL(`${scheme}://${req.headers.host}`).origin;
+      });
   }
 
   if (deps.enqueueChannelWebhookTask) {

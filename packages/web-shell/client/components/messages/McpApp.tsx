@@ -69,29 +69,35 @@ function loopbackCrossOriginHostname(hostname: string): string | undefined {
 export function resolveMcpAppSandboxUrl(
   daemonBaseUrl: string,
   hostUrl: string,
+  dataMode = false,
 ): string | undefined {
   try {
     const host = new URL(hostUrl);
     const sandbox = new URL(daemonBaseUrl, host);
     if (
-      !isLoopbackHostname(host.hostname) ||
-      !isLoopbackHostname(sandbox.hostname)
-    ) {
+      !['http:', 'https:'].includes(host.protocol) ||
+      !['http:', 'https:'].includes(sandbox.protocol) ||
+      sandbox.username ||
+      sandbox.password
+    )
       return undefined;
+    dataMode ||=
+      host.protocol === 'https:' ||
+      !isLoopbackHostname(host.hostname) ||
+      !isLoopbackHostname(sandbox.hostname);
+    if (!dataMode) {
+      // The dedicated HTTP listener uses localhost, including for IPv6 binds.
+      if (sandbox.hostname === '[::1]') sandbox.hostname = 'localhost';
+      if (sandbox.origin === host.origin) {
+        const alias = loopbackCrossOriginHostname(sandbox.hostname);
+        if (alias) sandbox.hostname = alias;
+      }
     }
-    // CSP cannot allow `http://[::1]:<port>`. Always rewrite IPv6
-    // loopback onto localhost before checking same-origin swap.
-    if (sandbox.hostname === '[::1]') {
-      sandbox.hostname = 'localhost';
-    }
-    if (sandbox.origin === host.origin) {
-      const alias = loopbackCrossOriginHostname(sandbox.hostname);
-      if (alias) sandbox.hostname = alias;
-    }
-    sandbox.pathname = '/mcp-app-sandbox';
+    sandbox.pathname = `${sandbox.pathname.replace(/\/$/, '')}/mcp-app-sandbox`;
     sandbox.search = '';
     sandbox.hash = '';
     sandbox.searchParams.set('hostOrigin', host.origin);
+    if (dataMode) sandbox.searchParams.set('mode', 'data');
     return sandbox.toString();
   } catch {
     return undefined;
@@ -136,7 +142,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   themeRef.current = theme;
   const [height, setHeight] = useState(260);
   const [error, setError] = useState<string>();
-  const [opaqueSandbox, setOpaqueSandbox] = useState(false);
+  const [dataSandbox, setDataSandbox] = useState(false);
   const cspKey = display.csp ? JSON.stringify(display.csp) : '';
   const toolArgumentsKey = JSON.stringify(display.toolArguments);
   const toolResultKey = JSON.stringify(display.toolResult);
@@ -145,12 +151,11 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     const resolved = resolveMcpAppSandboxUrl(
       daemonBaseUrl,
       window.location.href,
+      dataSandbox,
     );
     if (!resolved) return undefined;
-    const url = new URL(applySandboxCspQuery(resolved, cspKey));
-    if (opaqueSandbox) url.searchParams.set('mode', 'opaque');
-    return url.toString();
-  }, [daemonBaseUrl, cspKey, opaqueSandbox]);
+    return applySandboxCspQuery(resolved, cspKey);
+  }, [daemonBaseUrl, cspKey, dataSandbox]);
 
   useEffect(() => {
     setError(undefined);
@@ -225,8 +230,9 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     };
     let readyTimeout = setTimeout(() => {
       if (!active) return;
-      if (!opaqueSandbox) setOpaqueSandbox(true);
-      else failInitialization();
+      if (new URL(sandboxUrl).searchParams.get('mode') !== 'data') {
+        setDataSandbox(true);
+      } else failInitialization();
     }, 10_000);
     bridge.onsandboxready = () => {
       if (!active || ready) return;
@@ -299,7 +305,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     };
   }, [
     sandboxUrl,
-    opaqueSandbox,
+    dataSandbox,
     callTool,
     display.serverName,
     display.resourceUri,
@@ -323,12 +329,6 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         <span>MCP App</span>
         <span className={styles.server}>{display.serverName}</span>
       </div>
-      {opaqueSandbox && !error ? (
-        <div className={styles.fallback}>
-          Using a restricted App sandbox because the isolated origin is
-          unavailable. Apps requiring a non-opaque origin may not work here.
-        </div>
-      ) : null}
       {error ? (
         <div className={styles.fallback}>
           {display.fallbackText || 'MCP App could not initialize.'}
@@ -339,11 +339,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         title={`${display.serverName} MCP App`}
         className={styles.frame}
         style={{ height, display: error ? 'none' : undefined }}
-        sandbox={
-          opaqueSandbox
-            ? 'allow-scripts allow-forms'
-            : 'allow-scripts allow-forms allow-same-origin'
-        }
+        sandbox="allow-scripts allow-forms allow-same-origin"
         referrerPolicy="origin"
         onError={() => setError('sandbox-load-failed')}
       />
