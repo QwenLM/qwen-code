@@ -106,6 +106,25 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
 }
 
 /**
+ * Thrown by {@link readWorktreeSession} when the sidecar's identity changed
+ * on two consecutive read attempts. Distinct from corruption: the file on
+ * disk holds a complete document written by a concurrent atomic rewrite, so
+ * consumers that delete corrupt sidecars ({@link restoreWorktreeContext})
+ * must preserve it instead.
+ */
+export class WorktreeSessionReadInconclusiveError extends Error {
+  constructor(filePath: string) {
+    super(
+      `Worktree session sidecar at ${filePath} changed identity while being read`,
+    );
+    this.name = 'WorktreeSessionReadInconclusiveError';
+  }
+}
+
+/** Internal sentinel: the sidecar's identity changed mid-read — retry. */
+const READ_IDENTITY_CHANGED = Symbol('read-identity-changed');
+
+/**
  * Read the sidecar. Returns null when:
  * - file does not exist (ENOENT)
  * - file content is invalid JSON
@@ -116,6 +135,12 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
  * (`removeUserWorktree(undefined)`, `git status` with `cwd: undefined`,
  * Footer rendering `⎇ undefined (undefined)`).
  *
+ * A sidecar whose identity changes mid-read (a concurrent
+ * `writeWorktreeSession` renaming over the same path) is retried once and,
+ * if still unstable, reported via {@link WorktreeSessionReadInconclusiveError}
+ * rather than collapsed into the corrupt-sidecar null — never into a state
+ * a consumer would delete.
+ *
  * Throws only on unexpected I/O errors (permission, EIO, etc.) so the
  * caller can log them; benign ENOENT / parse failures are silenced into
  * a null return.
@@ -124,6 +149,17 @@ export async function readWorktreeSession(
   filePath: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<WorktreeSession | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const outcome = await readWorktreeSessionOnce(filePath, options);
+    if (outcome !== READ_IDENTITY_CHANGED) return outcome;
+  }
+  throw new WorktreeSessionReadInconclusiveError(filePath);
+}
+
+async function readWorktreeSessionOnce(
+  filePath: string,
+  options: { signal?: AbortSignal },
+): Promise<WorktreeSession | null | typeof READ_IDENTITY_CHANGED> {
   let raw: string;
   let handle: fs.FileHandle | undefined;
   try {
@@ -139,16 +175,29 @@ export async function readWorktreeSession(
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
     );
     const openedStat = await handle.stat();
+    if (openedStat.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES) return null;
     if (
       !openedStat.isFile() ||
       openedStat.dev !== pathStat.dev ||
-      openedStat.ino !== pathStat.ino ||
-      openedStat.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES
+      openedStat.ino !== pathStat.ino
     ) {
-      return null;
+      return READ_IDENTITY_CHANGED;
     }
+    // Looped bounded read: POSIX permits short reads on regular files
+    // (FUSE/NFS), and a truncated document must not be misread as corrupt
+    // JSON — restoreWorktreeContext deletes what this read rejects.
     const buffer = Buffer.alloc(WORKTREE_SESSION_SIDECAR_MAX_BYTES + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const chunk = await handle.read(
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
     if (bytesRead > WORKTREE_SESSION_SIDECAR_MAX_BYTES) return null;
     options.signal?.throwIfAborted();
     const finalStat = await fs.lstat(filePath);
@@ -157,7 +206,7 @@ export async function readWorktreeSession(
       finalStat.dev !== openedStat.dev ||
       finalStat.ino !== openedStat.ino
     ) {
-      return null;
+      return READ_IDENTITY_CHANGED;
     }
     raw = buffer.subarray(0, bytesRead).toString('utf8');
   } catch (error) {
@@ -659,6 +708,12 @@ export async function restoreWorktreeContext(
     session = await readWorktreeSession(sidecarPath);
   } catch (error) {
     onWarn?.(error);
+    if (error instanceof WorktreeSessionReadInconclusiveError) {
+      // A concurrent atomic rewrite kept the sidecar's identity unstable
+      // across both read attempts. The document on disk is complete, not
+      // corrupt — preserve it for the next resume.
+      return { contextMessage: null, session: null };
+    }
     // Sidecar exists but we can't read it (permission, EIO, …). Try to
     // clear it so subsequent --resume calls don't keep hitting the same
     // error. If the clear also fails, surface that too but don't throw.

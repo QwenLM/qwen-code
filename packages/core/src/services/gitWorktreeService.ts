@@ -419,11 +419,24 @@ export async function writeWorktreeSessionMarker(
 async function readBoundedMarker(
   handle: fs.FileHandle,
 ): Promise<string | null> {
-  const stat = await handle.stat();
-  if (stat.size > WORKTREE_SESSION_MARKER_MAX_BYTES) return null;
+  // Looped bounded read: POSIX permits short reads on regular files
+  // (FUSE/NFS), and a marker larger than the owner bound still reads as
+  // *present* — its bounded content can never equal a validated owner id
+  // (writers cap owners at WORKTREE_SESSION_MARKER_MAX_BYTES), so it fails
+  // closed as a foreign owner instead of collapsing into "no marker" for
+  // exit_worktree's removal guard. Only an empty marker reads as absent.
   const buffer = Buffer.alloc(WORKTREE_SESSION_MARKER_MAX_BYTES + 1);
-  const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-  if (bytesRead > WORKTREE_SESSION_MARKER_MAX_BYTES) return null;
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const chunk = await handle.read(
+      buffer,
+      bytesRead,
+      buffer.length - bytesRead,
+      bytesRead,
+    );
+    if (chunk.bytesRead === 0) break;
+    bytesRead += chunk.bytesRead;
+  }
   return buffer.subarray(0, bytesRead).toString('utf8').trim() || null;
 }
 
@@ -640,8 +653,17 @@ export async function readWorktreeSessionMarker(
   const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
   let handle: fs.FileHandle | undefined;
   try {
+    // Deliberately no nlink check (unlike the strict reader):
+    // createWorktreeSessionMarkerExclusive publishes by linking the staged
+    // sibling onto the marker path and only then unlinking the sibling, so
+    // the marker sits at nlink 2 inside every publish window and permanently
+    // after a crash — with complete, fsync'd content. exit_worktree treats a
+    // null owner as "no marker; allow removal", so that residue must still
+    // read as owned. Reading through a hard link is harmless; writing
+    // through one is not, and the strict readers gating writes keep the
+    // nlink rejection.
     const pathStat = await fs.lstat(markerPath);
-    if (!pathStat.isFile() || pathStat.nlink !== 1) return null;
+    if (!pathStat.isFile()) return null;
     handle = await fs.open(
       markerPath,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
@@ -649,7 +671,6 @@ export async function readWorktreeSessionMarker(
     const openedStat = await handle.stat();
     if (
       !openedStat.isFile() ||
-      openedStat.nlink !== 1 ||
       openedStat.dev !== pathStat.dev ||
       openedStat.ino !== pathStat.ino
     ) {
@@ -659,7 +680,6 @@ export async function readWorktreeSessionMarker(
     const finalStat = await fs.lstat(markerPath);
     if (
       !finalStat.isFile() ||
-      finalStat.nlink !== 1 ||
       finalStat.dev !== openedStat.dev ||
       finalStat.ino !== openedStat.ino
     ) {

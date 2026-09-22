@@ -119,8 +119,44 @@ describe('strict worktree session markers', () => {
     await expect(
       writeWorktreeSessionMarker(repo, 'session-b'),
     ).rejects.toBeDefined();
-    await expect(readWorktreeSessionMarker(repo)).resolves.toBeNull();
+    // Deliberate: lenient reads resolve the owner even at nlink > 1.
+    // Reading through a hard link is harmless — writing through one is what
+    // the strict-guarded write paths above refuse — and the publisher's own
+    // link-then-unlink leaves complete content at nlink 2, which a null here
+    // would misreport as "no marker" to exit_worktree's removal guard.
+    await expect(readWorktreeSessionMarker(repo)).resolves.toBe('session-a');
     expect(await fs.readFile(target, 'utf8')).toBe('session-a');
+  });
+
+  it('reads a marker caught in the link-then-unlink publish window', async () => {
+    // createWorktreeSessionMarkerExclusive publishes by linking the staged
+    // sibling onto the marker path and only then unlinking the sibling, so
+    // a crash between the two (or a concurrent reader) leaves the marker at
+    // nlink 2 holding complete, fsync'd content. exit_worktree reads a null
+    // owner as "no marker — allow removal", so the lenient read must still
+    // resolve the owner while writes stay refused.
+    const markerPath = path.join(repo, '.qwen-session');
+    const stagedPath = `${markerPath}.deadbeef.tmp`;
+    await fs.writeFile(stagedPath, 'session-a', 'utf8');
+    await fs.link(stagedPath, markerPath);
+
+    await expect(readWorktreeSessionMarker(repo)).resolves.toBe('session-a');
+    await expect(
+      writeWorktreeSessionMarker(repo, 'session-b'),
+    ).rejects.toBeDefined();
+    await expect(readWorktreeSessionMarker(repo)).resolves.toBe('session-a');
+  });
+
+  it('reads an oversized marker as present, never as absent', async () => {
+    // Writers cap owner ids at 512 bytes, so bounded content beyond that cap
+    // can never equal a real owner — returning it keeps exit_worktree's
+    // "owner !== current session" refusal engaged instead of collapsing the
+    // marker into "no marker — allow removal". 513 = 512-byte cap + 1.
+    await fs.writeFile(path.join(repo, '.qwen-session'), 'x'.repeat(600));
+
+    await expect(readWorktreeSessionMarker(repo)).resolves.toBe(
+      'x'.repeat(513),
+    );
   });
 
   it('writes the exclude rule to the owning repo despite inherited git env', async () => {

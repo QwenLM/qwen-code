@@ -18,6 +18,7 @@ import {
   restoreWorktreeContext,
   getSessionRuntimeLiveness,
   isSessionRuntimeActive,
+  WorktreeSessionReadInconclusiveError,
   type WorktreeSession,
 } from './worktreeSessionService.js';
 import { Storage } from '../config/storage.js';
@@ -94,6 +95,74 @@ describe('readWorktreeSession', () => {
   it('rejects an oversized sidecar without reading it into memory', async () => {
     await fs.writeFile(filePath, 'x'.repeat(64 * 1024 + 1), 'utf8');
     expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('re-reads and returns the new document when a rename lands during the read', async () => {
+    // The daemon's writeWorktreeSession call sites rename a complete,
+    // fsync'd document over the sidecar path. A read that observes the swap
+    // must not collapse into the corrupt-sidecar null (restoreWorktreeContext
+    // deletes that) — it re-reads once and returns the replacement.
+    await writeWorktreeSession(filePath, sample);
+    const replacement: WorktreeSession = { ...sample, slug: 'slug-b' };
+    const stagedPath = path.join(tmpDir, 'staged.worktree.json');
+    await writeWorktreeSession(stagedPath, replacement);
+
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalStat = prototype.stat;
+    await probe.close();
+    let renamed = false;
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof probe) {
+        const stats = await originalStat.call(this);
+        if (!renamed) {
+          renamed = true;
+          await fs.rename(stagedPath, filePath);
+        }
+        return stats;
+      });
+
+    try {
+      await expect(readWorktreeSession(filePath)).resolves.toEqual(replacement);
+      expect(renamed).toBe(true);
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it('continues reading a stable sidecar after a short read', async () => {
+    // POSIX permits short reads on regular files (FUSE/NFS); a truncated
+    // document must not be misread as corrupt JSON and deleted.
+    await fs.writeFile(filePath, JSON.stringify(sample), 'utf8');
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    const shortRead = function (
+      this: typeof probe,
+      buffer: Buffer,
+      offset: number,
+      length: number,
+      position: number,
+    ) {
+      return originalRead.call(this, {
+        buffer,
+        offset,
+        length: Math.min(length, 5),
+        position,
+      });
+    };
+    const readSpy = vi
+      .spyOn(prototype, 'read')
+      .mockImplementation(shortRead as typeof prototype.read);
+
+    try {
+      await expect(readWorktreeSession(filePath)).resolves.toEqual(sample);
+      expect(readSpy.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -654,6 +723,48 @@ describe('restoreWorktreeContext', () => {
     } finally {
       await fs.unlink(inflight);
     }
+  });
+
+  it('preserves a sidecar whose identity keeps changing across reads', async () => {
+    // A concurrent atomic rewrite makes every read observe an identity swap.
+    // That is not corruption: the sidecar on disk holds a complete document,
+    // so restore must refuse inconclusively and leave it for the next resume
+    // instead of deleting it as stale.
+    const liveCwd = path.join(tmpDir, 'repo-unstable');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'unstable');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'unstable',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
+
+    const probe = await fs.open(filePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalStat = prototype.stat;
+    await probe.close();
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof probe) {
+        const stats = await originalStat.call(this);
+        return Object.assign(stats, { ino: stats.ino === 1 ? 2 : 1 });
+      });
+
+    const onWarn = vi.fn();
+    let result: Awaited<ReturnType<typeof restoreWorktreeContext>>;
+    try {
+      result = await restoreWorktreeContext(filePath, onWarn);
+    } finally {
+      statSpy.mockRestore();
+    }
+
+    expect(result!).toEqual({ contextMessage: null, session: null });
+    expect(onWarn).toHaveBeenCalledWith(
+      expect.any(WorktreeSessionReadInconclusiveError),
+    );
+    expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
   it('rejects and preserves a sidecar when the marker has another owner', async () => {

@@ -239,6 +239,38 @@ describe('ExitWorktreeTool', () => {
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
     });
 
+    it('refuses remove when the marker sits at nlink 2 in the publish window', async () => {
+      // Publish residue: the marker publisher links the staged sibling onto
+      // the marker path and only then unlinks the sibling, so a crash leaves
+      // `.qwen-session` at nlink 2 with the owner intact. The lenient marker
+      // read must still resolve the owner — a null would read as "no marker"
+      // and let a stranger delete the live worktree and its branch.
+      const wtPath = await provisionWorktree('publish-residue');
+      const markerPath = path.join(wtPath, WORKTREE_SESSION_FILE);
+      await fs.link(
+        markerPath,
+        path.join(wtPath, `${WORKTREE_SESSION_FILE}.deadbeef.tmp`),
+      );
+
+      const otherCfg = {
+        getTargetDir: () => repoRoot,
+        getSessionId: () => 'session-stranger',
+      } as unknown as Config;
+      const result = await new ExitWorktreeTool(otherCfg)
+        .build({ name: 'publish-residue', action: 'remove' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.message).toMatch(
+        /different session.*owner=session-creator/i,
+      );
+      await expect(fs.access(wtPath)).resolves.toBeUndefined();
+      const branches = execFileSync('git', ['branch', '--list'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      });
+      expect(branches).toContain(worktreeBranchForSlug('publish-residue'));
+    });
+
     it('keep returns success and leaves the worktree + branch intact', async () => {
       const wtPath = await provisionWorktree('keepme');
       const cfg = {
