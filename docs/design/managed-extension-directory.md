@@ -29,7 +29,9 @@ Managed describes package ownership, not Qwen authorship or execution isolation.
 ## Discovery and state
 
 The CLI resolves the root against its startup cwd once. A missing, non-directory,
-or unreadable explicit root is a configuration error; an empty root is valid.
+unreadable, or symbolic-link explicit root is a configuration error; an empty root
+is valid. The accepted root is pinned to its canonical path at startup so later
+relinking cannot move the boundary consumers validated.
 ExtensionManager receives `managedExtensionsDir` separately from the writable
 ExtensionStore. A container sandbox (docker/podman) mounts the resolved root
 read-only and forwards the flag with the container path; the bwrap and seatbelt

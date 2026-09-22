@@ -400,6 +400,57 @@ describe('managed extension activation migration', () => {
     ).toBe(false);
   });
 
+  it('clears inherited legacy path rules for a managed batch enable under a filtered cache', async () => {
+    // A pre-managed user install left a V1 enablement path rule that
+    // disables the package inside `workspace`; the name-based migration
+    // carries it onto the managed policy.
+    const rule = `!${workspace.replace(/\\/g, '/')}/*`;
+    fs.mkdirSync(path.join(process.env['QWEN_HOME']!, 'extensions'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(
+        process.env['QWEN_HOME']!,
+        'extensions',
+        'extension-enablement.json',
+      ),
+      JSON.stringify({ [name]: { overrides: [rule] } }),
+    );
+    writePackage(path.join(managedExtensionsDir, 'deployed'), '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    const managedId = deployed.getLoadedExtensions()[0].id;
+    const seeded = await deployed.getExtensionStoreSnapshot();
+    expect(seeded.extensions[managedId]).toMatchObject({
+      managed: true,
+      legacyPathRules: [rule],
+    });
+    expect(
+      deployed.getExtensionActivationForIdentityFromSnapshot(
+        { id: managedId, name },
+        seeded,
+        workspace,
+      ),
+    ).toMatchObject({ effective: 'disabled', source: 'legacy_path_rule' });
+
+    // The cache no longer holds the managed extension, but its policy is
+    // still stored — the batch enable must clear the legacy rule anyway.
+    await deployed.refreshCache({ names: ['unrelated'] });
+    expect(deployed.getLoadedExtensions()).toEqual([]);
+
+    await deployed.setExtensionDefaultActivations([name], 'enabled');
+
+    const snapshot = await deployed.getExtensionStoreSnapshot();
+    expect(snapshot.extensions[managedId].legacyPathRules).toBeUndefined();
+    expect(
+      deployed.getExtensionActivationForIdentityFromSnapshot(
+        { id: managedId, name },
+        snapshot,
+        workspace,
+      ),
+    ).toMatchObject({ effective: 'enabled', source: 'default' });
+  });
+
   it('rechecks managed ownership when committing a prepared user install', async () => {
     const managedPackage = path.join(managedExtensionsDir, 'deployed');
     writePackage(managedPackage, '2.0.0');

@@ -424,18 +424,23 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     return;
   }
 
-  const [{ default: yargsInstance }, { mcpCommand }] = await Promise.all([
+  const [
+    { default: yargsInstance },
+    { mcpCommand },
+    { resolveManagedExtensionsDir },
+  ] = await Promise.all([
     import('yargs'),
     import('./commands/mcp.js'),
+    import('@qwen-code/qwen-code-core/extension/managed-extension-dir.js'),
   ]);
 
   const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
-    .option(
-      'managed-extensions',
-      TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
-    )
+    .option('managed-extensions', {
+      ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+      coerce: resolveManagedExtensionsDir,
+    })
     .version(false)
     .help()
     .alias('h', 'help')

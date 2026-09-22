@@ -1028,13 +1028,7 @@ export class ExtensionManager {
       const snapshot = await this.extensionStore.setDefaultActivations(
         identities,
         activation,
-        {
-          clearLegacyPathRulesForIds: new Set(
-            this.getLoadedExtensions()
-              .filter((extension) => extension.source === 'managed')
-              .map((extension) => extension.id),
-          ),
-        },
+        { clearLegacyPathRulesForManaged: true },
       );
       onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);

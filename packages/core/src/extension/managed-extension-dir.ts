@@ -44,18 +44,27 @@ export function resolveManagedExtensionsDir(
     return directory;
   }
   try {
-    if (!fs.statSync(directory).isDirectory()) {
+    // A root that is itself a link would let whoever can replace the link
+    // relocate every consumer's boundary (the no-prompt read roots among
+    // them); links in the path ABOVE the root are canonicalized instead.
+    if (fs.lstatSync(directory).isSymbolicLink()) {
+      throw new Error('must be a real directory, not a symbolic link');
+    }
+    // Pin the canonical path so later re-resolution (a relinked parent
+    // component) cannot move the root between validation and use.
+    const pinned = canonicalDirectory(directory);
+    if (!fs.statSync(pinned).isDirectory()) {
       throw new Error('not a directory');
     }
-    fs.accessSync(directory, fs.constants.R_OK | fs.constants.X_OK);
-    fs.readdirSync(directory);
+    fs.accessSync(pinned, fs.constants.R_OK | fs.constants.X_OK);
+    fs.readdirSync(pinned);
+    return pinned;
   } catch (error) {
     throw new Error(
       `Invalid --managed-extensions "${directory}": ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
-  return directory;
 }
 
 function canonicalDirectory(directory: string): string {

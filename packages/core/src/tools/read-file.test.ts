@@ -427,8 +427,10 @@ describe('ReadFileTool', () => {
     it('should return allow for paths within the managed extensions directory', async () => {
       // Outside the workspace: without the managed-root allowlist entry this
       // read would need a confirmation prompt.
-      const managedRoot = await fsp.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-read-managed-'),
+      // realpath so the lexical root matches the canonicalized candidate on
+      // platforms where os.tmpdir() sits behind a symlink (macOS /var).
+      const managedRoot = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-read-managed-')),
       );
       try {
         const managedConfig = {

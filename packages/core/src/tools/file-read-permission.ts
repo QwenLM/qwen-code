@@ -9,7 +9,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { isAnyAutoMemPath } from '../memory/paths.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { isSubpaths, realpathNearestExisting } from '../utils/paths.js';
+import { isSubpath, isSubpaths, realpathNearestExisting } from '../utils/paths.js';
 
 export function getFileReadDefaultPermission(
   config: Config,
@@ -40,11 +40,6 @@ export function getFileReadDefaultPermission(
     Storage.getGlobalTempDir(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
-    // The one root below that is NOT agent-writable: a deployment-managed
-    // root is read-only by design, so no symlink can be planted in it, and a
-    // link shipped inside it still canonicalizes outside via the candidate
-    // realpath above.
-    ...(managedExtensionsDir ? [managedExtensionsDir] : []),
     // Approved plans are persisted here (default ~/.qwen/plans, outside
     // the workspace) and after approval nothing re-injects the plan text,
     // so the saved file is the model's only recovery route — reading it
@@ -63,6 +58,15 @@ export function getFileReadDefaultPermission(
   if (
     workspaceContext.isPathWithinWorkspace(filePath) ||
     isSubpaths(allowedRoots, filePath) ||
+    // A deployment-managed root is read-only by design, so no symlink can be
+    // planted in it, and a link shipped inside it still canonicalizes outside
+    // via the candidate realpath above. Unlike the other roots it is matched
+    // LEXICALLY: resolveManagedExtensionsDir already rejected a link-valued
+    // root and pinned the canonical path at the process boundary, and
+    // re-resolving the root here would let a mid-session relink relocate the
+    // boundary — the same failure mode the auto-mem asymmetry below guards.
+    (managedExtensionsDir !== undefined &&
+      isSubpath(managedExtensionsDir, filePath)) ||
     // isAnyAutoMemPath narrows to the managed auto-memory roots
     // (per-project + user-level under ~/.qwen/memories/) — never the
     // broad getMemoryBaseDir() — to avoid exposing sensitive ~/.qwen

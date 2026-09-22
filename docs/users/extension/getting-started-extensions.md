@@ -349,8 +349,9 @@ qwen mcp list --managed-extensions ./prepared-extensions
 There is one optional root. Only direct children are discovered. Relative paths
 resolve against startup cwd once; serve carries the resulting absolute directory
 to all workspaces and new, resumed, or recreated Agent processes. Session requests
-cannot override it. An empty directory is valid; a missing, unreadable, or non-directory
-root fails with a configuration error. The managed root must be disjoint from
+cannot override it. An empty directory is valid; a missing, unreadable, non-directory, or
+symbolic-link root fails with a configuration error, and the accepted root is pinned
+to its canonical path once at startup. The managed root must be disjoint from
 Qwen’s writable extension and extension-store directories, including symlink
 and filesystem case aliases. Without this option, only the existing user extension source is discovered.
 Continue supplying the option to management commands. Unchanged skill bodies remain deduplicated during refresh.

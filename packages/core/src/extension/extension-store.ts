@@ -1071,11 +1071,11 @@ export class ExtensionStore {
   async setDefaultActivations(
     identities: readonly ExtensionIdentity[],
     activation: ExtensionActivation,
-    options: { clearLegacyPathRulesForIds?: ReadonlySet<string> } = {},
+    options: { clearLegacyPathRulesForManaged?: boolean } = {},
   ): Promise<ExtensionStoreSnapshot> {
-    const outcome = await this.mutateMany(identities, (policy, identity) => {
+    const outcome = await this.mutateMany(identities, (policy) => {
       policy.defaultActivation = activation;
-      if (options.clearLegacyPathRulesForIds?.has(identity.id)) {
+      if (options.clearLegacyPathRulesForManaged && policy.managed) {
         delete policy.legacyPathRules;
       }
     });

@@ -50,13 +50,15 @@ interface Layout {
 let layout: Layout;
 let originalMemoryBaseDir: string | undefined;
 
-function makeConfig(overrides: { plansDir?: string } = {}): Config {
+function makeConfig(
+  overrides: { plansDir?: string; managedExtensionsDir?: string } = {},
+): Config {
   const workspaceContext = new WorkspaceContext(layout.workspace);
   return {
     getWorkspaceContext: () => workspaceContext,
     getTargetDir: () => layout.workspace,
     getPlansDir: () => overrides.plansDir ?? layout.plansDir,
-    getManagedExtensionsDir: () => undefined,
+    getManagedExtensionsDir: () => overrides.managedExtensionsDir,
     storage: {
       getProjectTempDir: () => layout.projectTempDir,
       getProjectDir: () => layout.projectDir,
@@ -248,6 +250,39 @@ describe('getFileReadDefaultPermission', () => {
       });
     },
   );
+
+  describe.skipIf(skipOnWindows)('the managed extensions root', () => {
+    it('allows a real file under the pinned managed root', () => {
+      const managedRoot = path.join(layout.base, 'managed-pinned');
+      fs.mkdirSync(path.join(managedRoot, 'pkg'), { recursive: true });
+      const file = path.join(managedRoot, 'pkg', 'SKILL.md');
+      fs.writeFileSync(file, 'x', 'utf8');
+      const config = makeConfig({ managedExtensionsDir: managedRoot });
+
+      expect(getFileReadDefaultPermission(config, file)).toBe('allow');
+    });
+
+    it('asks when the managed root itself is a symlink', () => {
+      // The boundary must stay where the process boundary pinned it: a
+      // link-valued root (pre-planted, or swapped in mid-session) must not
+      // relocate the no-prompt read boundary to the link target.
+      const linkedRoot = path.join(layout.workspace, 'managed-link');
+      fs.symlinkSync(layout.secretsDir, linkedRoot, 'dir');
+      const config = makeConfig({ managedExtensionsDir: linkedRoot });
+
+      expect(getFileReadDefaultPermission(config, layout.secretFile)).toBe(
+        'ask',
+      );
+      // Reads spelled THROUGH the link canonicalize to the target, which is
+      // outside the lexical root, so they cannot slip through either.
+      expect(
+        getFileReadDefaultPermission(
+          config,
+          path.join(linkedRoot, 'credentials'),
+        ),
+      ).toBe('ask');
+    });
+  });
 
   describe.skipIf(skipOnWindows)(
     'symlinked roots still match, because both sides are canonicalized',

@@ -78,7 +78,12 @@ describe('managed extensions', () => {
   }
 
   beforeEach(() => {
-    temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-'));
+    // realpath the base: resolveManagedExtensionsDir now pins the canonical
+    // root, and os.tmpdir() sits behind a symlink on some platforms (macOS
+    // /var), so lexical tmp paths would no longer compare equal.
+    temporary = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-')),
+    );
     managed = path.join(temporary, 'managed');
     workspace = path.join(temporary, 'workspace');
     user = path.join(temporary, 'home', 'extensions');
@@ -821,6 +826,25 @@ describe('managed extensions', () => {
     expect(() => resolveManagedExtensionsDir(file)).toThrow(
       /Invalid --managed-extensions.*not a directory/,
     );
+    const linkedRoot = path.join(temporary, 'linked-root');
+    fs.symlinkSync(
+      managed,
+      linkedRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    expect(() => resolveManagedExtensionsDir(linkedRoot)).toThrow(
+      /Invalid --managed-extensions.*symbolic link/,
+    );
+    const viaLinkedParent = path.join(temporary, 'linked-parent');
+    fs.symlinkSync(
+      temporary,
+      viaLinkedParent,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    // A link ABOVE the root is not the root: the resolved path is pinned to
+    // the canonical spelling so later re-resolution cannot move it.
+    expect(resolveManagedExtensionsDir(path.join(viaLinkedParent, 'managed')))
+      .toBe(managed);
     const fileRoot = manager({ managedExtensionsDir: file });
     await fileRoot.refreshCache();
     expect(fileRoot.getLoadedExtensions()).toEqual([]);
