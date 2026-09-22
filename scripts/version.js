@@ -6,9 +6,10 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { keepManifestLayout } from './keep-manifest-layout.js';
 import { INDEPENDENT_PACKAGES } from './release-packages.mjs';
+import { getWorkspacePackageJsonPaths } from './workspaces.js';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -37,11 +38,15 @@ if (!versionType) {
 
 // `pnpm version` re-sorts every manifest it rewrites; snapshot them so the
 // bump below can be reduced to a version change (see keep-manifest-layout.js).
+// Enumerate with the workspace globs rather than `git ls-files`: like the
+// `--no-git-checks` flags below, this script must not require a git work tree.
+const { workspaces } = readJson('package.json');
+const snapshotPaths = [
+  'package.json',
+  ...getWorkspacePackageJsonPaths(process.cwd(), workspaces),
+];
 const originalManifests = new Map(
-  execSync('git ls-files -- "*package.json"', { encoding: 'utf-8' })
-    .split('\n')
-    .filter((file) => basename(file) === 'package.json')
-    .map((file) => [file, readFileSync(file, 'utf-8')]),
+  snapshotPaths.map((file) => [file, readFileSync(file, 'utf-8')]),
 );
 
 // Resolve patch/minor/etc. once, then align all release workspaces to it.

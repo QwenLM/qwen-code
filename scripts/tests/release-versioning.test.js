@@ -39,6 +39,7 @@ it.each(['patch', '99.0.0-preview.1'])(
         'pnpm-lock.yaml',
         '.pnpmfile.mjs',
         'scripts/version.js',
+        'scripts/keep-manifest-layout.js',
         'scripts/release-packages.mjs',
         'scripts/workspaces.js',
         extensionPath,
