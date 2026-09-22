@@ -960,10 +960,10 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /**
-       * False, and required: modeled child heap ceilings are not applied.
-       * Count enforcement is reported separately by `childHeap.admissionEnforced`.
+       * True only when managed child-count admission and the fixed old-space
+       * ceiling are both applied. Does not bound total process RSS.
        */
-      enforced: false;
+      enforced: boolean;
       /**
        * Adaptive live-journal growth derived from the budget: session journal caps really do grow
        * within this daemon-wide pool mid-turn. `null` when growth is
@@ -976,11 +976,11 @@ export interface DaemonStatusReport {
         baselineMaxBytes: number;
       } | null;
       /**
-       * The per-child heap partition the daemon models but does not apply.
+       * The fixed per-child heap partition, applied only under `enforce`.
        * `null` when no policy was built; absent on daemons predating it.
        */
       childHeap?: {
-        mode: 'off' | 'observe' | 'admit';
+        mode: 'off' | 'observe' | 'admit' | 'enforce';
         admissionEnforced?: boolean;
         /**
          * `null` under `off`, which models nothing — distinct from `0`,
@@ -994,9 +994,10 @@ export interface DaemonStatusReport {
         perChildCeilingMb: number | null;
         /**
          * Admission pressure only. 0 does not mean the partition is safe to
-         * apply: children still run on the host-derived ceiling. A channel
-         * swap at full occupancy also books one, and on a host too small to
-         * model a partition this equals the total ACP spawn count.
+         * apply. Under `observe` and `admit`, children retain legacy heap
+         * arguments. A channel swap at full occupancy also books one, and on
+         * a host too small to model a partition this equals the total ACP
+         * spawn count.
          */
         refusals: number;
       } | null;

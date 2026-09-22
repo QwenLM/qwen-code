@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
@@ -476,6 +477,8 @@ class InMemoryRepositoryTest {
                 requested.getState());
         assertSame(requested, repository.requestCancel(
                 created.getExecutionCallId(), requested.getVersion()));
+        assertNull(repository.requestCancel(created.getExecutionCallId(),
+                requested.getVersion() - 1));
 
         ToolExecutionRecord dropping = repository.findByExecutionCallId(
                 created.getExecutionCallId());
@@ -694,7 +697,7 @@ class InMemoryRepositoryTest {
     }
 
     @Test
-    void payloadsRejectMutableNumbersAndNonStringKeys() {
+    void payloadsRejectInvalidNumbersAndNonStringKeys() {
         InMemoryToolExecutionRepository repository =
                 new InMemoryToolExecutionRepository(new MutableClock(START));
         Map<String, Object> topLevel = new HashMap<>(reference("digest"));
@@ -715,6 +718,26 @@ class InMemoryRepositoryTest {
                 () -> ToolExecutionRecord.prepared("execution", "key",
                         "binding", 1, "harness", "session", "turn", "tool",
                         "digest", badKey));
+        for (Number nonFinite : List.of(Double.NaN,
+                Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                Float.NaN, Float.POSITIVE_INFINITY,
+                Float.NEGATIVE_INFINITY)) {
+            Map<String, Object> invalid = new HashMap<>(reference("digest"));
+            invalid.put("tokens", nonFinite);
+            assertThrows(IllegalArgumentException.class,
+                    () -> ToolExecutionRecord.prepared("execution", "key",
+                            "binding", 1, "harness", "session", "turn",
+                            "tool", "digest", invalid));
+        }
+        assertTrue(BrokerValues.sameJsonMap(
+                Map.of("value", 162544.13f),
+                Map.of("value", new BigDecimal("162544.13"))));
+        assertFalse(BrokerValues.sameJsonMap(
+                Map.of("value", 9_007_199_254_740_993L),
+                Map.of("value", 9_007_199_254_740_992d)));
+        assertFalse(BrokerValues.sameJsonMap(
+                Map.of("value", 16_777_217),
+                Map.of("value", 16_777_216f)));
 
         ToolExecutionRecord created = repository.findOrCreate(
                 execution("execution"));
@@ -722,6 +745,11 @@ class InMemoryRepositoryTest {
                 () -> created.withResult(
                         Map.of("executionStatus", "success", "tokens",
                                 new AtomicLong(1)),
+                        0, START));
+        assertThrows(IllegalArgumentException.class,
+                () -> created.withResult(
+                        Map.of("executionStatus", "success", "tokens",
+                                Double.NaN),
                         0, START));
         ToolExecutionRecord claimed = repository.claimDispatch(
                 created.getExecutionCallId(), "owner-a",

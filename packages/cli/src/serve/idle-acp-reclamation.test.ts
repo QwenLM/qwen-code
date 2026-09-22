@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
+import {
+  createChildHeapPolicy,
+  type ChildHeapMode,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
 import { createIdleAcpReclaimer } from './idle-acp-reclamation.js';
@@ -48,7 +51,7 @@ function makeRuntime(
   } as unknown as WorkspaceRuntime;
 }
 
-function setup() {
+function setup(mode: ChildHeapMode) {
   const a = makeRuntime('a', 10, true);
   const b = makeRuntime('b', 20);
   const c = makeRuntime('c', 30);
@@ -57,7 +60,7 @@ function setup() {
   const processes = new ProcessRegistry();
   const policy = createChildHeapPolicy({
     budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
-    mode: 'admit',
+    mode,
   });
   const occupied = processes.reserve();
   const getActivity = vi.fn(
@@ -85,9 +88,9 @@ function setup() {
   };
 }
 
-describe('daemon idle ACP reclamation', () => {
+describe.each(['admit', 'enforce'] as const)('idle ACP (%s)', (mode) => {
   it('reclaims the oldest eligible workspace once, excluding the requester', async () => {
-    const { a, b, c, reclaim } = setup();
+    const { a, b, c, reclaim } = setup(mode);
     const controller = new AbortController();
     await reclaim('a', controller.signal);
     expect(a.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
@@ -100,7 +103,7 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('does not let an untrusted requester reclaim trusted workspaces', async () => {
-    const { a, b, c, reclaim } = setup();
+    const { a, b, c, reclaim } = setup(mode);
     Object.assign(a, { trusted: false });
     await reclaim('a');
     for (const runtime of [a, b, c])
@@ -108,7 +111,7 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('continues scanning when an eligible runtime has no idle channel', async () => {
-    const { a, b, reclaim } = setup();
+    const { a, b, reclaim } = setup(mode);
     vi.mocked(a.bridge.getIdleChannelCandidate!).mockReturnValue(undefined);
     await reclaim('new');
     expect(a.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
@@ -116,14 +119,14 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('allows an idle primary and ignores removal permission', async () => {
-    const { a, reclaim } = setup();
+    const { a, reclaim } = setup(mode);
     Object.assign(a, { removable: false });
     await reclaim('new');
     expect(a.bridge.reclaimIdleChannel).toHaveBeenCalledTimes(1);
   });
 
   it('uses a stable workspace ID tie break', async () => {
-    const { a, b, reclaim } = setup();
+    const { a, b, reclaim } = setup(mode);
     vi.mocked(a.bridge.getIdleChannelCandidate!).mockReturnValue({
       channelId: 'a',
       runtimeEpoch: 1,
@@ -144,7 +147,7 @@ describe('daemon idle ACP reclamation', () => {
     'voiceSessions',
     'workspaceRuntime',
   ] as const)('preserves a workspace with %s', async (key) => {
-    const { a, b, reclaim, getActivity } = setup();
+    const { a, b, reclaim, getActivity } = setup(mode);
     getActivity.mockImplementation((runtime) => ({
       ...readWorkspaceActivity(runtime),
       ...(runtime === a ? { [key]: 1 } : {}),
@@ -155,7 +158,7 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('skips missing observations and unowned bridges', async () => {
-    const { a, b, c, reclaim, getActivity, ownsBridge } = setup();
+    const { a, b, c, reclaim, getActivity, ownsBridge } = setup(mode);
     getActivity.mockImplementation((runtime) =>
       runtime === a ? undefined : readWorkspaceActivity(runtime),
     );
@@ -167,7 +170,7 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('skips draining, untrusted and special runtime candidates', async () => {
-    const { a, b, c, registry, reclaim } = setup();
+    const { a, b, c, registry, reclaim } = setup(mode);
     expect(registry.beginDrain(b)).toBe(true);
     Object.assign(a, { trusted: false });
     Object.assign(c, { provenance: 'managed-scratch' });
@@ -177,7 +180,7 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('does not choose another victim if the oldest changed or refused', async () => {
-    const { a, b, reclaim } = setup();
+    const { a, b, reclaim } = setup(mode);
     vi.mocked(a.bridge.reclaimIdleChannel!).mockResolvedValue(false);
     await reclaim('new');
     expect(a.bridge.reclaimIdleChannel).toHaveBeenCalledTimes(1);
@@ -185,7 +188,7 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('checks current activity again before reclamation', async () => {
-    const { a, b, reclaim, getActivity } = setup();
+    const { a, b, reclaim, getActivity } = setup(mode);
     let reads = 0;
     getActivity.mockImplementation((runtime) => ({
       ...readWorkspaceActivity(runtime),
@@ -197,7 +200,7 @@ describe('daemon idle ACP reclamation', () => {
   });
 
   it('does nothing if capacity was already released or the requester aborted', async () => {
-    const { a, occupied, reclaim } = setup();
+    const { a, occupied, reclaim } = setup(mode);
     const controller = new AbortController();
     controller.abort();
     await reclaim('new', controller.signal);
@@ -206,3 +209,13 @@ describe('daemon idle ACP reclamation', () => {
     expect(a.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
   });
 });
+
+it.each(['off', 'observe'] as const)(
+  'does not reclaim under %s',
+  async (mode) => {
+    const { a, b, c, reclaim } = setup(mode);
+    await reclaim('new');
+    for (const runtime of [a, b, c])
+      expect(runtime.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
+  },
+);
