@@ -2,6 +2,15 @@
 <resources>
     <string name="app_name">Qwen Code</string>
     <string name="retry">Retry</string>
+    <string name="microphone_title">Enable microphone for this connection?</string>
+    <string name="microphone_consent">%1$s wants to use your microphone. Audio is handled by this daemon and its configured voice service.\n\nLeaving the app or opening another full-screen app will close this connection, even after recording stops. Unsent text may be lost.</string>
+    <string name="microphone_allow">Enable microphone</string>
+    <string name="microphone_files_title">Reconnect before using files?</string>
+    <string name="microphone_files_reconnect">This connection has microphone access. Reconnect first, then open or save the file again. Reconnecting stops microphone access and may discard unsent text. No file picker has been opened.</string>
+    <string name="keep_editing">Keep editing</string>
+    <string name="reconnect">Reconnect</string>
+    <string name="microphone_closed">Microphone connection closed</string>
+    <string name="microphone_reconnect">This connection was closed when the app left the foreground. Reconnect to continue; unsent page state may not have been saved.</string>
     <string name="connections">Connections</string>
     <string name="development_notice">Development client. Per-device credential revocation is not yet available.</string>
     <string name="no_profiles">Add a daemon connection to get started.</string>
