@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
@@ -728,6 +729,15 @@ class InMemoryRepositoryTest {
                 () -> ToolExecutionRecord.prepared("execution", "key",
                         "binding", 1, "harness", "session", "turn", "tool",
                         "digest", nonFinite));
+        assertTrue(BrokerValues.sameJsonMap(
+                Map.of("value", 162544.13f),
+                Map.of("value", new BigDecimal("162544.13"))));
+        assertFalse(BrokerValues.sameJsonMap(
+                Map.of("value", 9_007_199_254_740_993L),
+                Map.of("value", 9_007_199_254_740_992d)));
+        assertFalse(BrokerValues.sameJsonMap(
+                Map.of("value", 16_777_217),
+                Map.of("value", 16_777_216f)));
 
         ToolExecutionRecord created = repository.findOrCreate(
                 execution("execution"));

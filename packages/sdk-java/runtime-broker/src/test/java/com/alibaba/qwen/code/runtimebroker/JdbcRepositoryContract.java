@@ -366,6 +366,17 @@ final class JdbcRepositoryContract {
         typedReference.put("argsDigest", prefix + "-types-digest");
         typedReference.put("attempt", 1L);
         typedReference.put("note", null);
+        typedReference.put("schema", Map.of("$ref", "$"));
+        Map<String, Object> jsonLdReference = new LinkedHashMap<>();
+        jsonLdReference.put("@type", List.of("Product", "Thing"));
+        jsonLdReference.put("name", "widget");
+        typedReference.put("jsonLd", jsonLdReference);
+        Map<String, Object> untypedReference = new LinkedHashMap<>();
+        untypedReference.put("@type", null);
+        untypedReference.put("name", "widget");
+        typedReference.put("untyped", untypedReference);
+        typedReference.put("ratio", 162544.13f);
+        typedReference.put("weight", -1363683.0538119469d);
         ToolExecutionRecord typedCandidate = ToolExecutionRecord.prepared(
                 prefix + "-types-execution", typesKey,
                 prefix + "-types-binding", 1, prefix + "-types-harness",
@@ -393,6 +404,12 @@ final class JdbcRepositoryContract {
         Map<String, Object> typedResult = new LinkedHashMap<>();
         typedResult.put("executionStatus", "success");
         typedResult.put("durationMs", 12L);
+        typedResult.put("current", Map.of("$ref", "@"));
+        typedResult.put("copied", Map.of("$ref", "$.executionStatus"));
+        typedResult.put("external", Map.of("$ref",
+                "./common.yaml#/components/schemas/Error"));
+        typedResult.put("jsonLd", jsonLdReference);
+        typedResult.put("untyped", untypedReference);
         ToolExecutionRecord typedSettled = rereader.compareAndSet(typedClaim,
                 typedClaim.withResult(typedResult, 1, START),
                 prefix + "-dispatcher-a",

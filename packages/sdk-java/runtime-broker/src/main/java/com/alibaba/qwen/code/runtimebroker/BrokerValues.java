@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.fastjson2.JSON;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.URI;
@@ -141,7 +142,10 @@ final class BrokerValues {
     }
 
     private static boolean sameJsonNumber(Number first, Number second) {
-        return new BigDecimal(first.toString())
-                .compareTo(new BigDecimal(second.toString())) == 0;
+        return jsonNumber(first).compareTo(jsonNumber(second)) == 0;
+    }
+
+    private static BigDecimal jsonNumber(Number value) {
+        return new BigDecimal(JSON.toJSONString(value));
     }
 }
