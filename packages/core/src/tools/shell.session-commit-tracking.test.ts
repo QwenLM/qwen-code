@@ -34,7 +34,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
 import type { ShellExecutionResult } from '../services/shellExecutionService.js';
+import { makeFakeConfig } from '../test-utils/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { ShellTool } from './shell.js';
@@ -296,6 +298,61 @@ describe('ShellTool session commit tracking (issue #12460)', () => {
 
     // ...and the amend exemption still works, because session tracking
     // does not consult the attribution toggle.
+    expect(amendVerdict()).toBeNull();
+  });
+
+  /**
+   * Commits a real change through the shell tool and asserts the amend
+   * exemption was earned, so the mode-switch cases below start from a
+   * populated registry rather than an empty one (an empty registry would
+   * make "blocked again" pass for the wrong reason).
+   */
+  async function commitAndAssertExempt(): Promise<void> {
+    fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work\n');
+    await runShellCommand('git add feature.txt && git commit -m "feature"');
+    expect(amendVerdict()).toBeNull();
+  }
+
+  it('clears the registry on a mode switch so the amend is blocked again', async () => {
+    // Fail-closed witness for the `clearSessionCommits()` contract
+    // ("Called on session end or mode switch"): exemptions earned under
+    // one approval mode must not carry across a mode boundary.
+    await commitAndAssertExempt();
+
+    // Constructed already in DEFAULT (rather than switching into it) so
+    // the registry is not cleared before the transition under test.
+    const realConfig = makeFakeConfig({
+      targetDir: repoDir,
+      cwd: repoDir,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    vi.spyOn(realConfig, 'isTrustedFolder').mockReturnValue(true);
+    expect(realConfig.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+
+    realConfig.setApprovalMode(ApprovalMode.AUTO);
+    expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
+
+    // Same repo, same commit, same command — but the mode switched, so
+    // the guard blocks again and the user has to re-approve.
+    expect(amendVerdict()?.blocked).toBe(true);
+  });
+
+  it('keeps the exemption when the approval mode is re-set to its current value', async () => {
+    // Guard against over-clearing: several callers re-set the mode they
+    // are already in, and wiping the registry there would silently take
+    // the amend exemption away mid-session.
+    await commitAndAssertExempt();
+
+    const realConfig = makeFakeConfig({
+      targetDir: repoDir,
+      cwd: repoDir,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    const currentMode = realConfig.getApprovalMode();
+    expect(currentMode).toBe(ApprovalMode.DEFAULT);
+
+    realConfig.setApprovalMode(currentMode);
+
     expect(amendVerdict()).toBeNull();
   });
 });

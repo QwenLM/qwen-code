@@ -153,6 +153,7 @@ import {
   resetDenialState,
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
+import { clearSessionCommits } from '../permissions/destructive-commands.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -8397,6 +8398,19 @@ export class Config {
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
+      // ...and the session-commit registry that backs the AUTO-mode
+      // `git commit --amend` exemption
+      // (permissions/destructive-commands.ts `isAmendOfSessionCommit`).
+      // Its documented contract is "cleared on session end or mode
+      // switch": a mode boundary is where the user re-decides how much
+      // the agent may do unattended, so exemptions earned under the
+      // previous mode must not carry across it. Clearing is fail-closed —
+      // it can only make the amend guard stricter, never loosen a block —
+      // so the worst case is one amend that falls back to manual
+      // approval. Gated on `fromMode !== mode` (not on every call) so a
+      // no-op re-set of the current mode, which several callers do, does
+      // not discard registrations the agent still needs mid-session.
+      clearSessionCommits();
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
