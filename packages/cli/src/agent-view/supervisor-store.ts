@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+import { sanitizeSessionId } from './protocol.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
@@ -19,6 +20,11 @@ import type {
   AgentViewSupervisorFile,
   AgentViewWorkerFile,
 } from './protocol.js';
+
+// Re-exported from its old home: the sanitizer moved to `protocol.js` so
+// the pure row-merging module can canonicalize ids without importing this
+// filesystem store, and every existing importer keeps working.
+export { sanitizeSessionId };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -562,16 +568,6 @@ export async function writeAgentViewSupervisor(
   });
 }
 
-export function sanitizeSessionId(sessionId: string): string {
-  const safe = path
-    .basename(sessionId.replace(/\\/g, '/'))
-    .toLowerCase()
-    .replace(/^\.+/g, '_')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[<>:"|?*\x00-\x1F]/g, '_');
-  return safe || '_';
-}
-
 function compareRosterEntries(
   left: AgentViewRosterEntry,
   right: AgentViewRosterEntry,
@@ -822,6 +818,11 @@ function normalizeLaunch(
     ...raw,
     schemaVersion: 1,
     sessionId,
+    // Validated like every other text field: this value is promoted to a
+    // row's reported session id and to the key the `sessions ps` merge
+    // dedupes on, so a non-string or empty spelling must not survive
+    // normalization.
+    resumeSessionId: stringValue(raw['resumeSessionId']),
     argv: stringArrayValue(raw['argv']),
     env: stringMapValue(raw['env']),
     entrypoint,
@@ -904,6 +905,13 @@ function normalizeWorker(
     schemaVersion: 1,
     hostPid: numberValue(raw['hostPid']),
     workerPid: numberValue(raw['workerPid']),
+    // `null` rather than `undefined` for an absent token: it is the value
+    // `isSameProcess` reads as "no identity recorded, fall back to a bare
+    // liveness check", so a pre-identity worker file keeps its old
+    // behaviour instead of being treated as a mismatch.
+    hostProcStart: stringValue(raw['hostProcStart']) ?? null,
+    workerProcStart: stringValue(raw['workerProcStart']) ?? null,
+    pidNs: numberValue(raw['pidNs']) ?? null,
     endpoint: stringValue(raw['endpoint']),
     hostEndpoint: stringValue(raw['hostEndpoint']),
     hostAuthToken: stringValue(raw['hostAuthToken']),

@@ -11,17 +11,20 @@
  * live-process registry, so the two answer different questions: "what have
  * I worked on" versus "what is running on this machine at this moment".
  *
- * Two things can be running: a registered session, which writes the
+ * Two things can be running: an interactive session, which writes the
  * live-process registry, and a managed Agent View session, which is owned
- * by a supervisor and writes no registry record. Both are listed, managed
- * ones first — see `managed-rows.ts` for the merge.
+ * by a supervisor and has richer lifecycle state in the supervisor store.
+ * Both are listed, managed ones first — see `managed-rows.ts` for the merge.
  *
- * KIND says what registered each registry row — an interactive terminal, a
+ * KIND says what registered each one — an interactive terminal, a
  * daemon-managed session, a program that is not Qwen Code at all. It is a
  * self-report, like NAME and DIRECTORY: everything here was written by
  * the process it describes. A managed row has no record behind it, so its
- * KIND is `managed` — the supervisor is what accounts for it. What does
- * not appear at all is a one-shot `qwen -p` run, which never registers.
+ * KIND says what the row is instead of borrowing a registrant's word.
+ *
+ * "Interactive" is a registration fact, not a filter: only the
+ * interactive UI registers sessions, so headless runs (`qwen -p`) never
+ * appear here. A managed session appears whether or not it registers.
  */
 
 import type { CommandModule, Argv } from 'yargs';
@@ -109,12 +112,19 @@ function stateLabel(row: SessionRow): string {
 }
 
 /**
- * What the `KIND` column prints for a row. A registry row defers to the
- * record's self-report; a managed row has no record behind it — the
- * supervisor is what accounts for it, so its kind is `managed`.
+ * What the `KIND` column prints.
+ *
+ * A registry row prints the kind its own process recorded, which
+ * `describeSessionKind` reads as `tui` when the writer predates the field.
+ * A managed row has no record behind it — the supervisor store claims
+ * nothing about what registered — so printing `tui` for it would spend the
+ * one word this table reserves for "someone is sitting at a terminal" on a
+ * session nobody is.
  */
 function kindLabel(row: SessionRow): string {
-  return row.managed ? 'managed' : describeSessionKind(row.record?.kind);
+  return row.record === undefined
+    ? 'managed'
+    : describeSessionKind(row.record.kind);
 }
 
 function outputHuman(rows: SessionRow[], now: number): void {
@@ -151,7 +161,7 @@ function outputHuman(rows: SessionRow[], now: number): void {
 }
 
 /**
- * Managed sessions, or an empty list plus a note on stderr.
+ * Managed sessions plus whether the store was read successfully.
  *
  * A supervisor store that cannot be read must not take the command down —
  * the registry half still answers the question. But it must not vanish
@@ -159,15 +169,20 @@ function outputHuman(rows: SessionRow[], now: number): void {
  * the failure this command exists to prevent. stderr keeps `--json`
  * stdout parseable.
  */
-async function readManagedRows(now: number): Promise<SessionRow[]> {
+async function readManagedRows(
+  now: number,
+): Promise<{ rows: SessionRow[]; complete: boolean }> {
   try {
-    return managedSessionRows(await listAgentViewSessionSnapshots(), now);
+    return {
+      rows: managedSessionRows(await listAgentViewSessionSnapshots(), now),
+      complete: true,
+    };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     writeStderrLine(
       `Managed sessions could not be listed: ${sanitizeSingleLineTerminalText(reason)}`,
     );
-    return [];
+    return { rows: [], complete: false };
   }
 }
 
@@ -175,11 +190,11 @@ async function handlePs(argv: PsArgs): Promise<void> {
   const now = Date.now();
   // listLiveSessions reports "cannot look" as "no peers" rather than
   // throwing, so there is no failure path to surface here.
-  const [records, managed] = await Promise.all([
+  const [records, managedResult] = await Promise.all([
     listLiveSessions(),
     readManagedRows(now),
   ]);
-  const rows = mergeSessionRows(records, managed);
+  const rows = mergeSessionRows(records, managedResult.rows);
 
   if (argv.json) {
     for (const row of rows) {
@@ -208,8 +223,15 @@ async function handlePs(argv: PsArgs): Promise<void> {
     return;
   }
 
+  // "Running", not "registered": a managed session is listed whether or
+  // not it ever wrote a registry record, so an empty listing is a claim
+  // about both sources at once.
   if (rows.length === 0) {
-    writeStdoutLine('No other Qwen Code sessions are running.');
+    writeStdoutLine(
+      managedResult.complete
+        ? 'No other Qwen Code sessions are running.'
+        : 'No interactive Qwen Code sessions are running; managed sessions could not be listed.',
+    );
     return;
   }
 
