@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const navigateToDaemon = vi.hoisted(() => vi.fn());
 const confirmDaemonTarget = vi.hoisted(() => vi.fn());
 const getDaemonToken = vi.hoisted(() => vi.fn());
+const persistDaemonToken = vi.hoisted(() => vi.fn());
 const getAllowedDaemonOrigin = vi.hoisted(() =>
   vi.fn((raw: string) => {
     try {
@@ -22,6 +23,7 @@ vi.mock('./daemon', () => ({
   getAllowedDaemonOrigin,
   getDaemonToken,
   navigateToDaemon,
+  persistDaemonToken,
 }));
 
 const {
@@ -57,6 +59,7 @@ function setLocation(href: string): void {
 
 beforeEach(() => {
   setLocation(`${testOrigin}/session/original?workspace=local#token=x`);
+  getDaemonToken.mockReset();
   navigateToDaemon.mockReturnValue(true);
 });
 
@@ -269,5 +272,35 @@ describe('remote daemon proxy calls', () => {
       { headers: Record<string, string> },
     ];
     expect(init.headers).toEqual({});
+    expect(navigateToDaemon).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['directory browse', () => fetchRemotePathSuggestions(REMOTE, '/srv/')],
+    [
+      'workspace registration',
+      () => addWorkspaceToDaemon(REMOTE, '/srv/shared-checkout/', false),
+    ],
+  ])(
+    'reopens target authentication after a rejected %s credential',
+    async (_, request) => {
+      getDaemonToken.mockImplementation((baseUrl?: string) =>
+        baseUrl === REMOTE ? 'stale-target-secret' : undefined,
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => ({
+          ok: false,
+          status: 401,
+          text: async () => 'Unauthorized',
+        })),
+      );
+
+      await expect(request()).rejects.toMatchObject({ status: 401 });
+      expect(persistDaemonToken).toHaveBeenCalledWith('', REMOTE);
+      expect(navigateToDaemon).toHaveBeenCalledWith(REMOTE, undefined, {
+        continueFlow: 'workspace',
+      });
+    },
+  );
 });

@@ -1,8 +1,10 @@
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
   getDaemonToken,
   navigateToDaemon,
+  persistDaemonToken,
 } from './daemon';
 
 const FLOW_PARAM = 'addRemoteWorkspace';
@@ -45,6 +47,11 @@ function remoteProxyHeaders(
   return headers;
 }
 
+function recoverRejectedTargetCredential(daemonOrigin: string): void {
+  persistDaemonToken('', daemonOrigin);
+  selectRemoteWorkspaceLocation(daemonOrigin);
+}
+
 /**
  * Fetches directory suggestions from an arbitrary daemon origin without
  * navigating the page. Used by the Add-workspace dialog's location switcher
@@ -62,7 +69,10 @@ export async function fetchRemotePathSuggestions(
     { headers: remoteProxyHeaders(daemonOrigin) },
   );
   if (!res.ok) {
-    throw new Error(
+    if (res.status === 401) recoverRejectedTargetCredential(daemonOrigin);
+    throw new DaemonHttpError(
+      res.status,
+      undefined,
       `Failed to fetch directory suggestions from ${daemonOrigin}: ${res.status}`,
     );
   }
@@ -96,7 +106,10 @@ export async function addWorkspaceToDaemon(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(
+    if (res.status === 401) recoverRejectedTargetCredential(daemonOrigin);
+    throw new DaemonHttpError(
+      res.status,
+      body,
       `Failed to add workspace on ${daemonOrigin}: ${res.status} ${body}`,
     );
   }
