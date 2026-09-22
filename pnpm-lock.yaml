@@ -771,6 +771,9 @@ importers:
       '@types/yauzl':
         specifier: ^2.9.1
         version: 2.10.3
+      ajv:
+        specifier: ^8.17.1
+        version: 8.20.0
       archiver:
         specifier: ^7.0.1
         version: 7.0.1

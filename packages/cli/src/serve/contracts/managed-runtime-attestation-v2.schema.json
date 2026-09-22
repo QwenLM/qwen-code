@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwenlm.github.io/qwen-code/contracts/managed-runtime-attestation-v2.schema.json",
+  "title": "Managed Runtime attestation v2 conformance fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "route", "identity", "cases"],
+  "properties": {
+    "contractVersion": { "const": 1 },
+    "route": { "$ref": "#/$defs/route" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "method",
+        "path",
+        "protocolVersion",
+        "requestBodyLimitBytes",
+        "responseBodyLimitBytes",
+        "cacheControl"
+      ],
+      "properties": {
+        "key": { "const": "attest" },
+        "method": { "const": "POST" },
+        "path": { "const": "/internal/managed-runtime/v2/attest" },
+        "protocolVersion": { "const": 2 },
+        "requestBodyLimitBytes": { "const": 16384 },
+        "responseBodyLimitBytes": { "const": 16384 },
+        "cacheControl": { "const": "no-store" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "required": [
+        "provisionRequestId",
+        "tenantId",
+        "workspaceId",
+        "workspaceGeneration",
+        "workspaceCwd",
+        "capabilityDigest",
+        "isolationClass"
+      ],
+      "properties": {
+        "provisionRequestId": { "type": "string", "minLength": 1 },
+        "tenantId": { "type": "string", "minLength": 1 },
+        "workspaceId": { "type": "string", "minLength": 1 },
+        "workspaceGeneration": { "type": "string", "minLength": 1 },
+        "workspaceCwd": { "type": "string", "minLength": 1 },
+        "capabilityDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "isolationClass": { "enum": ["session", "workspace"] }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/scope" },
+        {
+          "type": "object",
+          "required": [
+            "token",
+            "runtimeInstanceId",
+            "runtimeIncarnation",
+            "leaseId",
+            "epoch"
+          ],
+          "properties": {
+            "token": { "type": "string", "minLength": 1 },
+            "runtimeInstanceId": { "type": "string", "minLength": 1 },
+            "runtimeIncarnation": { "type": "string", "minLength": 1 },
+            "leaseId": { "type": "string", "minLength": 1 },
+            "epoch": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "requestBody": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/scope" },
+        {
+          "type": "object",
+          "required": ["protocolVersion"],
+          "properties": { "protocolVersion": { "const": 2 } }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "responseBody": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/scope" },
+        {
+          "type": "object",
+          "required": [
+            "protocolVersion",
+            "runtimeInstanceId",
+            "runtimeIncarnation",
+            "leaseId",
+            "epoch"
+          ],
+          "properties": {
+            "protocolVersion": { "const": 2 },
+            "runtimeInstanceId": { "type": "string", "minLength": 1 },
+            "runtimeIncarnation": { "type": "string", "minLength": 1 },
+            "leaseId": { "type": "string", "minLength": 1 },
+            "epoch": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "headers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorization",
+        "cache-control",
+        "content-type",
+        "x-qwen-managed-lease-id",
+        "x-qwen-managed-lease-epoch"
+      ],
+      "properties": {
+        "authorization": { "type": "string" },
+        "cache-control": { "const": "no-store" },
+        "content-type": { "const": "application/json" },
+        "x-qwen-managed-lease-id": { "type": "string" },
+        "x-qwen-managed-lease-epoch": { "type": "string" }
+      }
+    },
+    "requestMutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "headers": { "$ref": "#/$defs/headers" },
+        "body": { "$ref": "#/$defs/requestBody" },
+        "omitHeader": { "type": "string" },
+        "replaceHeader": { "$ref": "#/$defs/replacement" },
+        "replaceBody": { "$ref": "#/$defs/replacement" },
+        "paddingBytes": { "type": "integer", "minimum": 1 },
+        "rawBody": { "type": "string" },
+        "pathSuffix": { "type": "string" },
+        "pathOverride": { "type": "string" },
+        "method": { "type": "string" }
+      },
+      "minProperties": 1
+    },
+    "replacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": {}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "request", "expected"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "request": { "$ref": "#/$defs/requestMutation" },
+        "expected": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "classification"],
+          "properties": {
+            "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+            "classification": {
+              "enum": [
+                "ok",
+                "credentials",
+                "protocol",
+                "identity",
+                "incompatible"
+              ]
+            },
+            "body": { "$ref": "#/$defs/responseBody" }
+          }
+        }
+      }
+    }
+  }
+}

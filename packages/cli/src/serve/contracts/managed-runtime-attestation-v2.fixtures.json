@@ -1,0 +1,252 @@
+{
+  "contractVersion": 1,
+  "route": {
+    "key": "attest",
+    "method": "POST",
+    "path": "/internal/managed-runtime/v2/attest",
+    "protocolVersion": 2,
+    "requestBodyLimitBytes": 16384,
+    "responseBodyLimitBytes": 16384,
+    "cacheControl": "no-store"
+  },
+  "identity": {
+    "token": "fixture-token",
+    "runtimeInstanceId": "runtime-01",
+    "runtimeIncarnation": "boot-01",
+    "leaseId": "lease-01",
+    "epoch": 4,
+    "provisionRequestId": "provision-01",
+    "tenantId": "tenant-a",
+    "workspaceId": "workspace-a",
+    "workspaceGeneration": "7",
+    "workspaceCwd": "/runtime/workspace",
+    "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "isolationClass": "session"
+  },
+  "cases": [
+    {
+      "id": "success",
+      "request": {
+        "headers": {
+          "authorization": "Bearer fixture-token",
+          "cache-control": "no-store",
+          "content-type": "application/json",
+          "x-qwen-managed-lease-id": "lease-01",
+          "x-qwen-managed-lease-epoch": "4"
+        },
+        "body": {
+          "protocolVersion": 2,
+          "provisionRequestId": "provision-01",
+          "tenantId": "tenant-a",
+          "workspaceId": "workspace-a",
+          "workspaceGeneration": "7",
+          "workspaceCwd": "/runtime/workspace",
+          "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "isolationClass": "session"
+        }
+      },
+      "expected": {
+        "status": 200,
+        "classification": "ok",
+        "body": {
+          "protocolVersion": 2,
+          "runtimeInstanceId": "runtime-01",
+          "runtimeIncarnation": "boot-01",
+          "leaseId": "lease-01",
+          "epoch": 4,
+          "provisionRequestId": "provision-01",
+          "tenantId": "tenant-a",
+          "workspaceId": "workspace-a",
+          "workspaceGeneration": "7",
+          "workspaceCwd": "/runtime/workspace",
+          "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "isolationClass": "session"
+        }
+      }
+    },
+    {
+      "id": "missing-authorization",
+      "request": {
+        "omitHeader": "authorization"
+      },
+      "expected": {
+        "status": 401,
+        "classification": "credentials"
+      }
+    },
+    {
+      "id": "missing-no-store",
+      "request": {
+        "omitHeader": "cache-control"
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "wrong-lease",
+      "request": {
+        "replaceHeader": {
+          "name": "x-qwen-managed-lease-id",
+          "value": "lease-02"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity"
+      }
+    },
+    {
+      "id": "wrong-epoch",
+      "request": {
+        "replaceHeader": {
+          "name": "x-qwen-managed-lease-epoch",
+          "value": "5"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity"
+      }
+    },
+    {
+      "id": "wrong-workspace-generation",
+      "request": {
+        "replaceBody": {
+          "name": "workspaceGeneration",
+          "value": "8"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity"
+      }
+    },
+    {
+      "id": "unknown-body-field",
+      "request": {
+        "replaceBody": {
+          "name": "unexpected",
+          "value": true
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "wrong-protocol-version",
+      "request": {
+        "replaceBody": {
+          "name": "protocolVersion",
+          "value": 3
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "malformed-json",
+      "request": {
+        "rawBody": "{not-json"
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "unsupported-json-charset",
+      "request": {
+        "replaceHeader": {
+          "name": "content-type",
+          "value": "application/json; charset=iso-8859-1"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "unsupported-content-encoding",
+      "request": {
+        "replaceHeader": {
+          "name": "content-encoding",
+          "value": "compress"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "malformed-capability-digest",
+      "request": {
+        "replaceBody": {
+          "name": "capabilityDigest",
+          "value": "sha256:not-canonical"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "oversized-body",
+      "request": {
+        "paddingBytes": 16384
+      },
+      "expected": {
+        "status": 413,
+        "classification": "protocol"
+      }
+    },
+    {
+      "id": "query-string-route",
+      "request": {
+        "pathSuffix": "?retry=1"
+      },
+      "expected": {
+        "status": 404,
+        "classification": "incompatible"
+      }
+    },
+    {
+      "id": "trailing-slash-route",
+      "request": {
+        "pathSuffix": "/"
+      },
+      "expected": {
+        "status": 404,
+        "classification": "incompatible"
+      }
+    },
+    {
+      "id": "wrong-method",
+      "request": {
+        "method": "GET"
+      },
+      "expected": {
+        "status": 404,
+        "classification": "incompatible"
+      }
+    },
+    {
+      "id": "unknown-path",
+      "request": {
+        "pathOverride": "/internal/managed-runtime/v2/unknown"
+      },
+      "expected": {
+        "status": 404,
+        "classification": "incompatible"
+      }
+    }
+  ]
+}
