@@ -81,8 +81,13 @@ its own names through the same path, after the registration response rather
 than inside it, and only the first time this daemon sees it: a later removal
 and re-registration, or a trust re-materialization, must not undo an operator
 who stopped one of those channels in between. Its names join the committed
-selection in one change. An explicit `--channel` selection bounds hosting for
-the daemon's whole life, so a workspace registered later adds nothing to it.
+selection in one change. A daemon whose channel hosting has been stopped —
+through `DELETE /workspace/channel`, or by a startup it could not keep —
+restores nothing on a registration, because registering a workspace is not an
+instruction to turn hosting back on; that waits for a `PUT /workspace/channel`
+or the next boot. An explicit `--channel` selection bounds hosting for the
+daemon's whole life, so a workspace registered later adds nothing to it, and a
+committed `all` selection is left as it is.
 Without an explicit or persisted
 selection, the daemon does not reserve the channel service or load the heavy
 channel runtime until the first runtime mutation.

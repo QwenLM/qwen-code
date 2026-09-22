@@ -7,7 +7,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { X509Certificate } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
@@ -13708,6 +13708,7 @@ describe('runQwenServe channel worker supervisor', () => {
 
   it('hands the quickstart the mounted-web-shell flag', async () => {
     mockRemoteQuickstart.print.mockClear();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-web-')),
     );
@@ -13726,8 +13727,18 @@ describe('runQwenServe channel worker supervisor', () => {
       );
       expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
       expect(mockRemoteQuickstart.print.mock.calls[0][0].web).toBe(true);
+      const startup = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(startup).toContain(
+        'same-origin Web Shell HTTP and WebSocket requests work without --allow-origin',
+      );
+      expect(startup).toContain(
+        'TLS-terminating proxy still need --allow-origin <origin>',
+      );
     } finally {
       vi.unstubAllEnvs();
+      stderr.mockRestore();
       await started?.close();
     }
   });
@@ -14845,6 +14856,87 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('excludes SSH workspaces from startup channels and runtime selection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ssh-channels-')),
+    );
+    vi.stubEnv('QWEN_HOME', tmpDir);
+    const primary = path.join(tmpDir, 'primary');
+    const url = 'ssh://host/srv/project';
+    const anchor = path.join(
+      tmpDir,
+      'ssh-workspaces',
+      createHash('sha256').update(url).digest('hex'),
+      'workspace',
+    );
+    writeWorkspaceSettings(anchor, {
+      channels: { remote: { type: 'telegram' } },
+      serve: { channels: ['remote'] },
+    });
+    fs.writeFileSync(
+      path.join(anchor, '..', 'connection.json'),
+      JSON.stringify({ url }),
+    );
+    writeWorkspaceSettings(primary, {
+      channels: {
+        local: { type: 'telegram' },
+        remote: { type: 'telegram', cwd: anchor },
+      },
+      serve: { channels: ['local'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, anchor],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledOnce();
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: primary,
+          selection: { mode: 'names', names: ['local'] },
+        }),
+      );
+      const selected = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['remote'] },
+        }),
+      });
+      expect(selected.status).toBeGreaterThanOrEqual(400);
+      expect(factory).toHaveBeenCalledOnce();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('drops only the workspace whose startup channel cannot be resolved', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-partial-startup-')),
@@ -15308,6 +15400,91 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('leaves a late workspace alone once channel hosting has been stopped', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-stopped-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalledTimes(1));
+
+      // `qwen channel stop` maps to this. Registering a workspace afterwards
+      // is not an instruction to turn hosting back on.
+      const stopped = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+      });
+      expect(stopped.status).toBe(200);
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(daemon.factory).toHaveBeenCalledTimes(1);
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: daemon.headers,
+      });
+      expect(await control.json()).toMatchObject({
+        enabled: false,
+        selection: null,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves a committed all selection alone when a workspace registers later', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-all-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    writeWorkspaceSettings(daemon.primary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['all'] },
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({ selection: { mode: 'all' } }),
+        ),
+      );
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // One flat selection cannot say "everything the primary has, plus
+      // these": `all` is left as it is rather than rewritten into names.
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: daemon.headers,
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'all' },
+      });
+      expect(
+        daemon.factory.mock.calls.map(([call]) => call.workspace),
+      ).not.toContain(canonicalizeWorkspace(daemon.secondary));
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('does not move a hosted channel to a workspace that registers later', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-claim-')),
@@ -15380,6 +15557,10 @@ describe('runQwenServe channel worker supervisor', () => {
         },
         body: JSON.stringify({ cwd: claimant }),
       });
+      const hostingCallsBefore = factory.mock.calls.filter(
+        ([call]) => call.workspace === canonicalizeWorkspace(hosting),
+      ).length;
+      const totalCallsBefore = factory.mock.calls.length;
       expect(added.status).toBe(201);
       await new Promise((resolve) => setTimeout(resolve, 100));
       // The newcomer asks for a name the daemon already hosts, so it has
@@ -15387,6 +15568,27 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(factory.mock.calls.map(([call]) => call.workspace)).not.toContain(
         canonicalizeWorkspace(claimant),
       );
+      // "Stays put" means the same worker, not a fresh one under the same
+      // owner: re-committing a name the daemon already hosts would tear the
+      // incumbent down and take every session on it with it.
+      expect(
+        factory.mock.calls.filter(
+          ([call]) => call.workspace === canonicalizeWorkspace(hosting),
+        ),
+      ).toHaveLength(hostingCallsBefore);
+      expect(factory.mock.calls).toHaveLength(totalCallsBefore);
+      // The committed selection is what a reconcile acts on, so re-committing
+      // a name the daemon already hosts is the step that would tear the
+      // incumbent down. It must not even be proposed.
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'names', names: ['shared'] },
+      });
     } finally {
       await handle.close();
     }

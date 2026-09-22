@@ -23,6 +23,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -3930,6 +3931,7 @@ async function runQwenServeImpl(
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
+          readSshWorkspace(cwd);
         } catch (err) {
           writeStderrLine(
             `qwen serve: skipping persisted workspace registration ${JSON.stringify(
@@ -4131,10 +4133,12 @@ async function runQwenServeImpl(
       ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
     });
   };
-  const startupChannelWorkspaces = workspaceInputs.map((workspace, index) => ({
-    workspaceCwd: workspace.cwd,
-    primary: index === 0,
-  }));
+  const startupChannelWorkspaces = workspaceInputs
+    .filter((workspace) => !readSshWorkspace(workspace.cwd))
+    .map((workspace, index) => ({
+      workspaceCwd: workspace.cwd,
+      primary: index === 0,
+    }));
   const loadStartupChannelsFor = (workspaceCwd: string): unknown =>
     (workspaceCwd === boundWorkspace
       ? bootSettings
@@ -4507,8 +4511,7 @@ async function runQwenServeImpl(
         );
         // The remote same-origin exception matches the browser's Origin
         // against the scheme and Host the daemon's own socket sees, so it
-        // covers direct listeners only. WebSocket upgrades (terminal, voice)
-        // admit loopback/allowlisted origins alone, and ANY intermediary
+        // covers direct HTTP and WebSocket requests. ANY intermediary
         // that terminates TLS or rewrites the Host header (nginx's default
         // proxy_set_header, k8s Ingress) presents an Origin this daemon
         // cannot match — name them so the operator is not left with a
@@ -4516,10 +4519,9 @@ async function runQwenServeImpl(
         // verbatim and needs nothing.
         if (!opts.allowOrigins || opts.allowOrigins.length === 0) {
           writeStderrLine(
-            'qwen serve: same-origin Web Shell HTTP requests work without ' +
-              '--allow-origin, but WebSocket-backed features (terminal, voice) ' +
-              'and browsers reaching the daemon through a TLS-terminating ' +
-              'proxy still need --allow-origin <origin>. A plain-HTTP ' +
+            'qwen serve: same-origin Web Shell HTTP and WebSocket requests work ' +
+              'without --allow-origin. Browsers reaching the daemon through a ' +
+              'TLS-terminating proxy still need --allow-origin <origin>. A plain-HTTP ' +
               'intermediary that rewrites the Host header (nginx default ' +
               'proxy_set_header, k8s Ingress) needs --allow-origin <origin> ' +
               'for the origin the browser sees, unless it forwards Host ' +
@@ -7541,11 +7543,29 @@ async function runQwenServeImpl(
           !runtimeAdded.trusted ||
           runtimeAdded.primary ||
           channelSelectionFromFlag ||
-          lateRestoredWorkspaces.has(workspaceCwd)
+          lateRestoredWorkspaces.has(workspaceCwd) ||
+          // A remote workspace's `serve.channels` is not this daemon's to
+          // host, the same exclusion boot applies.
+          readSshWorkspace(workspaceCwd)
         ) {
           return;
         }
-        const committedSelection = channelWorkerManager?.state().selection;
+        const channelControl = channelWorkerManager?.state();
+        if (channelControl && !channelControl.enabled) {
+          // Channel hosting exists and is off, which only happens because
+          // something turned it off — `DELETE /workspace/channel`, or a
+          // startup that could not be kept. Registering a workspace is not an
+          // instruction to turn hosting back on, so the restore waits for one:
+          // a `PUT /workspace/channel`, or the next boot reading the settings.
+          // A daemon that never hosted channels has no manager at all, and
+          // that is the case this restore exists for.
+          daemonLog.info(
+            'skipping serve.channels for a workspace registered after boot: channel hosting is stopped',
+            { workspaceCwd },
+          );
+          return;
+        }
+        const committedSelection = channelControl?.selection;
         if (committedSelection?.mode === 'all') {
           // One flat selection cannot say "everything the primary workspace
           // has, plus these two"; `all` stays what it is.
@@ -8556,7 +8576,10 @@ async function runQwenServeImpl(
       channelWebhookEnvByWorkspace.set(workspace.cwd, effectiveEnv);
       return undefined;
     }
-    const workspaces = workspaceInputs.map((workspace, index) => {
+    const channelWorkspaces = workspaceInputs.filter(
+      (workspace) => !readSshWorkspace(workspace.cwd),
+    );
+    const workspaces = channelWorkspaces.map((workspace, index) => {
       const runtime = resolveRuntime(workspace.cwd);
       const trusted = resolveTrusted(workspace.cwd, index === 0, runtime);
       const settings = validationSettingsRuntime.settings.loadSettings(
@@ -9160,8 +9183,11 @@ async function runQwenServeImpl(
           string,
           ReturnType<SettingsRuntime['loadSettings']>
         >();
+        const channelRuntimes = runtimes.filter(
+          (runtime) => !runtime.routeFileSystemFactory.sshWorkspace,
+        );
         const grouping = resolveChannelWorkspaceGroups({
-          workspaces: runtimes.map((runtime) => {
+          workspaces: channelRuntimes.map((runtime) => {
             const settings = settingsRuntime.settings.loadSettings(
               runtime.workspaceCwd,
               {

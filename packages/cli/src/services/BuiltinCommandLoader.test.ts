@@ -82,6 +82,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { CommandKind } from '../ui/commands/types.js';
 
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
+import { ideCommand } from '../ui/commands/ideCommand.js';
 
 vi.mock('../ui/commands/authCommand.js', () => ({ authCommand: {} }));
 vi.mock('../ui/commands/bugCommand.js', () => ({ bugCommand: {} }));
@@ -150,6 +151,16 @@ describe('BuiltinCommandLoader', () => {
     // ideCommand is now a constant, no longer needs config
     expect(restoreCommandMock).toHaveBeenCalledTimes(1);
     expect(restoreCommandMock).toHaveBeenCalledWith(mockConfig);
+  });
+
+  it('does not probe local IDE processes for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+    const loader = new BuiltinCommandLoader(mockConfig);
+
+    const commands = await loader.loadCommands(new AbortController().signal);
+
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
   });
 
   it('should filter out null command definitions returned by factories', async () => {

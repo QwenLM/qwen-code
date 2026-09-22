@@ -1334,7 +1334,10 @@ export function transcriptBlocksToDaemonMessages(
       tool.args = permissionInfo.args;
     }
     if (
-      isSubAgentToolCall(tool) &&
+      (isSubAgentToolCall(tool) ||
+        /^(shell|bash|run_shell_command|execute_command)$/i.test(
+          tool.toolName,
+        )) &&
       isActiveToolStatus(tool.status) &&
       tool.endTime === undefined
     ) {
@@ -1786,6 +1789,18 @@ function getToolRawOutput(
 }
 
 function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
+  // Active shell details can be an input preview, not command output.
+  if (
+    /^(shell|bash|run_shell_command|execute_command)$/i.test(
+      block.toolName ?? '',
+    ) &&
+    ['pending', 'in_progress', 'running'].includes(block.status) &&
+    block.rawInput !== undefined &&
+    block.rawOutput === undefined
+  ) {
+    return undefined;
+  }
+
   if (isAskUserQuestionBlock(block) && block.status === 'failed') {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
@@ -1820,6 +1835,7 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'shell_result') return preview.result;
   if (preview.kind === 'question_answers') {
     return {
       type: 'ask_user_question_answers',

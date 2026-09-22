@@ -5,6 +5,7 @@ import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { StandaloneContext } from './config/standalone';
 import { isKnownDaemonTarget } from './config/daemon';
 import { isRemoteConnectionKnown } from './config/remote-connections';
+import { exchangePairingCode } from './config/pairing';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -47,6 +48,7 @@ const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
 const BRAND_STORAGE_KEY = 'qwen-code-web-shell-brand';
+const MACOS_TITLEBAR_CLASS = 'qwen-code-macos-titlebar';
 
 /**
  * Cached for index.html's pre-paint script so a renamed deployment does not
@@ -95,6 +97,13 @@ function applyBrandToDocument(brand: WebShellResolvedBrand): void {
     if (link) link.href = brand.logoDataUri;
   }
   storeBrand(brand);
+}
+
+function hasMacOSOverlayTitlebar(): boolean {
+  return (
+    (window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean })
+      .__QWEN_CODE_MACOS_TITLEBAR__ === true
+  );
 }
 
 function parseTheme(value: string | null): WebShellTheme | undefined {
@@ -214,6 +223,7 @@ function replaceStandaloneSessionUrl(
 }
 
 export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+  const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
   // The entry's own opinion — an explicit URL param or a stored in-app
   // choice. Passed down as the `theme`/`language` host props; `undefined`
   // lets App resolve the daemon's effective settings instead (#11955).
@@ -365,6 +375,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         );
       }}
     >
+      {macosOverlayTitlebar && (
+        <div
+          className="qwen-code-macos-titlebar-drag-region"
+          data-tauri-drag-region=""
+          aria-hidden="true"
+        />
+      )}
       <BrowserTurnNotifications
         language={documentLanguage}
         options={{ defaultEnabled: true }}
@@ -387,6 +404,9 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onBrandResolved: handleBrandResolved,
                 onSessionIdChange: handleSessionIdChange,
                 sidebar: { enabled: true, showLive: true },
+                className: macosOverlayTitlebar
+                  ? MACOS_TITLEBAR_CLASS
+                  : undefined,
                 header: {
                   items: [
                     'title',
@@ -397,7 +417,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                   ],
                 },
                 rightPanel: {
-                  items: ['review', 'sideTask', 'terminal', 'webPreview'],
+                  items: [
+                    'review',
+                    'sideTask',
+                    'terminal',
+                    'webPreview',
+                    'trajectory',
+                  ],
                 },
                 environmentPanel: {
                   items: [
@@ -445,7 +471,11 @@ async function main() {
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
+  const pairing = await exchangePairingCode(
+    INVALID_DAEMON_TARGET ? '' : baseUrl,
+  );
   const daemonToken =
+    pairing?.token ??
     storedToken ??
     (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
       ? await waitForDaemonTokenMessage()
@@ -464,6 +494,7 @@ async function main() {
       <StandaloneAuth
         baseUrl={baseUrl}
         initialToken={daemonToken}
+        pairingFailed={Boolean(pairing?.failed)}
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.
