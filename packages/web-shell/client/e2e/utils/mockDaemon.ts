@@ -101,6 +101,11 @@ export interface WebShellDaemonScenario {
   providersDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
+  /**
+   * Page served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as.
+   */
+  transcriptPage?: { events: DaemonEvent[]; hasMore?: boolean };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
   /**
@@ -451,6 +456,7 @@ export function createWebShellDaemonScenario(
     savedWorkflowDetails: overrides.savedWorkflowDetails,
     providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
+    transcriptPage: overrides.transcriptPage,
     workspaceFiles: overrides.workspaceFiles ?? {},
     pathSuggestions: overrides.pathSuggestions,
     gitStatus: overrides.gitStatus,
@@ -825,6 +831,7 @@ function isDaemonPath(path: string): boolean {
     path === '/goals' ||
     /^\/file\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
+    /^\/session\/[^/]+\/transcript\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
@@ -983,6 +990,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/session\/[^/]+\/transcript\/?$/.test(path)) {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
@@ -2107,6 +2117,16 @@ async function handleDaemonRoute(
     }
     if (action === 'artifacts') {
       await json(route, sessionArtifactsEnvelope(scenario, sessionId));
+      return;
+    }
+    if (action === 'transcript') {
+      const page = scenario.transcriptPage;
+      await json(route, {
+        v: 1,
+        sessionId,
+        events: page?.events ?? [],
+        hasMore: page?.hasMore ?? false,
+      });
       return;
     }
     if (action === 'prompt') {

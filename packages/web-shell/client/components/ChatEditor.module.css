@@ -1080,6 +1080,43 @@
   gap: 4px;
 }
 
+/* The workspace and git chips, moved out of the toolbar into their own row
+   under the composer box so the composer stays about the prompt itself. The
+   4px inset plus the workspace chip's 8px padding lines their content up with the
+   editor's text. */
+.contextRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin-top: -12px;
+  padding: 18px 4px 6px;
+  border-radius: 0 0 12px 12px;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.contextRow button[data-web-shell-git-branch] {
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.contextRow button[data-web-shell-git-branch]:hover,
+.contextRow button[data-web-shell-git-branch]:focus-visible {
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+
+.contextRow button[data-web-shell-git-branch] > svg {
+  display: none;
+}
+
 .toolbarLeading,
 .toolbarStart,
 .toolbarEnd,

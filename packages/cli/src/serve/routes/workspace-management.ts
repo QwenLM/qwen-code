@@ -8,6 +8,7 @@ import {
   readWorkspaceActivity,
   type WorkspaceRemovalActivity,
 } from '../workspace-activity.js';
+import { prepareSshWorkspace } from '../ssh-workspace-store.js';
 import { readdir, stat } from 'node:fs/promises';
 import {
   translateAndCheckAbsoluteWorkspacePath,
@@ -778,7 +779,7 @@ export function registerWorkspaceManagementRoutes(
         await createScratchWorkspace(res);
         return;
       }
-      const cwd = body['cwd'];
+      const requestedCwd = body['cwd'];
       const persist = body['persist'] ?? false;
       const hasDisplayName = Object.hasOwn(body, 'displayName');
       let displayName: string | undefined;
@@ -794,13 +795,17 @@ export function registerWorkspaceManagementRoutes(
           return;
         }
       }
-      if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+      if (
+        typeof requestedCwd !== 'string' ||
+        requestedCwd.trim().length === 0
+      ) {
         res.status(400).json({
           error: '`cwd` must be a non-empty string',
           code: 'invalid_path',
         });
         return;
       }
+      let cwd: string = requestedCwd;
       if (typeof persist !== 'boolean') {
         res.status(400).json({
           error: '`persist` must be a boolean',
@@ -833,6 +838,29 @@ export function registerWorkspaceManagementRoutes(
           code: 'invalid_path',
         });
         return;
+      }
+
+      if (cwd.startsWith('ssh://')) {
+        if (sealed) {
+          sendSealed(res);
+          return;
+        }
+        operationStarted();
+        try {
+          const prepared = await prepareSshWorkspace(
+            cwd,
+            AbortSignal.timeout(30_000),
+          );
+          cwd = prepared.cwd;
+        } catch (error) {
+          res.status(400).json({
+            error: error instanceof Error ? error.message : String(error),
+            code: 'ssh_workspace_connection_failed',
+          });
+          return;
+        } finally {
+          operationFinished();
+        }
       }
 
       // #7139: the shared helper maps a Windows-shaped cwd to its container

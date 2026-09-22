@@ -70,7 +70,11 @@ const LISTBOX_ID = 'add-workspace-suggestions';
 const SUGGEST_DEBOUNCE_MS = 150;
 
 function isAbsoluteLike(value: string): boolean {
-  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value);
+  return (
+    value.startsWith('/') ||
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    value.startsWith('ssh://')
+  );
 }
 
 export function AddWorkspaceDialog({
@@ -133,7 +137,8 @@ export function AddWorkspaceDialog({
   // response (older sequence number) never overwrites a newer one.
   useEffect(() => {
     if (!onSuggest) return undefined;
-    if (!isAbsoluteLike(path)) {
+    if (!isAbsoluteLike(path) || path.trim().startsWith('ssh://')) {
+      ++suggestSeqRef.current;
       setSuggestions([]);
       setSuggestionsLoaded(false);
       setSuggestionsError(false);
@@ -286,6 +291,7 @@ export function AddWorkspaceDialog({
       if (
         event.key === 'Enter' &&
         browseDirectories &&
+        !path.trim().startsWith('ssh://') &&
         !event.nativeEvent.isComposing
       ) {
         // Enter opens the typed directory rather than submitting: registering a
@@ -421,7 +427,7 @@ export function AddWorkspaceDialog({
                   ref={inputRef}
                   id="add-workspace-path"
                   type="text"
-                  placeholder="/absolute/path/to/project"
+                  placeholder="/absolute/path or ssh://user@host/project"
                   value={path}
                   onChange={(e) => {
                     setPath(e.target.value);
@@ -462,7 +468,7 @@ export function AddWorkspaceDialog({
                   aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
                   aria-invalid={error ? true : undefined}
                 />
-                {browseDirectories && (
+                {browseDirectories && !path.trim().startsWith('ssh://') && (
                   <Button
                     type="button"
                     size="icon"
@@ -564,11 +570,9 @@ export function AddWorkspaceDialog({
                 </div>
               )}
             </div>
-            {!browseDirectories && (
-              <FieldDescription id={HINT_ID}>
-                {t('sidebar.addWorkspaceHint')}
-              </FieldDescription>
-            )}
+            <FieldDescription id={browseDirectories ? undefined : HINT_ID}>
+              {t('sidebar.addWorkspaceHint')}
+            </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
           {displayNameEnabled && (

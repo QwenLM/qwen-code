@@ -1,7 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "bootstrap",
-  "description": "Allows the local bootstrap page to subscribe to desktop lifecycle events.",
+  "description": "Allows the local bootstrap page to subscribe to desktop lifecycle events and drive the shell commands behind them.",
   "windows": ["main"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "allow-bootstrap-state",
+    "allow-change-zoom",
+    "allow-choose-workspace",
+    "allow-install-update",
+    "allow-open-logs",
+    "allow-restart-runtime"
+  ]
 }
