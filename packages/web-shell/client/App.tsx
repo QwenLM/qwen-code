@@ -13374,6 +13374,24 @@ export function App({
       ]
     : undefined;
   const hasRemoteWorkspaceLocation = (workspaceAddLocations?.length ?? 0) > 1;
+  // Whether the location the dialog is browsing is the daemon this shell is
+  // actually connected to — the same comparison `handleAddRemoteWorkspace`
+  // uses to choose between a local add and the remote proxy.
+  //
+  // Every capability-driven affordance below reads `workspace.capabilities`,
+  // which describes the CONNECTED daemon only. While a different location is
+  // selected in place the target's answers are unknowable without querying it,
+  // so the honest UI withholds the affordance rather than assuming the
+  // connected daemon's: a native picker would open an OS dialog on the wrong
+  // machine and register its result on the target, a Persist switch would
+  // either surface the target's raw 501 or silently register a workspace that
+  // dies on its next restart, and a cwd from this filesystem seeds a browse
+  // the target answers with an empty (not failed) list. Before in-place browse
+  // the location switch navigated first, so all of these re-resolved against
+  // the target.
+  const workspaceAddLocationIsConnected =
+    workspaceAddSelectedLocation ===
+    (workspace.baseUrl || window.location.origin);
   const changeWorkspaceAddLocation = useCallback((origin: string) => {
     setWorkspaceAddLocation(origin);
     return true;
@@ -18754,6 +18772,7 @@ export function App({
                 onClose={closeAddWorkspaceDialog}
               />
             ) : workspaceBrowseActiveRef.current &&
+              workspaceAddLocationIsConnected &&
               !dynamicWorkspaceRegistrationSupported ? (
               <WorkspaceAddStatusDialog
                 message={t('workspaceHost.unsupported')}
@@ -18765,14 +18784,20 @@ export function App({
               <AddWorkspaceDialog
                 browseDirectories={workspaceBrowseActiveRef.current}
                 initialPath={
-                  workspaceBrowseActiveRef.current
-                    ? workspace.capabilities?.workspaceCwd?.replace(
-                        /[^\\/]+[\\/]?$/,
-                        '',
-                      ) ||
-                      workspace.capabilities?.workspaceCwd ||
-                      '/'
-                    : undefined
+                  !workspaceBrowseActiveRef.current
+                    ? undefined
+                    : workspaceAddLocationIsConnected
+                      ? workspace.capabilities?.workspaceCwd?.replace(
+                          /[^\\/]+[\\/]?$/,
+                          '',
+                        ) ||
+                        workspace.capabilities?.workspaceCwd ||
+                        '/'
+                      : // The connected daemon's cwd is a path on a different
+                        // machine; seeding it here makes the target answer with
+                        // an empty list (or a 400 across platforms) instead of
+                        // a usable browse. Root is absolute on every platform.
+                        '/'
                 }
                 locations={workspaceAddLocations}
                 selectedLocation={workspaceAddSelectedLocation}
@@ -18785,6 +18810,7 @@ export function App({
                 }
                 onSuggest={suggestWorkspacePathsForLocation}
                 onPick={
+                  workspaceAddLocationIsConnected &&
                   nativeDirectoryPickerSupported &&
                   (!workspace.baseUrl ||
                     new URL(workspace.baseUrl, window.location.origin)
@@ -18796,8 +18822,13 @@ export function App({
                       }
                     : undefined
                 }
-                persistenceSupported={persistentWorkspaceRegistrationSupported}
-                displayNameEnabled={workspaceDisplayNameSupported}
+                persistenceSupported={
+                  workspaceAddLocationIsConnected &&
+                  persistentWorkspaceRegistrationSupported
+                }
+                displayNameEnabled={
+                  workspaceAddLocationIsConnected && workspaceDisplayNameSupported
+                }
               />
             ))}
           {scratchOutcomeUnknown !== 'clear' && (

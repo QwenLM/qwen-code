@@ -81,6 +81,12 @@ const REMOTE_DAEMON_PROXY_MAX_BYTES = 1024 * 1024;
  *   daemon never redirects these routes — a 3xx means a misconfigured or
  *   hostile target, not a success.
  *
+ * `clientSignal` carries the caller's own cancellation (both proxy routes wire
+ * `res.on('close')` to one, matching `/workspace-directory-picker` below):
+ * browse fires a suggestion request per debounced keystroke, and a request the
+ * browser already discarded must not keep an outbound socket alive until the
+ * timeout expires. It is combined with, not substituted for, the timeout.
+ *
  * The private/metadata SSRF guard is intentionally NOT applied: the legitimate
  * targets of these routes are other daemons on localhost and the LAN, which is
  * exactly the address space that guard rejects. Restricting which origins an
@@ -89,11 +95,13 @@ const REMOTE_DAEMON_PROXY_MAX_BYTES = 1024 * 1024;
 function fetchRemoteDaemon(
   url: string,
   init: RequestInit,
+  clientSignal?: AbortSignal,
 ): Promise<globalThis.Response> {
+  const timeout = AbortSignal.timeout(REMOTE_DAEMON_PROXY_TIMEOUT_MS);
   return fetch(url, {
     ...init,
     redirect: 'error',
-    signal: AbortSignal.timeout(REMOTE_DAEMON_PROXY_TIMEOUT_MS),
+    signal: clientSignal ? AbortSignal.any([timeout, clientSignal]) : timeout,
   });
 }
 
@@ -138,6 +146,50 @@ async function readRemoteDaemonJson(
     reader.releaseLock();
   }
   return JSON.parse(Buffer.concat(chunks, size).toString('utf8')) as unknown;
+}
+
+/**
+ * Maps a non-2xx upstream answer onto this daemon's error envelope.
+ *
+ * A JSON answer keeps its own `error`/`code`, so a target's `400
+ * invalid_prefix` and a wrong-token `401` stay distinguishable from each other
+ * and from a dead network. Anything else — an HTML gateway 502, a bodyless 401
+ * — degrades to the status alone rather than surfacing a JSON parse failure as
+ * the explanation, which is what an unconditional `upstream.json()` did.
+ */
+async function remoteErrorEnvelope(upstream: globalThis.Response): Promise<{
+  status: number;
+  body: { error: string; code: string };
+}> {
+  const fallback = {
+    status: upstream.status,
+    body: {
+      error: `Remote daemon returned ${upstream.status}`,
+      code: 'remote_error',
+    },
+  };
+  const contentType = upstream.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) return fallback;
+  try {
+    const data = (await readRemoteDaemonJson(upstream)) as {
+      error?: unknown;
+      code?: unknown;
+    } | null;
+    if (!data || typeof data !== 'object') return fallback;
+    const error = typeof data.error === 'string' ? data.error.trim() : '';
+    const code = typeof data.code === 'string' ? data.code.trim() : '';
+    if (!error && !code) return fallback;
+    return {
+      status: upstream.status,
+      body: {
+        error: error || fallback.body.error,
+        code: code || fallback.body.code,
+      },
+    };
+  } catch {
+    // An unreadable or malformed JSON error body says nothing worth forwarding.
+    return fallback;
+  }
 }
 
 export interface WorkspaceManagementRouteDeps {
@@ -831,22 +883,29 @@ export function registerWorkspaceManagementRoutes(
       if (typeof token === 'string' && token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
+      // Browse mode fires one of these per debounced keystroke and drops stale
+      // answers client-side only, so a hung-up caller must also release the
+      // outbound socket — the pattern `/workspace-directory-picker` uses.
+      const clientAbort = new AbortController();
+      res.on('close', () => clientAbort.abort());
       try {
         const query = new URLSearchParams({ prefix: prefixRaw });
         const upstream = await fetchRemoteDaemon(
           `${daemonOrigin}/workspace-path-suggestions?${query.toString()}`,
           { headers },
+          clientAbort.signal,
         );
         if (!upstream.ok) {
-          res.status(upstream.status).json({
-            error: `Remote daemon returned ${upstream.status}`,
-            code: 'remote_error',
-          });
+          const envelope = await remoteErrorEnvelope(upstream);
+          res.status(envelope.status).json(envelope.body);
           return;
         }
         const data = await readRemoteDaemonJson(upstream);
         res.status(200).json(data);
       } catch (error) {
+        // The caller hung up: the response is gone, so there is nothing to
+        // answer and writing a 502 to it would only throw.
+        if (clientAbort.signal.aborted) return;
         res.status(502).json({
           error: `Failed to reach remote daemon: ${error instanceof Error ? error.message : String(error)}`,
           code: 'remote_unreachable',
@@ -899,21 +958,38 @@ export function registerWorkspaceManagementRoutes(
       if (typeof token === 'string' && token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
+      const clientAbort = new AbortController();
+      res.on('close', () => clientAbort.abort());
       try {
-        const upstream = await fetchRemoteDaemon(`${daemonOrigin}/workspaces`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            cwd,
-            ...(body['persist'] === true ? { persist: true } : {}),
-            ...(typeof body['displayName'] === 'string'
-              ? { displayName: body['displayName'] }
-              : {}),
-          }),
-        });
+        const upstream = await fetchRemoteDaemon(
+          `${daemonOrigin}/workspaces`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              cwd,
+              ...(body['persist'] === true ? { persist: true } : {}),
+              ...(typeof body['displayName'] === 'string'
+                ? { displayName: body['displayName'] }
+                : {}),
+            }),
+          },
+          clientAbort.signal,
+        );
+        // A failure the target explained is not "unreachable": parsing its
+        // body unconditionally turned a bodyless 401 and an HTML gateway 502
+        // into `remote_unreachable` with a JSON parse message as the reason.
+        if (!upstream.ok) {
+          const envelope = await remoteErrorEnvelope(upstream);
+          res.status(envelope.status).json(envelope.body);
+          return;
+        }
         const data = await readRemoteDaemonJson(upstream);
         res.status(upstream.status).json(data);
       } catch (error) {
+        // The caller hung up: the response is gone, so there is nothing to
+        // answer and writing a 502 to it would only throw.
+        if (clientAbort.signal.aborted) return;
         res.status(502).json({
           error: `Failed to reach remote daemon: ${error instanceof Error ? error.message : String(error)}`,
           code: 'remote_unreachable',

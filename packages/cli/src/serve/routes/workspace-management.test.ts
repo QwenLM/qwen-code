@@ -19,6 +19,8 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { tmpdir } from 'node:os';
+import { createServer, get as httpGet } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { realpathSync } from 'node:fs';
 import {
   mkdir,
@@ -3583,5 +3585,101 @@ describe('remote daemon proxy routes', () => {
 
     expect(res.status).toBe(502);
     expect(res.body.error).toContain('1048576-byte limit');
+  });
+
+  it('reports a registration failure the target explained, not remote_unreachable', async () => {
+    // A bodyless 401 from a wrong target token used to reach the caller as
+    // `502 remote_unreachable` whose explanation was a JSON parse error.
+    fetchMock.mockResolvedValue(new Response(null, { status: 401 }));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('remote_error');
+    expect(res.body.error).toBe('Remote daemon returned 401');
+    expect(res.body.error).not.toContain('JSON');
+  });
+
+  it('reports an HTML gateway failure with the real status', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('<html>502 Bad Gateway</html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('remote_error');
+    expect(res.body.error).not.toContain('<html>');
+  });
+
+  it('forwards the target error detail on the suggestion proxy', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: '`prefix` must be an absolute path', code: 'invalid_prefix' },
+        400,
+      ),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: '`prefix` must be an absolute path',
+      code: 'invalid_prefix',
+    });
+  });
+
+  it('aborts the upstream request when the caller hangs up', async () => {
+    let captured: AbortSignal | undefined;
+    fetchMock.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise<globalThis.Response>((_resolve, reject) => {
+          captured = init.signal as AbortSignal;
+          captured.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          );
+        }),
+    );
+    const { app } = createApp();
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const { port } = server.address() as AddressInfo;
+      const client = httpGet({
+        host: '127.0.0.1',
+        port,
+        path: `/remote-workspace-path-suggestions?daemon=${encodeURIComponent(
+          REMOTE,
+        )}&prefix=%2Fsrv%2F`,
+      });
+      client.on('error', () => {
+        // The destroyed socket is the point of this test.
+      });
+      await vi.waitFor(() => expect(captured).toBeInstanceOf(AbortSignal));
+      expect(captured?.aborted).toBe(false);
+
+      client.destroy();
+
+      // Browse fires one suggestion request per debounced keystroke; a request
+      // the browser discarded must not keep an outbound socket alive until the
+      // 30s transfer timeout expires.
+      await vi.waitFor(() => expect(captured?.aborted).toBe(true));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });
