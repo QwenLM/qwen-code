@@ -2,7 +2,7 @@
 
 import { Blob as NodeBlob } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { handleNativeDownload, saveBlob } from './saveBlob';
+import { handleNativeDownload, saveBlob } from './saveBlob.js';
 
 type Reply = {
   v: number;

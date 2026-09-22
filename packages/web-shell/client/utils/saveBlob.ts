@@ -1,4 +1,4 @@
-import { base64ToBlob } from './base64';
+import { base64ToBlob } from './base64.js';
 
 type DownloadBridge = {
   postMessage(message: string | ArrayBuffer): void;

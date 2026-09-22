@@ -1,4 +1,4 @@
-import { handleNativeDownload } from '../../utils/saveBlob';
+import { handleNativeDownload } from '../../utils/saveBlob.js';
 import type {
   DaemonSessionArtifact,
   SessionSource,
