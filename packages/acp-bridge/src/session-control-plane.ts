@@ -159,6 +159,7 @@ import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -1219,9 +1220,11 @@ function parseWorkspaceMemoryDreamResult(
 function pickUserInputEchoMeta(meta: unknown): Record<string, unknown> {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
   const inputAnnotations = (meta as Record<string, unknown>)[
-    'inputAnnotations'
+    DAEMON_INPUT_ANNOTATIONS_META_KEY
   ];
-  return Array.isArray(inputAnnotations) ? { inputAnnotations } : {};
+  return Array.isArray(inputAnnotations)
+    ? { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations }
+    : {};
 }
 
 /**

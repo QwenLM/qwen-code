@@ -336,7 +336,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
             onSelectIndex={list.selectIndex}
             onWheel={(direction) =>
               list.setActiveIndex(
-                list.activeIndex + (direction === 'down' ? 1 : -1),
+                list.activeIndexRef.current + (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (

@@ -40,7 +40,7 @@ export type OpenTuiDialogRequest =
   | { dialog: 'settings' }
   | { dialog: 'statusline' }
   | { dialog: 'memory' }
-  | { dialog: 'auth'; initialError?: string }
+  | { dialog: 'auth'; initialError?: string; openedViaCommand?: boolean }
   | { dialog: 'trust' }
   | { dialog: 'permissions' }
   | { dialog: 'approval-mode' }
@@ -88,7 +88,9 @@ export function routeDialogToOpenTui(
     case 'memory':
       return { dialog: 'memory' };
     case 'auth':
-      return { dialog: 'auth' };
+      // ink records the /auth result only when the command opened the dialog
+      // (useAuth's openedViaCommandRef), never for the boot auth-error open.
+      return { dialog: 'auth', openedViaCommand: true };
     case 'trust':
       return { dialog: 'trust' };
     case 'permissions':

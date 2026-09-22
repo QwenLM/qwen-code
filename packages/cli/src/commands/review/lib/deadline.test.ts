@@ -1354,6 +1354,27 @@ describe('parseDeadlineOption — the flag grammar', () => {
 });
 
 describe('captureDeadline — what a capture records, and whether the clock is explicit', () => {
+  it('prices the default wall by size — a fix-audit posture does not move it (#10136)', () => {
+    // The posture flips the topology and the round cap (lib/budget.ts), not
+    // the size the wall is keyed on: `sizeTier` never reads it.
+    const posture = {
+      since: 'a'.repeat(40),
+      effective: true,
+      posture: 'critical',
+      scope: { anchor: 'a'.repeat(40), deltaFiles: ['x.ts'], interaction: [] },
+    };
+    expect(
+      captureDeadline({}, undefined, {
+        srcDiffLines: 120,
+        diffLines: 400,
+        incremental: posture,
+      }).fields,
+    ).toEqual({
+      deadlineSeconds: DEFAULT_DEADLINE_SECONDS.small,
+      deadlineSource: 'default',
+    });
+  });
+
   const SMALL = { srcDiffLines: 100, diffLines: 100 };
   const LARGE = { srcDiffLines: 900, diffLines: 900 };
   const HUGE = { srcDiffLines: 5000, diffLines: 5000 };

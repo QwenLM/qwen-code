@@ -376,6 +376,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_catalog_batch',
       'session_info',
       'session_source_metadata',
       'session_side_task',
