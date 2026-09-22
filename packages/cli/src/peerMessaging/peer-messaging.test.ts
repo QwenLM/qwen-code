@@ -588,8 +588,12 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     // whatever spelling arrives, what travels on is the host's name.
     const sender = await startSenderInbox();
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      // Self-resolving, as the contract on the option requires and as
+      // the production resolver is: the name it hands back must resolve
+      // to itself, or the gate's membership test would read a message
+      // parked for this very session as one for a session that left.
       resolveSessionId: (id) =>
-        id === 'session-was' || id === 'session-now'
+        id === 'session-was' || id === 'session-now' || id === 'session-key'
           ? 'session-key'
           : undefined,
     });
@@ -657,7 +661,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     );
     await settle();
 
-    expect(submitted[0]?.delivery?.senderLabel).toBe('the other window');
+    // Qualified by who it is: the label is shown on its own, so the
+    // authority the name carries has to travel with it.
+    expect(submitted[0]?.delivery?.senderLabel).toBe('peer: the other window');
   });
 
   it('refuses what it would have held when the host cannot present a hold', async () => {
@@ -689,6 +695,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const sender = await startSenderInbox();
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
       resolveSessionId: (id) => id,
+      // Metered, so the identical-body window is live: the re-send below
+      // is what it is here to answer.
+      admission: new PeerAdmission(),
     });
     const frame = peerFrame({
       content: 'read me later',
@@ -712,6 +721,22 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       status: 'expired',
       origMsgId: frame.msgId,
     });
+
+    // And the body record goes with it: an honest re-send of what the
+    // far side never read must not come back `duplicate`, whose whole
+    // premise is that the receiver already has it.
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'read me later',
+        from: sender.socketPath,
+        fromMode: 'prompting',
+        toSessionId: 'session-a',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(2);
+    expect(receipts.at(-1)).toMatchObject({ status: 'delivered' });
   });
 
   it('settles a message that never reached a session at close', async () => {
@@ -773,6 +798,12 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     );
     await settle();
     expect(submitted).toHaveLength(1);
+    // And the frame itself is let go: the host settles what its sessions
+    // never read, so retaining bodies here would hold a message's worth
+    // of memory per delivery for the life of the process.
+    expect(
+      (m as unknown as { outstanding: readonly unknown[] }).outstanding,
+    ).toHaveLength(0);
 
     await m.close();
     messaging = null;
@@ -1025,8 +1056,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         admissionKey: `peer:${sender.socketPath}`,
         from: sender.socketPath,
         toSessionId: 'session-a',
-        // No name of its own, so it is named by the address it answers on.
-        senderLabel: sender.socketPath,
+        // No name of its own, so it is named by the address it answers
+        // on, behind the qualifier every peer's label carries.
+        senderLabel: `peer: ${sender.socketPath}`,
       },
     ]);
 
@@ -1665,6 +1697,73 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     }
   });
 
+  it('leaves a parked message parked when the host cannot say whose it is', async () => {
+    // The membership test asks the host again while a message waits. On
+    // arrival, a resolver that throws means misaddressed — a stale
+    // directory, worth another try. Here the same answer is terminal: it
+    // would settle a message a reviewer is about to release, and one
+    // `reevaluate` would settle every other parked message with it.
+    const sender = await startSenderInbox();
+    let answering = true;
+    const { submitted } = await start(null, {
+      resolveSessionId: (id) => {
+        if (!answering) throw new Error('mid-teardown');
+        return id === 'hosted-1' ? id : undefined;
+      },
+      getPolicySetting: () => 'hold',
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    await send(
+      messaging!.socketPath!,
+      peerFrame({
+        content: 'waiting on a person',
+        from: sender.socketPath,
+        toSessionId: 'hosted-1',
+      }),
+    );
+    await settle();
+    const parked = messaging!.getHeld();
+    expect(parked).toHaveLength(1);
+
+    answering = false;
+    expect(messaging!.decide(parked[0]!.frame.msgId, 'approve')).toBe('failed');
+    expect(messaging!.getHeld()).toHaveLength(1);
+    expect(submitted).toHaveLength(0);
+  });
+
+  it('settles a parked message the host stopped holding', async () => {
+    // The other half: an answer, and it is that the session is gone.
+    // Nothing will ever release the message, so its sender is told the
+    // address was not this host's rather than left waiting.
+    const sender = await startSenderInbox();
+    let held = true;
+    await start(null, {
+      resolveSessionId: (id) => (held && id === 'hosted-1' ? id : undefined),
+      getPolicySetting: () => 'hold',
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    await send(
+      messaging!.socketPath!,
+      peerFrame({
+        content: 'addressed to a session that leaves',
+        from: sender.socketPath,
+        toSessionId: 'hosted-1',
+      }),
+    );
+    await settle();
+    expect(messaging!.getHeld()).toHaveLength(1);
+
+    held = false;
+    messaging!.reevaluate('settings');
+    expect(messaging!.getHeld()).toHaveLength(0);
+    await settle();
+    expect(
+      receipts
+        .filter((r) => r.type === 'control')
+        .map((r) => (r as { status: string }).status),
+    ).toContain('misaddressed');
+  });
+
   it('settles a partially flushed buffer alongside queued frames at exit', async () => {
     // deliver() flushes the buffer before admitting anything new, so the
     // unflushed tail of the buffer always sits after every queued frame in
@@ -2260,6 +2359,46 @@ describe.skipIf(isWindows)('controller grants', () => {
     expect(submitted[0].displayText).toBe(
       'Message from a trusted controller (voice bridge): open the diff',
     );
+  });
+
+  it('labels a queue entry by the grant, not by the name in the frame', async () => {
+    // The label is shown on its own — a turn's title, a status line — so
+    // a peer that names itself after a grant would read as that grant.
+    const { token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+      resolveSessionId: (id) => id,
+    });
+
+    await send(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'open the diff',
+        fromName: 'the grant process calls itself something else',
+        toSessionId: 'session-a',
+      }),
+      { authToken: token },
+    );
+    await settle();
+    expect(submitted[0]?.delivery?.senderLabel).toBe(
+      'controller: voice bridge',
+    );
+
+    // And an ordinary peer helping itself to the same name is qualified
+    // as what it is.
+    const sender = await startSenderInbox();
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'open the diff too',
+        from: sender.socketPath,
+        fromName: 'voice bridge',
+        fromMode: 'prompting',
+        toSessionId: 'session-a',
+      }),
+    );
+    await settle();
+    expect(submitted[1]?.delivery?.senderLabel).toBe('peer: voice bridge');
   });
 
   it('holds the same frame when it arrives on the published peer token', async () => {

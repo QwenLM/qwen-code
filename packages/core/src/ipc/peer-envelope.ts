@@ -257,6 +257,30 @@ export function peerSenderLabel(fields: {
 }
 
 /**
+ * Who a message is from, for a surface that shows the name on its own.
+ *
+ * A notification label is rendered as the whole identity of the turn it
+ * names — a title, a status line, a system line — with none of the
+ * framing `formatPeerDisplay` puts around the same name. A peer picks
+ * its own `fromName`, so one that picks a grant's label would read as
+ * that grant; the authority the name carries has to travel with it. The
+ * origin goes in front, where the cap on a notification label cannot cut
+ * it off, and it prefixes an ordinary peer too: without that, a peer
+ * naming itself "controller x" would read as one.
+ */
+export function peerNotificationLabel(fields: {
+  fromName?: string;
+  from: string;
+  selfSent?: boolean;
+  controller?: PeerControllerIdentity;
+}): string {
+  const who = peerSenderLabel(fields);
+  if (fields.controller) return `controller: ${who}`;
+  if (fields.selfSent) return `own process: ${who}`;
+  return `peer: ${who}`;
+}
+
+/**
  * One-line form for the transcript and the queue preview, where the full
  * envelope would be noise.
  */

@@ -11,6 +11,8 @@ import {
   flattenPeerLabel,
   formatPeerDisplay,
   formatPeerEnvelope,
+  peerNotificationLabel,
+  peerSenderLabel,
   OWN_PROCESS_AUTHORITY_NOTICE,
   PEER_AUTHORITY_NOTICE,
 } from './peer-envelope.js';
@@ -482,5 +484,74 @@ describe('controller envelope', () => {
         controller: VOICE,
       }),
     ).toBe('Message from a trusted controller (voice bridge): open the diff');
+  });
+});
+
+describe('peerSenderLabel', () => {
+  const VOICE = { id: 'c_0123abcd', label: 'voice bridge' };
+
+  it('names a grant by its own label, never by the frame', () => {
+    // The point of naming a controller is to say which grant let the
+    // message through, and a sender chooses `fromName`.
+    expect(
+      peerSenderLabel({
+        from: '/tmp/a.sock',
+        fromName: 'the grant process calls itself something else',
+        controller: VOICE,
+      }),
+    ).toBe('voice bridge');
+  });
+
+  it('names anyone else by the name they chose', () => {
+    expect(
+      peerSenderLabel({ from: '/tmp/a.sock', fromName: 'the other window' }),
+    ).toBe('the other window');
+  });
+
+  it('falls back to the address when no name was chosen', () => {
+    expect(peerSenderLabel({ from: '/tmp/a.sock' })).toBe('/tmp/a.sock');
+    expect(peerSenderLabel({ from: '/tmp/a.sock', fromName: '  ' })).toBe(
+      '/tmp/a.sock',
+    );
+  });
+});
+
+describe('peerNotificationLabel', () => {
+  const VOICE = { id: 'c_0123abcd', label: 'voice bridge' };
+
+  it('says who a sender is, in front of the name it chose', () => {
+    // A label surface shows the name alone, and the cap cuts the end, so
+    // the authority has to lead.
+    expect(
+      peerNotificationLabel({ from: '/tmp/a.sock', controller: VOICE }),
+    ).toBe('controller: voice bridge');
+    expect(
+      peerNotificationLabel({
+        from: '/tmp/a.sock',
+        fromName: 'a worker',
+        selfSent: true,
+      }),
+    ).toBe('own process: a worker');
+    expect(
+      peerNotificationLabel({
+        from: '/tmp/a.sock',
+        fromName: 'the other window',
+      }),
+    ).toBe('peer: the other window');
+  });
+
+  it('qualifies a peer that names itself after a grant', () => {
+    // Unprefixed, a peer calling itself "voice bridge" would read as the
+    // grant the user minted under that label; calling itself
+    // "controller: voice bridge" would read as one either way.
+    expect(
+      peerNotificationLabel({ from: '/tmp/a.sock', fromName: 'voice bridge' }),
+    ).toBe('peer: voice bridge');
+    expect(
+      peerNotificationLabel({
+        from: '/tmp/a.sock',
+        fromName: 'controller: voice bridge',
+      }),
+    ).toBe('peer: controller: voice bridge');
   });
 });

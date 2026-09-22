@@ -55,7 +55,7 @@ import {
   type PeerInbox,
   type PeerOrigin,
   peerSenderKey,
-  peerSenderLabel,
+  peerNotificationLabel,
   type PeerUserFrame,
   readPeerControllerRegistrySync,
   refundSendPacerMessage,
@@ -388,14 +388,17 @@ export class PeerMessaging {
       ...(options.admission ? { admission: options.admission } : {}),
       getSessionId: options.getSessionId,
       // Every id the gate is given has already been resolved to this
-      // host's own name for the session (see `handleUserFrame`), so the
-      // gate's membership test is "is this a name the host answers to" —
-      // which the contract on `resolveSessionId` makes true of exactly
-      // the names it returns. Synthesised rather than asked of the host
-      // again: two questions could disagree, and this way there is only
-      // one answer per message.
+      // host's own name for the session (see `onFrame`), so the gate's
+      // membership test is "is this a name the host answers to" — which
+      // the contract on `resolveSessionId` makes true of exactly the
+      // names it returns. It asks the host rather than comparing a name
+      // captured on arrival, because a parked message waits as long as a
+      // person takes to answer and whether the host still holds that
+      // session is a question about now. Uncaught on purpose: a resolver
+      // that throws leaves a parked message parked rather than settling
+      // something a reviewer is about to release.
       ...(options.resolveSessionId
-        ? { ownsSessionId: (id: string) => messaging.canonicalName(id) === id }
+        ? { ownsSessionId: (id: string) => messaging.holdsName(id) === id }
         : {}),
       ...(options.presentsHolds !== undefined
         ? { presentsHolds: options.presentsHolds }
@@ -1011,6 +1014,21 @@ export class PeerMessaging {
    * sender its directory is stale and lets it try again, rather than
    * delivering to an address nobody confirmed.
    */
+  /**
+   * The same question the gate's membership test asks, without the
+   * catch.
+   *
+   * On arrival, a resolver that throws means misaddressed: the sender's
+   * directory is stale and it can try again. For a message already
+   * parked that answer is terminal — it would settle something a
+   * reviewer is about to release, and `reevaluate` would settle every
+   * other parked message with it — so the gate is let see the throw and
+   * leave the message where it is.
+   */
+  private holdsName(id: string): string | undefined {
+    return this.resolveSessionId?.(id);
+  }
+
   private canonicalName(id: string): string | undefined {
     try {
       return this.resolveSessionId?.(id);
@@ -1124,8 +1142,9 @@ export class PeerMessaging {
             : {}),
           // The same name the display line carries, kept apart from it so
           // a queue entry that wants only the sender does not have to
-          // parse a sentence back into its parts.
-          senderLabel: peerSenderLabel(naming),
+          // parse a sentence back into its parts — and qualified by who
+          // it is, because the surfaces that show a label show it alone.
+          senderLabel: peerNotificationLabel(naming),
         },
       ) ?? false
     );
@@ -1140,9 +1159,15 @@ export class PeerMessaging {
    * independently, so nothing about the order messages were handed over
    * in says which of them are still waiting.
    */
-  reportExpired(delivery: PeerQueuedDelivery): void {
+  async reportExpired(delivery: PeerQueuedDelivery): Promise<void> {
+    // Before the receipt travels, not after it settles: the sender can
+    // honestly re-send what the far side never read the moment it hears,
+    // and the record left by the first delivery would answer `duplicate`.
+    if (delivery.admissionKey !== undefined) {
+      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
+    }
     if (delivery.from) {
-      void sendDeliveryStatus(
+      await sendDeliveryStatus(
         delivery.from,
         {
           status: 'expired',
@@ -1151,9 +1176,6 @@ export class PeerMessaging {
         },
         delivery.replyToken,
       );
-    }
-    if (delivery.admissionKey !== undefined) {
-      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
     }
   }
 
