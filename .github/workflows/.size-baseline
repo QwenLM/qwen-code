@@ -47,7 +47,7 @@
 2518 qwen-review-runner-schedule.yml
 27648 qwen-triage-finalize.yml
 354514 qwen-triage.yml
-15081 release-chrome-extension.yml
+15171 release-chrome-extension.yml
 9701 release-sdk-java.yml
 22345 release-sdk-python.yml
 20008 release-sdk.yml

@@ -152,6 +152,45 @@ describe.skipIf(!zipAvailable())('packageExtension', () => {
     }
   });
 
+  // The env-driven defaults only apply when no explicit paths are passed, so
+  // they are checked the way a caller gets them: by running the script.
+  it('follows EXTENSION_OUT_DIR and EXTENSION_ZIP for a store build', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-env-'));
+    const built = path.join(root, 'built');
+    const archive = path.join(root, 'from-env.zip');
+    try {
+      mkdirSync(built, { recursive: true });
+      writeFileSync(
+        path.join(built, 'manifest.json'),
+        JSON.stringify({ name: 'Qwen Code', version: '9.9.9.9', key: 'PUB' }),
+      );
+
+      const run = spawnSync(
+        process.execPath,
+        [path.join(import.meta.dirname, 'package-extension.js'), '--store'],
+        {
+          env: {
+            ...process.env,
+            EXTENSION_OUT_DIR: built,
+            EXTENSION_ZIP: archive,
+          },
+          encoding: 'utf8',
+        },
+      );
+
+      expect(run.status).toBe(0);
+      const entries = await readZipEntries(archive);
+      const manifest = JSON.parse(
+        String(entries.find((entry) => entry.name === 'manifest.json').content),
+      );
+      // The redirected build was packaged, keyless, and staged beside itself.
+      expect(manifest).toEqual({ name: 'Qwen Code', version: '9.9.9.9' });
+      expect(existsSync(path.join(root, 'store-extension'))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('lets the release scanner inspect the packaged contents', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-scan-'));
     const source = path.join(root, 'extension');

@@ -43,19 +43,19 @@ async function stageStoreBuild(source, staged) {
   return staged;
 }
 
-// Every other script here reads EXTENSION_OUT_DIR — sync-extension, the
-// esbuild config, dev-watch and artifact-scan — so packaging followed it too
-// late, and a redirected build packaged whatever the default path still held.
-const defaultSource = path.resolve(
-  packageRoot,
-  process.env.EXTENSION_OUT_DIR || 'dist/extension',
-);
+// Read at call time, not at import: `artifact-scan.js` reads the same two
+// knobs, and packaging ignoring them is what let a redirected build package
+// whatever the default path still held.
+const fromEnvironment = (variable, fallback) =>
+  path.resolve(packageRoot, process.env[variable] || fallback);
 
 export async function packageExtension({
-  source = defaultSource,
-  archive = path.join(packageRoot, 'chrome-extension.zip'),
+  source = fromEnvironment('EXTENSION_OUT_DIR', 'dist/extension'),
+  archive = fromEnvironment('EXTENSION_ZIP', 'chrome-extension.zip'),
   store = false,
-  staged = path.join(path.dirname(defaultSource), 'store-extension'),
+  // Beside whatever source is in play, including one a caller passed, so the
+  // staging directory never points somewhere the source does not.
+  staged = path.join(path.dirname(source), 'store-extension'),
 } = {}) {
   if (store) source = await stageStoreBuild(source, staged);
   await rm(archive, { force: true });
@@ -94,7 +94,12 @@ if (isMainEntry()) {
   packageExtension({
     store,
     ...(store
-      ? { archive: path.join(packageRoot, 'chrome-extension-store.zip') }
+      ? {
+          archive: fromEnvironment(
+            'EXTENSION_ZIP',
+            'chrome-extension-store.zip',
+          ),
+        }
       : {}),
   }).catch((error) => {
     console.error(error.message);

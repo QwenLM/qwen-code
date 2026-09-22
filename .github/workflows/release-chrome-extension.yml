@@ -217,12 +217,12 @@ jobs:
               if [[ "${body}" == 'show-body' ]]; then
                 cat response.json
               else
-                # A refusal here is an OAuth error object, but a 2xx body on
-                # this endpoint carries the token, so never print it verbatim.
-                # Anything that is not that object is withheld rather than
-                # leaving the message above ending at its colon.
-                node -p 'const v=JSON.parse(require("fs").readFileSync("response.json","utf8"));if(!v.error)throw 0;JSON.stringify({error:v.error,error_description:v.error_description})' 2>/dev/null ||
-                  echo '(body withheld: this endpoint returns the access token)'
+                # A refusal here is an OAuth error object, which is safe to
+                # print. A 2xx body on this endpoint carries the token, so
+                # anything of another shape is described rather than printed —
+                # without asserting a token was in it, which is unknowable.
+                node -p 'const v=JSON.parse(require("fs").readFileSync("response.json","utf8"));if(typeof v.error!=="string")throw 0;JSON.stringify({error:v.error,error_description:v.error_description})' 2>/dev/null ||
+                  echo "(no OAuth error object; $(wc -c < response.json) bytes not printed, since this endpoint can return the access token)"
               fi
               return 1
             fi
