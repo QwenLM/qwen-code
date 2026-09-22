@@ -26,7 +26,7 @@ The managed runtime broker foundation defines Runtime Binding, Runtime Session, 
 
 ## Dependency boundary
 
-The JDBC repositories depend only on `javax.sql.DataSource`. They do not choose a connection pool, require Spring, manage database migrations through a framework, or bundle a production database driver. The test profile supplies H2 for the default repository contract and MySQL Connector/J for the optional MySQL integration test.
+The JDBC repositories use `javax.sql.DataSource` for database access and fastjson2 (2.0.60) as the JSON codec for the `reference_json`/`result_json` columns. They do not choose a connection pool, require Spring, manage database migrations through a framework, or bundle a production database driver. The test profile supplies H2 for the default repository contract and MySQL Connector/J for the optional MySQL integration test.
 
 ## Schema
 

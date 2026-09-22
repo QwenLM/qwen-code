@@ -476,6 +476,8 @@ class InMemoryRepositoryTest {
                 requested.getState());
         assertSame(requested, repository.requestCancel(
                 created.getExecutionCallId(), requested.getVersion()));
+        assertNull(repository.requestCancel(created.getExecutionCallId(),
+                requested.getVersion() - 1));
 
         ToolExecutionRecord dropping = repository.findByExecutionCallId(
                 created.getExecutionCallId());

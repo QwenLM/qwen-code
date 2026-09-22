@@ -21,7 +21,6 @@ Runtime Broker 状态基础能够标识 Runtime binding 和逻辑 Runtime Sessio
 
 ## 非目标
 
-- JDBC 或 MySQL 持久化。
 - 派发 Tool 调用或与 Runtime 通信。
 - 定义公开 Agent Event、Item 或 API schema。
 - 恢复或重新拉起 Runtime 进程。
@@ -132,9 +131,11 @@ workspace 值。调用引用与结果属于 Broker 私有载荷；若没有独�
 - 不可变 execution 身份不能通过 compare-and-set 被替换。
 - 已结算 execution 不能再被修改或重新激活。
 - 结果状态、sequence 和结算约束失败关闭。
-- 不引入 JDBC、Runtime transport、Hosted Harness、Spring 或公开 API 依赖。
+- 内存 Repository 边界不引入 JDBC、Runtime transport、Hosted Harness、Spring
+  或公开 API 依赖。
 
 ## 后续工作
 
-以独立 PR 增加保持同一契约的 JDBC 实现，并使用 MySQL 证明跨实例收敛。Runtime
-派发集成在响应不明确后必须查询原 `executionCallId`，不能重放 Tool 调用。
+该契约的 JDBC 实现见 `JdbcToolExecutionRepository`，参见
+`managed-runtime-broker-jdbc.md`。Runtime 派发集成在响应不明确后必须查询原
+`executionCallId`，不能重放 Tool 调用。

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.fastjson2.TypeReference;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -418,7 +419,8 @@ public final class JdbcToolExecutionRepository
     }
 
     private static String toJson(Map<String, Object> value) {
-        return value == null ? null : JSON.toJSONString(value);
+        return value == null ? null
+                : JSON.toJSONString(value, JSONWriter.Feature.WriteNulls);
     }
 
     private static Map<String, Object> fromJson(String value) {
