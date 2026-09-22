@@ -982,7 +982,7 @@
           <a href="#acceptance">验收标准</a>
         </nav>
         <div class="sidebar-note">
-          方案版本 v1.7 · 2026-09-21<br />
+          方案版本 v1.8 · 2026-09-22<br />
           核心决策：一个 Session 一个固定执行引擎；Managed Harness
           从第一轮起负责完整模型循环；公开事件先可靠提交，再向客户端推送。
         </div>
@@ -1035,12 +1035,13 @@
             </div>
           </div>
           <p class="lead">
-            v1.7 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线、
+            v1.8 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线、
             v1.5 的统一 Session 身份和 v1.6 的事件可靠投影边界，并补充 Java
             管控面、Hosted Harness、Runtime Broker 与 Tool Runtime
-            的职责及通信架构图。Java 在创建前生成全局唯一 RFC UUID， 公共
-            API、qwen Session Authority、Managed Harness、JSONL 和 Runtime
-            Broker scope 使用完全相同的
+            的职责及通信架构图；v1.8 进一步记录 daemon workspace 配额边界和
+            Managed Session 长期存储 D0 接缝。Java 在创建前生成全局唯一 RFC
+            UUID， 公共 API、qwen Session Authority、Managed Harness、JSONL 和
+            Runtime Broker scope 使用完全相同的
             <code>sessionId</code>。不得再生成或持久化第二套 Harness Session
             ID。 首版仍采用单 Java + qwen Sidecar、预发布静态
             AgentBundle、Session 独占 Runtime， 复用现有产品 REST/SSE
@@ -2878,6 +2879,36 @@ GET  /internal/agent-runtime/v1/resources/{resourceId}</pre
               </ul>
             </article>
           </div>
+          <div class="callout warning" style="margin-top: 18px">
+            <strong>当前 daemon workspace 配额语义：</strong>
+            <code>qwen serve</code> 的默认 <code>maxSessions=32</code> 按 daemon
+            内部单个 <code>WorkspaceRuntime</code> /
+            <code>AcpSessionBridge</code> 计算，不是按 tenant、Managed Session
+            或 Tool Runtime Pod 计算。 daemon workspace 以
+            <code>workspaceId + workspaceCwd</code>
+            标识，负责承载模型循环、ACP 子进程、事件游标与 Prompt 队列；Tool
+            Runtime workspace 则负责用户代码、文件、Shell、Git、MCP
+            等本地执行，两者不是同一个资源边界。
+          </div>
+          <p>
+            当前 Java Hosted Harness Connector 创建 Session 时只提交全局唯一的
+            <code>sessionId</code>，不提交 <code>tenantId</code> 或
+            <code>workspaceId</code>；因此现有单 Harness 部署中的不同 tenant
+            通常共同占用默认 daemon workspace 的 Session 配额。一个常驻 Harness
+            实例可以并发服务多个 Session，不同 Session 可并行，同一 Session 的
+            Turn 串行；但实例持有 Session attachment、ACP 子进程、事件 ring
+            和活跃 Prompt 等运行态，必须视为有 owner
+            的有状态服务，不能放在随机负载均衡后 任意漂移请求。
+          </p>
+          <p>
+            生产化需要同时实施 Harness 实例、daemon workspace、tenant、active
+            turn 和 Runtime 五级容量控制，并持久化
+            <code>sessionId → harnessInstanceId / endpoint / bootId</code>
+            的 owner 路由。多 Harness 实例扩容时，后续
+            Turn、取消和事件续传必须命中 Session owner；只有共享 Session
+            Authority 与跨实例恢复完成后，才能把 Harness
+            实例作为可替换计算节点处理。
+          </p>
           <h3 style="margin-top: 28px">统一链路标识</h3>
           <pre>
 traceId · tenantId · workspaceId · sessionId · turnId
@@ -3386,6 +3417,32 @@ reconnect / history → SessionReplayService
               >《Managed Agent 存储、事件与会话恢复设计》</a
             >。
           </p>
+          <div class="callout" style="margin-top: 18px">
+            <strong>2026-09-22 私有 Session 存储进度：</strong>D0
+            存储接缝已落地。Core 现在通过
+            <code>ManagedSessionJournalStore</code> /
+            <code>ManagedSessionJournalHandle</code> 和
+            <code>ManagedSessionResourceStore</code> 工作；<code
+              >LocalJsonlManagedSessionJournalStore</code
+            >
+            封装原有 <code>SessionWriterLease</code>，保持 standalone 的 JSONL
+            精确字节、逐行 sync、writer barrier 与 torn-tail 恢复语义。<code
+              >openManagedSession</code
+            >
+            已支持注入其他 journal/resource backend。
+          </div>
+          <div class="callout warning">
+            <strong>尚未完成：</strong>D0 只是可替换存储边界，不代表 Hosted
+            Session 已长期化。D1 仍需在 Java 管控面增加四张私有表、内部 HTTP
+            API、writer lease/generation、CAS、幂等回执、精确 record bytes 和
+            <code>MYSQL_INLINE</code> 资源事务；D2 才接入大于 64 KiB 的 OSS
+            不可变资源；D3 完成跨 Harness/Runtime/Workspace
+            恢复门禁与生产故障验证。详细方案见
+            <a
+              href="https://github.com/doudouOUC/qwen-code/blob/feature/managed-agents-p0-p8/docs/design/2026-09-21-managed-session-durable-store.zh-CN.md"
+              >《Managed Session 长期权威存储》</a
+            >。
+          </div>
           <div class="callout danger">
             <strong>当前验证边界：</strong>P0/P1 事件切片仍以
             <code>c818c21910</code> 的 H2 测试为证，尚不代表跨节点通知已经完成。
@@ -3551,7 +3608,7 @@ reconnect / history → SessionReplayService
           <div class="section-head">
             <div>
               <div class="section-index">17 / CURRENT GAP</div>
-              <h2>现有基础与主要缺口（v1.7 代码快照）</h2>
+              <h2>现有基础与主要缺口（v1.8 代码快照）</h2>
             </div>
           </div>
           <div class="grid-2">
@@ -3608,8 +3665,8 @@ reconnect / history → SessionReplayService
                 <li>AgentBundle/Manifest 版本一致性。</li>
                 <li>Artifact Store 和 RuntimeTemplate。</li>
                 <li>
-                  Harness 私有 journal、资源闭包、共享 Session Authority
-                  和可替换 Harness。
+                  Harness 私有 journal 的 D0 接缝已完成；D1-D3 的 MySQL/OSS
+                  资源闭包、共享 Session Authority 和可替换 Harness 尚待实现。
                 </li>
                 <li>
                   真实 Kubernetes、真实 Harness/Runtime 的故障、网络、容量与
@@ -3637,7 +3694,7 @@ reconnect / history → SessionReplayService
         </section>
 
         <footer class="footer">
-          Managed Agent 双链路技术方案 · v1.7 · 2026-09-21 · 单文件展示<br />
+          Managed Agent 双链路技术方案 · v1.8 · 2026-09-22 · 单文件展示<br />
           核心原则：一个 Session 一个固定执行引擎；一个模型循环
           owner；工具副作用结果不确定时不自动重放。
         </footer>

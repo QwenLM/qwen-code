@@ -6,13 +6,19 @@
 
 import { randomUUID } from 'node:crypto';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import type {
+  ManagedSessionJournalStore,
+  ManagedSessionResourceStore,
+} from './managed-session-storage.js';
+import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
 } from './managed-session-records.js';
+import { ManagedSessionRecordError } from './managed-session-records.js';
 
 export interface OpenManagedSessionOptions {
   readonly runtimeBaseDir: string;
@@ -39,6 +45,10 @@ export interface OpenManagedSessionOptions {
    * knows how long that worker is supervised for.
    */
   readonly activationLeaseDurationMs: number;
+  /** Overrides local JSONL persistence for hosted deployments. */
+  readonly journalStore?: ManagedSessionJournalStore;
+  /** Overrides local resource files for hosted deployments. */
+  readonly resourceStore?: ManagedSessionResourceStore;
   /**
    * An already-held writer to adopt instead of acquiring one.
    *
@@ -51,7 +61,7 @@ export interface OpenManagedSessionOptions {
 
 export interface ManagedSession {
   readonly authority: LocalManagedSessionAuthority;
-  readonly resources: LocalManagedSessionResourceStore;
+  readonly resources: ManagedSessionResourceStore;
   readonly sink: ManagedSessionRecordSink;
   /** The activation currently advancing this session. */
   readonly activation: {
@@ -90,22 +100,31 @@ export interface ManagedSession {
 export async function openManagedSession(
   options: OpenManagedSessionOptions,
 ): Promise<ManagedSession> {
-  const resources = LocalManagedSessionResourceStore.create({
-    runtimeBaseDir: options.runtimeBaseDir,
-    sessionKey: options.sessionKey,
-  });
+  if (options.journalStore !== undefined && options.lease !== undefined) {
+    throw new ManagedSessionRecordError(
+      'journalStore and an adopted local lease cannot be supplied together.',
+    );
+  }
+  const resources =
+    options.resourceStore ??
+    LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: options.runtimeBaseDir,
+      sessionKey: options.sessionKey,
+    });
   const adopted = options.lease !== undefined;
-  const lease =
-    options.lease ??
-    (await LocalManagedSessionAuthority.acquireWriter({
+  const journalStore =
+    options.journalStore ??
+    new LocalJsonlManagedSessionJournalStore({
       runtimeBaseDir: options.runtimeBaseDir,
       sessionId: options.sessionId,
       transcriptPath: options.transcriptPath,
-    }));
+      ...(options.lease === undefined ? {} : { lease: options.lease }),
+    });
+  const journal = await journalStore.open({ sessionKey: options.sessionKey });
   let authority: LocalManagedSessionAuthority;
   try {
     authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal,
       sessionKey: options.sessionKey,
       cwd: options.cwd,
       version: options.version,
@@ -117,9 +136,7 @@ export async function openManagedSession(
     // out from under its owner. One we acquired must be released, since sealing
     // an unopened session leaves a barrier with nothing behind it and leaving it
     // held blocks every later attempt.
-    if (!adopted) {
-      await lease.release().catch(() => undefined);
-    }
+    await journal.abort().catch(() => undefined);
     throw cause;
   }
 

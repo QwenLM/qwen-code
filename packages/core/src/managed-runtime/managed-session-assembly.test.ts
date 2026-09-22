@@ -15,8 +15,14 @@ import {
   openManagedSession,
   type ManagedSession,
 } from './managed-session-assembly.js';
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
+import type {
+  ManagedSessionJournalStore,
+  ManagedSessionResourceStore,
+} from './managed-session-storage.js';
 
 const DIGEST = '9'.repeat(64);
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
@@ -64,7 +70,12 @@ async function createWorkspace(): Promise<Workspace> {
 
 function open(
   workspace: Workspace,
-  options: { create?: boolean; lease?: SessionWriterLease } = {},
+  options: {
+    create?: boolean;
+    lease?: SessionWriterLease;
+    journalStore?: ManagedSessionJournalStore;
+    resourceStore?: ManagedSessionResourceStore;
+  } = {},
 ): Promise<ManagedSession> {
   return openManagedSession({
     runtimeBaseDir: workspace.runtimeBaseDir,
@@ -76,6 +87,12 @@ function open(
     workerId: 'worker-1',
     activationLeaseDurationMs: 60_000,
     ...(options.lease === undefined ? {} : { lease: options.lease }),
+    ...(options.journalStore === undefined
+      ? {}
+      : { journalStore: options.journalStore }),
+    ...(options.resourceStore === undefined
+      ? {}
+      : { resourceStore: options.resourceStore }),
     ...(options.create === false
       ? {}
       : {
@@ -102,6 +119,25 @@ function record(overrides: Partial<ChatRecord>): ChatRecord {
 }
 
 describe('managed session assembly', () => {
+  it('accepts injected journal and resource stores', async () => {
+    const workspace = await createWorkspace();
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: workspace.runtimeBaseDir,
+      sessionId,
+      transcriptPath: workspace.transcriptPath,
+    });
+    const resourceStore = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: workspace.runtimeBaseDir,
+      sessionKey,
+    });
+
+    const session = await open(workspace, { journalStore, resourceStore });
+    await session.sink.write(record({ uuid: 'rec-user-injected' }));
+
+    expect(await session.sink.project()).toHaveLength(1);
+    await session.close();
+  });
+
   it('carries one whole turn from input to terminal state', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);

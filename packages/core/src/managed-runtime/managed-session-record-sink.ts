@@ -18,7 +18,7 @@ import {
   HARNESS_TURN_COMPLETE_BOUNDARY,
 } from './managed-harness-checkpoint.js';
 import { ManagedSessionMessageProjection } from './managed-session-message-projection.js';
-import type { LocalManagedSessionResourceStore } from './managed-session-resources.js';
+import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 
 /**
  * The record shapes the message projection can carry today.
@@ -69,7 +69,7 @@ export class ManagedSessionRecordSink {
 
   constructor(
     private readonly authority: LocalManagedSessionAuthority,
-    private readonly resources: LocalManagedSessionResourceStore,
+    private readonly resources: ManagedSessionResourceStore,
     /** Supplied by the binder, which is the only party that knows the activation. */
     private readonly actor: () => ManagedSessionActor,
   ) {

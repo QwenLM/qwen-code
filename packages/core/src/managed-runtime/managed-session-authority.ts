@@ -5,9 +5,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   authorizeParsedHarnessCheckpoint,
   encodeHarnessCheckpointV1,
@@ -32,7 +32,6 @@ import {
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
   parseManagedSessionHeader,
-  parseManagedSessionRecordJson,
   type ManagedSessionActorClass,
   type ManagedSessionDomain,
   type ManagedSessionCommitMarker,
@@ -42,10 +41,22 @@ import {
   type ManagedSessionHeader,
   type ManagedSessionKey,
 } from './managed-session-records.js';
+import { readManagedBranchCheckpoint } from './managed-session-resources.js';
 import {
-  readManagedBranchCheckpoint,
-  type LocalManagedSessionResourceStore,
-} from './managed-session-resources.js';
+  managedSessionActivationStateFrom,
+  managedSessionCommandKey,
+  type ManagedSessionActivationState,
+  type ManagedSessionCommitReceipt,
+  type ManagedSessionCommittedTransaction,
+  type ManagedSessionJournalHandle,
+  type ManagedSessionJournalScan,
+  type ManagedSessionResourceStore,
+} from './managed-session-storage.js';
+
+export type {
+  ManagedSessionActivationState,
+  ManagedSessionCommitReceipt,
+} from './managed-session-storage.js';
 
 export type ManagedSessionRecordBody =
   | ManagedSessionHeader
@@ -191,26 +202,6 @@ export interface ManagedSessionDomainReceipt {
   readonly revision: number;
 }
 
-export interface ManagedSessionActivationState {
-  readonly activationId: string;
-  readonly epoch: number;
-  readonly workerId: string;
-  readonly phase: string;
-  /** The horizon the install recorded; a release restates it unchanged. */
-  readonly expiresAt: number;
-}
-
-export interface ManagedSessionCommitReceipt {
-  readonly transactionId: string;
-  readonly commandId: string;
-  readonly operation: string;
-  readonly firstSequence: number;
-  readonly lastSequence: number;
-  readonly committedSequence: number;
-  /** True when the original commit was returned instead of appending again. */
-  readonly replayed: boolean;
-}
-
 export interface ManagedSessionInputRequest {
   readonly inputId: string;
   readonly turnId: string;
@@ -248,13 +239,10 @@ export class ManagedSessionUncommittedTailError extends ManagedSessionRecordErro
   }
 }
 
-interface CommittedTransaction {
-  readonly receipt: ManagedSessionCommitReceipt;
-  readonly contentDigest: string;
-}
-
 export interface OpenManagedSessionAuthorityOptions {
-  readonly lease: SessionWriterLease;
+  readonly journal?: ManagedSessionJournalHandle;
+  /** Compatibility entry point for callers that already own the local writer. */
+  readonly lease?: SessionWriterLease;
   readonly sessionKey: ManagedSessionKey;
   readonly cwd: string;
   readonly version: string;
@@ -266,35 +254,32 @@ export interface OpenManagedSessionAuthorityOptions {
   };
   readonly now?: () => number;
   /** Required only for domain records, whose bodies live in resources. */
-  readonly resources?: LocalManagedSessionResourceStore;
-}
-
-function commandKey(operation: string, commandId: string): string {
-  return `${operation}\u0000${commandId}`;
+  readonly resources?: ManagedSessionResourceStore;
 }
 
 /**
- * The authoritative writer for one Managed Session. Every append goes through
- * the session writer lease, which already serialises writes, re-checks
- * ownership per line and syncs the file, so this class adds the transaction
- * boundary, idempotency and eligibility rules on top rather than a second
- * write path.
+ * The semantic authority for one Managed Session. It validates complete
+ * transactions, then gives them to one journal handle; the selected store owns
+ * physical serialization, fencing and durability.
  */
 export class LocalManagedSessionAuthority {
   private constructor(
-    private readonly lease: SessionWriterLease,
+    private readonly journal: ManagedSessionJournalHandle,
     private readonly sessionKey: ManagedSessionKey,
     private readonly cwd: string,
     private readonly version: string,
     private readonly now: () => number,
     private readonly header: ManagedSessionHeader,
     private readonly events: ManagedSessionEvent[],
-    private readonly transactions: Map<string, CommittedTransaction>,
+    private readonly transactions: Map<
+      string,
+      ManagedSessionCommittedTransaction
+    >,
     private committed: number,
     private lastMarkerDigest: string | null,
     private lastRecordUuid: string | null,
     private activation: ManagedSessionActivationState | undefined,
-    private readonly resources: LocalManagedSessionResourceStore | undefined,
+    private readonly resources: ManagedSessionResourceStore | undefined,
   ) {}
 
   private writeFailure: Error | undefined;
@@ -336,10 +321,25 @@ export class LocalManagedSessionAuthority {
     options: OpenManagedSessionAuthorityOptions,
   ): Promise<LocalManagedSessionAuthority> {
     const now = options.now ?? (() => Date.now());
-    const scan = await readManagedSessionLog(
-      options.lease.transcriptPath,
-      options.sessionKey,
-    );
+    if (options.journal !== undefined && options.lease !== undefined) {
+      throw new ManagedSessionRecordError(
+        'journal and a compatibility local lease cannot be supplied together.',
+      );
+    }
+    const journal =
+      options.journal ??
+      (options.lease === undefined
+        ? undefined
+        : LocalJsonlManagedSessionJournalStore.fromLease(
+            options.lease,
+            options.sessionKey,
+          ));
+    if (journal === undefined) {
+      throw new ManagedSessionRecordError(
+        'a Managed Session journal handle is required.',
+      );
+    }
+    const scan = await journal.read();
     if (scan.uncommitted > 0) {
       throw new ManagedSessionUncommittedTailError(
         `session log ends with ${scan.uncommitted} uncommitted record(s); truncation under an exclusive writer is required before appending.`,
@@ -371,9 +371,10 @@ export class LocalManagedSessionAuthority {
       // Recorded before the header, in the container's own metadata shape, so
       // every existing execution-engine guard sees a Managed session instead of
       // defaulting to legacy and letting a legacy-only operation run on it.
+      const records: unknown[] = [];
       if (scan.engineRecords === 0) {
         const engineUuid = randomUUID();
-        await options.lease.appendJsonLine({
+        records.push({
           uuid: engineUuid,
           parentUuid: lastRecordUuid,
           sessionId: options.sessionKey.sessionId,
@@ -387,7 +388,7 @@ export class LocalManagedSessionAuthority {
         lastRecordUuid = engineUuid;
       }
       const uuid = randomUUID();
-      await options.lease.appendJsonLine({
+      records.push({
         uuid,
         parentUuid: lastRecordUuid,
         sessionId: options.sessionKey.sessionId,
@@ -398,10 +399,11 @@ export class LocalManagedSessionAuthority {
         version: options.version,
         managedSession: header,
       });
+      await journal.appendTransaction(records);
       lastRecordUuid = uuid;
     }
     const authority = new LocalManagedSessionAuthority(
-      options.lease,
+      journal,
       options.sessionKey,
       options.cwd,
       options.version,
@@ -464,51 +466,17 @@ export class LocalManagedSessionAuthority {
    * stays closed to writers that do not know how to take it over.
    */
   async close(): Promise<void> {
-    await this.lease.sealForHandoff();
+    await this.journal.seal();
   }
 
   static async recoverUncommittedTail(options: {
     lease: SessionWriterLease;
     sessionKey: ManagedSessionKey;
   }): Promise<{ discardedBytes: number; diagnosticPath: string }> {
-    const scan = await readManagedSessionLog(
-      options.lease.transcriptPath,
+    return LocalJsonlManagedSessionJournalStore.fromLease(
+      options.lease,
       options.sessionKey,
-    );
-    if (scan.uncommitted === 0) {
-      throw new ManagedSessionRecordError(
-        'session log has no uncommitted tail to discard.',
-      );
-    }
-    // The header has no marker after it, so a crash during the very first
-    // transaction leaves committedBytes at zero. Truncating there would delete
-    // the header and leave a session that can never be opened again.
-    const retain = Math.max(scan.committedBytes, scan.headerBytes);
-    if (retain === 0) {
-      throw new ManagedSessionRecordError(
-        'session log has no committed prefix to retain.',
-      );
-    }
-    // Read as bytes: a tail torn mid-character would not survive a decode and
-    // re-encode round trip.
-    const bytes = await readFile(options.lease.transcriptPath);
-    if (bytes.byteLength <= retain) {
-      throw new ManagedSessionRecordError(
-        'session log changed while preparing tail recovery.',
-      );
-    }
-    const discarded = bytes.subarray(retain);
-    const diagnosticPath = `${options.lease.transcriptPath}.uncommitted-tail`;
-    const pendingPath = `${diagnosticPath}.pending`;
-    await writeFile(pendingPath, discarded, { mode: 0o600 });
-    try {
-      await options.lease.truncateTo(retain);
-    } catch (cause) {
-      await unlink(pendingPath).catch(() => undefined);
-      throw cause;
-    }
-    await rename(pendingPath, diagnosticPath);
-    return { discardedBytes: discarded.byteLength, diagnosticPath };
+    ).recoverUncommittedTail();
   }
 
   /**
@@ -1236,7 +1204,7 @@ export class LocalManagedSessionAuthority {
         'command session key does not match this session.',
       );
     }
-    const key = commandKey(command.operation, command.commandId);
+    const key = managedSessionCommandKey(command.operation, command.commandId);
     const previous = this.transactions.get(key);
     if (previous !== undefined) {
       if (previous.contentDigest !== command.contentDigest) {
@@ -1334,17 +1302,26 @@ export class LocalManagedSessionAuthority {
 
     // Events first, marker last: a crash before the marker leaves the
     // transaction invisible rather than half applied.
-    try {
-      for (const event of events) {
-        this.lastRecordUuid = await this.appendRecord(
-          MANAGED_SESSION_EVENT_SUBTYPE,
-          event,
-        );
-      }
-      this.lastRecordUuid = await this.appendRecord(
-        MANAGED_SESSION_COMMIT_SUBTYPE,
-        marker,
+    const records: unknown[] = [];
+    let lastRecordUuid = this.lastRecordUuid;
+    for (const event of events) {
+      const next = this.createRecord(
+        MANAGED_SESSION_EVENT_SUBTYPE,
+        event,
+        lastRecordUuid,
       );
+      records.push(next.record);
+      lastRecordUuid = next.uuid;
+    }
+    const final = this.createRecord(
+      MANAGED_SESSION_COMMIT_SUBTYPE,
+      marker,
+      lastRecordUuid,
+    );
+    records.push(final.record);
+    try {
+      await this.journal.appendTransaction(records);
+      this.lastRecordUuid = final.uuid;
     } catch (cause) {
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
@@ -1357,7 +1334,7 @@ export class LocalManagedSessionAuthority {
       this.events.push(event);
       this.eventIds.add(event.eventId);
       if (event.kind === 'activation.changed') {
-        this.activation = activationStateFrom(event);
+        this.activation = managedSessionActivationStateFrom(event);
       }
       if (event.kind === 'domain.committed') {
         this.recordDomainEvent(event);
@@ -1634,7 +1611,7 @@ export class LocalManagedSessionAuthority {
   }
 
   private assertActivationEpoch(event: ManagedSessionEvent): void {
-    const next = activationStateFrom(event);
+    const next = managedSessionActivationStateFrom(event);
     const current = this.activation;
     if (current === undefined || next.activationId !== current.activationId) {
       const expected = (current?.epoch ?? 0) + 1;
@@ -1694,50 +1671,29 @@ export class LocalManagedSessionAuthority {
     }
   }
 
-  private async appendRecord(
+  private createRecord(
     subtype:
       | typeof MANAGED_SESSION_EVENT_SUBTYPE
       | typeof MANAGED_SESSION_COMMIT_SUBTYPE,
     body: ManagedSessionRecordBody,
-  ): Promise<string> {
+    parentUuid: string | null,
+  ): { readonly uuid: string; readonly record: unknown } {
     const uuid = randomUUID();
-    await this.lease.appendJsonLine({
+    return {
       uuid,
-      parentUuid: this.lastRecordUuid,
-      sessionId: this.sessionKey.sessionId,
-      timestamp: new Date(this.now()).toISOString(),
-      type: 'system',
-      subtype,
-      cwd: this.cwd,
-      version: this.version,
-      managedSession: body,
-    });
-    return uuid;
+      record: {
+        uuid,
+        parentUuid,
+        sessionId: this.sessionKey.sessionId,
+        timestamp: new Date(this.now()).toISOString(),
+        type: 'system',
+        subtype,
+        cwd: this.cwd,
+        version: this.version,
+        managedSession: body,
+      },
+    };
   }
-}
-
-interface ManagedSessionLogScan {
-  readonly header?: ManagedSessionHeader;
-  readonly events: ManagedSessionEvent[];
-  readonly transactions: Map<string, CommittedTransaction>;
-  readonly committed: number;
-  readonly lastMarkerDigest: string | null;
-  readonly lastRecordUuid: string | null;
-  readonly activation: ManagedSessionActivationState | undefined;
-  /** Byte length of the prefix ending at the last commit marker. */
-  readonly committedBytes: number;
-  /**
-   * Byte length through the header. The header carries the session identity
-   * and definition refs and has no marker after it, so it is a required
-   * prefix rather than an uncommitted tail.
-   */
-  readonly headerBytes: number;
-  /** Byte length of the records after it, kept for diagnostics. */
-  readonly uncommittedBytes: number;
-  readonly uncommitted: number;
-  readonly foreignRecords: number;
-  /** Engine ownership records, which a Managed log writes before its header. */
-  readonly engineRecords: number;
 }
 
 function actionDecisionsMatch(
@@ -1767,211 +1723,6 @@ export async function readManagedSessionLog(
   path: string,
   sessionKey: ManagedSessionKey,
   maxBytes?: number,
-): Promise<ManagedSessionLogScan> {
-  let text: string;
-  try {
-    const bytes = await readFile(path);
-    text = (
-      maxBytes === undefined || maxBytes >= bytes.byteLength
-        ? bytes
-        : bytes.subarray(0, maxBytes)
-    ).toString('utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return {
-        events: [],
-        transactions: new Map(),
-        committed: 0,
-        lastMarkerDigest: null,
-        lastRecordUuid: null,
-        activation: undefined,
-        committedBytes: 0,
-        headerBytes: 0,
-        uncommittedBytes: 0,
-        uncommitted: 0,
-        foreignRecords: 0,
-        engineRecords: 0,
-      };
-    }
-    throw error;
-  }
-
-  const lines = text.split('\n');
-  // A final line with no newline is a torn write, not a corrupt prefix.
-  const tornTail = lines[lines.length - 1] !== '' ? 1 : 0;
-  lines.pop();
-
-  let header: ManagedSessionHeader | undefined;
-  const events: ManagedSessionEvent[] = [];
-  const transactions = new Map<string, CommittedTransaction>();
-  let committed = 0;
-  let lastMarkerDigest: string | null = null;
-  let lastRecordUuid: string | null = null;
-  let activation: ManagedSessionActivationState | undefined;
-  let scanned = 0;
-  let committedBytes = 0;
-  let headerBytes = 0;
-  let foreignRecords = 0;
-  let engineRecords = 0;
-  let pending: ManagedSessionEvent[] = [];
-
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    if (line === '') {
-      throw new ManagedSessionRecordError(
-        `session log line ${index + 1} is blank.`,
-      );
-    }
-    scanned += Buffer.byteLength(line, 'utf8') + 1;
-    const record = parseManagedSessionRecordJson(
-      line,
-      MANAGED_SESSION_LIMITS.maxEventBytes,
-    );
-    if (
-      record === null ||
-      typeof record !== 'object' ||
-      Array.isArray(record)
-    ) {
-      throw new ManagedSessionRecordError(
-        `session log line ${index + 1} is not a record object.`,
-      );
-    }
-    const envelope = record as Record<string, unknown>;
-    const subtype = envelope['subtype'];
-    if (typeof envelope['uuid'] === 'string') {
-      lastRecordUuid = envelope['uuid'];
-    }
-    if (
-      subtype !== MANAGED_SESSION_HEADER_SUBTYPE &&
-      subtype !== MANAGED_SESSION_EVENT_SUBTYPE &&
-      subtype !== MANAGED_SESSION_COMMIT_SUBTYPE
-    ) {
-      if (header !== undefined) {
-        throw new ManagedSessionRecordError(
-          `session log line ${index + 1} has the unknown subtype ${String(subtype)} after the Managed header.`,
-        );
-      }
-      foreignRecords++;
-      if (subtype === 'session_execution_engine') engineRecords++;
-      continue;
-    }
-    const body = envelope['managedSession'];
-    if (subtype === MANAGED_SESSION_HEADER_SUBTYPE) {
-      if (header !== undefined) {
-        throw new ManagedSessionRecordError(
-          `session log line ${index + 1} repeats the Managed header.`,
-        );
-      }
-      header = parseManagedSessionHeader(body);
-      headerBytes = scanned;
-      if (!managedSessionKeysEqual(header.sessionKey, sessionKey)) {
-        throw new ManagedSessionRecordError(
-          'session log header belongs to a different session.',
-        );
-      }
-      continue;
-    }
-    if (header === undefined) {
-      throw new ManagedSessionRecordError(
-        `session log line ${index + 1} precedes the Managed header.`,
-      );
-    }
-    if (subtype === MANAGED_SESSION_EVENT_SUBTYPE) {
-      const event = parseManagedSessionEvent(body);
-      if (!managedSessionKeysEqual(event.sessionKey, sessionKey)) {
-        throw new ManagedSessionRecordError(
-          `session log line ${index + 1} belongs to a different session.`,
-        );
-      }
-      const expected = committed + pending.length + 1;
-      if (event.sequence !== expected) {
-        throw new ManagedSessionRecordError(
-          `session log line ${index + 1} has sequence ${event.sequence} where ${expected} was expected.`,
-        );
-      }
-      pending.push(event);
-      continue;
-    }
-    const marker = parseManagedSessionCommitMarker(body);
-    if (marker.previousCommitDigest !== lastMarkerDigest) {
-      throw new ManagedSessionRecordError(
-        `session log line ${index + 1} does not chain to the previous commit.`,
-      );
-    }
-    if (
-      marker.eventCount !== pending.length ||
-      marker.firstSequence !== committed + 1 ||
-      marker.lastSequence !== committed + pending.length
-    ) {
-      throw new ManagedSessionRecordError(
-        `session log line ${index + 1} does not cover the preceding events.`,
-      );
-    }
-    if (marker.eventsDigest !== managedSessionEventsDigest(pending)) {
-      throw new ManagedSessionRecordError(
-        `session log line ${index + 1} does not match the preceding event content.`,
-      );
-    }
-    for (const event of pending) {
-      if (
-        event.kind === 'checkpoint.committed' &&
-        (event.payload['coveredSequence'] as number) > committed
-      ) {
-        throw new ManagedSessionRecordError(
-          'checkpoint covers events not committed before its transaction.',
-        );
-      }
-      events.push(event);
-      if (event.kind === 'activation.changed') {
-        activation = activationStateFrom(event);
-      }
-    }
-    committed = marker.lastSequence;
-    committedBytes = scanned;
-    lastMarkerDigest = managedToolDigest(
-      marker,
-      MANAGED_SESSION_LIMITS.maxCommitMarkerBytes,
-    );
-    transactions.set(commandKey(marker.operation, marker.commandId), {
-      contentDigest: marker.contentDigest,
-      receipt: {
-        transactionId: marker.transactionId,
-        commandId: marker.commandId,
-        operation: marker.operation,
-        firstSequence: marker.firstSequence,
-        lastSequence: marker.lastSequence,
-        committedSequence: marker.lastSequence,
-        replayed: false,
-      },
-    });
-    pending = [];
-  }
-
-  return {
-    header,
-    events,
-    transactions,
-    committed,
-    lastMarkerDigest,
-    lastRecordUuid,
-    activation,
-    committedBytes,
-    headerBytes,
-    uncommittedBytes: Buffer.byteLength(text, 'utf8') - committedBytes,
-    uncommitted: pending.length + tornTail,
-    foreignRecords,
-    engineRecords,
-  };
-}
-
-function activationStateFrom(
-  event: ManagedSessionEvent,
-): ManagedSessionActivationState {
-  return {
-    activationId: event.payload['activationId'] as string,
-    epoch: event.payload['epoch'] as number,
-    workerId: event.payload['workerId'] as string,
-    phase: event.payload['phase'] as string,
-    expiresAt: event.payload['expiresAt'] as number,
-  };
+): Promise<ManagedSessionJournalScan> {
+  return LocalJsonlManagedSessionJournalStore.read(path, sessionKey, maxBytes);
 }

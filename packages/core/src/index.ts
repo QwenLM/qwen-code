@@ -172,6 +172,14 @@ export * from './managed-runtime/managed-session-message-projection.js';
 export * from './managed-runtime/managed-session-record-sink.js';
 export * from './managed-runtime/managed-session-records.js';
 export * from './managed-runtime/managed-session-resources.js';
+export type {
+  ManagedSessionCommittedTransaction,
+  ManagedSessionJournalHandle,
+  ManagedSessionJournalReader,
+  ManagedSessionJournalScan,
+  ManagedSessionJournalStore,
+  ManagedSessionResourceStore,
+} from './managed-runtime/managed-session-storage.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {

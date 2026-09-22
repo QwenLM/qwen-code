@@ -23,6 +23,7 @@ import {
   LocalManagedSessionResourceStore,
   readManagedBranchCheckpoint,
 } from './managed-session-resources.js';
+import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 
 /**
  * Carries the existing transcript history inside the authoritative log.
@@ -37,7 +38,7 @@ import {
 export class ManagedSessionMessageProjection {
   constructor(
     private readonly authority: LocalManagedSessionAuthority,
-    private readonly resources: LocalManagedSessionResourceStore,
+    private readonly resources: ManagedSessionResourceStore,
   ) {}
 
   /**
@@ -136,11 +137,11 @@ export class ManagedSessionMessageProjection {
 }
 
 async function readRecordBody(
-  resources: LocalManagedSessionResourceStore,
+  resources: ManagedSessionResourceStore,
   ref: ManagedSessionEvent['payload'][string],
 ): Promise<ChatRecord> {
   const body = await resources.read(
-    ref as unknown as Parameters<LocalManagedSessionResourceStore['read']>[0],
+    ref as unknown as Parameters<ManagedSessionResourceStore['read']>[0],
   );
   return JSON.parse(body.toString('utf8')) as ChatRecord;
 }

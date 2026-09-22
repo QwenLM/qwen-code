@@ -18,6 +18,7 @@ import {
   type ManagedSessionEvent,
   type ManagedSessionKey,
 } from './managed-session-records.js';
+import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 
 /**
  * Session-owned resource storage. Event payloads carry a `DurableRef` rather
@@ -28,7 +29,9 @@ import {
  * orphan reclamation, pins and workspace-owned resources are separate concerns
  * that need the reference-closure ledger, and are deliberately absent.
  */
-export class LocalManagedSessionResourceStore {
+export class LocalManagedSessionResourceStore
+  implements ManagedSessionResourceStore
+{
   private constructor(
     private readonly root: string,
     private readonly sessionKey: ManagedSessionKey,
@@ -150,7 +153,7 @@ export class LocalManagedSessionResourceStore {
  */
 export async function readManagedBranchCheckpoint(
   event: ManagedSessionEvent,
-  resources: LocalManagedSessionResourceStore | undefined,
+  resources: ManagedSessionResourceStore | undefined,
   checkpointSequence: (id: string) => number | undefined,
   committedSequence: number,
 ): Promise<ChatRecord | undefined> {

@@ -1,0 +1,298 @@
+# Managed Session 长期权威存储
+
+[English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
+
+状态：D0 存储接缝已实现，D1-D3 待实现。日期：2026-09-21。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
+
+## 1. 决策
+
+Hosted Managed Session 不再把 Runtime 本地 JSONL 作为生产权威，而采用混合长期存储：
+
+- MySQL 保存私有日志头、writer generation 与 lease、幂等事务回执、已提交记录的精确字节、资源引用、恢复状态，以及不超过 64 KiB 的不可变资源正文。
+- OSS 保存超过 64 KiB 的不可变资源正文，例如较大消息、checkpoint、工具结果、文件历史和恢复产物。
+- TypeScript Harness 仍是 Session 语义权威：由它校验并生成 Managed 记录。Java 存储模块只负责物理提交和 fencing，不运行 Agent Loop，也不生成私有记录。
+- 如为兼容或诊断生成本地 JSONL，它只是可丢弃缓存/导出格式，不是第二权威；Harness Pod 本地盘丢失不能导致 Session 丢失。
+- 独立 CLI 和开发部署继续使用现有本地文件后端。Session 创建时只选择一个后端，不对两个权威做双写。
+
+不把共享 PVC 或单个可追加 OSS Object 作为生产权威。PVC 可以用于开发或过渡；OSS 适合不可变正文，但顺序、幂等、CAS 和旧 writer 拒绝由关系型提交点提供。
+
+## 2. 已核验的当前基线
+
+当前持久化后端仍全部在本地，但 D0 已通过存储契约将它隔离：
+
+- `LocalManagedSessionAuthority` 通过 `ManagedSessionJournalHandle` 读写；正常写入不再直接持有 transcript path 或调用 `SessionWriterLease`。
+- `LocalJsonlManagedSessionJournalStore` 包装 `SessionWriterLease`、扫描普通 Session transcript，并保持既有 JSONL 字节与 torn-tail 语义。
+- `LocalManagedSessionResourceStore` 实现 `ManagedSessionResourceStore`，把资源发布到 `<runtimeBaseDir>/resources/<sessionId>/`。
+- `openManagedSession` 支持注入 journal/resource store，默认选择上述本地 adapter。
+- Spring 服务已经保存公共 Session、Turn、Command、Event、Item、Snapshot 和 Runtime Broker 状态，但没有私有 Managed journal 或 Managed 资源目录表。
+- 现有 JSONL 包含 `session_execution_engine`、`managed_session_header_v1`、`managed_session_event_v1` 和 `managed_session_commit_v1`。同目录的 `<sessionId>.ledger.jsonl` 是 prompt 终态账本，不是私有 Managed journal。
+
+因此，没有持久挂载的 Runtime 或 Hosted Harness Pod 被回收后，会同时丢失 transcript 及其引用的全部资源。只上传 JSONL 也不够，因为 checkpoint、消息和工具正文位于独立资源中。
+
+Hosted 远端模式不会再把同目录的 prompt ledger 作为另一个文件上传；其中需要长期保留的事实由私有 `turn.settled` 事务和 Java 公共 Turn 状态表达。Standalone 模式为兼容继续保留现有 sidecar。
+
+## 3. 方案比较
+
+| 方案                              | 优点                                                                                       | 问题                                                                                                                                      | 决策                                    |
+| --------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| 每 Session PVC                    | 代码改动最少，保留文件 API                                                                 | 调度与存储耦合；挂载/故障切换慢；非 Kubernetes 还需另一套方案；卷访问模式不是应用层 fencing；引用资源与数据库状态仍需协同恢复             | 仅开发或过渡使用                        |
+| 共享 RWX 文件系统                 | 既有 reader 可见同一路径                                                                   | lock/inode 语义依赖文件系统；共享争用和噪声租户风险；文件路径无法提供租户级 CAS 与幂等提交回执                                            | 拒绝作为生产权威                        |
+| 单个可追加 OSS JSONL              | 长期保存且形态类似本地文件                                                                 | 追加串行；单个 Appendable Object 最大 5 GiB；版本、WORM、加密和下载行为有限制；无法跨 Object、资源 manifest 和 writer generation 原子提交 | 拒绝                                    |
+| 仅 MySQL                          | 事务、顺序和 fencing 清晰                                                                  | 大 checkpoint、消息和工具结果会放大数据库及备份流量                                                                                       | 保存 journal 数据和不超过 64 KiB 的资源 |
+| MySQL 分层 journal/resource + OSS | 提交语义强，同时大字节不进入 SQL；不依赖调度器；本地进程和 Kubernetes provisioner 均可使用 | 需要内部存储 API、资源 manifest 与安全回收                                                                                                | 选择此方案                              |
+
+Kubernetes 文档说明，普通卷访问模式主要描述挂载能力，卷挂载后并不自动强制写保护。`ReadWriteOncePod` 更严格，但恢复仍受卷和 CSI 能力约束。[Kubernetes Persistent Volumes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)
+
+OSS 在写成功后提供原子操作和强一致性，适合保存不可变资源。但 OSS AppendObject 最大 5 GiB，只能向当前 Appendable 版本追加，不会为每次追加生成历史版本，且与 WORM、部分加密和下载能力存在限制。[OSS consistency](https://help.aliyun.com/en/oss/user-guide/what-is-oss)、[OSS AppendObject](https://help.aliyun.com/en/oss/developer-reference/appendobject)
+
+## 4. 目标拓扑与归属
+
+```mermaid
+flowchart LR
+  UI[WebShell / Agent API] --> JAVA[Java 管控面]
+  JAVA -->|create, load, submit, cancel| H[Hosted Harness]
+  H -->|lease-scoped internal HTTP| STORE[Managed Session Store 模块]
+  STORE --> DB[(MySQL 私有 journal)]
+  STORE --> OSS[(OSS 不可变资源)]
+  H -->|tool intent| BROKER[Runtime Broker]
+  BROKER --> RT[Tool-only Runtime]
+  RT --> WS[Workspace 存储 / 快照]
+  H -. 可丢弃缓存 .-> CACHE[Pod 本地缓存]
+```
+
+Managed Session Store 首先作为现有 Spring 管控面中的模块，通过内部 HTTP API 提供能力，不要求新增部署。接口与传输解耦，后续可以拆成独立服务，而不改变 Core 语义。
+
+Java 继续主动发起公开的 Harness 和 Runtime 操作。存储回调是一条窄的内部持久化通道：Java 向选中的 Harness 发放 Session 范围的 writer capability，Harness 只能用它读写该 Session。TypeScript 不获得数据库凭据或 OSS 长期凭据。
+
+Java 公共 Session、Harness 私有 journal 和 Runtime binding 共用同一个 `(tenantId, workspaceId, sessionId)`，不新增第二套 public 或 Harness Session ID。
+
+## 5. Core 存储契约
+
+从当前具体本地类中提取能力，但不复制 Managed 状态机：
+
+```ts
+interface ManagedSessionJournalStore {
+  open(request: OpenJournalRequest): Promise<ManagedSessionJournalHandle>;
+}
+
+interface ManagedSessionJournalHandle {
+  readonly sessionKey: ManagedSessionKey;
+  read(options?: { maxBytes?: number }): Promise<ManagedSessionJournalScan>;
+  appendTransaction(records: readonly unknown[]): Promise<void>;
+  seal(): Promise<void>;
+  abort(): Promise<void>;
+}
+
+interface ManagedSessionResourceStore {
+  publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
+  read(ref: ManagedSessionDurableRef): Promise<Buffer>;
+}
+```
+
+以上是已经落地的 D0 Core 接缝。`appendTransaction` 每次接收一笔完整的语义事务。本地 adapter 保留历史上的逐行 sync 与可恢复 torn-tail 行为；D1 HTTP handle 将对整批记录只序列化一次，在内部获取或续租 scoped writer grant，从已校验的 header、event 和 marker 派生外层 CAS 与幂等元数据，并仅在 Java 确认精确字节已提交后返回。配套 HTTP resource adapter 会将 inline 暂存字节保留到该次提交。D1 adapter 和服务端语义当前尚未实现。
+
+`ManagedSessionAuthority` 负责记录校验、事件 sequence、command content digest、checkpoint 规则和领域语义；Store 实现负责物理原子性、writer fencing、精确字节持久化、分页和资源校验。
+
+实现包括：
+
+- `LocalJsonlManagedSessionJournalStore` 封装 `SessionWriterLease`，保留现有 standalone 行为及显式坏尾恢复。
+- `LocalManagedSessionResourceStore` 继续作为本地资源适配器。
+- `HttpManagedSessionJournalStore` 与 `HttpManagedSessionResourceStore` 在 hosted 模式调用 Java 内部 API。
+
+远端 resource adapter 将不超过 64 KiB 的资源暂存在 Harness 中，直到所属 journal 事务把资源与引用原子写入 MySQL。较大资源在该事务之前发布到 OSS。两条路径返回相同的 `DurableRef`，reader 不从 ref 猜测物理位置。v1 使用固定阈值，避免形成按部署变化的行为矩阵；以后只有通过带 storage version 的兼容决策才能调整。
+
+远端提交一次接收一个完整 Managed 事务：通常是一至三条 event record 加一条 commit marker，并带上待提交的 inline resources。Java 保存 UTF-8 JSONL 精确字节及 SHA-256，不解析或重新序列化私有事件正文；它只校验外层 scope、大小、记录数量、sequence 范围、引用列表、lease 和摘要链。
+
+## 6. 关系数据模型
+
+使用独立私有表，不扩展已过滤的公共投影 `managed_agent_event`。
+
+### 6.1 `qwen_managed_session_journal_head`
+
+每个 Session 一行：
+
+| 字段                                                                       | 用途                                                                    |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `tenant_id`、`workspace_id`、`session_id`                                  | 可信 scope 与主身份                                                     |
+| `storage_version`、`state`                                                 | 格式和生命周期（`ACTIVE`、`SEALED`、`DELETING`、`DELETED`）             |
+| `writer_generation`、`writer_id`、`writer_lease_until`、`lease_token_hash` | 使用数据库时间的单调 writer fencing                                     |
+| `journal_revision`、`committed_sequence`、`last_commit_digest`             | 权威 head CAS                                                           |
+| `activation_epoch`                                                         | 将私有写入绑定到当前 Harness grant                                      |
+| `latest_checkpoint_resource_id`                                            | 快速恢复入口；仅合法 initial basis 可为空                               |
+| `compacted_through_revision`                                               | 未来不可变 pack 水位；初始为零                                          |
+| `recovery_status`、`recovery_detail_code`                                  | `READY`、`BLOCKED_RESOURCE`、`BLOCKED_WORKSPACE` 或 `BLOCKED_EXECUTION` |
+| `created_at`、`updated_at`                                                 | 数据库时间                                                              |
+
+主键为 `(tenant_id, session_id)`。每个变更事务通过唯一键锁定这一行。InnoDB locking read 为 head CAS 提供所需的行级串行化。[MySQL InnoDB locking](https://dev.mysql.com/doc/refman/8.0/en/innodb-best-practices.html)
+
+### 6.2 `qwen_managed_session_journal_tx`
+
+每个已提交 Managed 事务一行：
+
+| 字段                                                              | 用途                                                                |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------- |
+| scope 加 `journal_revision`                                       | 有序主键                                                            |
+| `operation`、`command_id`、`content_digest`                       | 幂等键；在 Session 和 operation 内唯一                              |
+| `first_sequence`、`last_sequence`、`event_count`                  | 事件范围                                                            |
+| `events_digest`、`previous_commit_digest`、`commit_digest`        | 现有摘要链证明                                                      |
+| `writer_generation`、`activation_epoch`                           | 审计与旧 writer 证明                                                |
+| `record_encoding`、`record_bytes`、`byte_length`、`record_digest` | 精确且有界的 JSONL 事务字节；首版用 `MEDIUMBLOB` 的 `identity` 编码 |
+| `created_at`                                                      | 提交时间                                                            |
+
+第一行是 `session.create` 的 genesis transaction：保存精确的 `session_execution_engine` 和 Managed header 两行，使用 sequence zero，并引用 definition 与 root snapshot 资源。后续行才保存 event records 及其 commit marker。这样可以让物理创建原子完成，同时不改变导出 JSONL 的记录格式或 event sequence。保持现有单事务 8 MiB 限额。私有记录字节绝不从公共 Agent API 返回，也不复制到 `managed_agent_event`。
+
+### 6.3 `qwen_managed_session_resource`
+
+记录存放在 MySQL 或 OSS 的不可变资源：
+
+| 字段                                                   | 用途                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------ |
+| scope 加 `resource_id`                                 | 不透明身份和归属                                                   |
+| `kind`、`schema_version`、`byte_length`、`sha256`      | 现有 `DurableRef` 契约                                             |
+| `storage_kind`、`inline_bytes`                         | `MYSQL_INLINE` 及不超过 64 KiB 的资源字节                          |
+| `object_key`、`object_version_id`、`encryption_key_id` | 较大资源的 `OSS_OBJECT` 位置与加密身份                             |
+| `publish_command_id`、`state`                          | 幂等的 `ALLOCATED`、`PUBLISHED`、`REFERENCED`、`DELETING` 生命周期 |
+| `created_at`、`last_verified_at`、`retention_until`    | 运维与保留元数据                                                   |
+
+每个资源只能使用一种物理位置。`MYSQL_INLINE` 必须有 `inline_bytes` 且 OSS 位置字段为空；`OSS_OBJECT` 必须有 OSS 位置字段且 `inline_bytes` 为空。64 KiB 边界按传输编码前的资源原始字节计算。无论资源位于哪里，读取时都必须校验 `byte_length` 和 `sha256`。
+
+### 6.4 `qwen_managed_session_resource_ref`
+
+保存每个 journal revision 提交的资源闭包，主键为 `(tenant_id, session_id, journal_revision, resource_id)`。首版在 Session 被显式删除前保留其所有已引用资源；跨 Session pin 和自动 GC 在持有协议完成并验证前保持关闭。
+
+## 7. 内部 HTTP 协议
+
+首个实现增加类似以下私有路由：
+
+```text
+POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire
+POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew
+POST /internal/managed-session-store/v1/sessions/{sessionId}/transactions:commit
+GET  /internal/managed-session-store/v1/sessions/{sessionId}/restore
+GET  /internal/managed-session-store/v1/sessions/{sessionId}/transactions
+POST /internal/managed-session-store/v1/sessions/{sessionId}/resources:allocate
+POST /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}:finalize
+GET  /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}
+POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal
+```
+
+管控面在创建或加载 Hosted Harness Session 时传入短期 opaque writer grant。grant 绑定 tenant、workspace、Session、writer generation、activation epoch、worker identity 和过期时间，数据库只保存其 hash。生产部署除 scoped grant 外还需 mTLS 或等价服务身份；`tenantId` 只是 scope，不是鉴权凭据。
+
+`transactions:commit` 携带待提交 inline resources，并在它们首次被 journal 引用的同一 MySQL 事务中写入。较大资源使用短期签名 PUT/GET。Object key 由服务端生成，上传禁止覆盖，强制服务端加密；`finalize` 核验长度和 SHA-256 后资源才可被引用。本地开发可由 Java 代理字节或使用本地适配器。
+
+## 8. 提交协议
+
+Session 创建时先按相同位置规则暂存或发布 definition 与 root snapshot，再在一个 MySQL 事务中创建 journal head、genesis transaction、inline resource 正文和初始资源引用。后续每个语义事务按以下流程执行：
+
+1. Core 校验 command、actor、expected sequence、records 和资源闭包。不超过 64 KiB 的资源暂存在 scoped Harness handle 中；较大资源以不可变 OSS Object 上传并 finalize。两者此时都尚未从 Session journal 可见。
+2. Harness 调用 `transactions:commit`，携带精确 record 字节、resource refs、expected journal revision、expected committed sequence、previous commit digest、writer generation、activation epoch、operation、command ID 和 content digest。
+3. Store 在同一个 MySQL 事务内锁定 head，校验未过期 generation 与 activation，查询原幂等回执，校验预期 head 和全部资源，插入待提交 inline resource 字节、journal transaction 与 resource refs，最后推进 head。
+4. 只有提交成功后，Harness 才确认私有事件或报告 Turn 成功终态。响应丢失时使用原 command ID 和 content digest 重试并返回原回执。
+5. 本地缓存和公开/SSE 投影在私有提交后更新；它们失败不能回滚或重复私有事务。
+
+OSS Object 上传后数据库提交失败，会留下未引用的不可变孤儿。恢复看不到它；确认发布者已被 fencing 并超过安全窗口后才可回收。Inline 提交失败不会留下 resource row。已提交 journal head 绝不能引用尚未 finalize 的 Object。
+
+## 9. 打开与恢复协议
+
+1. Java 先 fencing 原 generation，再发放新 writer generation。lease 过期允许数据库产生更高 generation，但不能证明旧工具副作用已停止；Runtime 派发仍使用自己的 generation 门禁。
+2. Harness 读取 journal head 和 RestoreBundle，其中包含最新已验证 checkpoint、checkpoint 后的已提交尾部、未决 command 及资源 manifest。
+3. Harness 核验 commit 摘要链、record 字节、checkpoint digest 和全部必需资源。Harness Pod 可按 digest 缓存不可变资源。
+4. Runtime Broker 对每个未结算 `executionCallId` 对账。结果未知则进入 `BLOCKED_EXECUTION`，不能因为旧 Pod 消失就重新执行。
+5. 核验 Workspace 身份与快照/挂载。缺少 Workspace 时进入 `BLOCKED_WORKSPACE`；能读 transcript 不等于能继续执行。
+6. 只有 `READY` 的恢复才能安装新 activation 并允许模型/工具推进。资源缺失或损坏进入 `BLOCKED_RESOURCE`；安全场景仍可提供只读历史。
+
+首个远端实现可以分页读取完整已提交 journal。压缩属于后续按测量触发的优化：后台任务把连续前缀打包成不可变压缩 OSS Object，校验后在 MySQL 原子发布 manifest 和水位，经过宽限期后再删除覆盖的 SQL blob。恢复合并已验证 pack 与 SQL 热尾；OSS Object listing 永远不是顺序或完整性的权威。
+
+## 10. 延迟与可用性
+
+长期存储链路不能重新把 Runtime 冷启动放进首 token：
+
+- 尽量在第一条 Prompt 前完成 Session definition 和 root snapshot 的暂存或发布。
+- Prompt input 在模型推理前提交。普通的不超过 64 KiB 的 Prompt 及其 journal records 只使用一次有界内部存储事务，不等待 OSS PUT 或 Pod 启动；更大输入明确走 OSS 路径。
+- 模型推理和 Runtime prepare 继续并行，只有第一次真实工具调用才等待 Runtime。
+- 不逐 token 写私有 journal；在 input admission、model attempt/result、工具派发前 intent、模型消费前 receipt、checkpoint 和 Turn settlement 等语义边界提交。
+- 最终消息和 checkpoint 事务持久后才发出成功终态。
+- 本地缓存可减少恢复读取，但不能放宽提交 ACK。
+
+测量新增 TTFT、commit p50/p95/p99、恢复延迟、每 Turn MySQL 字节、OSS 请求/字节和缓存命中率。生产前使用这些数据验证 64 KiB 分界；以后调整该值需要带 storage version 的兼容决策。本文不承诺固定延迟数字。
+
+MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable admission 之前继续模型或工具副作用会破坏恢复契约。OSS 不可用会阻塞需要新资源的操作；已经提交且资源仍可通过正常冗余/缓存读取的历史不受影响。
+
+## 11. 保留、删除与安全
+
+- 公共 SSE replay 保留期与私有 Session 保留期分离；公共 delta 过期不能删除私有模型上下文或 checkpoint。
+- 首版不自动删除任何已引用私有资源。宁可安全占用空间，也不能制造恢复缺口。
+- 删除 Session 时先封闭准入、对账 execution、提交 tombstone/cleanup plan 并删除数据库引用；Object 删除保持幂等，并在配置的宽限或合规保留期后执行。
+- 启用 OSS 版本控制和服务端加密；不可变写使用禁止覆盖请求头。版本控制可防误覆盖，但不能替代数据库提交点。[OSS overwrite protection and limits](https://help.aliyun.com/en/oss/user-guide/limits)、[OSS versioning](https://help.aliyun.com/en/oss/user-guide/manage-objects-in-a-versioning-enabled-bucket)
+- 私有 journal/resource 表使用不同于公共 reader 的数据库角色。所有读取均校验可信 tenant 和 Session scope。原始 records、签名 URL、凭据、工具参数和模型上下文不得进入公共事件或普通应用日志。
+- 备份与容灾必须同时覆盖 MySQL 和 OSS，使恢复点包含 journal head 引用的全部 Object。数据库恢复点新于可用 Object 副本时，不构成有效恢复点。
+
+## 12. 落地顺序与可评审改动
+
+### D0：存储接缝，无行为变化
+
+状态：已在当前 feature 分支实现。
+
+- 引入 `ManagedSessionJournalStore` 与 `ManagedSessionResourceStore` 契约。
+- 将现有 JSONL 扫描/追加和资源文件放进本地 adapter。
+- 原 authority、projection、restore、writer conflict 和 corruption 测试不改语义地在本地 adapter 上通过。
+
+退出条件：standalone 行为和字节不变，Core 不引入 Java 或 OSS 依赖。
+
+### D1：Java 长期 Store 与契约客户端
+
+- 在下一个可用 Flyway migration 中增加四张私有表。
+- 增加 Spring 内部 API、lease/CAS/幂等逻辑和 TypeScript HTTP adapter。
+- 为 record 精确字节、摘要、错误码和限额增加双方共用的 golden contract fixture。
+- 实现事务化 `MYSQL_INLINE` 资源路径，初期暂不启用 OSS。
+
+退出条件：两个共享 MySQL 的 Java 实例能拒绝旧 writer，并在提交响应丢失后返回同一回执。
+
+### D2：OSS 资源与新 Session hosted 路由
+
+- 为超过 64 KiB 的资源实现 `OSS_OBJECT` 路径：allocate/upload/finalize/read、scoped signed URL、摘要校验、加密和孤儿盘点。
+- 新建 Hosted Managed Session 选择远端后端；既有本地 Session 继续本地运行，不迁移、不双写。
+- hosted 恢复不再依赖 Pod 本地 transcript/resource；本地缓存可选且可丢弃。
+
+退出条件：删除原 Harness Pod 及其文件系统后，另一个 Harness 能恢复同一 Session 和 checkpoint，历史无缺失。
+
+### D3：恢复门禁与生产证据
+
+- 将 journal writer generation 与 Harness activation、Runtime dispatch fencing 关联。
+- continuation 前完成未结算工具 execution 与 Workspace 恢复对账。
+- 增加保留/tombstone 流程、指标、告警、备份恢复演练和故障注入。
+
+退出条件：下列故障矩阵在实际 MySQL 和 OSS 产品上通过。只有这时 hosted 模式才能承诺跨 Pod 自动恢复。
+
+## 13. 验收矩阵
+
+| 场景                                     | 必需结果                                                                             |
+| ---------------------------------------- | ------------------------------------------------------------------------------------ |
+| 两个 Harness worker 同时取得同一 Session | 只有一个 generation 可提交；旧 worker 在任何字节可见前收到 conflict                  |
+| Commit 成功但 HTTP 响应丢失              | 原 command ID 与 digest 返回原回执，不重复 sequence 或内容                           |
+| 相同幂等键但内容不同                     | conflict 并告警，两份 payload 都不能覆盖另一份                                       |
+| Object 上传后、SQL 提交前崩溃            | Session 看不到该 Object；它是可安全回收的孤儿                                        |
+| 资源为 64 KiB 或 64 KiB 加 1 字节        | 前者使用 `MYSQL_INLINE`，后者使用 `OSS_OBJECT`；两者使用相同 `DurableRef` 和摘要校验 |
+| SQL 提交后、cache/SSE 前崩溃             | 恢复读到已提交事务；cache 和公共投影追赶但不重写事务                                 |
+| Harness Pod 与本地盘删除                 | 新 Harness 恢复 journal、checkpoint 和全部引用资源                                   |
+| 资源缺失或摘要不符                       | `BLOCKED_RESOURCE`；不从空状态或未经证明的旧状态继续                                 |
+| 工具结果未知                             | `BLOCKED_EXECUTION`；不自动重复调用工具                                              |
+| Workspace 快照/挂载缺失                  | 历史仍可读，执行状态为 `BLOCKED_WORKSPACE`                                           |
+| 伪造 tenant 或 Session scope             | 返回 Object URL 或私有字节前拒绝请求                                                 |
+| MySQL 或 OSS 不可用                      | 有界背压和明确失败，不发出虚假 durable ACK                                           |
+| 本地 cache 损坏或缺失                    | 重建或忽略；以 durable head 与 resource digest 为准                                  |
+| 活动工作期间删除 Session                 | 封闭准入，execution 结算或阻塞，提交 tombstone，再安全回收资源                       |
+
+## 14. 待确认的部署参数
+
+生产启用前需要选择并测量：
+
+- 私有 Session 保留期和 legal hold 要求；
+- 活跃 Session/Turn 速率，以及每 Turn journal/resource 平均和最大字节数；
+- writer lease 时长与续租间隔；
+- MySQL 持久化/复制配置与允许的恢复点、恢复时间；
+- OSS region、冗余、版本控制、加密密钥策略、生命周期存储级别和跨 region 恢复；
+- 最大恢复尾部、checkpoint 频率，以及是否需要把 SQL journal 打包进 OSS；
+- Workspace 持久化或快照 provider；这是可执行恢复的独立前置条件。
+
+这些参数不改变已选定的归属与提交协议，只决定容量和运维策略，不决定本地 Pod 磁盘是否是权威。
