@@ -29,7 +29,7 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 ## Adapter 边界
 
-`HarnessSessionResolver` 返回 Harness Session 的权威 `RuntimeScope`。服务由此生成 `RuntimeProvisionRequest`：workspace isolation 不包含 isolation key，因此在完整 scope 内共享 binding；session isolation 使用 Harness Session 标识，因此不能跨 Harness Session 共享。
+`HarnessSessionResolver` 返回 Harness Session 的权威 `RuntimeScope`。其结果必须在该 scope 下创建的所有 Runtime Session 生命周期内保持稳定；真实的 scope 变更必须使用新的 Runtime Session 标识。服务由此生成 `RuntimeProvisionRequest`：workspace isolation 不包含 isolation key，因此在完整 scope 内共享 binding；session isolation 使用 Harness Session 标识，因此不能跨 Harness Session 共享。
 
 `RuntimeProvisioner` 执行外部供应并返回已证明的 `RuntimeLease`。对于完全相同的 placement request，重复调用必须收敛到同一个 live resource，包括发生不确定失败之后。服务负责围绕该调用持有 repository claim，但不规定如何创建进程或容器。
 
@@ -43,7 +43,7 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 ## Runtime Session 生命周期
 
-`acquire` 在构建 Session 身份前解析 scope。同一 Runtime Session 标识的调用会在进程内收敛，并且必须重复相同的 Harness Session、turn kind 和 scope。服务确保存在 live binding，持久化 `ACQUIRING`，调用 transport acquire，再通过 compare-and-set 将 Session 更新为 `READY`。Runtime acquire 操作必须按 Runtime Session 标识幂等，才能安全处理 adapter 边界上的不确定重试。acquire transport 失败时，持久化 Session 保持 `ACQUIRING`，服务只移除失败的进程内尝试，从而允许同一身份安全重试，而不会在缺少权威失败证据时进入终态。
+`acquire` 在构建 Session 身份前解析 scope。同一 Runtime Session 标识的调用会在进程内收敛，并且必须重复相同的 Harness Session 和 turn kind，而 resolver 必须返回相同的 scope。服务确保存在 live binding，持久化 `ACQUIRING`，调用 transport acquire，再通过 compare-and-set 将 Session 更新为 `READY`。Runtime acquire 操作必须按 Runtime Session 标识幂等，才能安全处理 adapter 边界上的不确定重试。acquire transport 失败时，持久化 Session 保持 `ACQUIRING`，服务只移除失败的进程内尝试，从而允许同一身份安全重试，而不会在缺少权威失败证据时进入终态。
 
 控制操作限定为现有私有 Runtime kind：`bind-history`、`checkpoint`、`history`、`manifest`、`begin-turn`、`prepare`、`confirmation`、`confirm` 和 `preflight`，并要求进程内 Session 对应的 repository 记录仍为 `READY`。
 
@@ -53,7 +53,7 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 创建操作保存 `PREPARED` 记录，其不可变身份包含 binding generation、Harness Session、Runtime Session、prompt、Tool call、参数摘要以及 invocation reference。`findOrCreate` 通过 idempotency key 收敛；同一 key 对应的请求内容变化会在再次物理分发前被拒绝。
 
-dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并在调用结束前持续续租 dispatch lease。有效结果会结算当前已 claim 的记录。物理分发可能已经开始，因此 transport 失败、缺少结果或无效结果均属于不确定状态；服务会尝试把 execution 转为 `UNKNOWN`，而不是制造 error result 或重放 Tool call。如果 claim 过期或被其他 owner 接管，repository fencing 仍是最终权威。
+dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并在调用结束前持续续租 dispatch lease。有效结果会结算当前已 claim 的记录。物理分发可能已经开始，因此 transport 失败、缺少结果或无效结果均属于不确定状态；服务会尝试把 execution 转为 `UNKNOWN`，而不是制造 error result 或重放 Tool call。同一幂等键的重试会重新驱动尚未发送的 `DISPATCHING` 记录，并通过 repository takeover 把已过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 隔离为 `UNKNOWN`；dispatch lease 仍有效时绝不会重放 Tool call。如果 claim 过期或被其他 owner 接管，repository fencing 仍是最终权威。
 
 取消操作首先使用开放的 repository 路径。尚未分发的 execution 会直接结算为 cancelled；`DISPATCHING` execution 为 owner 保留粘性取消意图；`EXECUTING` execution 会在服务发送物理取消信号前变为 `CANCEL_REQUESTED`。只有取消响应同时提供 Runtime 的 `state: settled` 证据和有效终态结果时，服务才结算记录；非终态确认会保留粘性请求，等待 dispatch result 或后续 reconciliation。
 
@@ -67,7 +67,7 @@ dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并
 
 `RuntimeBrokerException` 携带稳定 code、retryable 标记以及供 adapter 使用的状态码。参数校验和身份冲突不可重试；供应、scope 解析、transport 失败、claim 丢失以及缺少 reconciliation 属于可重试的服务不可用情况。
 
-Runtime token 只保留在 `RuntimeLease` 中，并仅传入 provisioner/transport 边界。服务不记录 token、invocation reference 或 Tool result。嵌入 adapter 仍负责认证调用方，并把调用方映射到传给本服务的 Harness Session 标识。
+Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding repository 和 Runtime transport，并且 `warm` 返回的 binding record 会把 lease 交给嵌入调用方。JDBC binding repository 会将 token 持久化到 `runtime_token`；因此 binding 行及其备份都属于机密数据，需要收紧访问权限，并采用适当的加密和轮换控制。嵌入 adapter 不得把 lease 或 token 序列化给不可信调用方。服务不记录 token、invocation reference 或 Tool result。嵌入 adapter 仍负责认证调用方，并把调用方映射到传给本服务的 Harness Session 标识。
 
 ## 验证
 

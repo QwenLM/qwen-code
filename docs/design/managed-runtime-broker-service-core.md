@@ -29,7 +29,7 @@ The Runtime Broker repositories define durable identities, lifecycle states, com
 
 ## Adapter boundary
 
-`HarnessSessionResolver` returns the authoritative `RuntimeScope` for a Harness Session. The service derives a `RuntimeProvisionRequest`: workspace isolation has no isolation key and therefore shares a binding within the full scope, while session isolation uses the Harness Session identifier and therefore cannot share across Harness Sessions.
+`HarnessSessionResolver` returns the authoritative `RuntimeScope` for a Harness Session. Its result must remain stable for the lifetime of every Runtime Session created under that scope; a genuine scope change requires a new Runtime Session identity. The service derives a `RuntimeProvisionRequest`: workspace isolation has no isolation key and therefore shares a binding within the full scope, while session isolation uses the Harness Session identifier and therefore cannot share across Harness Sessions.
 
 `RuntimeProvisioner` performs external provisioning and returns an attested `RuntimeLease`. Repeated calls for the same exact placement request must converge on one live resource, including after an ambiguous failure. The service owns the repository claim around that call, but it does not prescribe how a process or container is created.
 
@@ -43,7 +43,7 @@ A `READY` row is only durable control-plane evidence. It does not prove that its
 
 ## Runtime Session lifecycle
 
-`acquire` resolves scope before constructing the Session identity. Calls with the same Runtime Session identifier converge in process and must repeat the same Harness Session, turn kind, and scope. The service ensures a live binding, persists `ACQUIRING`, invokes transport acquire, and compare-and-sets the Session to `READY`. The Runtime acquire operation is required to be idempotent by Runtime Session identifier so a retry after an uncertain adapter boundary is safe. An acquire transport failure leaves the durable Session `ACQUIRING` and removes only the failed process-local attempt, allowing the same identity to retry safely instead of becoming terminal without authoritative failure evidence.
+`acquire` resolves scope before constructing the Session identity. Calls with the same Runtime Session identifier converge in process and must repeat the same Harness Session and turn kind, while the resolver must return the same scope. The service ensures a live binding, persists `ACQUIRING`, invokes transport acquire, and compare-and-sets the Session to `READY`. The Runtime acquire operation is required to be idempotent by Runtime Session identifier so a retry after an uncertain adapter boundary is safe. An acquire transport failure leaves the durable Session `ACQUIRING` and removes only the failed process-local attempt, allowing the same identity to retry safely instead of becoming terminal without authoritative failure evidence.
 
 Control operations are limited to the existing private Runtime kinds: `bind-history`, `checkpoint`, `history`, `manifest`, `begin-turn`, `prepare`, `confirmation`, `confirm`, and `preflight`. They require a process-local Session whose repository record is still `READY`.
 
@@ -53,7 +53,7 @@ Release first rejects a Session with any unsettled execution. It persists `RELEA
 
 Creation stores a `PREPARED` record whose immutable identity includes the binding generation, Harness Session, Runtime Session, prompt, Tool call, argument digest, and invocation reference. `findOrCreate` converges the idempotency key; changed request content is rejected before another physical dispatch.
 
-The dispatcher claims the record, persists `EXECUTING` before calling the Runtime, and renews the dispatch lease until the call finishes. A valid result settles the current claimed record. A transport failure, missing result, or invalid result is ambiguous after physical dispatch may have started, so the service attempts to transition the execution to `UNKNOWN` instead of manufacturing an error result or replaying the Tool call. Repository fencing remains authoritative if the claim expires or another owner takes over.
+The dispatcher claims the record, persists `EXECUTING` before calling the Runtime, and renews the dispatch lease until the call finishes. A valid result settles the current claimed record. A transport failure, missing result, or invalid result is ambiguous after physical dispatch may have started, so the service attempts to transition the execution to `UNKNOWN` instead of manufacturing an error result or replaying the Tool call. A same-key retry re-drives an unsent `DISPATCHING` record and uses repository takeover to fence an expired `EXECUTING` or `CANCEL_REQUESTED` claim as `UNKNOWN`; it never replays a Tool call whose dispatch lease is still live. Repository fencing remains authoritative if the claim expires or another owner takes over.
 
 Cancellation first uses the open repository path. A never-dispatched execution settles as cancelled. A `DISPATCHING` execution carries sticky cancellation intent for its owner to observe, and an `EXECUTING` execution becomes `CANCEL_REQUESTED` before the service sends the physical cancellation signal. A cancellation response settles the record only when it carries Runtime evidence with `state: settled` and a valid terminal result; a non-terminal acknowledgement leaves the sticky request for the dispatch result or later reconciliation.
 
@@ -67,7 +67,7 @@ Closing the service rejects new work, cancels its internal waiters, and stops it
 
 `RuntimeBrokerException` carries a stable code, retryability flag, and adapter-oriented status code. Validation and identity conflicts are non-retryable. Provisioning, scope resolution, transport failure, claim loss, and missing reconciliation are retryable service-unavailable conditions.
 
-Runtime tokens stay inside `RuntimeLease` and are only passed to the provisioner/transport boundary. The service does not log tokens, invocation references, or Tool results. The embedding adapter remains responsible for authenticating callers and for mapping a caller to the Harness Session identifier supplied to this service.
+Runtime tokens stay inside `RuntimeLease`. The service passes a lease to the binding repository and Runtime transport, and `warm` returns a binding record that carries the lease to the embedding caller. The JDBC binding repository persists the token in `runtime_token`; the binding row and its backups are therefore secret material that require restricted access and appropriate encryption and rotation controls. An embedding adapter must not serialize the lease or token to an untrusted caller. The service does not log tokens, invocation references, or Tool results. The embedding adapter remains responsible for authenticating callers and for mapping a caller to the Harness Session identifier supplied to this service.
 
 ## Validation
 

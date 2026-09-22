@@ -151,15 +151,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
-                    CompletionStage<Object> result;
                     synchronized (context) {
                         requireReadySessionRecord(context);
                         context.beginControl();
+                    }
+                    CompletionStage<Object> result;
+                    try {
                         result = mapFailure(safeStage(() ->
                                 transport.control(context.lease(),
                                         context.session(), immutable)),
                                 "runtime_control_failed",
                                 "Runtime control operation failed");
+                    } catch (RuntimeException | Error failure) {
+                        context.endControl();
+                        throw failure;
                     }
                     return result.whenComplete((ignored, error) ->
                             context.endControl());
@@ -173,12 +178,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String key = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
         return requireReadySession(harnessSessionId, runtimeSessionId)
-                .thenApply(context -> {
-                    synchronized (context) {
-                        requireReadySessionRecord(context);
-                        return createExecution(context, key, reference);
-                    }
-                });
+                .thenApply(context -> createExecution(context, key,
+                        reference));
     }
 
     public CompletionStage<ToolExecutionRecord> getExecution(
@@ -200,37 +201,49 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "executionCallId");
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
-                    CompletionStage<ToolExecutionRecord> result;
+                    ToolExecutionRecord requested;
                     synchronized (context) {
                         requireReadySessionRecord(context);
                         ToolExecutionRecord current = requireExecution(
                                 context, executionId);
-                        ToolExecutionRecord requested =
-                                requestCancel(current);
+                        requested = requestCancel(current);
                         if (requested.isSettled()
                                 || requested.getState()
-                                        != ToolExecutionRecord.State
-                                                .CANCEL_REQUESTED) {
+                                        == ToolExecutionRecord.State.UNKNOWN) {
                             return CompletableFuture.completedFuture(
                                     requested);
                         }
-                        result = mapFailure(safeStage(() -> transport.cancel(
-                                context.lease(), context.session(),
-                                requested.getReference())),
-                                "runtime_execution_cancel_failed",
-                                "Runtime execution cancellation failed")
-                                .thenApply(status -> {
-                                    absorbCancellationStatus(requested,
-                                            status);
-                                    ToolExecutionRecord latest =
-                                            executionRepository
-                                                    .findByExecutionCallId(
-                                                            executionId);
-                                    return latest == null
-                                            ? requested : latest;
-                                });
                     }
-                    return result;
+                    if (requested.getState()
+                                    == ToolExecutionRecord.State.DISPATCHING
+                            || (requested.getState()
+                                            == ToolExecutionRecord.State
+                                                    .CANCEL_REQUESTED
+                                    && !requested.hasLiveDispatchAt(
+                                            clock.instant()))) {
+                        beginDispatch(context, requested);
+                        ToolExecutionRecord latest = executionRepository
+                                .findByExecutionCallId(executionId);
+                        return CompletableFuture.completedFuture(
+                                latest == null ? requested : latest);
+                    }
+                    if (requested.getState()
+                            != ToolExecutionRecord.State.CANCEL_REQUESTED) {
+                        return CompletableFuture.completedFuture(requested);
+                    }
+                    return mapFailure(safeStage(() -> transport.cancel(
+                            context.lease(), context.session(),
+                            requested.getReference())),
+                            "runtime_execution_cancel_failed",
+                            "Runtime execution cancellation failed")
+                            .thenApply(status -> {
+                                absorbCancellationStatus(requested, status);
+                                ToolExecutionRecord latest =
+                                        executionRepository
+                                                .findByExecutionCallId(
+                                                        executionId);
+                                return latest == null ? requested : latest;
+                            });
                 });
     }
 
@@ -279,33 +292,41 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private ToolExecutionRecord createExecution(SessionContext context,
             String idempotencyKey, Map<String, Object> reference) {
-        String referenceSessionId = referenceString(reference, "sessionId");
-        if (!context.session().getRuntimeSessionId().equals(
-                referenceSessionId)) {
-            throw invalid("runtime_reference_invalid",
-                    "reference sessionId does not match the Runtime Session");
-        }
-        ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
-                nextExecutionId(), idempotencyKey,
-                context.binding().getBindingId(),
-                context.binding().getGeneration(),
-                context.session().getHarnessSessionId(),
-                context.session().getRuntimeSessionId(),
-                referenceString(reference, "promptId"),
-                referenceString(reference, "callId"),
-                referenceString(reference, "argsDigest"), reference);
         ToolExecutionRecord record;
-        try {
-            record = executionRepository.findOrCreate(candidate);
-        } catch (IllegalArgumentException exception) {
-            throw conflict("runtime_execution_conflict",
-                    "execution identity is already in use", exception);
+        synchronized (context) {
+            requireReadySessionRecord(context);
+            Map<String, Object> safeReference = immutableMap(reference,
+                    "reference");
+            String referenceSessionId = referenceString(safeReference,
+                    "sessionId");
+            if (!context.session().getRuntimeSessionId().equals(
+                    referenceSessionId)) {
+                throw invalid("runtime_reference_invalid",
+                        "reference sessionId does not match the Runtime "
+                                + "Session");
+            }
+            ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
+                    nextExecutionId(), idempotencyKey,
+                    context.binding().getBindingId(),
+                    context.binding().getGeneration(),
+                    context.session().getHarnessSessionId(),
+                    context.session().getRuntimeSessionId(),
+                    referenceString(safeReference, "promptId"),
+                    referenceString(safeReference, "callId"),
+                    referenceString(safeReference, "argsDigest"),
+                    safeReference);
+            try {
+                record = executionRepository.findOrCreate(candidate);
+            } catch (IllegalArgumentException exception) {
+                throw conflict("runtime_execution_conflict",
+                        "execution identity is already in use", exception);
+            }
+            if (!record.sameRequest(candidate)) {
+                throw conflict("runtime_idempotency_conflict",
+                        "idempotency key belongs to another request");
+            }
         }
-        if (!record.sameRequest(candidate)) {
-            throw conflict("runtime_idempotency_conflict",
-                    "idempotency key belongs to another request");
-        }
-        if (record.getState() == ToolExecutionRecord.State.PREPARED) {
+        if (shouldDriveDispatch(record)) {
             beginDispatch(context, record);
         }
         ToolExecutionRecord current = executionRepository
@@ -460,6 +481,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             RuntimeProvisionRequest request) {
         RuntimeBindingRecord record = bindingRepository.findOrCreate(request);
         if (record.getState() == RuntimeBindingRecord.State.READY) {
+            CompletableFuture<BindingContext> finishing =
+                    bindingOperations.get(record.getBindingId());
+            if (finishing != null) {
+                return finishing;
+            }
             return CompletableFuture.completedFuture(
                     requireLiveBinding(record));
         }
@@ -496,6 +522,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (claimed == null) {
             return failed(unavailable("runtime_provisioning_in_progress",
                     "another Broker owns Runtime provisioning"));
+        }
+        if (claimed.getState()
+                != RuntimeBindingRecord.State.PROVISIONING) {
+            return claimed.getState() == RuntimeBindingRecord.State.READY
+                    ? CompletableFuture.completedFuture(
+                            requireLiveBinding(claimed))
+                    : failed(unavailable("runtime_binding_unavailable",
+                            "Runtime binding is not available"));
         }
         BindingRenewal renewal = new BindingRenewal(claimed);
         renewal.start();
@@ -601,7 +635,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletionStage<Void> operation;
         try {
             operation = dispatch(context, prepared);
-        } catch (RuntimeException exception) {
+        } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
             throw unavailable("runtime_execution_dispatch_failed",
@@ -638,7 +672,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 executing.getDispatchGeneration());
         try {
             renewal.start();
-        } catch (RuntimeException exception) {
+        } catch (RuntimeException | Error exception) {
             markUnknown(executing.getExecutionCallId(),
                     executing.getDispatchGeneration());
             throw exception;
@@ -779,8 +813,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         Map<String, Object> result = runtimeMap(status.get("result"),
                 "cancellation result");
-        settleExecution(requested.getExecutionCallId(),
-                requested.getDispatchGeneration(), result);
+        try {
+            settleExecution(requested.getExecutionCallId(),
+                    requested.getDispatchGeneration(), result);
+        } catch (IllegalArgumentException exception) {
+            throw unavailable("runtime_execution_cancel_failed",
+                    "Runtime cancellation returned an invalid result",
+                    exception);
+        }
     }
 
     private ToolExecutionRecord requireExecution(SessionContext context,
@@ -936,8 +976,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw invalid("runtime_reference_invalid",
                     "reference " + field + " is required");
         }
-        return BrokerValues.requireId((String) value,
-                "reference." + field);
+        try {
+            return BrokerValues.requireId((String) value,
+                    "reference." + field);
+        } catch (IllegalArgumentException exception) {
+            throw invalid("runtime_reference_invalid",
+                    "reference " + field + " is invalid");
+        }
+    }
+
+    private boolean shouldDriveDispatch(ToolExecutionRecord record) {
+        return !record.isSettled()
+                && record.getState() != ToolExecutionRecord.State.UNKNOWN
+                && (record.getState() == ToolExecutionRecord.State.PREPARED
+                        || record.getState()
+                                == ToolExecutionRecord.State.DISPATCHING
+                        || !record.hasLiveDispatchAt(clock.instant()));
     }
 
     private static Map<String, Object> immutableMap(Object value,
@@ -1032,7 +1086,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         "operation returned no CompletionStage"));
             }
             return stage;
-        } catch (RuntimeException exception) {
+        } catch (RuntimeException | Error exception) {
             return failed(exception);
         }
     }
@@ -1158,7 +1212,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             current = new AtomicReference<>(claimed);
         }
 
-        void start() {
+        synchronized void start() {
             long delay = renewalDelayMillis(operationLeaseDuration);
             task = scheduler.scheduleWithFixedDelay(this::renew, delay,
                     delay, TimeUnit.MILLISECONDS);
@@ -1166,7 +1220,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
         synchronized RuntimeBindingRecord stopAndGet() {
             close();
-            return valid.get() ? current.get() : null;
+            return !closed.get() && valid.get() ? current.get() : null;
         }
 
         private synchronized void renew() {
@@ -1212,13 +1266,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
             this.dispatchGeneration = dispatchGeneration;
         }
 
-        void start() {
+        synchronized void start() {
             long delay = renewalDelayMillis(dispatchLeaseDuration);
             task = scheduler.scheduleWithFixedDelay(this::renew, delay,
                     delay, TimeUnit.MILLISECONDS);
         }
 
-        private void renew() {
+        private synchronized void renew() {
             if (closed.get()) {
                 close();
                 return;
@@ -1229,15 +1283,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 brokerOwnerId, dispatchGeneration,
                                 dispatchLeaseDuration);
                 if (renewed == null) {
+                    executionRepository.claimDispatch(executionCallId,
+                            brokerOwnerId, dispatchLeaseDuration);
                     close();
                 }
             } catch (RuntimeException exception) {
-                close();
+                // A transient repository failure does not prove claim loss.
             }
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
             if (task != null) {
                 task.cancel(false);
             }
