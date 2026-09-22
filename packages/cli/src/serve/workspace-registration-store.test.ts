@@ -698,4 +698,79 @@ describe('WorkspaceRegistrationStore', () => {
       vi.resetModules();
     }
   });
+
+  it('pins and unpins a workspace registration', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const id = workspaceRegistrationId('/work/secondary');
+    await store.add('/work/secondary');
+
+    await expect(store.setPinned(id, true)).resolves.toBe(true);
+    const pinned = await store.read();
+    expect(pinned.pinnedAts).toBeDefined();
+    expect(pinned.pinnedAts?.[id]).toBeDefined();
+    expect(typeof pinned.pinnedAts?.[id]).toBe('string');
+
+    await expect(store.setPinned(id, true)).resolves.toBe(false);
+
+    await expect(store.setPinned(id, false)).resolves.toBe(true);
+    const unpinned = await store.read();
+    expect(unpinned.pinnedAts).toBeUndefined();
+
+    await expect(store.setPinned(id, false)).resolves.toBe(false);
+  });
+
+  it('returns false when pinning a non-existent registration', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await expect(store.setPinned('nonexistent-id', true)).resolves.toBe(false);
+  });
+
+  it('removes pinnedAts when the workspace registration is removed', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const id = workspaceRegistrationId('/work/secondary');
+    await store.add('/work/secondary');
+    await store.setPinned(id, true);
+
+    await expect(store.removeById(id)).resolves.toBe(true);
+    const snapshot = await store.read();
+    expect(snapshot.pinnedAts).toBeUndefined();
+  });
+
+  it('parses stored pinnedAts and rejects invalid entries', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const id = workspaceRegistrationId('/work/secondary');
+    await store.add('/work/secondary');
+    await store.setPinned(id, true);
+
+    const raw = JSON.parse(await fs.readFile(store.filePath, 'utf8'));
+    expect(raw.pinnedAts[id]).toBeDefined();
+
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        primaryWorkspace: '/work/primary',
+        workspaces: ['/work/secondary'],
+        pinnedAts: { [id]: raw.pinnedAts[id] },
+      }),
+    );
+    const restored = await store.read();
+    expect(restored.pinnedAts?.[id]).toBe(raw.pinnedAts[id]);
+
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        primaryWorkspace: '/work/primary',
+        workspaces: ['/work/secondary'],
+        pinnedAts: { unknown: '2026-01-01T00:00:00.000Z' },
+      }),
+    );
+    await expect(store.read()).rejects.toBeInstanceOf(
+      WorkspaceRegistrationStoreError,
+    );
+  });
 });
