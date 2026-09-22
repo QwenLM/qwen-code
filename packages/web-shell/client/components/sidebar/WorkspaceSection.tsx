@@ -39,7 +39,7 @@ import {
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
-import { workspaceLabel } from '../../utils/workspace';
+import { sshWorkspaceLabel, workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import {
@@ -800,10 +800,20 @@ export function WorkspaceSection({
             <span
               className={cx(styles.chevron, expanded && styles.chevronOpen)}
             >
-              <WorkspaceFolderIcon open={expanded} remote={remote} />
+              <WorkspaceFolderIcon
+                open={expanded}
+                remote={remote || !!workspace.ssh}
+              />
             </span>
             <span className={styles.headerContent}>
-              <span className={styles.name} title={workspace.cwd}>
+              <span
+                className={styles.name}
+                title={
+                  workspace.ssh
+                    ? sshWorkspaceLabel(workspace.ssh)
+                    : workspace.cwd
+                }
+              >
                 {workspaceLabel(workspace)}
               </span>
             </span>
@@ -825,7 +835,7 @@ export function WorkspaceSection({
       {overviewEnabled && !renderHeader && !disabled ? (
         <WorkspaceDetailsTooltip
           label={workspaceLabel(workspace)}
-          cwd={gitPollCwd}
+          cwd={workspace.ssh ? sshWorkspaceLabel(workspace.ssh) : gitPollCwd}
           branch={gitStatus?.branch}
           gitStatus={gitStatus}
           sessions={stats}
@@ -834,7 +844,7 @@ export function WorkspaceSection({
           gitActions={
             // Untrusted workspaces have no git runtime, and a synthetic
             // fallback has no real cwd to scope the picker's routes with.
-            onOpenGitDiff && workspace.trusted && gitPollCwd
+            onOpenGitDiff && workspace.trusted && gitPollCwd && !workspace.ssh
               ? {
                   workspaceCwd: workspace.cwd,
                   onOpenDiff: () => onOpenGitDiff(workspace.cwd),
@@ -848,12 +858,18 @@ export function WorkspaceSection({
           }
           onOpenChange={setDetailsOpen}
           onOpenPathLocally={
-            onOpenPathLocally && gitPollCwd && workspace.trusted
+            onOpenPathLocally &&
+            gitPollCwd &&
+            workspace.trusted &&
+            !workspace.ssh
               ? () => onOpenPathLocally(workspace.cwd)
               : undefined
           }
           onOpenTerminalLocally={
-            onOpenTerminalLocally && gitPollCwd && workspace.trusted
+            onOpenTerminalLocally &&
+            gitPollCwd &&
+            workspace.trusted &&
+            !workspace.ssh
               ? () => onOpenTerminalLocally(workspace.cwd)
               : undefined
           }

@@ -1031,6 +1031,25 @@ describe('main-session style: reminder decision matches prompt section', () => {
 
     expect(getMainSessionBaseSystemPrompt(config)).toContain('todo_write');
   });
+
+  it('describes the admitted tool execution sandbox instead of the host process', () => {
+    const config = {
+      ...makeConfig({ interactive: false, acp: false }),
+      getShellExecutionSandbox: () => ({
+        filesystem: 'read-only' as const,
+        workspace: '/workspace',
+        installation: '/installation',
+        state: '/state',
+        network: 'closed' as const,
+        requestedBackend: 'bwrap' as const,
+      }),
+    };
+
+    const prompt = getMainSessionBaseSystemPrompt(config);
+    expect(prompt).toContain('# Tool Execution Sandbox (bwrap)');
+    expect(prompt).toContain('workspace is read-only');
+    expect(prompt).not.toContain('# Outside of Sandbox');
+  });
 });
 
 describe('main-session style: project trust gate', () => {

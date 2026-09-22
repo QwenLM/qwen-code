@@ -63,6 +63,8 @@ import { extensionComponentsSummary } from '../../services/extension-components-
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
+import { applyOpenTuiTheme } from './theme.js';
+import { getActiveOpenTuiTheme } from './theme-parity.js';
 import {
   isSelectableVoiceModel,
   formatUnsupportedVoiceModelMessage,
@@ -587,6 +589,7 @@ export function applyThemeSelection(
   }
   const effective = settings.merged.ui?.theme;
   themeManager.setActiveTheme(effective ?? AUTO_THEME_NAME);
+  applyOpenTuiTheme(getActiveOpenTuiTheme());
   return { applied: themeName };
 }
 

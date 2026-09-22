@@ -38,6 +38,7 @@ import {
   type StagedFileInfo,
 } from '../services/commitAttribution.js';
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
   commandRunsGhPrCreate,
   ghPrCreateInlineEnv,
@@ -5264,8 +5265,10 @@ function getShellCommandSequencingGuidance({
   }
 }
 
-function getShellToolDescription(config: Config): string {
-  const shellConfiguration = getShellConfiguration();
+function getShellToolDescription(
+  config: Config,
+  shellConfiguration: ShellConfiguration,
+): string {
   const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   const isWindows = os.platform() === 'win32';
   const hasBashSearch = isBashSearchAvailable(config);
@@ -5338,8 +5341,7 @@ ${processGroupNote}${processStopNote}
 `;
 }
 
-function getCommandDescription(): string {
-  const shellConfiguration = getShellConfiguration();
+function getCommandDescription(shellConfiguration: ShellConfiguration): string {
   const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   switch (shellConfiguration.shell) {
     case 'cmd':
@@ -5366,24 +5368,32 @@ export class ShellTool extends BaseDeclarativeTool<
   }
 
   override get schema(): FunctionDeclaration {
+    const shellConfiguration: ShellConfiguration =
+      this.config.getExecutionEnvironment?.() instanceof SshExecutionEnvironment
+        ? { executable: 'bash', argsPrefix: ['-c'], shell: 'bash' }
+        : getShellConfiguration();
     return {
       ...super.schema,
-      description: getShellToolDescription(this.config),
+      description: getShellToolDescription(this.config, shellConfiguration),
     };
   }
 
   constructor(private readonly config: Config) {
+    const shellConfiguration: ShellConfiguration =
+      config.getExecutionEnvironment?.() instanceof SshExecutionEnvironment
+        ? { executable: 'bash', argsPrefix: ['-c'], shell: 'bash' }
+        : getShellConfiguration();
     super(
       ShellTool.Name,
       ToolDisplayNames.SHELL,
-      getShellToolDescription(config),
+      getShellToolDescription(config, shellConfiguration),
       Kind.Execute,
       {
         type: 'object',
         properties: {
           command: {
             type: 'string',
-            description: getCommandDescription(),
+            description: getCommandDescription(shellConfiguration),
           },
           is_background: {
             type: 'boolean',

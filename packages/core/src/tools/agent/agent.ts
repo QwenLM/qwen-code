@@ -148,6 +148,11 @@ import {
   ExecutionCleanupError,
   type ExecutionEnvironment,
 } from '../../services/execution-environment.js';
+import {
+  buildAgentDelegationSection,
+  resolveAgentDelegationSurface,
+} from '../../skills/agent-delegation-skill.js';
+import type { BundledReferenceSurface } from '../../skills/bundled-reference.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -774,6 +779,13 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   private availableSubagents: SubagentConfig[] = [];
   private readonly removeChangeListener: () => void;
   private readonly removeWorkspaceDirectoriesChangedListener: () => void;
+  /**
+   * What the description says about the delegation reference, decided once
+   * here. Every later refresh (a subagent added, the team flag toggled)
+   * rebuilds the description from this, so a mid-session `/skills` toggle
+   * cannot make two refreshes disagree about where the reference lives.
+   */
+  private readonly delegationSurface: BundledReferenceSurface;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -872,6 +884,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       true, // canUpdateOutput - Enable live output updates for real-time progress
     );
 
+    this.delegationSurface = resolveAgentDelegationSurface(config);
     this.subagentManager = config.getSubagentManager();
     this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents(config);
     this.removeChangeListener = this.subagentManager.addChangeListener(() => {
@@ -950,6 +963,14 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const teammateWorktreeTail = teamEnabled
       ? '; named teammates may use one, but must be shut down before it is removed.'
       : '.';
+    // Prompt-writing craft: a pointer where the model can load the
+    // `agent-delegation` skill, the reference in full where it cannot, and
+    // nothing where the user turned that reference off (#12054). The fork
+    // facts that shape the call and every background-agent rule stay above,
+    // so a session that never loads it still calls this tool correctly.
+    const delegationSection = buildAgentDelegationSection(
+      this.delegationSurface,
+    );
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -974,10 +995,8 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 - A background agent reports its result through a completion notification in a later turn. A foreground regular agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.LIST_AGENTS} to inspect the current roster, then call ${ToolNames.SEND_MESSAGE} with its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
-- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
 - Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`, \`fork_tools\`, and \`fork_profile\`; omit \`fork_turns\` for the full conversation and omit both restriction parameters to allow every inherited tool except \`${ToolNames.ASK_USER_QUESTION}\`. Regular subagents do not receive that tool either.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
 - Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches${teammateWorktreeTail}
@@ -999,48 +1018,7 @@ Choose a fork when the task needs substantial context from the parent conversati
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork — a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can track the fork.
 
-The background-agent rules above apply to background forks unchanged.
-
-**Writing a fork prompt.** With the default full history, the prompt is a *directive* — what to do, not what the situation is. When \`fork_turns\` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
-
-## Writing the prompt
-
-Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation; forks inherit all or the selected recent window.
-- Explain what you're trying to accomplish and why.
-- Describe what you've already learned or ruled out.
-- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
-- If you need a short response, say so explicitly.
-- For lookups, provide the exact target. For investigations, provide the actual question rather than an over-prescribed sequence of steps.
-
-Terse command-style prompts produce shallow, generic work.
-
-**Never delegate understanding.** Do not write prompts like "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood the task: include relevant file paths, constraints, what specifically needs to be learned or changed, and what is out of scope.
-
-After launching an agent, do not fabricate or predict what it found before it returns. If the user asks a follow-up before the result arrives, provide status rather than guessing.
-
-Example usage:
-
-<example_agent_descriptions>
-"test-runner": use this agent after you are done writing code to run tests
-</example_agent_descriptions>
-
-<example>
-user: "Please write a function that checks if a number is prime"
-assistant: I'm going to use the Write tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
-<commentary>
-Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
-</commentary>
-assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
-</example>
+The background-agent rules above apply to background forks unchanged.${delegationSection ? `\n\n${delegationSection}` : ''}
 `;
 
     // Update description using object property assignment since it's readonly

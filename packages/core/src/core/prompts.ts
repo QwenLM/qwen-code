@@ -271,6 +271,7 @@ export function getCustomSystemPrompt(
  */
 export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
+  executionSandboxFilesystem?: 'read-only' | 'workspace-write';
 }
 
 /**
@@ -619,6 +620,7 @@ ${toolGuidance}
 
 ${(function () {
   // Determine sandbox status based on environment variables
+  const executionSandboxFilesystem = surface?.executionSandboxFilesystem;
   const isSandboxExec = process.env['SANDBOX'] === 'sandbox-exec';
   // The in-place bwrap backend confines this process behind a read-only host
   // root rather than running a container, and its denials read "Read-only
@@ -627,7 +629,13 @@ ${(function () {
   const isKernelSandbox = process.env['SANDBOX'] === 'bwrap';
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
-  if (isSandboxExec) {
+  if (executionSandboxFilesystem) {
+    return `
+# Tool Execution Sandbox (bwrap)
+Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and command network access follows the operator policy. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
+When a write fails with EROFS, report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
+`;
+  } else if (isSandboxExec) {
     return `
 # macOS Seatbelt
 You are running under macos seatbelt with limited access to files outside the project directory or system temp directory, and with limited access to host system resources such as ports. If you encounter failures that could be due to MacOS Seatbelt (e.g. if a command fails with 'Operation not permitted' or similar error), as you report the error to the user, also explain why you think it could be due to MacOS Seatbelt, and how the user may need to adjust their Seatbelt profile.
