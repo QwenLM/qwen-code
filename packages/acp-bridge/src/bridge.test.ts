@@ -569,12 +569,82 @@ describe('createAcpSessionBridge', () => {
       },
     );
 
-    // R1-1: the cd guard and the reaper's `entryHasLocalWork` term are the
-    // two R1-17 sites the branch/fork/rewind rows above cannot reach. The
-    // retention half is only observable with no event subscriber attached:
-    // the auto-close candidate check returns early on `subscriberCount > 0`,
-    // one line before `entryHasLocalWork` runs, so a subscribed session
-    // would pass for the wrong reason and stay green under the mutation.
+    it.each([
+      {
+        operation: 'branch',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+        errorType: BranchWhilePromptActiveError,
+      },
+      {
+        operation: 'fork',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.launchSessionForkAgent(sessionId, 'review this'),
+        errorType: SessionBusyError,
+      },
+    ])(
+      'rejects $operation synchronously before a queued cd can dispatch during a background turn',
+      async ({ invoke, errorType }) => {
+        const hangingCd = deferred<Record<string, unknown>>();
+        const handle = makeChannel({
+          extMethodImpl: (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionCd
+              ? hangingCd.promise
+              : {},
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const cd = bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+        void cd.catch(() => undefined);
+        await vi.waitFor(() =>
+          expect(handle.agent.extMethodCalls).toContainEqual(
+            expect.objectContaining({
+              method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+            }),
+          ),
+        );
+
+        await expect(
+          handle.agentConnection.extMethod('_qwencode/start_turn', {
+            sessionId: session.sessionId,
+            source: 'background_notification',
+            ...admittedBackgroundTurn,
+          }),
+        ).resolves.toEqual({ accepted: true });
+
+        const outcome = await Promise.race([
+          invoke(bridge, session.sessionId).then(
+            () => 'queued-success',
+            (error) => error,
+          ),
+          new Promise<'queued-timeout'>((resolve) =>
+            setTimeout(() => resolve('queued-timeout'), 100),
+          ),
+        ]);
+        expect(outcome).toBeInstanceOf(errorType);
+
+        hangingCd.resolve({
+          previousCwd: WS_A,
+          newCwd: WS_B,
+          warnings: [],
+        });
+        await cd;
+        await bridge.shutdown();
+      },
+    );
+
+    // R1-1: the cd guard (pinned by the `cd` row above) and the
+    // `entryHasLocalWork` term are the two deferred sites the branch/fork/rewind
+    // rows cannot reach. Retention is decided on the detach path —
+    // `maybeCloseIdleSession('last_client_detached')` evaluates
+    // `entryIsAutoCloseCandidate` inside the awaited `detachClient` — and is
+    // only observable with no event subscriber attached: the candidate check
+    // returns early on `subscriberCount > 0`, one line before `entryHasLocalWork`
+    // runs, so a subscribed session would pass for the wrong reason and stay
+    // green under the mutation. The release half below is the reaper's idle
+    // TTL, which is what proves the turn was the only thing holding it.
     it('retains a detached session whose only work is an admitted background turn', async () => {
       let conditionalCloseCalls = 0;
       const handle = makeChannel({
@@ -619,6 +689,7 @@ describe('createAcpSessionBridge', () => {
         turnId: admittedBackgroundTurn.turnId,
       });
       await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(conditionalCloseCalls).toBe(1);
 
       await bridge.shutdown();
     });
