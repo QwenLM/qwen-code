@@ -158,6 +158,7 @@ vi.mock('./early-input.js', () => ({
 }));
 vi.mock('./resume-session.js', () => ({
   resumeEventsFromConfig: () => null,
+  seedLivePromptCountFromResume: () => {},
 }));
 
 import type { ReactElement } from 'react';

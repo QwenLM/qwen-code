@@ -200,7 +200,12 @@ describe('Turn', () => {
       getHistoryTailShallow: mockGetHistoryTailShallow,
       maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
     };
-    turn = new Turn(mockChatInstance as unknown as LlmChat, 'prompt-id-1');
+    turn = new Turn(
+      mockChatInstance as unknown as LlmChat,
+      'prompt-id-1',
+      undefined,
+      'stable-prompt-id',
+    );
     mockGetHistory.mockReturnValue([]);
     mockGetHistoryLength.mockReturnValue(0);
     mockGetHistoryTailShallow.mockReturnValue([]);
@@ -253,6 +258,7 @@ describe('Turn', () => {
         },
         'prompt-id-1',
         undefined,
+        { promptId: 'stable-prompt-id' },
       );
 
       expect(events).toEqual([

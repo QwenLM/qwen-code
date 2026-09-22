@@ -90,6 +90,9 @@ import { findRunningLegacyGoalCard } from '../goals/goal-legacy-cards.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 export {
   buildApiHistoryFromConversation,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
   type BuildApiHistoryOptions,
 } from './session-api-history.js';
 import {
@@ -4029,6 +4032,20 @@ export class SessionService {
           sessionId: newSessionId,
           cwd: this.projectRoot,
           systemPayload,
+          // The record-side identity must follow the session id the same
+          // way snapshot ids do: parseSessionPromptTurn keys claims on the
+          // exact `${sessionId}########` prefix, so an unremapped record id
+          // is invisible to the fork's prompt-count seed and the next live
+          // mint can re-mint an id an inherited snapshot already wears.
+          ...(typeof record.promptId === 'string'
+            ? {
+                promptId: remapForkPromptId(
+                  record.promptId,
+                  sourceSessionId,
+                  newSessionId,
+                ),
+              }
+            : {}),
           parentUuid:
             isArtifactRecord &&
             record.parentUuid !== null &&
@@ -4538,18 +4555,30 @@ export class SessionService {
   }
 }
 
+function remapForkPromptId(
+  promptId: string,
+  sourceSessionId: string,
+  newSessionId: string,
+): string {
+  const sourcePrefix = `${sourceSessionId}########`;
+  if (!promptId.startsWith(sourcePrefix)) {
+    return promptId;
+  }
+  return `${newSessionId}########${promptId.slice(sourcePrefix.length)}`;
+}
+
 function remapSnapshotPromptId(
   snapshot: FileHistorySnapshot,
   sourceSessionId: string,
   newSessionId: string,
 ): FileHistorySnapshot {
-  const sourcePrefix = `${sourceSessionId}########`;
-  if (!snapshot.promptId.startsWith(sourcePrefix)) {
-    return snapshot;
-  }
   return {
     ...snapshot,
-    promptId: `${newSessionId}########${snapshot.promptId.slice(sourcePrefix.length)}`,
+    promptId: remapForkPromptId(
+      snapshot.promptId,
+      sourceSessionId,
+      newSessionId,
+    ),
   };
 }
 
@@ -4581,6 +4610,20 @@ function remapSystemPayloadForFork(
   remappedArtifactIds: Map<string, string>,
 ): ChatRecord['systemPayload'] {
   if (record.type !== 'system') return record.systemPayload;
+  if (record.subtype === 'chat_compression') {
+    const payload = record.systemPayload as
+      | { promptIds?: Array<string | null> }
+      | undefined;
+    if (!Array.isArray(payload?.promptIds)) return record.systemPayload;
+    return {
+      ...(payload ?? {}),
+      promptIds: payload.promptIds.map((promptId) =>
+        typeof promptId === 'string'
+          ? remapForkPromptId(promptId, sourceSessionId, newSessionId)
+          : promptId,
+      ),
+    } as ChatRecord['systemPayload'];
+  }
   if (record.subtype === 'file_history_snapshot') {
     return remapFileHistorySnapshotPayload(
       record.systemPayload,

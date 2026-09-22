@@ -6086,6 +6086,7 @@ export class Session implements SessionContext {
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
                   : undefined,
+                promptId,
                 daemonPromptId,
               );
             }
@@ -6173,6 +6174,7 @@ export class Session implements SessionContext {
                   promptDisplayText !== undefined
                     ? { displayText: promptDisplayText, hookContext: '' }
                     : undefined,
+                  promptId,
                   daemonPromptId,
                 );
               }

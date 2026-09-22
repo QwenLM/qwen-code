@@ -154,6 +154,7 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 
 export { InvalidStreamError };
 
@@ -588,6 +589,8 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** Internal identity for the user prompt added to model history. */
+  promptId?: string;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -2736,9 +2739,18 @@ export class LlmChat {
       // explicit authoritative `false`.
       info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
+        // The in-send call site compresses BEFORE the turn's user content is
+        // pushed, and the resume side replaces history wholesale at the
+        // compression record: a snapshot without the pending turn resurrects
+        // the model's answer with its question gone. Append the pending turn
+        // to a fresh array — never re-share the live one setHistory installs
+        // (the send's tail push and the orphan-repair splices still mutate
+        // it later in this turn; R38-2).
         this.chatRecordingService?.recordChatCompression({
           info,
-          compressedHistory: newHistory,
+          compressedHistory: options?.pendingUserMessage
+            ? [...newHistory, options.pendingUserMessage]
+            : newHistory,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3180,6 +3192,10 @@ export class LlmChat {
         );
       }
 
+      // Mark before the compaction block: the in-send compression record
+      // snapshots the pending turn and derives its promptIds eagerly, so the
+      // identity must be on userContent before tryCompress runs.
+      markApiHistoryPrompt(userContent, options?.promptId);
       if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
           originalTokenCount: effectiveTokens,
@@ -3293,9 +3309,12 @@ export class LlmChat {
         shouldForceFromHard &&
         compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
       ) {
+        // Same snapshot contract as the in-send record inside tryCompress:
+        // include the pending turn (already marked above) so resume keeps
+        // the question with its answer.
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
-          compressedHistory: this.getHistoryShallow(),
+          compressedHistory: [...this.getHistoryShallow(), userContent],
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3331,7 +3350,9 @@ export class LlmChat {
           userContentPushSnapshotKey
         ] = this.userContentPushCount;
       }
-      // Add user content to history ONCE before any attempts.
+      // Add user content to history ONCE before any attempts. The mark was
+      // applied before the compaction block above; spreading userContent
+      // since (the manual-plan-exit notice path) carries the symbol along.
       this.history.push(userContent);
       currentUserContent = userContent;
       userContentAdded = true;

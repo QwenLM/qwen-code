@@ -90,6 +90,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -1214,16 +1215,15 @@ export const AppContainer = (props: AppContainerProps) => {
         loadHistoryWithLatchReconciliation(historyItems);
 
         // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots.
-        const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
-        }
+        // promptIds don't collide with restored file history snapshots
+        // (R37-31). The same seed runs on the in-session /resume and
+        // /branch entrances (R38-1); monotonic, so 0 is a no-op.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumedSessionData.conversation.messages,
+            config.getSessionId(),
+          ),
+        );
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -1880,6 +1880,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1890,6 +1891,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -4183,6 +4185,36 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
       try {
+        // A session whose counter restarted on resume can hold TWO file
+        // snapshots wearing the same promptId. The file consumer resolves a
+        // shared key by last occurrence — the wrong turn's snapshot — then
+        // prunes the newer snapshots and permanently deletes their backups.
+        // Refuse before validating the conversation cut: that check fails for
+        // its own reasons on the same ambiguous turn and would report
+        // "compressed" instead. The census reads the snapshot array, not the
+        // UI items: a conversation-only rewind drops the twin's UI item while
+        // both snapshots survive.
+        const promptId = (userItem as HistoryItemUser).promptId;
+        const promptIdIsShared =
+          option !== 'conversation' && promptId
+            ? config
+                .getFileHistoryService()
+                .getSnapshots()
+                .filter((s) => s.promptId === promptId).length > 1
+            : false;
+        if (promptIdIsShared) {
+          historyManager.addItem(
+            {
+              type: 'error',
+              text: t(
+                'Cannot restore files: this turn shares its checkpoint identity with another turn.',
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
         // For 'both', validate that conversation can be truncated BEFORE
         // touching files — otherwise we'd roll back the workspace while
         // the conversation stays at the newer state.
@@ -4240,7 +4272,6 @@ export const AppContainer = (props: AppContainerProps) => {
         let fileRestoreError: string | undefined;
         let hasRestoreFailure = false;
         if (option === 'code' || option === 'both') {
-          const promptId = (userItem as HistoryItemUser).promptId;
           if (promptId) {
             try {
               const truncateHistory =

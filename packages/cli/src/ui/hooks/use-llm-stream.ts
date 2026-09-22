@@ -558,6 +558,10 @@ export const useLlmStream = (
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
     cmd: PartListUnion,
+    oneTimeShellAllowlist?: Set<string>,
+    overwriteConfirmed?: boolean,
+    existingInvocationItemId?: number,
+    invocationPromptId?: string,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -1416,8 +1420,12 @@ export const useLlmStream = (
     // lives — tools get cancelled and handleCompletedTools returns early.
     config.getArenaAgentClient()?.reportCancelled();
 
-    // Log API cancellation
-    const prompt_id = config.getSessionId() + '########' + getPromptCount();
+    // Log API cancellation. Prefer the id the in-flight interaction already
+    // minted: a fresh mint inside a session-swap window names the incoming
+    // session and no longer identifies the turn being cancelled.
+    const prompt_id =
+      activeInteractionPromptId ??
+      config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
       modelOverrideRef.current ?? config.getModel(),
       prompt_id,
@@ -1641,7 +1649,13 @@ export const useLlmStream = (
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+          ? await handleSlashCommand(
+              trimmedQuery,
+              undefined,
+              undefined,
+              undefined,
+              prompt_id,
+            )
           : false;
 
         if (slashCommandResult) {

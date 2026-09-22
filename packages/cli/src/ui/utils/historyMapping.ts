@@ -9,6 +9,8 @@ import type { Content } from '@google/genai';
 import type { ApiUserPromptOptions } from '@qwen-code/qwen-code-core';
 import {
   CompressionStatus,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
   getStartupContextLength,
   isApiUserPrompt,
 } from '@qwen-code/qwen-code-core';
@@ -84,15 +86,11 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * Computes the number of API Content[] entries to keep when rewinding
  * to a specific user turn in the UI history.
  *
- * The API history may include:
- * - A startup context entry at the beginning
- * - User text prompts (corresponding to UI user turns)
- * - Model responses (with optional functionCall parts)
- * - Tool result entries: user(functionResponse) + model(response)
- *
- * This function counts user text Content entries (skipping tool results
- * and the startup context entry) to find the API boundary corresponding
- * to the target UI user turn.
+ * A turn whose API entry carries its stable identity resolves by that
+ * identity; everything else keeps the positional mapping used before prompt
+ * identities existed. That mapping counts user text Content entries (skipping
+ * tool results and the startup context entry) to find the API boundary
+ * corresponding to the target UI user turn.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
  * IDE context. This function does not account for those and will produce
@@ -103,7 +101,8 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * @param targetUserItemId The ID of the user HistoryItem to rewind to
  * @param apiHistory The current API Content[] array
  * @returns The number of Content entries to keep, or -1 if the target turn
- *   could not be located (e.g., it was absorbed by chat compression).
+ *   could not be located (e.g., it was absorbed by chat compression, or its
+ *   identity is claimed by more than one turn on either side).
  */
 export function computeApiTruncationIndex(
   uiHistory: HistoryItem[],
@@ -118,55 +117,80 @@ export function computeApiTruncationIndex(
   const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
-  // Count how many UI user turns exist before the target
+  // Count visible user turns before the target for legacy positional mapping.
   let uiUserTurnCount = 0;
   for (
-    let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
-    i < targetIndex;
-    i++
+    let index = compressionIndex === -1 ? 0 : compressionIndex + 1;
+    index < targetIndex;
+    index++
   ) {
-    const item = uiHistory[i]!;
-    if (isRealUserTurn(item)) {
-      uiUserTurnCount++;
-    }
+    if (isRealUserTurn(uiHistory[index]!)) uiUserTurnCount++;
   }
 
-  // Determine the starting index in the API history (skip startup context)
   const startIndex = getStartupContextLength(apiHistory, {
     includeCompressed: true,
   });
 
-  if (uiUserTurnCount === 0) {
-    // Marker-less auto-compaction (entrance 3): the API history carries a
-    // compressed prefix but the UI has no summarizing compression boundary.
-    // Rewinding to the first turn would silently truncate to
-    // [prelude, summary, ack] and drop every real turn — fail loud instead.
+  // Marker-less auto-compaction: the API history carries a compressed prefix
+  // but the UI has no summarizing compression boundary, so the first turn has
+  // already been absorbed. Rewinding to it would silently truncate to
+  // [prelude, summary, ack] and drop every real turn — fail loud instead.
+  if (
+    uiUserTurnCount === 0 &&
+    compressionIndex === -1 &&
+    startIndex > getStartupContextLength(apiHistory)
+  ) {
+    return -1;
+  }
+
+  const target = uiHistory[targetIndex]!;
+  if (
+    isRealUserTurn(target) &&
+    target.promptId &&
+    !target.promptIdFileKeyOnly
+  ) {
     if (
-      compressionIndex === -1 &&
-      startIndex > getStartupContextLength(apiHistory)
+      uiHistory.some(
+        (item, index) =>
+          index !== targetIndex &&
+          isRealUserTurn(item) &&
+          !item.promptIdFileKeyOnly &&
+          item.promptId === target.promptId,
+      )
     ) {
       return -1;
     }
-    // Rewinding to the first user turn: keep only startup context (if any)
-    return startIndex;
+    const identified = findApiHistoryPromptIndex(
+      apiHistory,
+      target.promptId,
+      startIndex,
+    );
+    if (identified !== -1) return identified;
+    // The resolver also refuses when TWO entries claim this identity, and
+    // there the positional walk below would be guessing between them. An
+    // entry that carries no mark at all is expected — only first-party user
+    // prompts are marked, every other send stays positional — so fall
+    // through to the mapping this function had before identities existed.
+    const claimed = apiHistory.some(
+      (content, index) =>
+        index >= startIndex &&
+        getApiHistoryPromptId(content) === target.promptId,
+    );
+    if (claimed) return -1;
   }
 
-  // Walk the API history from after the startup context, counting
-  // user text prompts to find the one corresponding to the target turn.
-  let realUserPromptCount = 0;
+  if (uiUserTurnCount === 0) return startIndex;
 
-  for (let i = startIndex; i < apiHistory.length; i++) {
-    if (isUserTextContent(apiHistory[i]!)) {
+  let realUserPromptCount = 0;
+  for (let index = startIndex; index < apiHistory.length; index++) {
+    if (isUserTextContent(apiHistory[index]!)) {
       realUserPromptCount++;
-      // The target turn is the (uiUserTurnCount + 1)th real user prompt.
-      // We want to truncate right before it.
-      if (realUserPromptCount > uiUserTurnCount) {
-        return i;
-      }
+      // Truncate immediately before the target prompt.
+      if (realUserPromptCount > uiUserTurnCount) return index;
     }
   }
 
-  // If we didn't find enough user prompts (e.g., after compression),
-  // signal that the target turn is unreachable.
+  // Not enough user prompts after the startup context (e.g. after
+  // compression): the target turn is unreachable.
   return -1;
 }
