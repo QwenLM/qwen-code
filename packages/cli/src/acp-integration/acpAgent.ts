@@ -358,7 +358,6 @@ import {
   type PeerQueuedDelivery,
 } from '../peerMessaging/peer-messaging.js';
 import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
-import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -4885,14 +4884,18 @@ class QwenAgent implements Agent {
           getPolicySetting: (name) => {
             const session = this.hostedSession(name);
             if (!session) return 'refuse';
+            // Queuing a message starts with a transcript record, so a
+            // session with no recorder can never take one. Said here,
+            // where the answer is "stop", rather than at delivery, whose
+            // only answer is "not now" — which would have a sender retry
+            // forever against a condition that does not change.
+            if (session.getConfig().getChatRecordingService() === undefined) {
+              return 'refuse';
+            }
             const settings = session.getSettings();
             return isCrossSessionMessagingEnabled(settings.merged)
               ? settings.merged.agents?.crossSessionInbound
               : 'refuse';
-          },
-          getPolicyScope: (name) => {
-            const settings = this.hostedSession(name)?.getSettings();
-            return settings ? inboundPolicyScope(settings) : undefined;
           },
           // Nothing here can put a parked message in front of anyone: a
           // session a program drives has no `/peers` to read and nobody
@@ -4901,6 +4904,9 @@ class QwenAgent implements Agent {
           // it holding a `held` that promises a review that cannot
           // happen. Presenting them is a separate piece of work.
           presentsHolds: false,
+          // No `getPolicyScope`: the gate reads a scope to group held
+          // messages, and nothing is held here. It belongs with the host
+          // that can present one.
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             this.publishInboxAddress(ipcPath, ipcToken),
           resolveSessionId: (id) => this.resolveHostedSessionId(id),
@@ -5029,10 +5035,42 @@ class QwenAgent implements Agent {
    * are still waiting.
    */
   private expireUnreadPeerMessages(session: Session): void {
+    void this.settlePeerExpiries(this.takeUnreadPeerMessages(session));
+  }
+
+  /**
+   * Take what `session` was handed and never read.
+   *
+   * Synchronous, and separate from sending the receipts: the taking has
+   * to happen before the queue is emptied, with no await in between,
+   * while the receipts can travel afterwards.
+   */
+  private takeUnreadPeerMessages(session: Session): PeerQueuedDelivery[] {
+    if (!this.peerMessaging) return [];
+    return session.takeUnconsumedPeerDeliveries();
+  }
+
+  /**
+   * Tell each sender its message expired, in batches under the
+   * transport's concurrent-send ceiling.
+   *
+   * A burst past that ceiling is refused, and a refused correction is
+   * the wrong receipt left standing — the one thing this is here to fix.
+   * The batch stays well below it because closing the inbox fires rounds
+   * of its own that share the same counter.
+   */
+  private async settlePeerExpiries(
+    deliveries: readonly PeerQueuedDelivery[],
+  ): Promise<void> {
     const messaging = this.peerMessaging;
-    if (!messaging) return;
-    for (const delivery of session.takeUnconsumedPeerDeliveries()) {
-      messaging.reportExpired(delivery);
+    if (!messaging || deliveries.length === 0) return;
+    const batch = 32;
+    for (let index = 0; index < deliveries.length; index += batch) {
+      await Promise.all(
+        deliveries
+          .slice(index, index + batch)
+          .map((delivery) => messaging.reportExpired(delivery)),
+      );
     }
   }
 
@@ -5041,10 +5079,11 @@ class QwenAgent implements Agent {
    * answer costs its senders a correction, which is best-effort anyway;
    * it must not cost the process the socket close that follows.
    */
-  private expireUnreadPeerMessagesEverywhere(): void {
+  private async expireUnreadPeerMessagesEverywhere(): Promise<void> {
+    const deliveries: PeerQueuedDelivery[] = [];
     for (const session of this.sessions.values()) {
       try {
-        this.expireUnreadPeerMessages(session);
+        deliveries.push(...this.takeUnreadPeerMessages(session));
       } catch (error) {
         debugLogger.debug(
           `[ACP] settling unread peer messages failed: ${
@@ -5052,6 +5091,15 @@ class QwenAgent implements Agent {
           }`,
         );
       }
+    }
+    try {
+      await this.settlePeerExpiries(deliveries);
+    } catch (error) {
+      debugLogger.debug(
+        `[ACP] settling unread peer messages failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -5066,8 +5114,9 @@ class QwenAgent implements Agent {
       // Before the inbox goes: the process is on its way out, and every
       // message still waiting in a session's queue was receipted
       // `delivered` to a sender that will otherwise never learn it went
-      // unread.
-      this.expireUnreadPeerMessagesEverywhere();
+      // unread. Awaited, because the socket closes next and a receipt
+      // still in flight then is a correction nobody hears.
+      await this.expireUnreadPeerMessagesEverywhere();
       this.peerMessaging = null;
       await messaging?.close();
     } catch (error) {

@@ -2452,6 +2452,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
         enqueuePeerMessage: ReturnType<typeof vi.fn>;
+        isOpenForPeerMessages: ReturnType<typeof vi.fn>;
         hasRoomForPeerMessage: ReturnType<typeof vi.fn>;
         takeUnconsumedPeerDeliveries: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
@@ -5232,7 +5233,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getId: vi.fn().mockReturnValue(createdSessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(createdConfig),
-          getSettings: vi.fn().mockReturnValue(makeSessionSettings()),
+          // The settings this session was created with, the way the
+          // production Session answers: what the gate's policy reader
+          // reads is this session's own, not a fresh default.
+          getSettings: vi
+            .fn()
+            .mockReturnValue(_settings ?? makeSessionSettings()),
           // Asked before every cross-session lookup, and for what this
           // session never read when it leaves.
           isOpenForPeerMessages: vi.fn().mockReturnValue(true),
@@ -5767,6 +5773,86 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       return { agent, agentPromise, submit, reportExpired };
     }
 
+    /** The options the transport was started with. */
+    function inboxOptions() {
+      return mockPeerMessagingStart.mock.calls[0]![0] as {
+        getPolicySetting: (name?: string) => string | undefined;
+        getApprovalMode: (name?: string) => string | null;
+        resolveSessionId: (id: string) => string | undefined;
+      };
+    }
+
+    it("answers with the addressed session's own mode and policy", async () => {
+      // What #12303 reported: the answer was the same for every message
+      // — `refuse` — whoever sent it and whatever mode the session ran
+      // in, so a controller grant and a session's own processes were
+      // turned away with it.
+      const { agentPromise } = await startWithInbox('hosted-in');
+      const options = inboxOptions();
+
+      // Unset, so nothing outranks the mode, a trusted controller or the
+      // session's own processes.
+      expect(options.getPolicySetting('hosted-in')).toBeUndefined();
+      expect(options.getApprovalMode('hosted-in')).toBe('default');
+      // A name this process does not hold is answered about no session
+      // at all, rather than judged by another session's settings.
+      expect(options.getApprovalMode('someone-else')).toBeNull();
+      expect(options.getPolicySetting('someone-else')).toBe('refuse');
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('refuses messages to a session that cannot write one down', async () => {
+      // Queuing starts with a transcript record, so this session can
+      // never take a message. "No room" would be read as "not now" and
+      // retried forever.
+      const { agentPromise } = await startWithInbox('hosted-in');
+      const session = lastSessionMock!;
+      session.getConfig().getChatRecordingService = vi
+        .fn()
+        .mockReturnValue(undefined);
+      const options = inboxOptions();
+
+      expect(options.getPolicySetting('hosted-in')).toBe('refuse');
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('does not answer for a session that can no longer be addressed', async () => {
+      const { agentPromise } = await startWithInbox('hosted-in');
+      const session = lastSessionMock!;
+      session.isOpenForPeerMessages.mockReturnValue(false);
+      const options = inboxOptions();
+
+      expect(options.resolveSessionId('hosted-in')).toBeUndefined();
+      expect(options.getPolicySetting('hosted-in')).toBe('refuse');
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('stays addressable with no room, and says so', async () => {
+      // A session closing may yet stay: the close gate is released again
+      // when an `onlyIfUnheld` close finds a hold. "Not this session" is
+      // terminal, so the answer while it has no room is that it has no
+      // room — unsettled, and honest to retry.
+      const { agentPromise, submit } = await startWithInbox('hosted-in');
+      const session = lastSessionMock!;
+      session.hasRoomForPeerMessage.mockReturnValue(false);
+      const options = inboxOptions();
+
+      expect(options.resolveSessionId('hosted-in')).toBe('hosted-in');
+      expect(
+        submit('<peer-message />', 'display', peerDelivery('hosted-in')),
+      ).toBe(false);
+      expect(session.enqueuePeerMessage).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it('hands an accepted message to the session it names', async () => {
       const { agentPromise, submit } = await startWithInbox('hosted-in');
       const session = lastSessionMock!;
@@ -5858,6 +5944,60 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         session.takeUnconsumedPeerDeliveries.mock.invocationCallOrder[0]!,
       ).toBeLessThan(session.dispose.mock.invocationCallOrder[0]!);
+    });
+
+    it('sends the corrections in batches, and before the inbox closes', async () => {
+      // The transport refuses a send past its concurrent ceiling, and a
+      // refused correction is the wrong receipt left standing; the
+      // socket closing with one still in flight costs the same.
+      const setSubmitFn = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      let inFlight = 0;
+      let peakInFlight = 0;
+      const release: Array<() => void> = [];
+      const reportExpired = vi.fn(() => {
+        inFlight += 1;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        return new Promise<void>((resolve) => {
+          release.push(() => {
+            inFlight -= 1;
+            resolve();
+          });
+        });
+      });
+      mockPeerMessagingStart.mockResolvedValue({
+        close,
+        setSubmitFn,
+        reportExpired,
+      });
+      await setupSessionMocks('hosted-many');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(setSubmitFn).toHaveBeenCalled());
+      const unread = Array.from({ length: 80 }, (_, index) =>
+        peerDelivery('hosted-many', `msg-${index}`),
+      );
+      lastSessionMock!.takeUnconsumedPeerDeliveries.mockReturnValue(unread);
+
+      mockConnectionState.resolve();
+      // Each batch settles before the next one is sent, so the ceiling is
+      // never approached and the close waits for all of them.
+      await vi.waitFor(() => expect(reportExpired).toHaveBeenCalledTimes(32));
+      expect(close).not.toHaveBeenCalled();
+      while (reportExpired.mock.calls.length < unread.length) {
+        release.splice(0).forEach((resolve) => resolve());
+        await vi.waitFor(() =>
+          expect(reportExpired.mock.calls.length % 32 === 0).toBe(true),
+        );
+      }
+      release.splice(0).forEach((resolve) => resolve());
+      await agentPromise;
+
+      expect(reportExpired).toHaveBeenCalledTimes(80);
+      expect(peakInFlight).toBeLessThanOrEqual(32);
+      expect(close).toHaveBeenCalled();
     });
 
     it('settles one session as it leaves, while the process carries on', async () => {
@@ -6026,7 +6166,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
       const disposed = internals.disposeSessions();
       await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
-      expect(close).toHaveBeenCalled();
+      // The receipts a leaving session owes its senders travel before the
+      // inbox closes, so the close is a turn or two of the loop later.
+      await vi.waitFor(() => expect(close).toHaveBeenCalled());
       // The record teardown still waits for the drain: the address clear
       // is a patch the records must still be there for.
       expect(innerConfig.unregisterSessionRegistry).not.toHaveBeenCalled();
