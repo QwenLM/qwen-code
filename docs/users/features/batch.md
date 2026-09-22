@@ -171,6 +171,62 @@ qwen batch cancel batch_abc123
 
 Requests that already completed are still billed.
 
+## The agent-prepared workflow: `/batch --api`
+
+The four verbs above are the transport. Most bulk work is easier through the
+workflow layer: you describe the task, the agent prepares a plan, and the
+executor submits, tracks, and delivers results as files.
+
+```text
+/batch --api translate the Markdown docs in docs/zh into English,
+writing them to docs/en with the same file names
+```
+
+The agent checks that the task fits batch's shape (independent single-turn
+transforms whose materials exist now — see
+[When batch is the right tool](#when-batch-is-the-right-tool)), reads a small
+sample, writes a plan to `.qwen/batch/plans/`, and submits it through:
+
+```bash
+qwen batch run .qwen/batch/plans/<slug>.json
+# task translate-docs-20260923103000: 42 item(s), window 24h
+# ~180,000 in / ~190,000 out tokens (rough estimate); ...
+# batch job: batch_abc123
+# collect later with: qwen batch collect translate-docs-20260923103000
+```
+
+`run` returns immediately — the provider works for tens of minutes to hours.
+Nothing polls a model while you wait. Later:
+
+```bash
+qwen batch collect <task-id> [--wait]   # validate + write target files
+qwen batch list                          # every task recorded under .qwen/batch
+qwen batch retry <task-id>               # resubmit only the failed items
+qwen batch cancel --task <task-id>       # partial results are still billed
+```
+
+`collect` reports each item as **delivered** (written to its target),
+**held** (the source changed after submission, or the target already exists
+with different content — resolve and re-run collect, no new request is made),
+or **failed** (truncated, empty, provider error — `retry` resubmits just
+these). Re-running `collect` is always safe: results are parsed from the
+local record, delivered items are never redone, and repeated collects never
+double-count usage. After results are safely on disk the remote input and
+output files are deleted (`--keep-remote` keeps them).
+
+Each item's state survives crashes in `.qwen/batch/tasks/<task-id>/`. If the
+create call's answer is lost (a 5xx or a dropped socket after the provider
+accepted it), the task is marked `submit-unknown` and `collect` reconciles
+against the provider's batch list instead of resubmitting — a duplicate
+submission would bill twice.
+
+Cost estimates are token-based unless you provide unit prices via
+`QWEN_BATCH_INPUT_PRICE_PER_1M_USD` and `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`
+(a plan's `maxCostUsd` budget is only enforced when prices are set). Batch
+usage is recorded in the task ledger, separate from the interactive session's
+cache statistics. The design contract for this workflow is
+[`docs/design/2026-09-23-agent-prepared-batch-api.md`](../design/2026-09-23-agent-prepared-batch-api.md).
+
 ## Verifying locally without an API key
 
 A fake DashScope server and a regression script that drives the real CLI

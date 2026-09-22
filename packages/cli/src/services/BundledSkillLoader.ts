@@ -11,7 +11,8 @@ import {
   buildSkillLlmContent,
   applySkillSideEffects,
 } from '@qwen-code/qwen-code-core';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import type { ICommandLoader } from './types.js';
 import type {
   SlashCommand,
@@ -114,8 +115,30 @@ export class BundledSkillLoader implements ICommandLoader {
           // Skill tool's model-invocation path (#11067).
           await applySkillSideEffects(this.config, skill);
 
-          // Resolve template variables in skill body
+          // `/batch --api <task>` selects the batch skill's API-mode
+          // instructions instead of its default parallel-workers ones. Mode
+          // selection is a flag, so it is resolved here in code: a model
+          // that never sees the flag cannot be talked into the wrong mode.
+          let rawArgs = context.invocation?.args ?? '';
           let body = skill.body;
+          if (skill.name === 'batch' && /^\s*--api(?:\s|$)/.test(rawArgs)) {
+            try {
+              body = await readFile(
+                join(dirname(skill.filePath), 'api-mode.md'),
+                'utf8',
+              );
+            } catch {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content:
+                  'Batch API mode is unavailable: api-mode.md is missing from the bundled batch skill.',
+              };
+            }
+            rawArgs = rawArgs.replace(/^\s*--api(?:\s+|$)/, '');
+          }
+
+          // Resolve template variables in skill body
           const modelId = this.config?.getModel()?.trim() || '';
           const cliVersion = this.config?.getCliVersion()?.trim() || 'unknown';
           body = body.replaceAll('{{cliVersion}}', cliVersion);
@@ -141,7 +164,6 @@ export class BundledSkillLoader implements ICommandLoader {
           // its job perfectly on the wrong input, reviewed the local working
           // tree instead of the pull request, found it clean, and reported
           // "no changes to review".
-          const rawArgs = context.invocation?.args ?? '';
           let content;
           if (rawArgs) {
             content = appendToLastTextPart(

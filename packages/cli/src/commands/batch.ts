@@ -12,8 +12,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import type { Argv, CommandModule } from 'yargs';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { loadSettings } from '../config/settings.js';
@@ -23,39 +21,29 @@ import {
 } from '../utils/modelConfigUtils.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { resolveProxy } from './channel/proxy.js';
+import {
+  SETTLED_STATUSES,
+  MAX_REQUESTS_PER_FILE,
+  MAX_FILE_BYTES,
+  MAX_LINE_BYTES,
+  assertValidWindow,
+  batchRequest as api,
+  uploadBatchJsonl,
+  downloadRemoteFile,
+} from './batch-client.js';
+import {
+  runPlan,
+  collectTask,
+  listTasks,
+  retryTask,
+  cancelTask,
+  type WorkflowDeps,
+} from './batch-workflow.js';
+
+export { assertValidWindow };
 
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-const SETTLED = new Set(['completed', 'failed', 'expired', 'cancelled']);
-
-// Provider ceilings for one batch input file, checked locally so an
-// out-of-range file is refused before it is uploaded rather than after — the
-// upload is the slow, billable half of the mistake. These are the numbers the
-// user doc states (docs/users/features/batch.md); if the provider raises them,
-// both move together.
-const MAX_REQUESTS_PER_FILE = 50_000;
-const MAX_FILE_BYTES = 500 * 1024 * 1024;
-const MAX_LINE_BYTES = 6 * 1024 * 1024;
-// `completion_window` bounds, in hours: the provider offers 24h to 14d.
-const MIN_WINDOW_HOURS = 24;
-const MAX_WINDOW_HOURS = 14 * 24;
-
-/**
- * Reject a completion window the provider does not offer, before anything is
- * uploaded. Forwarding it verbatim costs a full upload to learn that `12h` is
- * not a window — a limit this PR's own docs state.
- */
-export function assertValidWindow(window: string): void {
-  const match = /^(\d+)([hd])$/.exec(window);
-  if (!match) {
-    throw new Error(
-      `--window must be a number followed by h or d, e.g. 24h or 7d; got "${window}".`,
-    );
-  }
-  const hours = Number(match[1]) * (match[2] === 'd' ? 24 : 1);
-  if (hours < MIN_WINDOW_HOURS || hours > MAX_WINDOW_HOURS) {
-    throw new Error(`--window must be between 24h and 14d; got "${window}".`);
-  }
-}
+const SETTLED = SETTLED_STATUSES;
 
 export interface BatchEndpoint {
   apiKey: string;
@@ -169,29 +157,6 @@ const cliOptionsOf = (argv: Record<string, unknown>): BatchCliOptions => ({
   proxy: argv['proxy'] as string | undefined,
   insecure: argv['insecure'] as boolean | undefined,
 });
-
-async function api(
-  ep: BatchEndpoint,
-  route: string,
-  init: RequestInit = {},
-): Promise<Response> {
-  const res = await fetch(`${ep.baseUrl}${route}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${ep.apiKey}`, ...(init.headers ?? {}) },
-  });
-  if (!res.ok) {
-    const detail = (await res.text()).slice(0, 500);
-    // The status rides along so callers can tell a definite provider
-    // rejection (4xx) from an ambiguous one (5xx after the work was accepted).
-    throw Object.assign(
-      new Error(
-        `${init.method ?? 'GET'} ${route} -> HTTP ${res.status}: ${detail}`,
-      ),
-      { status: res.status },
-    );
-  }
-  return res;
-}
 
 const postJson = (ep: BatchEndpoint, route: string, body: unknown) =>
   api(ep, route, {
@@ -380,12 +345,7 @@ export async function submitBatch(
     throw new Error(`${file} has no requests.`);
   }
 
-  const form = new FormData();
-  form.append('purpose', 'batch');
-  form.append('file', new Blob([jsonl]), path.basename(file));
-  const uploaded = (await (
-    await api(ep, '/files', { method: 'POST', body: form })
-  ).json()) as { id: string };
+  const uploaded = await uploadBatchJsonl(ep, jsonl, path.basename(file));
   // The input file is a billable object and this CLI has no `files`
   // subcommand, so name it before the create: if the create fails (or the
   // transport drops ambiguously after the provider accepted it), the id is
@@ -474,26 +434,8 @@ export async function fetchBatch(
     [job.error_file_id, 'error'],
   ] as const) {
     if (!fileId) continue;
-    const res = await api(ep, `/files/${fileId}/content`);
     const target = path.join(outDir, `${id}.${suffix}.jsonl`);
-    const partial = `${target}.part`;
-    // Stream to disk: the output file can approach the provider's 500 MB
-    // ceiling and materialising it as one JS string risks the default heap.
-    if (!res.body) throw new Error(`empty response for ${fileId}`);
-    // Stage under `.part` and rename only once the body is fully consumed: a
-    // download cut short would otherwise leave a truncated file under the
-    // exact name a complete one has — and its last line can still be valid
-    // JSON, so nothing about it announces that the paid result is short.
-    try {
-      await pipeline(
-        Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]),
-        fs.createWriteStream(partial),
-      );
-    } catch (error) {
-      fs.rmSync(partial, { force: true });
-      throw error;
-    }
-    fs.renameSync(partial, target);
+    await downloadRemoteFile(ep, fileId, target);
     written.push(target);
   }
   if (remove) {
@@ -618,21 +560,134 @@ const fetchCommand: CommandModule = {
 };
 
 const cancelCommand: CommandModule = {
-  command: 'cancel <id>',
+  command: 'cancel [id]',
   describe: 'Cancel a batch job (already-completed requests are still billed)',
   builder: (yargs) =>
-    yargs.positional('id', {
-      describe: 'Batch id',
+    yargs
+      .positional('id', {
+        describe: 'Batch id',
+        type: 'string',
+      })
+      .option('task', {
+        describe:
+          'Cancel the active batch of a workflow task instead of a bare batch id',
+        type: 'string',
+      })
+      .check((argv) =>
+        argv['task'] || argv['id']
+          ? true
+          : 'cancel needs a batch id or --task <task-id>',
+      ),
+  handler: (argv) =>
+    run(async () => {
+      const ep = await prepareEndpoint(process.env, cliOptionsOf(argv));
+      if (argv['task']) {
+        await cancelTask(workflowDeps(ep), argv['task'] as string);
+        return;
+      }
+      const job = (await (
+        await postJson(ep, `/batches/${argv['id'] as string}/cancel`, {})
+      ).json()) as BatchJob;
+      writeStdoutLine(describeBatch(job));
+    }),
+};
+
+/** Deps shared by the agent-prepared workflow subcommands. */
+const workflowDeps = (ep: BatchEndpoint): WorkflowDeps => ({
+  ep,
+  cwd: process.cwd(),
+  env: process.env,
+  out: writeStdoutLine,
+  err: writeStderrLine,
+});
+
+const runWorkflowCommand: CommandModule = {
+  command: 'run <plan>',
+  describe:
+    'Run an agent-prepared batch plan: assemble requests, submit, record the task',
+  builder: (yargs) =>
+    yargs.positional('plan', {
+      describe:
+        'Plan JSON (usually written by the /batch --api skill): shared rules + source/target items',
       type: 'string',
       demandOption: true,
     }),
   handler: (argv) =>
     run(async () => {
-      const ep = await prepareEndpoint(process.env, cliOptionsOf(argv));
-      const job = (await (
-        await postJson(ep, `/batches/${argv['id'] as string}/cancel`, {})
-      ).json()) as BatchJob;
-      writeStdoutLine(describeBatch(job));
+      await runPlan(
+        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        argv['plan'] as string,
+      );
+    }),
+};
+
+const collectWorkflowCommand: CommandModule = {
+  command: 'collect <task-id>',
+  describe:
+    'Collect a workflow task: reconcile, download, validate, and deliver results',
+  builder: (yargs) =>
+    yargs
+      .positional('task-id', {
+        describe: 'Task id printed by `qwen batch run`',
+        type: 'string',
+        demandOption: true,
+      })
+      .option('wait', {
+        describe: 'Poll until the batch settles (see --timeout)',
+        type: 'boolean',
+        default: false,
+      })
+      .option('timeout', {
+        describe: 'Seconds to wait with --wait before giving up',
+        type: 'number',
+        default: 3600,
+      })
+      .option('keep-remote', {
+        describe: 'Keep the uploaded input/output files on the provider',
+        type: 'boolean',
+        default: false,
+      }),
+  handler: (argv) =>
+    run(async () => {
+      await collectTask(
+        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        argv['task-id'] as string,
+        {
+          wait: argv['wait'] as boolean,
+          timeoutSeconds: argv['timeout'] as number,
+          keepRemote: argv['keep-remote'] as boolean,
+        },
+      );
+    }),
+};
+
+const retryWorkflowCommand: CommandModule = {
+  command: 'retry <task-id>',
+  describe: 'Resubmit only the failed items of a workflow task',
+  builder: (yargs) =>
+    yargs.positional('task-id', {
+      describe: 'Task id',
+      type: 'string',
+      demandOption: true,
+    }),
+  handler: (argv) =>
+    run(async () => {
+      await retryTask(
+        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        argv['task-id'] as string,
+      );
+    }),
+};
+
+const listWorkflowCommand: CommandModule = {
+  command: 'list',
+  describe: 'List workflow tasks recorded under this project',
+  builder: (yargs) => yargs,
+  handler: (argv) =>
+    run(async () => {
+      await listTasks(
+        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+      );
     }),
 };
 
@@ -645,6 +700,10 @@ export const batchCommand: CommandModule = {
       .command(statusCommand)
       .command(fetchCommand)
       .command(cancelCommand)
+      .command(runWorkflowCommand)
+      .command(collectWorkflowCommand)
+      .command(retryWorkflowCommand)
+      .command(listWorkflowCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},
