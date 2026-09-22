@@ -151,11 +151,17 @@ describe('CUA release workflow', () => {
     expect(steps[signIndex].env.SIGNING_TEST_ONLY).toBe(
       "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/') }}",
     );
+    const signingScriptPath = '.github/scripts/sign-cua-windows-worker.ps1';
+    expect(steps[signIndex].run).toContain(signingScriptPath);
     expect(steps[signIndex].run).toContain(
+      '-Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"',
+    );
+    const signingScript = readFileSync(signingScriptPath, 'utf8');
+    expect(signingScript).toContain(
       "throw 'A trusted Windows code-signing certificate is required",
     );
-    expect(steps[signIndex].run).toContain("$signature.Status -ne 'Valid'");
-    expect(steps[signIndex].run).toContain(
+    expect(signingScript).toContain("$signature.Status -ne 'Valid'");
+    expect(signingScript).toContain(
       "$_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3'",
     );
     expect(steps[installIndex].run).toContain('npm install');
