@@ -23,6 +23,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -3936,6 +3937,7 @@ async function runQwenServeImpl(
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
+          readSshWorkspace(cwd);
         } catch (err) {
           writeStderrLine(
             `qwen serve: skipping persisted workspace registration ${JSON.stringify(
@@ -4127,10 +4129,12 @@ async function runQwenServeImpl(
       ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
     });
   };
-  const startupChannelWorkspaces = workspaceInputs.map((workspace, index) => ({
-    workspaceCwd: workspace.cwd,
-    primary: index === 0,
-  }));
+  const startupChannelWorkspaces = workspaceInputs
+    .filter((workspace) => !readSshWorkspace(workspace.cwd))
+    .map((workspace, index) => ({
+      workspaceCwd: workspace.cwd,
+      primary: index === 0,
+    }));
   if (
     !opts.channelSelection &&
     (bootSettings?.serve?.channels !== undefined ||
@@ -8469,7 +8473,10 @@ async function runQwenServeImpl(
       channelWebhookEnvByWorkspace.set(workspace.cwd, effectiveEnv);
       return undefined;
     }
-    const workspaces = workspaceInputs.map((workspace, index) => {
+    const channelWorkspaces = workspaceInputs.filter(
+      (workspace) => !readSshWorkspace(workspace.cwd),
+    );
+    const workspaces = channelWorkspaces.map((workspace, index) => {
       const runtime = resolveRuntime(workspace.cwd);
       const trusted = resolveTrusted(workspace.cwd, index === 0, runtime);
       const settings = validationSettingsRuntime.settings.loadSettings(
@@ -9073,8 +9080,11 @@ async function runQwenServeImpl(
           string,
           ReturnType<SettingsRuntime['loadSettings']>
         >();
+        const channelRuntimes = runtimes.filter(
+          (runtime) => !runtime.routeFileSystemFactory.sshWorkspace,
+        );
         const grouping = resolveChannelWorkspaceGroups({
-          workspaces: runtimes.map((runtime) => {
+          workspaces: channelRuntimes.map((runtime) => {
             const settings = settingsRuntime.settings.loadSettings(
               runtime.workspaceCwd,
               {

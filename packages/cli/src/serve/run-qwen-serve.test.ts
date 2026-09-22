@@ -7,7 +7,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { X509Certificate } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
@@ -14840,6 +14840,87 @@ describe('runQwenServe channel worker supervisor', () => {
         channels: ['telegram', 'discord'],
         servePid: process.pid,
       });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('excludes SSH workspaces from startup channels and runtime selection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ssh-channels-')),
+    );
+    vi.stubEnv('QWEN_HOME', tmpDir);
+    const primary = path.join(tmpDir, 'primary');
+    const url = 'ssh://host/srv/project';
+    const anchor = path.join(
+      tmpDir,
+      'ssh-workspaces',
+      createHash('sha256').update(url).digest('hex'),
+      'workspace',
+    );
+    writeWorkspaceSettings(anchor, {
+      channels: { remote: { type: 'telegram' } },
+      serve: { channels: ['remote'] },
+    });
+    fs.writeFileSync(
+      path.join(anchor, '..', 'connection.json'),
+      JSON.stringify({ url }),
+    );
+    writeWorkspaceSettings(primary, {
+      channels: {
+        local: { type: 'telegram' },
+        remote: { type: 'telegram', cwd: anchor },
+      },
+      serve: { channels: ['local'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, anchor],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(factory).toHaveBeenCalledOnce();
+      expect(factory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: primary,
+          selection: { mode: 'names', names: ['local'] },
+        }),
+      );
+      const selected = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['remote'] },
+        }),
+      });
+      expect(selected.status).toBeGreaterThanOrEqual(400);
+      expect(factory).toHaveBeenCalledOnce();
     } finally {
       await handle.close();
     }
