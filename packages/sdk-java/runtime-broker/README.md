@@ -31,11 +31,12 @@ mvn checkstyle:check
 ## JDBC persistence
 
 `JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
-Broker tables. The JDBC implementations use only `javax.sql.DataSource`; the
-embedding service owns the connection pool and schema lifecycle. Tool
-execution rows preserve idempotency identity, dispatch ownership and lease,
-cancellation intent, `UNKNOWN` recovery state, and the final result. This
-module intentionally does not wire a Spring/HTTP adapter.
+Broker tables. The JDBC implementations use `javax.sql.DataSource` for
+database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
+codec; the embedding service owns the connection pool and schema lifecycle.
+Tool execution rows preserve idempotency identity, dispatch ownership and
+lease, cancellation intent, `UNKNOWN` recovery state, and the final result.
+This module intentionally does not wire a Spring/HTTP adapter.
 
 Run the optional real-MySQL contract with:
 
