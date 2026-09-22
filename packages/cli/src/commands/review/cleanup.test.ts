@@ -106,6 +106,9 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const realpathSync = Object.assign(mocks.realpathSync, {
+    native: mocks.realpathSync,
+  });
   return {
     ...actual,
     default: {
@@ -115,7 +118,7 @@ vi.mock('node:fs', async (importOriginal) => {
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
       statSync: mocks.statSync,
-      realpathSync: mocks.realpathSync,
+      realpathSync,
       rmSync: mocks.rmSync,
     },
     existsSync: mocks.existsSync,
@@ -123,7 +126,7 @@ vi.mock('node:fs', async (importOriginal) => {
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
     statSync: mocks.statSync,
-    realpathSync: mocks.realpathSync,
+    realpathSync,
     rmSync: mocks.rmSync,
   };
 });
