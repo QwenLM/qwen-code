@@ -5140,6 +5140,167 @@ describe('ExtensionStore', () => {
       await store.readSnapshot();
     });
 
+    it('throws when the marker write fails for an older sibling of a deferred journal', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const { destination } = await plantStackedPair(store);
+      const rollbackRoot = path.join(storeDir, 'rollback');
+      const internals = store as unknown as {
+        copyTree: (
+          source: string,
+          target: string,
+          budget: unknown,
+        ) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string, budget: unknown) => {
+          if (source === path.join(rollbackRoot, 'stack-t2')) {
+            throw lockError(source);
+          }
+          return await copyTree(source, target, budget);
+        },
+      );
+      atomicWriteFault.inspect = (target) =>
+        target.endsWith('stack-t1.json') ? lockError(target) : undefined;
+      try {
+        const thrown = await store
+          .readSnapshot()
+          .catch((error: unknown) => error);
+        expect((thrown as NodeJS.ErrnoException).code).toBe('EPERM');
+        const t2 = JSON.parse(
+          await fsp.readFile(
+            path.join(storeDir, 'transactions', 'stack-t2.json'),
+            'utf8',
+          ),
+        );
+        expect(t2.rollbackBlocked).toBe(true);
+        const t1 = JSON.parse(
+          await fsp.readFile(
+            path.join(storeDir, 'transactions', 'stack-t1.json'),
+            'utf8',
+          ),
+        );
+        expect(t1.rollbackBlocked).toBeUndefined();
+        expect(
+          await fsp.stat(path.join(rollbackRoot, 'stack-t1')),
+        ).toBeDefined();
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('three');
+      } finally {
+        atomicWriteFault.inspect = undefined;
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('does not promote an older sibling when the newer journal cannot retry', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const { destination } = await plantStackedPair(store);
+      // Drop a backup entry so canRetryRollback answers false for T2.
+      await fsp.unlink(path.join(destination, EXTENSIONS_CONFIG_FILENAME));
+      const rollbackRoot = path.join(storeDir, 'rollback');
+      const internals = store as unknown as {
+        copyTree: (
+          source: string,
+          target: string,
+          budget: unknown,
+        ) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string, budget: unknown) => {
+          if (source === path.join(rollbackRoot, 'stack-t2')) {
+            throw lockError(source);
+          }
+          return await copyTree(source, target, budget);
+        },
+      );
+      try {
+        const thrown = await store
+          .readSnapshot()
+          .catch((error: unknown) => error);
+        expect(thrown).toBeInstanceOf(ExtensionDirectoryLockedError);
+        expect(await leftoverJournals()).toEqual([
+          'stack-t1.json',
+          'stack-t2.json',
+        ]);
+        expect(
+          await fsp.stat(path.join(rollbackRoot, 'stack-t1')),
+        ).toBeDefined();
+        expect(
+          await fsp.stat(path.join(rollbackRoot, 'stack-t2')),
+        ).toBeDefined();
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('three');
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('keeps a rollback-completed journal when only teardown fails', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const { destination } = await plantStackedPair(store);
+      const rollbackRoot = path.join(storeDir, 'rollback');
+      const internals = store as unknown as {
+        removeTransactionTeardown: (
+          journal: ExtensionTransactionJournal,
+          journalPath: string,
+          budget: unknown,
+        ) => Promise<void>;
+      };
+      vi.spyOn(internals, 'removeTransactionTeardown').mockImplementation(
+        async () => {
+          const error = new Error('EIO') as NodeJS.ErrnoException;
+          error.code = 'EIO';
+          throw error;
+        },
+      );
+      try {
+        const thrown = await store
+          .readSnapshot()
+          .catch((error: unknown) => error);
+        expect((thrown as NodeJS.ErrnoException).code).toBe('EIO');
+        const t2 = JSON.parse(
+          await fsp.readFile(
+            path.join(storeDir, 'transactions', 'stack-t2.json'),
+            'utf8',
+          ),
+        );
+        expect(t2.cleanupPending).toBe(true);
+        expect(t2.phase).toBe('prepared');
+        const t1 = JSON.parse(
+          await fsp.readFile(
+            path.join(storeDir, 'transactions', 'stack-t1.json'),
+            'utf8',
+          ),
+        );
+        expect(t1.cleanupPending).toBeUndefined();
+        expect(await leftoverJournals()).toEqual([
+          'stack-t1.json',
+          'stack-t2.json',
+        ]);
+        expect(
+          await fsp.stat(path.join(rollbackRoot, 'stack-t2')),
+        ).toBeDefined();
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('two');
+        vi.restoreAllMocks();
+        await store.readSnapshot();
+        expect(await leftoverJournals()).toEqual([]);
+        expect(await fsp.readdir(rollbackRoot)).toEqual([]);
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('one');
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
     // The gate's question is the backup comparison, not the manifest name:
     // a half-wiped uninstall keeps a manifest standing beside a deleted
     // payload, and a plugin or link root loads fine carrying neither name.

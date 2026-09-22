@@ -1826,12 +1826,16 @@ export class ExtensionStore {
         }
         if (decided === 'deferred') {
           // Newer journal owns the restore until its window; older ones wait.
-          await this.recordPendingStep(
-            journal,
-            journalPath,
-            'rollback',
-            lockErrorFor(journal.backupDirectory),
-          );
+          if (
+            !(await this.recordPendingStep(
+              journal,
+              journalPath,
+              'rollback',
+              lockErrorFor(journal.backupDirectory),
+            ))
+          ) {
+            throw lockErrorFor(journal.backupDirectory);
+          }
           continue;
         }
         if (decided === 'unrecoverable') {
@@ -1850,20 +1854,39 @@ export class ExtensionStore {
             decided = 'deferred';
           }
         } catch (error: unknown) {
-          // Lock-classified errors already carry their window; only a true
-          // non-lock failure needs quarantine.
-          if (
-            !isDirectoryLockError(error) &&
-            !(error instanceof ExtensionDirectoryLockedError)
-          ) {
-            await quarantineJournal(journalPath, error);
-          }
-          decided = 'unrecoverable';
+          decided = await this.classifyJournal(journal, journalPath, error);
           if (firstUnrecoverable === null) firstUnrecoverable = error;
         }
       }
     }
     if (firstUnrecoverable !== null) throw firstUnrecoverable;
+  }
+
+  /** Classify the journal's fate after `attemptRollback` throws. The
+   *  mark and quarantine booleans are inputs, never silently swallowed. */
+  private async classifyJournal(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+    error: unknown,
+  ): Promise<'deferred' | 'unrecoverable'> {
+    if (error instanceof ExtensionDirectoryLockedError) return 'deferred';
+    if (isDirectoryLockError(error)) throw error;
+    // Rollback completed but teardown failed: cleanupPending is on disk and
+    // rethrowing keeps the journal as the owner of its residue.
+    if (await this.journalCleanupPendingOnDisk(journalPath)) throw error;
+    if (!(await quarantineJournal(journalPath, error))) throw error;
+    return 'unrecoverable';
+  }
+
+  private async journalCleanupPendingOnDisk(
+    journalPath: string,
+  ): Promise<boolean> {
+    try {
+      const text = await fsp.readFile(journalPath, 'utf8');
+      return Boolean(JSON.parse(text).cleanupPending);
+    } catch {
+      return false;
+    }
   }
 
   /** The refusal for a blocked rollback whose retry could not leave a loadable
@@ -2005,12 +2028,16 @@ export class ExtensionStore {
         continue;
       }
       if (decided === 'deferred') {
-        await this.recordPendingStep(
-          journal,
-          journalPath,
-          'rollback',
-          lockErrorFor(journal.backupDirectory),
-        );
+        if (
+          !(await this.recordPendingStep(
+            journal,
+            journalPath,
+            'rollback',
+            lockErrorFor(journal.backupDirectory),
+          ))
+        ) {
+          throw lockErrorFor(journal.backupDirectory);
+        }
         continue;
       }
       if (decided === 'unrecoverable') {
@@ -2022,12 +2049,7 @@ export class ExtensionStore {
           deferredJournal = journal;
         }
       } catch (error: unknown) {
-        if (
-          !isDirectoryLockError(error) &&
-          !(error instanceof ExtensionDirectoryLockedError)
-        ) {
-          await quarantineJournal(journalPath, error);
-        }
+        await this.classifyJournal(journal, journalPath, error);
         throw error;
       }
     }
