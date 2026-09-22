@@ -1044,14 +1044,17 @@ describe('resolve-health: assessment', () => {
     assert.equal(alive.alarm, false);
   });
 
-  it('reads an old sign of life as silence once it ages past the horizon', () => {
-    // The life signal answers "is the lane producing output NOW", and a
-    // result from days ago cannot answer it: reading the whole window as
-    // alive keeps an outage that began yesterday invisible until every
-    // pre-outage result ages out — up to windowDays — instead of the hours
-    // the roster's own clock promises. Three stale, unacknowledged
-    // maintainer requests on their own open PRs; the lane's only classified
-    // result is 36 hours old — past silentHours.
+  it('reads a lane with any result in the window as alive, however old the result', () => {
+    // The never-ran arm exists for the outage that produces NOTHING — no
+    // run, no result, no ack. Its window-level signature must be the
+    // strong one, or it re-admits what the owed gate excludes: a lane that
+    // merely idled — its newest result older than any recency bound —
+    // looks exactly like the outage to an age-based reading, and three
+    // unacknowledged read-only requests would file "0 consecutive
+    // failures, 3 unanswered requests" against a healthy lane. So a result
+    // comment anywhere in the window, however old, keeps the per-request
+    // reading on. Three stale, unacknowledged requests on their own open
+    // PRs; the lane's only classified result is 36 hours old.
     const asks = [0, 1, 2].map((h) => ({
       number: 51 + h,
       state: 'open',
@@ -1070,26 +1073,27 @@ describe('resolve-health: assessment', () => {
       ...asks,
       { number: 90, state: 'open', comments: [result(at, PUSHED, 90)] },
     ];
-    const stale = assess(withResult('2026-08-26T00:00:00Z'), { now });
-    assert.equal(stale.unanswered.length, 3);
-    assert.equal(stale.alarm, true);
-    // The same lane with a recent result is demonstrably alive: the three
-    // unacknowledged requests read as refusals again.
-    const alive = assess(withResult('2026-08-27T09:00:00Z'), { now });
+    const alive = assess(withResult('2026-08-26T00:00:00Z'), { now });
     assert.equal(alive.unanswered.length, 0);
     assert.equal(alive.alarm, false);
-    // The record's timestamps fold into the same horizon: a recorded result
-    // past silentHours is no more evidence of life than a live one.
+    // No result comment ANYWHERE in the window is the never-ran case the
+    // arm exists for: the missing reactions are the outage, not refusals,
+    // and every stale request counts whatever its reaction.
+    const outage = assess(asks, { now });
+    assert.equal(outage.unanswered.length, 3);
+    assert.equal(outage.alarm, true);
+    // The record's sightings count the same way: a recorded result is life
+    // the lane showed, seen unedited by an earlier tick.
     const recorded = assess(asks, {
       now,
       recordedResults: [[904242, 90, '2026-08-26T00:00:00Z']],
     });
-    assert.equal(recorded.unanswered.length, 3);
-    assert.equal(recorded.alarm, true);
+    assert.equal(recorded.unanswered.length, 0);
+    assert.equal(recorded.alarm, false);
   });
 
   it('treats a reaction from just anyone as no sign of life', () => {
-    // The laneSilent arm exists for the outage that produces NOTHING — no
+    // The never-ran arm exists for the outage that produces NOTHING — no
     // run, no result, no ack — so its life signal must be one whose author
     // the watch can check. The projected eyes count cannot say WHO reacted:
     // one 👀 from an account with no repository access, on a closed PR and
@@ -1131,12 +1135,12 @@ describe('resolve-health: assessment', () => {
   });
 
   it('keeps the life signal when the only result in the window was edited after recording', () => {
-    // laneSilent's bot arm carries its own copy of the unedited check, so
-    // editing the window's one result flips the lane back to silent and
-    // every stale refused request joins the roster at once — an alarm
-    // against a lane that demonstrably ran. A result the record carries
-    // was seen unedited by an earlier tick, so the later edit cannot take
-    // back the life the lane showed.
+    // The never-ran arm's life reading carries its own copy of the
+    // unedited check, so editing the window's one result flips the lane
+    // back to mute and every stale refused request joins the roster at
+    // once — an alarm against a lane that demonstrably ran. A result the
+    // record carries was seen unedited by an earlier tick, so the later
+    // edit cannot take back the life the lane showed.
     const served = result('2026-08-26T09:05:00Z', PUSHED, 41);
     const refused = () =>
       [0, 1, 2].map((h) => ({
@@ -1506,6 +1510,101 @@ describe('resolve-health: assessment', () => {
     );
     assert.equal(a.streak, 5);
     assert.equal(a.alarm, true);
+  });
+
+  it('counts a duplicated PR once, by comment id', () => {
+    // The discovery walk paginates a moving search index, so one PR can
+    // reach assess() twice (fetchPrs de-duplicates by number; this is the
+    // second line). Fed twice with identical comment ids, everything it
+    // carries must count once: three failures are a streak of three — not
+    // six over the threshold — and two starved requests stay two. The key
+    // is the comment id, never (at, kind): two genuinely distinct results
+    // may share a created_at second on different PRs.
+    const pr = {
+      number: 42,
+      state: 'open',
+      comments: [
+        result('2026-08-26T00:00:00Z', AGENT_FAILED, 42),
+        result('2026-08-26T01:00:00Z', AGENT_FAILED, 42),
+        result('2026-08-26T02:00:00Z', AGENT_FAILED, 42),
+      ],
+    };
+    const once = assess([pr], { now });
+    const twice = assess([pr, pr], { now });
+    assert.equal(once.streak, 3);
+    assert.equal(twice.streak, 3);
+    assert.equal(twice.alarm, false);
+    const starved = {
+      number: 43,
+      state: 'open',
+      comments: [
+        request('2026-08-26T03:00:00Z', 43, 'writer1'),
+        request('2026-08-26T04:00:00Z', 43, 'writer2'),
+      ],
+    };
+    assert.equal(assess([starved, starved], { now }).unanswered.length, 2);
+  });
+
+  it('does not let a dry run answer the request nothing served', () => {
+    // A dry run is dispatch-only: triggered by no request comment, it
+    // served none. Spent as an answer it would erase the recorded deficit
+    // of a starved request — the roster's proxy would read it as served,
+    // the carry would drop the id, and a later push would close the issue
+    // over it. Here the request was recorded unanswered by an earlier
+    // tick; the dry run lands after it on the same PR. The id must stay on
+    // the roster, in the recorded deficit, and in the close gate's veto —
+    // while the dry run still counts as a sighting and as life.
+    const starved = request(
+      '2026-08-26T03:00:00Z',
+      41,
+      'maintainer',
+      undefined,
+      'COLLABORATOR',
+      0,
+    );
+    const dryRun = result('2026-08-26T04:00:00Z', DRY_RUN, 41);
+    const lane = assess(
+      [{ number: 41, state: 'open', comments: [starved, dryRun] }],
+      { now, deficit: [starved.id] },
+    );
+    assert.deepEqual(
+      lane.unanswered.map((u) => u.id),
+      [starved.id],
+    );
+    assert.deepEqual(lane.deficit, [starved.id]);
+    assert.equal(lane.unserved, starved.created_at);
+    // ...and the record the tick writes still carries the deficit.
+    const existing = { number: 42, createdAt: FILED_AT, texts: [] };
+    const writes = decide(lane, existing);
+    assert.deepEqual(
+      writes.map((a) => a.type),
+      ['comment'],
+      'a dry run is no recovery evidence and answers nothing',
+    );
+    assert.deepEqual(readState([writes[0].body]).unanswered, [starved.id]);
+    // The dry run comment still gives life: it is a classified result the
+    // lane produced, so the never-ran arm stays off.
+    const refused = assess(
+      [
+        { number: 41, state: 'open', comments: [dryRun] },
+        {
+          number: 51,
+          state: 'open',
+          comments: [
+            request(
+              '2026-08-26T06:00:00Z',
+              51,
+              'read-only-collaborator',
+              undefined,
+              'COLLABORATOR',
+              0,
+            ),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(refused.unanswered.length, 0);
   });
 });
 
@@ -3646,6 +3745,37 @@ describe('resolve-health: reading the comment feed', () => {
       0,
     );
   });
+
+  it('returns a PR that lands on two search pages once', () => {
+    // The search walk paginates a moving index with no `sort`, so one PR
+    // can appear on page N's tail and page N+1's head. Returned twice it
+    // would be fanned out twice — a second comments call, and a second
+    // pass through assess() counting everything it carries again.
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args);
+      if (args[3] === 'search/issues') {
+        return '42\topen\n43\topen\n42\topen\n';
+      }
+      return '';
+    };
+    const prs = fetchPrs(gh, 'QwenLM/qwen-code', '2026-08-20');
+    assert.deepEqual(
+      prs.map((p) => p.number),
+      [42, 43],
+    );
+    const commentCalls = calls.filter((c) =>
+      /^repos\/QwenLM\/qwen-code\/issues\/\d+\/comments$/.test(c[3]),
+    );
+    assert.deepEqual(
+      commentCalls.map((c) => c[3]),
+      [
+        'repos/QwenLM/qwen-code/issues/42/comments',
+        'repos/QwenLM/qwen-code/issues/43/comments',
+      ],
+      'one comments call per PR, never two for the duplicated one',
+    );
+  });
 });
 
 describe('resolve-health: writes', () => {
@@ -4433,16 +4563,6 @@ describe('resolve-health: end to end against a recording gh', () => {
     assert.ok(DEFAULTS.ackHours <= DEFAULTS.staleHours);
   });
 
-  it('pins the liveness horizon inside the comment window', () => {
-    // A silentHours at or past windowDays could never fire — assess() drops
-    // comments older than the window, so every reading would look alive,
-    // restoring the blindness the bound exists to remove. And it must
-    // outlast an ordinary quiet day, or a healthy-but-askless lane flips
-    // the per-request reading off.
-    assert.ok(DEFAULTS.silentHours >= 24);
-    assert.ok(DEFAULTS.silentHours < DEFAULTS.windowDays * 24);
-  });
-
   it('honours the unanswered-request knob through main()', () => {
     // One stale request: alarms under `unanswered=1`, not under `4`, so a
     // dropped or misnamed env read would flip the first assertion.
@@ -4774,6 +4894,263 @@ describe('resolve-health: end to end against a recording gh', () => {
       store.comments[90].length,
       1,
       'the closed issue is never written',
+    );
+  });
+
+  it('keeps a served request answered by its edited result when no issue was ever filed', () => {
+    // The record's home is a tracking issue; a lane that never filed one
+    // has nowhere to carry first sightings, so the record cannot help
+    // here. Three requests are each served by a push thirty minutes
+    // later, then a triage user annotates every result comment — read by
+    // classification the answers are gone, and the next tick would file
+    // "0 consecutive failures, 3 unanswered requests" against a lane that
+    // demonstrably served them. The roster reads the weaker fact no edit
+    // can forge: the bot posted a marker-carrying comment after the
+    // request. No issue exists, open or closed — and none may be filed.
+    const served = [0, 1, 2].map((h) => ({
+      ask: request(`2026-08-26T0${h + 1}:00:00Z`, 71 + h),
+      push: result(`2026-08-26T0${h + 1}:30:00Z`, PUSHED, 71 + h),
+    }));
+    const store = {
+      prs: served.map((s, i) => ({
+        number: 71 + i,
+        state: 'open',
+        comments: [
+          s.ask,
+          { ...s.push, updated_at: '2026-08-26T06:00:00Z' }, // edited since
+        ],
+      })),
+      issues: [],
+      comments: {},
+      next: 500,
+      now: '2026-08-27T12:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const { assessment, actions } = main({
+      gh,
+      env: { REPO: 'QwenLM/qwen-code' },
+      now: new Date(store.now),
+    });
+    assert.equal(assessment.unanswered.length, 0);
+    assert.equal(assessment.alarm, false);
+    assert.deepEqual(actions, []);
+    assert.equal(store.issues.length, 0, 'no issue is filed');
+    // The edited comment still counts as nothing toward the streak and
+    // the recovery evidence: only the roster reads it.
+    assert.equal(assessment.attempts.length, 0);
+    assert.equal(assessment.latestAttempt, null);
+  });
+
+  it('carries the borrowed record into the issue the filing tick creates', () => {
+    // Incident #1 closed on recovery; its final record answers PR 41's
+    // request by a recorded push, and a triage user annotated that push
+    // afterwards. Incident #2 (five failures on PR 30) files a new issue:
+    // the tick assesses with the record borrowed from the closed issue,
+    // so the create must carry the borrow into the NEW issue's first
+    // state — otherwise the very next tick reads the new issue's own
+    // record, un-answers PR 41's request, and refuses the recovery close
+    // for the rest of the window.
+    const ask41 = request('2026-08-26T01:00:00Z', 41);
+    const push41 = result('2026-08-26T01:30:00Z', PUSHED, 41);
+    const borrowedRecord = {
+      streak: 0,
+      unanswered: [],
+      newestRequest: ask41.created_at,
+      requests: [[ask41.id, ask41.created_at, 'COLLABORATOR', 41]],
+      resultsSeen: [[push41.id, 41, push41.created_at, 'pushed']],
+      latest: null,
+    };
+    const failures = () => ({
+      number: 30,
+      state: 'open',
+      // After the borrowed push, so the record's success does not break
+      // the streak the create rides on.
+      comments: [3, 4, 5, 6, 7].map((h) =>
+        result(`2026-08-26T0${h}:00:00Z`, AGENT_FAILED, 30),
+      ),
+    });
+    const store = {
+      prs: [
+        failures(),
+        {
+          number: 41,
+          state: 'open',
+          comments: [
+            ask41,
+            { ...push41, updated_at: '2026-08-26T06:00:00Z' }, // edited since
+          ],
+        },
+      ],
+      issues: [
+        {
+          number: 90,
+          state: 'closed',
+          created_at: '2026-08-20T00:00:00Z',
+          body: `${HEALTH_MARKER}\nthe tracking issue, closed on recovery`,
+        },
+      ],
+      comments: {
+        90: [
+          {
+            user: 'github-actions[bot]',
+            created_at: '2026-08-26T04:00:00Z',
+            updated_at: '2026-08-26T04:00:00Z',
+            body: `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state ${JSON.stringify(borrowedRecord)} -->`,
+          },
+        ],
+      },
+      next: 500,
+      now: '2026-08-27T12:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const env = { REPO: 'QwenLM/qwen-code' };
+    // Tick 1 files incident #2; the borrowed push answered PR 41's request.
+    const tick1 = main({ gh, env, now: new Date(store.now) });
+    assert.equal(tick1.assessment.unanswered.length, 0);
+    assert.deepEqual(
+      tick1.actions.map((a) => a.type),
+      ['create'],
+    );
+    const filed = store.issues.find((i) => (i.state ?? 'open') === 'open');
+    assert.ok(filed, 'incident #2 is filed');
+    const firstRecord = readState(
+      store.comments[filed.number].map((c) => c.body),
+    );
+    assert.ok(
+      firstRecord.resultsSeen.some(([id]) => id === push41.id),
+      "the new issue's first record carries the borrowed result",
+    );
+    assert.equal(store.comments[90].length, 1, 'the borrow is never written');
+    // Tick 2 reads the new issue's own record: PR 41's request stays
+    // answered across the edit, and nothing moved.
+    store.now = '2026-08-27T18:00:00Z';
+    const tick2 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(tick2.assessment.unanswered, []);
+    // Tick 3: a genuine push after every request recovers and closes.
+    store.prs = [
+      failures(),
+      {
+        number: 41,
+        state: 'open',
+        comments: [
+          ask41,
+          { ...push41, updated_at: '2026-08-26T06:00:00Z' },
+          result('2026-08-28T00:00:00Z', PUSHED, 41),
+        ],
+      },
+    ];
+    store.now = '2026-08-28T12:00:00Z';
+    const tick3 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      tick3.actions.map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('releases the recorded deficit of a request edited into a retraction', () => {
+    // Editing is the only way to cancel a comment, so a maintainer
+    // retracts a starved `/resolve` by editing it into a note. The carry
+    // already releases the id (unedited only), and every consumer must
+    // read the carry — an arm keyed on the raw recorded set keeps the
+    // retracted request on the roster, in the deficit, and in the close
+    // gate's veto for the rest of the window.
+    const asks = [0, 1, 2].map((h) =>
+      request(
+        `2026-08-24T0${6 + h}:00:00Z`,
+        11 + h,
+        'maintainer',
+        undefined,
+        'COLLABORATOR',
+        0,
+      ),
+    );
+    const lane = () => [
+      { number: 11, state: 'open', comments: [asks[0]] },
+      { number: 12, state: 'open', comments: [asks[1]] },
+      { number: 13, state: 'open', comments: [asks[2]] },
+    ];
+    const store = {
+      prs: lane(),
+      issues: [],
+      comments: {},
+      next: 500,
+      now: '2026-08-24T12:00:00Z',
+    };
+    const gh = statefulGh(store);
+    const env = { REPO: 'QwenLM/qwen-code' };
+    // Tick 1: the never-ran outage files the issue with all three recorded.
+    const tick1 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      tick1.actions.map((a) => a.type),
+      ['create'],
+    );
+    // Tick 2: the first request is retracted by edit. It leaves the
+    // roster, the recorded deficit, and the veto at once; the other two
+    // still carry.
+    store.prs = [
+      {
+        number: 11,
+        state: 'open',
+        comments: [
+          {
+            ...asks[0],
+            body: '(retracted — resolved this by hand, ignore)',
+            updated_at: '2026-08-25T00:00:00Z',
+          },
+        ],
+      },
+      { number: 12, state: 'open', comments: [asks[1]] },
+      { number: 13, state: 'open', comments: [asks[2]] },
+    ];
+    store.now = '2026-08-25T12:00:00Z';
+    const tick2 = main({ gh, env, now: new Date(store.now) });
+    assert.deepEqual(
+      tick2.assessment.unanswered.map((u) => u.id),
+      [asks[1].id, asks[2].id],
+      'the retracted request leaves the live roster',
+    );
+    assert.deepEqual(
+      tick2.assessment.deficit,
+      [asks[1].id, asks[2].id],
+      'and the recorded deficit',
+    );
+    assert.equal(tick2.assessment.unserved, asks[2].created_at);
+    // Tick 3: the other two are served and a push lands past the barrier —
+    // nothing holds the close any more.
+    store.prs = [
+      {
+        number: 11,
+        state: 'open',
+        comments: [
+          {
+            ...asks[0],
+            body: '(retracted — resolved this by hand, ignore)',
+            updated_at: '2026-08-25T00:00:00Z',
+          },
+        ],
+      },
+      {
+        number: 12,
+        state: 'open',
+        comments: [asks[1], result('2026-08-26T01:00:00Z', PUSHED, 12)],
+      },
+      {
+        number: 13,
+        state: 'open',
+        comments: [asks[2], result('2026-08-26T01:05:00Z', PUSHED, 13)],
+      },
+      {
+        number: 14,
+        state: 'open',
+        comments: [result('2026-08-26T02:00:00Z', PUSHED, 14)],
+      },
+    ];
+    store.now = '2026-08-26T12:00:00Z';
+    const tick3 = main({ gh, env, now: new Date(store.now) });
+    assert.equal(tick3.assessment.unserved, null);
+    assert.deepEqual(
+      tick3.actions.map((a) => a.type),
+      ['comment', 'close'],
     );
   });
 

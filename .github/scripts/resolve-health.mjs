@@ -34,10 +34,6 @@ export const DEFAULTS = Object.freeze({
   staleHours: 3,
   ackHours: 1,
   windowDays: 7,
-  // The lane reads as silent once its newest sign of life is older than
-  // this. Bounded above by windowDays: a bound at or past the window could
-  // never fire — the blindness this constant exists to remove.
-  silentHours: 27,
   bot: 'qwen-code-dev-bot',
   label: 'scope/ci-cd',
   recentLimit: 10,
@@ -84,6 +80,14 @@ const FAILED = new Set([
 // healed. `resolved_moved` resets the streak (a retryable resolution) but is
 // not recovery evidence either — decide() demands a real `pushed` for that.
 const OK = new Set(['pushed', 'resolved_moved']);
+// The kinds whose comment can ANSWER a request: every classified kind except
+// `dry_run`. A dry run is dispatch-only (its sentence is fed solely from
+// `github.event.inputs.dry_run`; an issue_comment run resolves it false), so
+// it was triggered by no request comment and served none — spending it as an
+// answer would erase the recorded deficit of a request nothing ever served.
+// `skipped` and `noop` keep answering: those comments are posted by the very
+// run the request comment triggered.
+const ANSWERING = new Set([...FAILED, ...OK, 'skipped', 'noop']);
 
 // Classifies a result comment by the fixed sentences `Report result` and
 // `Report skipped request` emit. Order matters: the infra wording is checked
@@ -350,11 +354,21 @@ export function assess(prs, options = {}) {
   // owed gate reads the outage this file exists for (the thirteen days in
   // the header) as a lane full of refusals, and the roster goes quiet for
   // as long as the outage lasts. What no per-request signal can say, the
-  // window can: requests exist and the lane produced no RECENT classified
-  // result comment anywhere. Then the missing reactions are the outage, not
-  // refusals, and every stale request counts whatever its reaction. One
-  // recent live result switches the per-request reading back on, so a
-  // refused request on a demonstrably healthy lane still never alarms.
+  // window can — but only the STRONG form of it: requests exist and the
+  // lane produced no classified result comment ANYWHERE in the window.
+  // Then the missing reactions are the outage, not refusals, and every
+  // stale request counts whatever its reaction. Anything weaker admits
+  // refusals: a lane that merely idled — a weekend with no `/resolve`
+  // traffic, its newest result older than any recency bound — looks
+  // exactly like the outage to an age-based reading, so every unacked
+  // stale request-shaped comment would re-enter the roster and three
+  // read-only collaborators would file "0 consecutive failures, 3
+  // unanswered requests" against a healthy lane. The trade is deliberate:
+  // a zero-output outage that begins MID-window becomes visible on this
+  // arm only once the pre-outage results age out; an outage that still
+  // posts results is the streak arm's job, and any single result comment
+  // switches the per-request reading back on, so a refused request on a
+  // demonstrably alive lane never alarms.
   //
   // Life is a classified result comment — the only signal whose author the
   // watch can check. The acknowledgement count cannot serve here: it
@@ -365,13 +379,6 @@ export function assess(prs, options = {}) {
   // An edited result is not the producer's word and proves nothing either;
   // a result the RECORD carries was seen unedited by an earlier tick, so an
   // edit after the fact cannot take back the life the lane showed.
-  //
-  // Life also expires: a result posted days ago says nothing about the
-  // requests being judged now, and treating the whole window as alive kept
-  // an outage that began yesterday invisible until every pre-outage result
-  // aged out. The signal is the AGE of the newest sign of life — live, or
-  // carried by the record — and the lane reads as silent once that is older
-  // than silentHours.
   let newestLife = null;
   for (const entry of recordedResults) {
     if (!newestLife || entry[2] > newestLife) {
@@ -391,17 +398,26 @@ export function assess(prs, options = {}) {
       }
     }
   }
-  const laneSilent =
-    !newestLife ||
-    now.getTime() - Date.parse(newestLife) >= opts.silentHours * 3_600_000;
+  const laneMute = !newestLife;
   const isAnswerableRequest = (c) =>
     isRequestShaped(c) &&
     c.updated_at === c.created_at &&
-    (isOwed(c) || laneSilent);
+    (isOwed(c) || laneMute);
+  // The discovery walk paginates a moving search index (no `sort`, and
+  // `updated:>=` candidates only ever enter while the pages are read), so
+  // the same PR can arrive twice — fetchPrs de-duplicates by number, and
+  // this set is the second line: a duplicated PR reaching assess() must not
+  // count its comments twice, or three failures read as a streak of six
+  // and two unanswered requests as four, halving both thresholds. Comment
+  // ids are globally unique, so the first sighting wins.
+  const seenCommentIds = new Set();
   for (const pr of prs) {
     const comments = [...pr.comments]
-      .filter((c) => c.created_at >= windowStart)
+      .filter((c) => c.created_at >= windowStart && !seenCommentIds.has(c.id))
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    for (const c of comments) {
+      seenCommentIds.add(c.id);
+    }
     for (const c of comments) {
       // Every request-shaped comment is sighted with its LIVE association,
       // answerable or not: stateOf() records the first sighting, so a later
@@ -455,12 +471,21 @@ export function assess(prs, options = {}) {
     // guards CLASSIFICATION — a failure edited into a success must not pose
     // as recovery evidence — but an edit after the fact must not un-answer
     // the request the result already served. Keyed by comment id, so a
-    // result still live is never spent twice in the pairing.
+    // result still live is never spent twice in the pairing. Only kinds
+    // that can ANSWER a request enter: a dry run was triggered by no
+    // request comment, so spending one here would retire a request nothing
+    // ever served and drop its recorded deficit with it (see ANSWERING).
     const liveResultIds = new Set(prResults.map((r) => r.id));
     const gateResults = [
-      ...prResults,
+      ...prResults.filter((r) => ANSWERING.has(r.kind)),
       ...(recordedResultsByPr.get(pr.number) ?? [])
-        .filter((e) => !liveResultIds.has(e[0]))
+        .filter(
+          (e) =>
+            !liveResultIds.has(e[0]) &&
+            // Entries from before the record kept the kind have none to
+            // filter by; they answer and give life as they always did.
+            (e.length < 4 || ANSWERING.has(e[3])),
+        )
         .map(([id, , at]) => ({ id, at })),
     ].sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
     // The recorded deficit carries forward while its request is still live,
@@ -553,13 +578,18 @@ export function assess(prs, options = {}) {
     // refused, or one read-only collaborator re-arms the veto this gate
     // exists to drop. The veto only ever refuses a close, so the
     // conservative side is the safe side. The deficit arm re-admits what
-    // the watch itself recorded unanswered: those ids were judged at a tick
-    // that saw the outage, and re-judging them by the live rules at the
-    // heal tick is exactly the erasure the record exists to prevent.
+    // the watch itself recorded unanswered AND what still carries forward
+    // this tick: those ids were judged at a tick that saw the outage, and
+    // re-judging them by the live rules at the heal tick is exactly the
+    // erasure the record exists to prevent. Read through carriedDeficit,
+    // never the raw set — the carry already applies the release rule (the
+    // id leaves when the request is edited, deleted, aged out or
+    // answered), so an edited-away, retracted request does not keep the
+    // veto armed for the rest of the window.
     const gateRequests = [
       ...comments.filter(
         (c) =>
-          deficit.has(c.id) ||
+          carriedDeficit.has(c.id) ||
           (isRequestShaped(c) && (isOwed(c) || gateResults.length > 0)),
       ),
       ...vanished,
@@ -627,7 +657,7 @@ export function assess(prs, options = {}) {
       continue;
     }
     const requests = comments.filter(
-      (c) => isAnswerableRequest(c) || deficit.has(c.id),
+      (c) => isAnswerableRequest(c) || carriedDeficit.has(c.id),
     );
     for (const req of requests) {
       // Any result after the request answers it. Runs on one PR are
@@ -635,7 +665,31 @@ export function assess(prs, options = {}) {
       // implies the earlier run finished — and a retry typed before the
       // first run reported must not leave the first request "unanswered"
       // forever because its result landed after the retry's timestamp.
-      const answered = gateResults.some((r) => r.at > req.created_at);
+      //
+      // An EDITED result comment answers too, on this arm only. The edit
+      // exclusion above guards classification: an edited body can say
+      // anything, so it must count as nothing toward the streak, the
+      // pairing and the recovery evidence. But the roster asks a weaker
+      // question — did the lane respond at all? — and no edit can take
+      // back that the bot posted a marker-carrying comment after the
+      // request: `created_at` and the author are not editable. Without
+      // this reading, a triage annotation on a result comment retroactively
+      // un-serves the request it answered, and on a lane that never filed
+      // an issue (no record to carry the answer) three annotated pushes
+      // file "0 consecutive failures, 3 unanswered requests" against a
+      // lane that demonstrably served them. The reading is safe where it
+      // stands: suppressing a roster entry this way needs a bot comment
+      // that already postdates the request, and a genuinely starved
+      // request has none to edit.
+      const answered =
+        gateResults.some((r) => r.at > req.created_at) ||
+        comments.some(
+          (c) =>
+            c.user === opts.bot &&
+            c.created_at > req.created_at &&
+            c.updated_at !== c.created_at &&
+            c.body.includes(RESULT_MARKER),
+        );
       const ageHours = (now.getTime() - Date.parse(req.created_at)) / 3_600_000;
       if (!answered && ageHours >= opts.staleHours) {
         unanswered.push({
@@ -829,13 +883,21 @@ function stateOf(assessment, previous = null) {
   // twice, as proof the lane recovered and again as proof the later request
   // was served. Once no in-window result can be claimed by it, the entry can
   // never change a decision again and goes.
-  // Read over every classified result, not just `attempts`: the pairing spends
-  // skips, no-ops and dry runs too, so pruning on the narrower set would drop
-  // an entry whose own result is a benign skip and hand that skip to the next
-  // request on the PR one tick later.
+  // Read over every result the close gate's pairing can spend, no narrower:
+  // the pairing spends skips and no-ops too, so pruning on a smaller set
+  // would drop an entry whose own result is a benign skip and hand that
+  // skip to the next request on the PR one tick later. A dry run is the
+  // one kind the pairing never spends (see ANSWERING in assess()), so it
+  // claims nothing here either — the two readings must move together, or
+  // the record keeps an entry whose result the gate no longer spends.
   const claimable = (entry) =>
     entry.length > 3 &&
-    [...resultsSeen.values()].some((e) => e[1] === entry[3] && e[2] > entry[1]);
+    [...resultsSeen.values()].some(
+      (e) =>
+        e[1] === entry[3] &&
+        e[2] > entry[1] &&
+        (e.length < 4 || ANSWERING.has(e[3])),
+    );
   for (const entry of previous?.requests ?? []) {
     if (entry[1] >= assessment.windowStart || claimable(entry)) {
       judgments.set(entry[0], entry);
@@ -1051,13 +1113,13 @@ export function renderReport(assessment, options = {}) {
   return lines.join('\n');
 }
 
-export function renderIssueBody(assessment, options = {}) {
+export function renderIssueBody(assessment, options = {}, previous = null) {
   return [
     HEALTH_MARKER,
-    stateMarker(stateOf(assessment)),
+    stateMarker(stateOf(assessment, previous)),
     '`@qwen-code /resolve` is failing in a row. Its baseline is ~84% of agent runs pushing a resolution, so a streak this long almost always means the lane itself is broken — an npm `latest` that does not resolve, a sandbox image that was never published, a workflow file that no longer parses — not the conflicts. Re-running requests will not help until the cause is fixed.',
     '',
-    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at); only requests from someone the lane would have served are counted, since it refuses anyone without write access in silence — and on a lane that is demonstrably alive, only requests the producer acknowledged; when the lane showed no recent output anywhere, every stale request counts, because a lane that answers nothing is the outage this issue tracks.',
+    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at); only requests from someone the lane would have served are counted, since it refuses anyone without write access in silence — and on a lane that is demonstrably alive, only requests the producer acknowledged; when the lane produced no result comment anywhere in the window, every stale request counts, because a lane that answers nothing is the outage this issue tracks.',
     '',
     renderReport(assessment, options),
     'This issue is maintained by `.github/workflows/qwen-resolve-health.yml`; it comments when the picture changes and closes itself once a `/resolve` succeeds again.',
@@ -1082,11 +1144,16 @@ export function renderUpdate(assessment, options = {}, previous = null) {
 // readable state (`texts` empty, `previous` null, `sameState` with nothing
 // to compare): required then too — suppressing it puts the barrier back
 // where a deleted comment can take it — but it must not claim a change it
-// never saw.
-function renderFirstRecord(assessment, options = {}) {
+// never saw. When the filing tick borrowed its record from a closed
+// tracking issue (main()'s record source), `previous` carries it into the
+// new issue's first state: what the borrow answered for THIS tick must
+// stay answered on the next, or the requests those recorded results
+// served read as never served the moment the new issue's own record
+// becomes the source.
+function renderFirstRecord(assessment, options = {}, previous = null) {
   return [
     HEALTH_MARKER,
-    stateMarker(stateOf(assessment)),
+    stateMarker(stateOf(assessment, previous)),
     'Still failing. This issue carried no state the watch reads back, so this is a first record of the picture, not a report of a change.',
     '',
     renderReport(assessment, options),
@@ -1136,21 +1203,26 @@ export function renderRecovery(assessment, options = {}, previous = null) {
 
 // Pure decision: what to write, given the assessment and the open issue (if
 // any). `existing` is { number, texts: [...the watch's own unedited comments] }
-// or null.
-export function decide(assessment, existing, options = {}) {
+// or null. `borrowed` is the state the tick READ when no issue is open —
+// from the newest closed one — and matters only on the create path: the new
+// issue's first record must carry what the borrow answered, or the next
+// tick un-answers it. It defaults to null, and the branches with an open
+// issue keep reading the state from that issue's own comments, so their
+// writes are unchanged.
+export function decide(assessment, existing, options = {}, borrowed = null) {
   const actions = [];
   if (assessment.alarm) {
     if (!existing) {
       actions.push({
         type: 'create',
         title: `/resolve is failing: ${assessment.streak} consecutive failures, ${assessment.unanswered.length} unanswered requests`,
-        body: renderIssueBody(assessment, options),
+        body: renderIssueBody(assessment, options, borrowed),
         // apply() posts this with the create: the filing tick's record, in
         // a comment the watch trusts. The body's own marker is never read
         // back (findOpenIssue returns only comments as state), so without
         // it the judgments wait for a later write and freeze whatever the
         // live field drifted to.
-        record: renderFirstRecord(assessment, options),
+        record: renderFirstRecord(assessment, options, borrowed),
       });
     } else {
       const previous = readState(existing.texts);
@@ -1312,7 +1384,12 @@ function b64(s) {
 }
 
 export function fetchPrs(gh, repo, since) {
-  const found = tsvLines(
+  // Keyed by PR number: the search walk paginates with no `sort`, so the
+  // index re-scores between pages while `updated:>=` candidates only
+  // enter — one PR can land on two pages, and returning it twice would
+  // double both its comments call and everything assess() counts from it.
+  const found = new Map();
+  for (const [number, state] of tsvLines(
     gh([
       'api',
       '-X',
@@ -1333,8 +1410,12 @@ export function fetchPrs(gh, repo, since) {
       '--jq',
       '.items[] | [.number, .state] | @tsv',
     ]),
-  ).map(([number, state]) => ({ number: Number(number), state }));
-  return found.map((pr) => ({
+  )) {
+    if (!found.has(Number(number))) {
+      found.set(Number(number), { number: Number(number), state });
+    }
+  }
+  return [...found.values()].map((pr) => ({
     ...pr,
     comments: tsvLines(
       gh([
@@ -1582,7 +1663,11 @@ export function main({
     recordedResults: previous?.resultsSeen,
     deficit: previous?.unanswered,
   });
-  const actions = decide(assessment, existing, opts);
+  // `previous` rides into decide() for the create path: when the record was
+  // borrowed from a closed issue, the new issue's first state must carry
+  // what the borrow answered, or the next tick — reading the new issue's
+  // own record — un-answers the requests those recorded results served.
+  const actions = decide(assessment, existing, opts, previous);
   console.log(
     `resolve-health: ${prs.length} PRs since ${since}, ${assessment.attempts.length} attempts, streak=${assessment.streak}, unanswered=${assessment.unanswered.length}, alarm=${assessment.alarm}, issue=${existing?.number ?? 'none'}, actions=${actions.map((a) => a.type).join(',') || 'none'}`,
   );
