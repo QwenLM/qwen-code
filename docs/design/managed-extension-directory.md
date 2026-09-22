@@ -34,13 +34,16 @@ is valid. The accepted root is pinned to its canonical path at startup so later
 relinking cannot move the boundary consumers validated.
 ExtensionManager receives `managedExtensionsDir` separately from the writable
 ExtensionStore. A container sandbox (docker/podman) mounts the resolved root
-read-only and forwards the flag with the container path; the bwrap and seatbelt
-backends already expose the host filesystem for reads. Reject overlaps (including symlink and filesystem case aliases) with writable
+read-only at its translated container path and forwards the flag unchanged —
+raw argv carries user content in value positions, so the flag is never
+rewritten; the child's startup validation applies the same container
+translation to the flag value. The bwrap and seatbelt backends already expose
+the host filesystem for reads. Reject overlaps (including symlink and filesystem case aliases) with writable
 extension/state directories to preserve the read-only boundary. Discovery and lookup share the same resolver: validate managed
 names using existing rules, reject duplicate managed names case-insensitively,
 then give managed precedence over user packages and diagnose shadowing. Resolve
 ownership before activation so disabling managed never activates a shadowed copy.
-An individual invalid manifest uses the existing diagnostics. The daemon catalog uses the same source precedence and identities while reading manifests only. Re-reading an unchanged catalog preserves existing policies and store generation without hydrating extension contributions.
+An individual invalid managed manifest reserves its directory name with an stderr warning, so a same-name user package cannot silently take its place. The daemon catalog uses the same source precedence and identities while reading manifests only. Re-reading an unchanged catalog preserves existing policies and store generation without hydrating extension contributions.
 
 Loaded extensions expose `source` (`managed` or `user`). Managed identity is derived
 from normalized name, not version or deployment path. Manageds default enabled;

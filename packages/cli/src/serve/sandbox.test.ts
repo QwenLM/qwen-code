@@ -165,6 +165,64 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
+  it('keeps a lookalike --managed-extensions token in a value position untouched', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const managedRoot = path.resolve('/opt/qwen-managed');
+    const cliConfig = {
+      getManagedExtensionsDir: () => managedRoot,
+    } as unknown as Config;
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    // A piped prompt equal to the flag name lands in a value position; the
+    // forwarded argv must reach the child byte-for-byte, or the flag after
+    // the lookalike is destroyed with it.
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      cliConfig,
+      [
+        process.execPath,
+        '/path/to/cli.js',
+        '--managed-extensions',
+        managedRoot,
+        '--prompt',
+        '--managed-extensions',
+        '--sandbox-session-id',
+        'abc123',
+      ],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const entrypointCommand = args[args.length - 1];
+    expect(entrypointCommand).toContain('--managed-extensions');
+    expect(entrypointCommand).toContain(managedRoot);
+    expect(entrypointCommand).toContain('--sandbox-session-id');
+    expect(entrypointCommand).toContain('abc123');
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
   it('does not mount the managed extensions root twice when it is the workspace', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);

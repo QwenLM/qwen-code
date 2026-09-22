@@ -36,6 +36,11 @@ export interface ExtensionPolicy {
   workspaceOverrides: Record<string, WorkspaceActivation>;
   skillWorkspaceOverrides?: Record<string, Record<string, boolean>>;
   legacyPathRules?: string[];
+  // Home-path rules a managed identity inherited when it claimed a user
+  // policy by name. The managed activation clear deletes legacyPathRules,
+  // so the user's rules wait here until the policy returns to a user
+  // identity; without the stash the clear would erase them permanently.
+  preservedLegacyPathRules?: string[];
 }
 
 export interface ExtensionStoreSnapshot {
@@ -329,7 +334,12 @@ function parseState(
           ))) &&
       (parsed.legacyPathRules === undefined ||
         (Array.isArray(parsed.legacyPathRules) &&
-          parsed.legacyPathRules.every((rule) => typeof rule === 'string')))
+          parsed.legacyPathRules.every((rule) => typeof rule === 'string'))) &&
+      (parsed.preservedLegacyPathRules === undefined ||
+        (Array.isArray(parsed.preservedLegacyPathRules) &&
+          parsed.preservedLegacyPathRules.every(
+            (rule) => typeof rule === 'string',
+          )))
     );
   };
   if (
@@ -615,8 +625,24 @@ export class ExtensionStore {
         const policy = existing.extensions[identity.id];
         const managed = identity.source === 'managed';
         if (managed === (policy.managed === true)) continue;
-        if (managed) policy.managed = true;
-        else delete policy.managed;
+        if (managed) {
+          policy.managed = true;
+          // The record the name-keyed migration just handed to this managed
+          // identity may still carry the user package's home-path rules.
+          // The managed activation clear deletes legacyPathRules outright,
+          // so stash them for the hand-back below; otherwise enabling and
+          // later withdrawing a managed package would permanently re-enable
+          // a package the user explicitly disabled.
+          if (policy.legacyPathRules && !policy.preservedLegacyPathRules) {
+            policy.preservedLegacyPathRules = [...policy.legacyPathRules];
+          }
+        } else {
+          delete policy.managed;
+          if (policy.preservedLegacyPathRules) {
+            policy.legacyPathRules ??= [...policy.preservedLegacyPathRules];
+            delete policy.preservedLegacyPathRules;
+          }
+        }
         changed = true;
       }
       let remainderSource = legacyProjectionIsNewer
@@ -881,7 +907,16 @@ export class ExtensionStore {
           targetSnapshot.generation + 1;
       }
       if (input.operation !== 'uninstall') {
-        delete targetSnapshot.extensions[input.identity.id].managed;
+        // Adopting a managed policy (or completing an install/update) hands
+        // it to the user identity: restore any rules stashed while the
+        // managed identity held the record, the same hand-back the
+        // refresh-time managed-flag sync performs.
+        const committed = targetSnapshot.extensions[input.identity.id];
+        delete committed.managed;
+        if (committed.preservedLegacyPathRules) {
+          committed.legacyPathRules ??= [...committed.preservedLegacyPathRules];
+          delete committed.preservedLegacyPathRules;
+        }
       }
       targetSnapshot.generation = snapshot.generation + 1;
       targetSnapshot.legacyProjectionHash = projectionHash(

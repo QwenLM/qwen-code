@@ -1701,15 +1701,16 @@ export class ExtensionManager {
     );
   }
 
-  private async loadManagedExtensions(
+  async loadManagedExtensions(
     workspaceDir: string,
-    options: { manifestOnly?: boolean } = {},
+    options: { manifestOnly?: boolean; createDataDir?: boolean } = {},
+    onLoadFailure?: (extensionDir: string, error: unknown) => void,
   ): Promise<Extension[]> {
     if (!this.managedExtensionsDir) return [];
     const extensions = await this.loadExtensionsFromExtensionsDir(
       this.managedExtensionsDir,
       workspaceDir,
-      { ...options, source: 'managed' },
+      { ...options, source: 'managed', onLoadFailure },
     );
     const names = new Map<string, Extension>();
     for (const extension of extensions) {
@@ -1729,10 +1730,27 @@ export class ExtensionManager {
     workspaceDir: string,
     options: { manifestOnly?: boolean } = {},
   ): Promise<Extension[]> {
-    const manageds = await this.loadManagedExtensions(workspaceDir, options);
+    const failedManaged: Array<{ directory: string; error: unknown }> = [];
+    const manageds = await this.loadManagedExtensions(
+      workspaceDir,
+      options,
+      (directory, error) => {
+        failedManaged.push({ directory, error });
+      },
+    );
     const managedNames = new Set(
       manageds.map((extension) => extension.name.toLowerCase()),
     );
+    for (const { directory, error } of failedManaged) {
+      // A managed entry that fails to load still claims its name: silently
+      // letting a same-name user copy take over would substitute user code
+      // for the deployment's package with no signal. The manifest is
+      // unreadable, so the directory name is the only reservation left.
+      process.stderr.write(
+        `Warning: Managed extension at "${directory}" failed to load; its name stays reserved and a same-name user extension stays shadowed. ${getErrorMessage(error)}\n`,
+      );
+      managedNames.add(path.basename(directory).toLowerCase());
+    }
     const users = await this.loadExtensionsFromExtensionsDir(
       this.configDir,
       workspaceDir,
@@ -1773,7 +1791,12 @@ export class ExtensionManager {
   private async loadExtensionsFromExtensionsDir(
     extensionsDir: string,
     workspaceDir: string,
-    options: { manifestOnly?: boolean; source?: 'managed' | 'user' } = {},
+    options: {
+      manifestOnly?: boolean;
+      createDataDir?: boolean;
+      source?: 'managed' | 'user';
+      onLoadFailure?: (extensionDir: string, error: unknown) => void;
+    } = {},
   ): Promise<Extension[]> {
     const source = options.source ?? 'user';
     // See fingerprintExtensionsDir: the managed root was validated at
@@ -1790,7 +1813,12 @@ export class ExtensionManager {
       const extensionDir = path.join(extensionsDir, subdir);
       const extension = await this.loadExtension(
         { extensionDir, workspaceDir },
-        { manifestOnly: options.manifestOnly, source },
+        {
+          manifestOnly: options.manifestOnly,
+          createDataDir: options.createDataDir,
+          source,
+          onLoadFailure: options.onLoadFailure,
+        },
       );
       if (extension != null) {
         extensions.push(extension);
@@ -1933,7 +1961,9 @@ export class ExtensionManager {
     options: {
       throwOnError?: boolean;
       manifestOnly?: boolean;
+      createDataDir?: boolean;
       source?: 'managed' | 'user';
+      onLoadFailure?: (extensionDir: string, error: unknown) => void;
     } = {},
   ): Promise<Extension | null> {
     const { extensionDir } = context;
@@ -1947,6 +1977,7 @@ export class ExtensionManager {
       // every other extension down with it; the user directory keeps its
       // fail-closed stat so breakage there surfaces instead of vanishing.
       if (source !== 'managed') throw error;
+      options.onLoadFailure?.(extensionDir, error);
       return null;
     }
 
@@ -1955,7 +1986,7 @@ export class ExtensionManager {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
       const head = await this.loadExtensionManifestHead(context, {
-        createDataDir: !options.manifestOnly,
+        createDataDir: options.createDataDir ?? !options.manifestOnly,
         source,
       });
       extension = head.extension;
@@ -2117,6 +2148,7 @@ export class ExtensionManager {
       return extension;
     } catch (e) {
       if (options.throwOnError) throw e;
+      if (source === 'managed') options.onLoadFailure?.(extensionDir, e);
       debugLogger.warn(
         `Warning: Skipping extension in ${(e as Error & { manifestPath?: string }).manifestPath ?? extension?.path ?? extensionDir}: ${getErrorMessage(
           e,

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import { SettingScope } from './extensionManager.js';
+import { ExtensionStore } from './extension-store.js';
 
 let temporary: string;
 let managedExtensionsDir: string;
@@ -207,6 +208,65 @@ describe('managed user activation outside the home directory', () => {
       other.getExtensions().find((extension) => extension.name === 'portable')
         ?.isActive,
     ).toBe(false);
+  });
+
+  it('hands a shadowed user package home-path disable back after the managed episode', async () => {
+    const homeWorkspace = path.join(os.homedir(), 'workspace');
+    fs.mkdirSync(homeWorkspace);
+    writeExtension(
+      path.join(process.env['QWEN_HOME']!, 'extensions', 'user-copy'),
+      'portable',
+      'user',
+    );
+    const legacy = await createConfig(homeWorkspace, false);
+    await legacy
+      .getExtensionManager()
+      .disableExtension('portable', SettingScope.User);
+    expect(legacy.getActiveExtensions()).toEqual([]);
+
+    // The managed package claims the user policy by name; enabling it must
+    // clear the inherited rule for the managed package without destroying
+    // the user's own preference.
+    writeExtension(
+      path.join(managedExtensionsDir, 'deployed'),
+      'portable',
+      '1.0.0',
+    );
+    const adopted = await createConfig(homeWorkspace);
+    expect(adopted.getExtensions()).toEqual([
+      expect.objectContaining({ source: 'managed', isActive: false }),
+    ]);
+    await adopted
+      .getExtensionManager()
+      .enableExtension('portable', SettingScope.User);
+    expect((await createConfig(homeWorkspace)).getActiveExtensions()).toEqual([
+      expect.objectContaining({ source: 'managed' }),
+    ]);
+
+    // Withdrawing the managed package hands the policy back: the user copy
+    // returns still disabled by its surviving home-path rule.
+    fs.rmSync(path.join(managedExtensionsDir, 'deployed'), {
+      recursive: true,
+      force: true,
+    });
+    const restored = await createConfig(homeWorkspace);
+    expect(restored.getExtensions()).toEqual([
+      expect.objectContaining({ source: 'user', isActive: false }),
+    ]);
+    expect(restored.getActiveExtensions()).toEqual([]);
+    const activation = await restored
+      .getExtensionManager()
+      .getExtensionActivation(restored.getExtensions()[0]!.id, homeWorkspace);
+    expect(activation).toMatchObject({
+      effective: 'disabled',
+      source: 'legacy_path_rule',
+    });
+    const snapshot = await new ExtensionStore().readSnapshot();
+    const policy = Object.values(snapshot.extensions).find(
+      (entry) => entry.name === 'portable',
+    );
+    expect(policy?.legacyPathRules?.length).toBeGreaterThan(0);
+    expect(policy?.preservedLegacyPathRules).toBeUndefined();
   });
 
   it('retains the existing home-path activation semantics for user extensions', async () => {

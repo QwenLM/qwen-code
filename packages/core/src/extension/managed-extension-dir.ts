@@ -43,6 +43,7 @@ export function resolveManagedExtensionsDir(
     }
     return directory;
   }
+  let failure: unknown;
   try {
     // A root that is itself a link would let whoever can replace the link
     // relocate every consumer's boundary (the no-prompt read roots among
@@ -60,11 +61,36 @@ export function resolveManagedExtensionsDir(
     fs.readdirSync(pinned);
     return pinned;
   } catch (error) {
-    throw new Error(
-      `Invalid --managed-extensions "${directory}": ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+    failure = error;
   }
+  // A container sandbox (docker/podman) forwards the flag verbatim, so its
+  // Linux child receives the host spelling of a Windows path, which cannot
+  // exist in the container; the mount placed the root at the translated
+  // path. Accept that spelling only when the value as given failed every
+  // check — a genuine root named "C:\..." next to the cwd keeps winning,
+  // and a bad root keeps failing with the user's own spelling.
+  const translated = windowsContainerPath(value);
+  if (translated !== undefined) {
+    try {
+      return resolveManagedExtensionsDir(translated);
+    } catch {
+      // Fall through and report the spelling the user actually gave.
+    }
+  }
+  throw new Error(
+    `Invalid --managed-extensions "${directory}": ${failure instanceof Error ? failure.message : String(failure)}`,
+    { cause: failure },
+  );
+}
+
+// Mirror of the translation a container sandbox applies to host paths
+// (getContainerPath in packages/cli/src/serve/sandbox.ts): inside the Linux
+// container a Windows drive-letter root lands at /<drive>/<rest>.
+function windowsContainerPath(value: string): string | undefined {
+  if (process.platform === 'win32') return undefined;
+  const match = value.match(/^([a-zA-Z]):[\\/](.*)$/);
+  if (!match) return undefined;
+  return `/${match[1]!.toLowerCase()}/${match[2]!.replace(/\\/g, '/')}`;
 }
 
 function canonicalDirectory(directory: string): string {
@@ -103,6 +129,15 @@ function canonicalDirectory(directory: string): string {
   }
 }
 
+// Win32 and darwin default volumes equate names differing only in case, and
+// realpath preserves the spelling it was given — so one physical directory
+// can reach the comparison under two spellings. Fold case there, or a
+// case-variant spelling slips past the containment guard (the same failure
+// config/storage.ts folds for).
+function platformFoldsCase(): boolean {
+  return process.platform === 'win32' || process.platform === 'darwin';
+}
+
 export function assertManagedExtensionStateSeparation(
   managedDirectory: string | undefined,
   writableDirectories: string[],
@@ -110,7 +145,11 @@ export function assertManagedExtensionStateSeparation(
   if (!managedDirectory) return;
   const managed = canonicalDirectory(managedDirectory);
   const contains = (parent: string, child: string) => {
-    const relative = path.relative(parent, child);
+    const fold = platformFoldsCase();
+    const relative = path.relative(
+      fold ? parent.toLowerCase() : parent,
+      fold ? child.toLowerCase() : child,
+    );
     return (
       relative === '' ||
       (!relative.startsWith(`..${path.sep}`) &&

@@ -351,6 +351,43 @@ describe('managed extensions', () => {
     ).toBe(true);
   });
 
+  it('reserves the name of a managed package that fails to load and warns', async () => {
+    writeExtension(user, 'example', { name: 'example', version: 'user' });
+    const broken = path.join(managed, 'example');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(path.join(broken, EXTENSIONS_CONFIG_FILENAME), '{');
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    // The broken deployment package still claims its name: the user copy
+    // must not silently take its place.
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    const catalog = await subject.refreshCatalogSnapshot();
+    expect(catalog.extensions).toEqual([]);
+  });
+
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'reserves the name of a dangling managed symlink entry and warns',
+    async () => {
+      writeExtension(user, 'dangling', { name: 'dangling', version: 'user' });
+      const entry = path.join(managed, 'dangling');
+      fs.symlinkSync(path.join(managed, 'missing-target'), entry, 'dir');
+      const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const subject = manager();
+      await subject.refreshCache();
+      expect(subject.getLoadedExtensions()).toEqual([]);
+      const writes = warning.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(writes).toContain(entry);
+      expect(writes).toContain('shadowed');
+    },
+  );
+
   it('catalog discovery keeps managed ownership and full-cache contents without loading subresources', async () => {
     writeExtension(user, 'shadowed', { name: 'PORTABLE', version: 'user' });
     writeExtension(user, 'user-only');
@@ -843,8 +880,9 @@ describe('managed extensions', () => {
     );
     // A link ABOVE the root is not the root: the resolved path is pinned to
     // the canonical spelling so later re-resolution cannot move it.
-    expect(resolveManagedExtensionsDir(path.join(viaLinkedParent, 'managed')))
-      .toBe(managed);
+    expect(
+      resolveManagedExtensionsDir(path.join(viaLinkedParent, 'managed')),
+    ).toBe(managed);
     const fileRoot = manager({ managedExtensionsDir: file });
     await fileRoot.refreshCache();
     expect(fileRoot.getLoadedExtensions()).toEqual([]);

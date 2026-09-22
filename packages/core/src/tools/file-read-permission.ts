@@ -9,7 +9,11 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { isAnyAutoMemPath } from '../memory/paths.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { isSubpath, isSubpaths, realpathNearestExisting } from '../utils/paths.js';
+import {
+  isSubpath,
+  isSubpaths,
+  realpathNearestExisting,
+} from '../utils/paths.js';
 
 export function getFileReadDefaultPermission(
   config: Config,

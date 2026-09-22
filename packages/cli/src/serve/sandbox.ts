@@ -603,12 +603,16 @@ export async function start_sandbox(
     }
   }
 
-  // Mount the deployment-managed extension root read-only and point the
-  // forwarded flag at the container path: the child re-validates it at
-  // argv-parse time, and no default mount covers an out-of-workspace root.
-  // A root that coincides with a mount pushed above (the workspace, the
-  // tmpdir, a SANDBOX_MOUNTS entry) keeps that mount instead of failing the
-  // container start with a duplicate destination.
+  // Mount the deployment-managed extension root read-only at its translated
+  // container path; no default mount covers an out-of-workspace root. The
+  // forwarded flag keeps its launch spelling: raw argv also carries user
+  // content in value positions (a piped prompt is pushed verbatim), so no
+  // argv edit can tell the flag apart from a lookalike token. The child's
+  // parse-time validation applies the same container translation to the
+  // flag value instead (managed-extension-dir.ts). A root that coincides
+  // with a mount pushed above (the workspace, the tmpdir, a SANDBOX_MOUNTS
+  // entry) keeps that mount instead of failing the container start with a
+  // duplicate destination.
   const managedExtensionsDir = cliConfig?.getManagedExtensionsDir();
   if (managedExtensionsDir) {
     const containerManagedDir = getContainerPath(managedExtensionsDir);
@@ -618,13 +622,6 @@ export async function start_sandbox(
         `${managedExtensionsDir}:${containerManagedDir}:ro`,
       );
     }
-    cliArgs = cliArgs.map((arg, index, argv) => {
-      if (arg.startsWith('--managed-extensions='))
-        return `--managed-extensions=${containerManagedDir}`;
-      if (index > 0 && argv[index - 1] === '--managed-extensions')
-        return containerManagedDir;
-      return arg;
-    });
   }
 
   // expose env-specified ports on the sandbox
