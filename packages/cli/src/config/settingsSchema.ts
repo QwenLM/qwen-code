@@ -2728,6 +2728,31 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
+      executionSandbox: {
+        type: 'object',
+        label: 'Tool Execution Sandbox',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as
+          | import('./execution-sandbox-settings.js').ExecutionSandboxSettings
+          | undefined,
+        description:
+          'Linux tool execution confinement. Operator scopes only; workspace settings cannot override it. Model/auth/session traffic stays on the host.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          required: ['filesystem', 'network'],
+          additionalProperties: false,
+          properties: {
+            backend: { type: 'string', enum: ['auto', 'bwrap'] },
+            filesystem: {
+              type: 'string',
+              enum: ['read-only', 'workspace-write'],
+            },
+            network: { type: 'string', enum: ['open', 'closed'] },
+          },
+        },
+      },
       codeModeOnly: {
         type: 'boolean',
         label: 'Code Mode Only (Experimental)',

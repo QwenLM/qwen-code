@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readOperatorSandboxSettings,
+  stripUtf8Bom,
+} from '../config/execution-sandbox-settings.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -432,7 +436,9 @@ function readSettingsSummary(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(fs.readFileSync(filePath, 'utf8')));
+    parsed = JSON.parse(
+      stripJsonComments(stripUtf8Bom(fs.readFileSync(filePath, 'utf8'))),
+    );
   } catch (err) {
     throw new Error(
       `Failed to read serve fast path settings from ${filePath}: ${
@@ -729,6 +735,7 @@ export function loadServeFastPathSettings(
   workspaceDir: string,
 ): ServeFastPathSettings {
   preResolveServeFastPathHomeEnvOverrides();
+  const operator = readOperatorSandboxSettings();
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
   const resolvedHomeDir = path.resolve(os.homedir());
   let realWorkspaceDir = resolvedWorkspaceDir;
@@ -781,6 +788,14 @@ export function loadServeFastPathSettings(
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
+  if (operator.tools?.executionSandbox !== undefined) {
+    merged.tools = {
+      ...merged.tools,
+      executionSandbox: operator.tools.executionSandbox as NonNullable<
+        Settings['tools']
+      >['executionSandbox'],
+    };
+  }
   if (startupChannelsTrusted && workspaceFromDisk.serve) {
     merged.serve = {
       channels: workspaceFromDisk.serve.channels,
