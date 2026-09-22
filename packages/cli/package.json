@@ -131,6 +131,7 @@
     "@types/ws": "^8.5.0",
     "@types/yargs": "^17.0.32",
     "@types/yauzl": "^2.9.1",
+    "ajv": "^8.17.1",
     "archiver": "^7.0.1",
     "ink-testing-library": "^4.0.0",
     "jsdom": "^26.1.0",
