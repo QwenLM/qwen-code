@@ -1624,6 +1624,72 @@ describe('McpTransportPool', () => {
       expect(entry.currentState).toBe('failed');
     });
 
+    it('W125 else-if path: stale terminal entry evicted with budget released (R22 W125-followup A)', async () => {
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      const release = vi.spyOn(budget, 'release');
+      const client = mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const cfg = new MCPServerConfig('node');
+      const first = mkSessionRegistries();
+      await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        first.tools,
+        first.prompts,
+        first.resources,
+      );
+      expect(budget.getReservedSlots()).toEqual(['srv']);
+
+      const id = connectionIdOf('srv', cfg);
+      const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
+        .entries;
+      const oldEntry = entries.get(id)!;
+      let finishClose!: () => void;
+      client.close.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishClose = resolve;
+        }),
+      );
+      const closing = oldEntry.forceShutdown('manual');
+      expect(oldEntry.currentState).toBe('closed');
+      expect(entries.get(id)).toBe(oldEntry);
+
+      // The cleanup barrier handles the normal force-close path. Hide that
+      // publication to exercise the defensive stale-terminal branch retained
+      // for entries whose cleanup cannot be observed by the pool.
+      vi.spyOn(oldEntry, 'waitForCleanup').mockReturnValue(undefined);
+      const second = mkSessionRegistries();
+      const acquiring = pool.acquire(
+        'srv',
+        cfg,
+        's2',
+        second.tools,
+        second.prompts,
+        second.resources,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.close).toHaveBeenCalledOnce();
+
+      const connection = await acquiring;
+      const newEntry = entries.get(id)!;
+      expect(newEntry).not.toBe(oldEntry);
+      expect(connection.entryIndex).toBe(1);
+      expect(ClientLib.Client).toHaveBeenCalledTimes(2);
+      expect(release).toHaveBeenCalledExactlyOnceWith('srv');
+      expect(budget.getReservedSlots()).toEqual(['srv']);
+
+      finishClose();
+      await closing;
+      await vi.runAllTimersAsync();
+      expect(entries.get(id)).toBe(newEntry);
+      expect(budget.getReservedSlots()).toEqual(['srv']);
+    });
+
     it('waits for retirement before replacing a closed entry without leaking budget', async () => {
       const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
       const budget = new WorkspaceMcpBudget({
