@@ -198,6 +198,7 @@ import {
   DaemonStatusDialog,
 } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { GaugeIcon, LayersIcon } from 'lucide-react';
@@ -270,12 +271,13 @@ import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
+  addWorkspaceToDaemon,
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
   discardAbandonedRemoteWorkspaceAdd,
+  fetchRemotePathSuggestions,
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
-  selectRemoteWorkspaceLocation,
 } from './config/remote-workspace-add';
 import {
   clearInitialConnectionsSettingsCategory,
@@ -283,7 +285,11 @@ import {
   getInitialConnectionsSettingsCategory,
   listRemoteComputers,
 } from './config/remote-connections';
-import { getDaemonToken, isPageOriginDaemon } from './config/daemon';
+import {
+  getDaemonToken,
+  isPageOriginDaemon,
+  navigateToDaemon,
+} from './config/daemon';
 import { Button } from './components/ui/button';
 import {
   isPluginShadowPanel,
@@ -1607,6 +1613,12 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
 ];
+/**
+ * One trajectory tab per session, so re-opening an already-open one reveals it
+ * rather than stacking a second. Shared with the entry, which hides itself
+ * once this session's tab is open.
+ */
+const trajectoryTabId = (sessionId: string) => `trajectory:${sessionId}`;
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
   ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
@@ -1836,6 +1848,10 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'workspaceCwd'
     >
   | Pick<
+      Extract<ArtifactPanelTab, { kind: 'trajectory' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
+    >
+  | Pick<
       Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
       'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
     >
@@ -2016,6 +2032,13 @@ function parsePersistedArtifactPanelTab(
         kind: 'terminal',
         workspaceCwd: tab['workspaceCwd'],
       } as PersistedArtifactPanelTab;
+    case 'trajectory':
+      if (typeof tab['sessionId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'trajectory',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     case 'token_usage':
     case 'context_usage':
       if (typeof tab['sessionId'] !== 'string') return;
@@ -2162,6 +2185,8 @@ function serializeArtifactPanelTabs(
             workspaceCwd: tab.workspaceCwd,
           },
         ];
+      case 'trajectory':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'token_usage':
       case 'context_usage':
         return tab.sessionId
@@ -4826,6 +4851,7 @@ export function App({
       true;
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
+  const trajectoryAvailable = rightPanelItems.includes('trajectory');
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -5562,6 +5588,28 @@ export function App({
       setArtifactPanelOpen(true);
     },
     [getDefaultReviewPanelWidth, t],
+  );
+  const openTrajectoryPanel = useCallback(
+    (sourceSessionId: string) => {
+      const tab: ArtifactPanelTab = {
+        id: trajectoryTabId(sourceSessionId),
+        kind: 'trajectory',
+        title: t('trajectory.title'),
+        sessionId: sourceSessionId,
+        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t, workspace.client],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6454,6 +6502,23 @@ export function App({
                   return webTerminalAvailable
                     ? { ...tab, initialized: false }
                     : undefined;
+                case 'trajectory': {
+                  if (!tab.sessionId) return undefined;
+                  // A stored tab outlives the host's opt-in, so a host that
+                  // has since stopped listing the item would get the panel
+                  // back — and fetching with it — through the browser profile
+                  // alone.
+                  if (!trajectoryAvailable) return undefined;
+                  // The loader is a function, so it cannot survive storage;
+                  // a restored tab is inert until it is rewired here.
+                  return {
+                    ...tab,
+                    loadPage: createTrajectoryPageLoader(
+                      workspace.client,
+                      tab.sessionId,
+                    ),
+                  };
+                }
                 case 'context_usage':
                 case 'token_usage': {
                   if (!tab.sessionId) return undefined;
@@ -6582,6 +6647,7 @@ export function App({
     resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
+    trajectoryAvailable,
     webTerminalAvailable,
     webPreviewAvailable,
     workspace.baseUrl,
@@ -13328,24 +13394,11 @@ export function App({
       workspaceActions,
     ],
   );
-  const handleAddRemoteWorkspace = useCallback(
-    async (cwd: string, persist: boolean, displayName?: string) => {
-      await handleAddWorkspace(cwd, persist, displayName);
-      workspaceBrowseActiveRef.current = false;
-      completeRemoteWorkspaceAdd();
-    },
-    [handleAddWorkspace],
-  );
-
-  const closeAddWorkspaceDialog = useCallback(() => {
-    setShowAddWorkspaceDialog(false);
-    if (!workspaceBrowseActiveRef.current) return;
-    workspaceBrowseActiveRef.current = false;
-    leaveRemoteWorkspaceAdd();
-  }, []);
-
+  const [workspaceAddLocation, setWorkspaceAddLocation] = useState<
+    string | undefined
+  >(undefined);
   const workspaceAddSelectedLocation =
-    workspace.baseUrl || window.location.origin;
+    workspaceAddLocation || workspace.baseUrl || window.location.origin;
   const workspaceAddLocations = standalone
     ? [
         {
@@ -13361,14 +13414,102 @@ export function App({
       ]
     : undefined;
   const hasRemoteWorkspaceLocation = (workspaceAddLocations?.length ?? 0) > 1;
+  // Whether the location the dialog is browsing is the daemon this shell is
+  // actually connected to — the same comparison `handleAddRemoteWorkspace`
+  // uses to choose between a local add and the remote proxy.
+  //
+  // Every capability-driven affordance below reads `workspace.capabilities`,
+  // which describes the CONNECTED daemon only. While a different location is
+  // selected in place the target's answers are unknowable without querying it,
+  // so the honest UI withholds the affordance rather than assuming the
+  // connected daemon's: a native picker would open an OS dialog on the wrong
+  // machine and register its result on the target, a Persist switch would
+  // either surface the target's raw 501 or silently register a workspace that
+  // dies on its next restart, and a cwd from this filesystem seeds a browse
+  // the target answers with an empty (not failed) list. Before in-place browse
+  // the location switch navigated first, so all of these re-resolved against
+  // the target.
+  const workspaceAddLocationIsConnected =
+    workspaceAddSelectedLocation ===
+    (workspace.baseUrl || window.location.origin);
   const changeWorkspaceAddLocation = useCallback((origin: string) => {
-    return selectRemoteWorkspaceLocation(origin, getDaemonToken(origin));
+    setWorkspaceAddLocation(origin);
+    return true;
+  }, []);
+
+  // Suggest paths from the selected location's daemon, not necessarily the
+  // currently connected one. This lets the user browse a remote daemon's
+  // folders without navigating the page.
+  const suggestWorkspacePathsForLocation = useMemo(() => {
+    if (!hasRemoteWorkspaceLocation) {
+      return workspaceActions.suggestWorkspacePaths;
+    }
+    return async (prefix: string) => {
+      const location = workspaceAddSelectedLocation;
+      const currentOrigin = workspace.baseUrl || window.location.origin;
+      if (location === currentOrigin) {
+        return workspaceActions.suggestWorkspacePaths(prefix);
+      }
+      return fetchRemotePathSuggestions(location, prefix);
+    };
+  }, [
+    hasRemoteWorkspaceLocation,
+    workspaceAddSelectedLocation,
+    workspace.baseUrl,
+    workspaceActions,
+  ]);
+
+  const handleAddRemoteWorkspace = useCallback(
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      const currentOrigin = workspace.baseUrl || window.location.origin;
+      if (
+        workspaceAddSelectedLocation &&
+        workspaceAddSelectedLocation !== currentOrigin
+      ) {
+        // The user browsed a different daemon's folders in place. Register
+        // the workspace there via REST, then navigate to that daemon.
+        await addWorkspaceToDaemon(
+          workspaceAddSelectedLocation,
+          cwd,
+          persist,
+          displayName,
+        );
+        workspaceBrowseActiveRef.current = false;
+        completeRemoteWorkspaceAdd();
+        // Navigate to the target daemon so the user lands on the new
+        // workspace. Deliberately a plain switch, NOT
+        // selectRemoteWorkspaceLocation(): that helper arms the
+        // `addRemoteWorkspace=browse` continuation on the target URL, so the
+        // daemon we just registered on would boot into a fresh, empty Add
+        // Workspace dialog on top of the workspace the user already added.
+        // The add is finished — there is no flow left to continue.
+        navigateToDaemon(
+          workspaceAddSelectedLocation,
+          getDaemonToken(workspaceAddSelectedLocation),
+        );
+        return;
+      }
+      await handleAddWorkspace(cwd, persist, displayName);
+      workspaceBrowseActiveRef.current = false;
+      completeRemoteWorkspaceAdd();
+    },
+    [handleAddWorkspace, workspace.baseUrl, workspaceAddSelectedLocation],
+  );
+
+  const closeAddWorkspaceDialog = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    setWorkspaceAddLocation(undefined);
+    if (!workspaceBrowseActiveRef.current) return;
+    workspaceBrowseActiveRef.current = false;
+    leaveRemoteWorkspaceAdd();
   }, []);
 
   // Which computer the folder step is reading, for loading and error states.
-  const workspaceAddRemoteHost = isPageOriginDaemon(workspace.baseUrl)
+  const workspaceAddRemoteHost = isPageOriginDaemon(
+    workspaceAddSelectedLocation,
+  )
     ? undefined
-    : formatOriginHost(workspace.baseUrl);
+    : formatOriginHost(workspaceAddSelectedLocation);
   const workspaceAddLocationSubtitle = workspaceAddRemoteHost
     ? t('workspaceHost.folderOn', { address: workspaceAddRemoteHost })
     : t('workspaceHost.folderOnThisComputer');
@@ -18290,6 +18431,12 @@ export function App({
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
+    onOpenTrajectory: connection.sessionId
+      ? () => openTrajectoryPanel(connection.sessionId!)
+      : undefined,
+    trajectoryTabId: connection.sessionId
+      ? trajectoryTabId(connection.sessionId)
+      : undefined,
     items: rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,
@@ -18700,6 +18847,7 @@ export function App({
                 onClose={closeAddWorkspaceDialog}
               />
             ) : workspaceBrowseActiveRef.current &&
+              workspaceAddLocationIsConnected &&
               !dynamicWorkspaceRegistrationSupported ? (
               <WorkspaceAddStatusDialog
                 message={t('workspaceHost.unsupported')}
@@ -18711,14 +18859,20 @@ export function App({
               <AddWorkspaceDialog
                 browseDirectories={workspaceBrowseActiveRef.current}
                 initialPath={
-                  workspaceBrowseActiveRef.current
-                    ? workspace.capabilities?.workspaceCwd?.replace(
-                        /[^\\/]+[\\/]?$/,
-                        '',
-                      ) ||
-                      workspace.capabilities?.workspaceCwd ||
-                      '/'
-                    : undefined
+                  !workspaceBrowseActiveRef.current
+                    ? undefined
+                    : workspaceAddLocationIsConnected
+                      ? workspace.capabilities?.workspaceCwd?.replace(
+                          /[^\\/]+[\\/]?$/,
+                          '',
+                        ) ||
+                        workspace.capabilities?.workspaceCwd ||
+                        '/'
+                      : // The connected daemon's cwd is a path on a different
+                        // machine; seeding it here makes the target answer with
+                        // an empty list (or a 400 across platforms) instead of
+                        // a usable browse. Root is absolute on every platform.
+                        '/'
                 }
                 locations={workspaceAddLocations}
                 selectedLocation={workspaceAddSelectedLocation}
@@ -18729,8 +18883,9 @@ export function App({
                     ? handleAddRemoteWorkspace
                     : handleAddWorkspace
                 }
-                onSuggest={workspaceActions.suggestWorkspacePaths}
+                onSuggest={suggestWorkspacePathsForLocation}
                 onPick={
+                  workspaceAddLocationIsConnected &&
                   nativeDirectoryPickerSupported &&
                   (!workspace.baseUrl ||
                     new URL(workspace.baseUrl, window.location.origin)
@@ -18742,8 +18897,13 @@ export function App({
                       }
                     : undefined
                 }
-                persistenceSupported={persistentWorkspaceRegistrationSupported}
-                displayNameEnabled={workspaceDisplayNameSupported}
+                persistenceSupported={
+                  workspaceAddLocationIsConnected &&
+                  persistentWorkspaceRegistrationSupported
+                }
+                displayNameEnabled={
+                  workspaceAddLocationIsConnected && workspaceDisplayNameSupported
+                }
               />
             ))}
           {scratchOutcomeUnknown !== 'clear' && (

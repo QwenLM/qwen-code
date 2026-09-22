@@ -973,6 +973,93 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it.each([
+    ['file', '@README.md'],
+    ['mcp', '@mcp:o2'],
+    ['extension', '@ext:browser'],
+  ])('restores %s input annotations from saved user records', (kind, text) => {
+    const inputAnnotations = [
+      {
+        type: 'reference',
+        start: 0,
+        end: text.length,
+        text,
+        reference: { id: text, kind, value: text.slice(1), serialized: text },
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-tag', 'user', {
+        daemonPromptId: 'tag-prompt',
+        message: { role: 'user', parts: [{ text: 'expanded model input' }] },
+        systemPayload: { displayText: text, hookContext: '', inputAnnotations },
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text },
+        _meta: expect.objectContaining({
+          inputAnnotations,
+          promptId: 'tag-prompt',
+          qwenTranscript: {
+            sourceRecordIds: ['user-tag'],
+            segmentId: 'user-tag:0',
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it.each([undefined, null, 'invalid', {}, [null], ['x'], [[null]]])(
+    'ignores missing or non-array saved input annotations (%j)',
+    (inputAnnotations) => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-plain', 'user', {
+          message: { role: 'user', parts: [{ text: '@README.md' }] },
+          systemPayload: {
+            displayText: '@README.md',
+            hookContext: '',
+            inputAnnotations,
+          },
+        }),
+      );
+      expect(projected[0]._meta).not.toHaveProperty('inputAnnotations');
+      expect(projected[0]).toMatchObject({
+        content: { type: 'text', text: '@README.md' },
+      });
+    },
+  );
+
+  it('forwards only object elements from saved input annotations', () => {
+    const valid = {
+      type: 'reference',
+      start: 0,
+      end: 10,
+      text: '@README.md',
+      reference: {
+        id: '@README.md',
+        kind: 'file',
+        value: 'README.md',
+        serialized: '@README.md',
+      },
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-mixed', 'user', {
+        message: { role: 'user', parts: [{ text: '@README.md' }] },
+        systemPayload: {
+          displayText: '@README.md',
+          hookContext: '',
+          inputAnnotations: [valid, null, 'x'],
+        },
+      }),
+    );
+    expect(projected[0]._meta).toMatchObject({ inputAnnotations: [valid] });
+  });
+
   it('strips only a complete final tag-only context part', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -1765,6 +1852,58 @@ describe('createTranscriptReplayMachine', () => {
     expect([...machine.finalize()]).toEqual([]);
     expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
   });
+
+  it.each(['completed', 'failed', 'cancelled', 'timed_out'] as const)(
+    'replays persisted structured shell %s results without flattening metadata',
+    (outcome) => {
+      const resultDisplay = {
+        type: 'shell_result' as const,
+        version: 1 as const,
+        text: 'Display text differs from model envelope',
+        output: outcome === 'completed' ? '' : 'partial 😀 output',
+        directory: '/workspace/项目',
+        exitCode: outcome === 'completed' ? 0 : null,
+        signal: outcome === 'cancelled' ? 15 : null,
+        pid: 42,
+        error: outcome === 'failed' ? 'execution failed' : null,
+        outcome,
+        notices: ['Output persisted', 'Retained notice'],
+        truncated: true,
+        outputFiles: ['/tmp/shell-output.log'],
+      };
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('shell-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'shell-1',
+            toolName: 'run_shell_command',
+            status: outcome === 'completed' ? 'success' : 'error',
+            resultDisplay,
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  response: { output: 'Legacy model-facing envelope' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(projected).toHaveLength(1);
+      expect(projected[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'shell-1',
+        status: outcome === 'completed' ? 'completed' : 'failed',
+        rawOutput: resultDisplay,
+      });
+      expect(projected[0]).toHaveProperty('rawOutput', resultDisplay);
+    },
+  );
 
   it('attributes persisted Agent usage to its parent and omits it in summary', () => {
     const machine = createTranscriptReplayMachine();

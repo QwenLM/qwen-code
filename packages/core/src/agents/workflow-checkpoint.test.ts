@@ -235,6 +235,33 @@ describe('writing and reading a checkpoint', () => {
 });
 
 describe('claimInterruptedWorkflowRuns', () => {
+  // A checkpoint from before `argsRecorded` existed says a run had no args
+  // the only way it could: by carrying neither them nor `argsOmitted`. Read
+  // as "unknown", such a run is refused a retry for want of args it never
+  // had, and its resume notice asks the user for them.
+  it('claims a run that had no args as a run that had none, not as one whose args are unknown', async () => {
+    await leaveRun({ ...checkpoint(), argsRecorded: undefined }, [
+      { type: 'launched', version: 1 },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed[0]!.snapshot.argsRecorded).toBe(true);
+    expect(claimed[0]!.snapshot).not.toHaveProperty('args');
+    expect(claimed[0]!.snapshot.argsOmitted).toBeUndefined();
+  });
+
+  it('keeps a claimed run without args distinct from one whose args were too large', async () => {
+    await leaveRun(checkpoint({ argsOmitted: true }), [
+      { type: 'launched', version: 1 },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed[0]!.snapshot.argsOmitted).toBe(true);
+    expect(claimed[0]!.snapshot.argsRecorded).toBeUndefined();
+  });
+
   it('turns a run whose process is gone into failed history', async () => {
     await leaveRun(
       checkpoint({ args: { files: ['a.csv'] }, resumeName: 'audit' }),
