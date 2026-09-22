@@ -2875,13 +2875,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       !this.config.getShellExecutionSandbox?.() &&
       commitCtx.attributableInCwd
     ) {
-      // Record the commit in the session registry BEFORE attribution so
-      // the two are independent: `attachCommitAttribution` returns early
-      // on the `gitCoAuthor.commit` toggle, and the Auto-mode
-      // `git commit --amend` exemption (permissions/destructive-commands
-      // `isAmendOfSessionCommit`) must keep working for users who turned
-      // commit attribution off. Running it first also means an
-      // attribution failure can't cost us the registration.
+      // Before attribution: `attachCommitAttribution` returns early on the
+      // `gitCoAuthor.commit` toggle, but the amend exemption must not depend
+      // on it, and an attribution failure must not cost the registration.
       await this.trackSessionCommit(cwd, preHead);
 
       // `git commit --amend` rewrites HEAD in place, so the standard
@@ -4191,90 +4187,53 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Record the commit this command just created in the session registry
-   * (`permissions/destructive-commands.ts`) so a later
-   * `git commit --amend` of it is recognised as "made by the agent in
-   * this session" and exempted from the Auto-mode destructive-command
-   * block.
+   * Record the commit this command created in the session registry
+   * (`permissions/destructive-commands.ts`) so a later `git commit --amend`
+   * of it is exempt from the Auto-mode destructive-command block.
    *
    * The criterion is "a `git commit` put HEAD there", read from the HEAD
-   * reflog — not "HEAD moved", and not the shell exit code. Both of those
-   * proxies are wrong in opposite directions:
+   * reflog. Exit code is too strict (`git commit -m x && npm test` can land
+   * the commit and then fail). HEAD movement is too loose, and fail-open: in
+   * `git pull && git commit -m x` with nothing staged, the pull fast-forwards
+   * onto somebody else's commit and the commit then exits non-zero — and
+   * because `gitCommitContext` does not treat `pull`/`checkout`/`merge` as
+   * cwd-shifting and the call site has no exit-code gate, that chain really
+   * does reach here. A movement-only test would register a human's SHA,
+   * trading the deterministic Layer-0 block for the classifier.
    *
-   * - Exit code is too strict. A compound `git commit -m "x" && npm test`
-   *   can land the commit and then fail; gating on `exitCode !== 0` would
-   *   leave a real agent commit unregistered, so its amend would be
-   *   blocked.
-   * - HEAD movement is too loose, and *fail-open*. In
-   *   `git pull && git commit -m "x"` where nothing is staged, the pull
-   *   fast-forwards HEAD onto somebody else's commit and the commit
-   *   segment then exits non-zero. HEAD moved, so a movement-only test
-   *   registers a SHA the agent never authored — and because
-   *   `gitCommitContext` does not treat `pull`/`checkout`/`merge` as
-   *   cwd-shifting, and the call site has no exit-code gate, that chain
-   *   really does reach here. `isAmendOfSessionCommit` would then exempt an
-   *   amend of a human's commit, dropping the deterministic Layer-0 block
-   *   and handing a history rewrite to the non-deterministic classifier.
-   *
-   * The reflog answers the question directly: its newest HEAD entry records
-   * the action that moved HEAD, so `commit`, `commit (initial)` and
-   * `commit (amend)` mean a commit created it, while `pull: Fast-forward`,
-   * `checkout: moving from …`, `reset: moving to …` and `rebase …` do not.
-   * This keeps both cases above correct — the `&& npm test` chain still
-   * registers (its newest entry is the commit), and the failed-commit-after
-   * -pull chain does not (its newest entry is the pull). An amend rewrites
-   * HEAD and leaves a `commit (amend)` entry, so the rewritten SHA is
-   * registered too and a second consecutive amend keeps working.
-   *
-   * Fail-closed when the reflog cannot answer: a repo with
-   * `core.logAllRefUpdates` off, or one whose reflog has been expired, makes
-   * `git log -g` fail, which resolves to `null` and registers nothing. The
-   * cost is a blocked amend that falls back to manual approval, never a
+   * Fail-closed when the reflog cannot answer (`core.logAllRefUpdates` off,
+   * reflog expired): nothing registers, which costs a blocked amend, never a
    * lifted block.
    *
-   * Deliberately independent of the `gitCoAuthor.commit` attribution
-   * toggle: that setting governs whether AI credit is written into the
-   * commit, not whether the agent may amend its own work.
-   *
-   * Deliberately has no multi-commit guard, unlike
-   * {@link attachCommitAttribution}, which refuses when one command
-   * produced several commits. The invariants differ: attribution has to
-   * *partition* per-file AI contribution across those commits and cannot,
-   * so it bails; registration only has to answer "is HEAD a commit this
-   * session's agent produced". In a `commit a && commit b` chain HEAD is
-   * `b`, which the agent's own command created, so registering it is
-   * sound — and `a` stays unregistered, so amending `a` is still blocked.
-   * Adding a `rev-list` here would cost a subprocess to give up an
-   * exemption that is already fail-closed.
+   * No multi-commit guard, unlike {@link attachCommitAttribution}, which has
+   * to *partition* per-file contribution and so bails. In `commit a &&
+   * commit b` HEAD is `b`, created by this command, so registering it is
+   * sound and `a` stays blocked.
    */
   private async trackSessionCommit(
     cwd: string,
     preHead: string | null,
   ): Promise<void> {
     const head = await this.getGitHeadOrigin(cwd);
-    // Both conditions are load-bearing and neither subsumes the other:
-    // `createdByCommit` rejects a HEAD that something other than a commit
-    // relocated, and the `preHead` comparison rejects a command that never
-    // moved HEAD at all (a `git commit` with nothing staged), which would
-    // otherwise re-register the pre-existing HEAD and exempt an amend of
-    // somebody else's commit.
+    // Neither condition subsumes the other: `createdByCommit` rejects a HEAD
+    // something else relocated, and the `preHead` comparison rejects a commit
+    // that never moved HEAD (nothing staged), which would otherwise
+    // re-register the pre-existing HEAD.
     if (head !== null && head.createdByCommit && head.sha !== preHead) {
       registerSessionCommit(head.sha);
     }
   }
 
   /**
-   * Read HEAD together with the reflog action that last moved it, in a
-   * single subprocess (`%H` and the reflog subject `%gs` on two lines).
+   * Read HEAD and the reflog action that last moved it in one subprocess.
    *
    * `--no-show-signature` is required, not cosmetic: with
-   * `log.showSignature=true` git prints the signature verdict *ahead of* the
-   * formatted output, which shifts both fields by one line and makes an
-   * agent's own signed commit look like it was not created by a commit. The
-   * flag is inert when nothing is signed.
+   * `log.showSignature=true` git prints the signature verdict ahead of the
+   * formatted output, shifting both fields and making an agent's own signed
+   * commit look uncommitted. Inert when nothing is signed.
    *
-   * Returns `null` when git cannot answer — not a repository, no HEAD yet,
-   * reflog disabled or expired, git missing — so every caller fails closed.
+   * Returns `null` when git cannot answer (not a repo, no HEAD, reflog off or
+   * expired, git missing) so every caller fails closed.
    */
   private async getGitHeadOrigin(
     cwd: string,
@@ -4294,10 +4253,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
             resolve(null);
             return;
           }
-          // Reflog action verbs are not localised by git. `\b` admits
-          // `commit:`, `commit (initial):`, `commit (amend):` and
-          // `commit (merge):`, and excludes every other verb — `pull`,
-          // `checkout`, `reset`, `rebase`, `merge`, `cherry-pick`.
+          // Reflog verbs are not localised by git. `\b` admits `commit:`,
+          // `commit (initial|amend|merge):` and excludes every other verb.
           resolve({
             sha: sha.trim(),
             createdByCommit: /^commit\b/.test(subject),
