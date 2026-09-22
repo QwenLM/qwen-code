@@ -188,7 +188,15 @@
                 "incompatible"
               ]
             },
-            "body": { "$ref": "#/$defs/responseBody" }
+            "body": { "$ref": "#/$defs/responseBody" },
+            "code": {
+              "enum": [
+                "managed_runtime_attestation_invalid",
+                "managed_runtime_attestation_too_large",
+                "managed_runtime_identity_conflict",
+                "managed_runtime_unauthorized"
+              ]
+            }
           }
         }
       }

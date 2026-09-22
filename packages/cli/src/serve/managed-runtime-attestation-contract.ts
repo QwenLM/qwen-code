@@ -265,6 +265,10 @@ export function registerManagedRuntimeAttestationRoute(
     noStore,
     authorize(identitySnapshot),
     express.json({
+      // Compressed private requests add no value at 16 KiB. Refusing them
+      // keeps the limit on wire bytes and makes corrupt streams use the JSON
+      // protocol error instead of Express' HTML error handler.
+      inflate: false,
       limit: ATTEST_ROUTE.requestBodyLimitBytes,
       strict: true,
       type: 'application/json',

@@ -58,7 +58,7 @@ Content-Type: application/json
 Cache-Control: no-store
 ```
 
-The closed JSON body contains `protocolVersion`, `provisionRequestId`, `tenantId`, `workspaceId`, `workspaceGeneration`, `workspaceCwd`, `capabilityDigest`, and `isolationClass`. Unknown fields and malformed JSON return 400. A body over 16 KiB returns 413. Invalid credentials return 401 before body parsing. Lease or immutable scope mismatches return 409. A successful response echoes the immutable scope and adds `runtimeInstanceId`, `runtimeIncarnation`, `leaseId`, and `epoch`.
+The closed JSON body contains `protocolVersion`, `provisionRequestId`, `tenantId`, `workspaceId`, `workspaceGeneration`, `workspaceCwd`, `capabilityDigest`, and `isolationClass`. Unknown fields and malformed JSON return 400. Compressed requests are rejected, so the 16 KiB cap applies to wire bytes; a larger body returns 413. Invalid credentials return 401 before body parsing. Lease or immutable scope mismatches return 409. A successful response echoes the immutable scope and adds `runtimeInstanceId`, `runtimeIncarnation`, `leaseId`, and `epoch`.
 
 The handler never returns the bearer token. Token comparison uses equal-length `timingSafeEqual`. The capability digest must use canonical lowercase `sha256:<64 hex>` syntax. Request and response payloads are closed so a v2 peer cannot silently introduce an identity field that the other implementation ignores.
 
@@ -67,7 +67,7 @@ The handler never returns the bearer token. Token comparison uses equal-length `
 The language-neutral files live beside the TypeScript contract under `packages/cli/src/serve/contracts/`:
 
 - `managed-runtime-attestation-v2.schema.json` fixes the route metadata, closed request and response shapes, limits, and outcome classes.
-- `managed-runtime-attestation-v2.fixtures.json` contains the canonical identity and cases for success, missing credentials, missing `no-store`, wrong lease, wrong epoch, wrong Workspace generation, unknown body fields, wrong protocol versions, malformed JSON and digests, unsupported JSON charsets and content encodings, oversized bodies, and exact-route rejection.
+- `managed-runtime-attestation-v2.fixtures.json` contains the canonical identity and cases for credential variants, every immutable identity mismatch, malformed and empty fields, exact error codes, unsupported media types, charsets and content encodings, oversized bodies, and exact-route rejection.
 
 The TypeScript test materializes every case and sends it through `node:http` → the raw manifest gate → Express authentication and JSON parsing → the attestation handler. It checks status, classification, `no-store`, exact success body, and response size.
 
@@ -100,7 +100,7 @@ The focused TypeScript suite must pass all fixture cases through a real TCP list
 - The route registrar and raw allow decision contain no duplicate attestation path literal.
 - A query string, trailing slash, wrong method, or unknown path receives 404 at the raw gate.
 - Missing credentials win over malformed JSON, proving authentication precedes parsing.
-- Bodies over 16 KiB receive 413, unsupported JSON charsets or content encodings fail as protocol errors, and every response has `Cache-Control: no-store`.
+- Bodies over 16 KiB receive 413, compressed bodies and unsupported JSON charsets or content encodings fail as JSON protocol errors, and every response has `Cache-Control: no-store`.
 - Unknown fields, wrong protocol version, and malformed digests fail as protocol errors; lease and immutable identity differences fail as conflicts.
 - TypeScript and Java consume the same fixture file and agree on all five classifications.
 - No Hosted profile, Runtime provider, Broker transport, public API, or ordinary daemon behavior is introduced.

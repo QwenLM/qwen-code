@@ -58,7 +58,7 @@ Content-Type: application/json
 Cache-Control: no-store
 ```
 
-闭合 JSON body 包含 `protocolVersion`、`provisionRequestId`、`tenantId`、`workspaceId`、`workspaceGeneration`、`workspaceCwd`、`capabilityDigest` 和 `isolationClass`。未知字段和非法 JSON 返回 400；超过 16 KiB 的 body 返回 413；非法凭据在解析 body 前返回 401；lease 或不可变 scope 不一致返回 409。成功响应回显不可变 scope，并增加 `runtimeInstanceId`、`runtimeIncarnation`、`leaseId` 和 `epoch`。
+闭合 JSON body 包含 `protocolVersion`、`provisionRequestId`、`tenantId`、`workspaceId`、`workspaceGeneration`、`workspaceCwd`、`capabilityDigest` 和 `isolationClass`。未知字段和非法 JSON 返回 400；压缩请求会被拒绝，因此 16 KiB 上限按线路字节计算，超过上限的 body 返回 413；非法凭据在解析 body 前返回 401；lease 或不可变 scope 不一致返回 409。成功响应回显不可变 scope，并增加 `runtimeInstanceId`、`runtimeIncarnation`、`leaseId` 和 `epoch`。
 
 handler 永不返回 bearer token。token 通过等长 `timingSafeEqual` 比较。capability digest 必须采用规范的小写 `sha256:<64 hex>` 形式。请求和响应 payload 都是闭合对象，因此 v2 peer 不能静默加入另一端忽略的身份字段。
 
@@ -67,7 +67,7 @@ handler 永不返回 bearer token。token 通过等长 `timingSafeEqual` 比较�
 语言无关文件位于 TypeScript 契约旁的 `packages/cli/src/serve/contracts/`：
 
 - `managed-runtime-attestation-v2.schema.json` 固定 route metadata、闭合请求与响应形状、大小限制和结果分类。
-- `managed-runtime-attestation-v2.fixtures.json` 包含规范 identity，以及成功、缺失凭据、缺失 `no-store`、错误 lease、错误 epoch、错误 Workspace generation、未知 body 字段、错误协议版本、非法 JSON 和 digest、不支持的 JSON charset/content encoding、超大 body 与精确路由拒绝等用例。
+- `managed-runtime-attestation-v2.fixtures.json` 包含规范 identity，以及凭据变体、每个不可变身份不一致、非法或空字段、精确错误码、不支持的媒体类型、charset/content encoding、超大 body 与精确路由拒绝等用例。
 
 TypeScript 测试物化每个用例，并通过 `node:http` → raw manifest gate → Express 鉴权与 JSON 解析 → attestation handler 的完整路径发送请求。测试校验 status、分类、`no-store`、精确成功 body 和响应大小。
 
@@ -100,7 +100,7 @@ Hosted Runtime 后续变更必须：
 - route registrar 和 raw allow 判断中没有重复的 attestation path 字面量。
 - query string、尾随斜杠、错误 method 或未知 path 在 raw gate 返回 404。
 - 缺失凭据的结果优先于非法 JSON，证明鉴权先于解析。
-- 超过 16 KiB 的 body 返回 413，不支持的 JSON charset 或 content encoding 按协议错误失败，所有响应都带 `Cache-Control: no-store`。
+- 超过 16 KiB 的 body 返回 413；压缩 body 以及不支持的 JSON charset 或 content encoding 按 JSON 协议错误失败；所有响应都带 `Cache-Control: no-store`。
 - 未知字段、错误协议版本和非法 digest 按协议错误失败；lease 和不可变 identity 差异按冲突失败。
 - TypeScript 与 Java 消费同一个 fixture 文件，并对五种分类达成一致。
 - 不引入 Hosted profile、Runtime provider、Broker transport、公共 API 或普通 daemon 行为变化。

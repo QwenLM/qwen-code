@@ -41,6 +41,7 @@ interface FixtureCase {
   readonly expected: {
     readonly status: number;
     readonly classification: string;
+    readonly code?: string;
     readonly body?: Readonly<Record<string, unknown>>;
   };
 }
@@ -203,6 +204,14 @@ describe('Managed Runtime attestation contract', () => {
       expect(response.headers.get('cache-control')).toBe(
         fixtures.route.cacheControl,
       );
+      if (fixture.expected.code) {
+        expect(response.headers.get('content-type')).toMatch(
+          /^application\/json/u,
+        );
+        expect(await response.clone().json()).toMatchObject({
+          code: fixture.expected.code,
+        });
+      }
       if (fixture.expected.body) {
         const text = await response.text();
         expect(Buffer.byteLength(text)).toBeLessThanOrEqual(
@@ -292,6 +301,21 @@ describe('Managed Runtime attestation contract', () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(successResponseBody);
+  });
+
+  it.each([
+    ['empty token', { token: '' }],
+    ['zero epoch', { epoch: 0 }],
+    ['fractional epoch', { epoch: 1.5 }],
+    ['uppercase digest', { capabilityDigest: `sha256:${'A'.repeat(64)}` }],
+    ['unknown isolation class', { isolationClass: 'tenant' }],
+  ])('rejects an invalid identity at registration: %s', (_label, patch) => {
+    expect(() =>
+      registerManagedRuntimeAttestationRoute(express(), {
+        ...fixtures.identity,
+        ...(patch as Partial<ManagedRuntimeAttestationIdentity>),
+      }),
+    ).toThrow('Managed Runtime attestation identity is invalid.');
   });
 
   it('keeps request and response objects closed in the shared schema', () => {

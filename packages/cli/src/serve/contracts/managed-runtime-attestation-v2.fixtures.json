@@ -71,7 +71,8 @@
       },
       "expected": {
         "status": 401,
-        "classification": "credentials"
+        "classification": "credentials",
+        "code": "managed_runtime_unauthorized"
       }
     },
     {
@@ -81,7 +82,8 @@
       },
       "expected": {
         "status": 400,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
       }
     },
     {
@@ -94,7 +96,8 @@
       },
       "expected": {
         "status": 409,
-        "classification": "identity"
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
       }
     },
     {
@@ -107,7 +110,8 @@
       },
       "expected": {
         "status": 409,
-        "classification": "identity"
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
       }
     },
     {
@@ -120,7 +124,8 @@
       },
       "expected": {
         "status": 409,
-        "classification": "identity"
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
       }
     },
     {
@@ -133,7 +138,8 @@
       },
       "expected": {
         "status": 400,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
       }
     },
     {
@@ -146,7 +152,8 @@
       },
       "expected": {
         "status": 400,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
       }
     },
     {
@@ -156,7 +163,8 @@
       },
       "expected": {
         "status": 400,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
       }
     },
     {
@@ -169,7 +177,8 @@
       },
       "expected": {
         "status": 400,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
       }
     },
     {
@@ -182,7 +191,8 @@
       },
       "expected": {
         "status": 400,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
       }
     },
     {
@@ -195,7 +205,8 @@
       },
       "expected": {
         "status": 400,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
       }
     },
     {
@@ -205,7 +216,8 @@
       },
       "expected": {
         "status": 413,
-        "classification": "protocol"
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_too_large"
       }
     },
     {
@@ -242,6 +254,280 @@
       "id": "unknown-path",
       "request": {
         "pathOverride": "/internal/managed-runtime/v2/unknown"
+      },
+      "expected": {
+        "status": 404,
+        "classification": "incompatible"
+      }
+    },
+    {
+      "id": "wrong-token",
+      "request": {
+        "replaceHeader": {
+          "name": "authorization",
+          "value": "Bearer fixture-tokeX"
+        }
+      },
+      "expected": {
+        "status": 401,
+        "classification": "credentials",
+        "code": "managed_runtime_unauthorized"
+      }
+    },
+    {
+      "id": "wrong-token-length",
+      "request": {
+        "replaceHeader": {
+          "name": "authorization",
+          "value": "Bearer x"
+        }
+      },
+      "expected": {
+        "status": 401,
+        "classification": "credentials",
+        "code": "managed_runtime_unauthorized"
+      }
+    },
+    {
+      "id": "wrong-auth-scheme",
+      "request": {
+        "replaceHeader": {
+          "name": "authorization",
+          "value": "Digest fixture-token"
+        }
+      },
+      "expected": {
+        "status": 401,
+        "classification": "credentials",
+        "code": "managed_runtime_unauthorized"
+      }
+    },
+    {
+      "id": "wrong-provision-request",
+      "request": {
+        "replaceBody": {
+          "name": "provisionRequestId",
+          "value": "provision-02"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
+      }
+    },
+    {
+      "id": "wrong-tenant",
+      "request": {
+        "replaceBody": {
+          "name": "tenantId",
+          "value": "tenant-b"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
+      }
+    },
+    {
+      "id": "wrong-workspace",
+      "request": {
+        "replaceBody": {
+          "name": "workspaceId",
+          "value": "workspace-b"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
+      }
+    },
+    {
+      "id": "wrong-workspace-cwd",
+      "request": {
+        "replaceBody": {
+          "name": "workspaceCwd",
+          "value": "/runtime/other"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
+      }
+    },
+    {
+      "id": "wrong-capability-digest",
+      "request": {
+        "replaceBody": {
+          "name": "capabilityDigest",
+          "value": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
+      }
+    },
+    {
+      "id": "wrong-isolation-class",
+      "request": {
+        "replaceBody": {
+          "name": "isolationClass",
+          "value": "workspace"
+        }
+      },
+      "expected": {
+        "status": 409,
+        "classification": "identity",
+        "code": "managed_runtime_identity_conflict"
+      }
+    },
+    {
+      "id": "empty-provision-request",
+      "request": {
+        "replaceBody": {
+          "name": "provisionRequestId",
+          "value": ""
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "empty-tenant",
+      "request": {
+        "replaceBody": {
+          "name": "tenantId",
+          "value": ""
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "empty-workspace",
+      "request": {
+        "replaceBody": {
+          "name": "workspaceId",
+          "value": ""
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "numeric-workspace-generation",
+      "request": {
+        "replaceBody": {
+          "name": "workspaceGeneration",
+          "value": 7
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "empty-workspace-cwd",
+      "request": {
+        "replaceBody": {
+          "name": "workspaceCwd",
+          "value": ""
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "array-capability-digest",
+      "request": {
+        "replaceBody": {
+          "name": "capabilityDigest",
+          "value": [
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ]
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "unknown-isolation-class",
+      "request": {
+        "replaceBody": {
+          "name": "isolationClass",
+          "value": "tenant"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "non-json-content-type",
+      "request": {
+        "replaceHeader": {
+          "name": "content-type",
+          "value": "text/plain"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "gzip-content-encoding",
+      "request": {
+        "replaceHeader": {
+          "name": "content-encoding",
+          "value": "gzip"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "classification": "protocol",
+        "code": "managed_runtime_attestation_invalid"
+      }
+    },
+    {
+      "id": "case-variant-route",
+      "request": {
+        "pathOverride": "/INTERNAL/MANAGED-RUNTIME/V2/ATTEST"
+      },
+      "expected": {
+        "status": 404,
+        "classification": "incompatible"
+      }
+    },
+    {
+      "id": "options-method",
+      "request": {
+        "method": "OPTIONS"
       },
       "expected": {
         "status": 404,
