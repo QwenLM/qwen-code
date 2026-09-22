@@ -408,6 +408,9 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await isShellCommandReadOnlyAST("sed --quiet 'w out' file")).toBe(
         false,
       );
+      expect(await isShellCommandReadOnlyAST("sed --silent 'w out' file")).toBe(
+        false,
+      );
     });
   });
 

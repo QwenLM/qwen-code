@@ -252,6 +252,7 @@ describe('evaluateShellCommandReadOnly', () => {
 
     it('still rejects sed write scripts with --quiet', () => {
       expect(isShellCommandReadOnly("sed --quiet 'w out' file")).toBe(false);
+      expect(isShellCommandReadOnly("sed --silent 'w out' file")).toBe(false);
     });
   });
 
