@@ -23,9 +23,10 @@ model, approval, dictation, and send controls. Hide the width toggle on touch;
 retain the context-usage control when enabled by the host. Put workspace
 selection and Git controls
 in a separate context row so starting a task in a particular workspace or
-branch remains possible. The row's height is added to the composer's height
-cap, so it does not come out of the attachments' room when a soft keyboard
-shrinks the viewport. The rows stack without overlapping touch targets.
+branch remains possible. The row's measured height, two lines when it wraps,
+is added to the composer's height cap, so it does not come out of the
+attachments' room when a soft keyboard shrinks the viewport. The rows stack
+without overlapping touch targets.
 Preserve host-provided toolbar slots.
 
 Use 44px touch targets and wrap controls on very narrow viewports rather than
@@ -80,8 +81,10 @@ this fallback does not enable file ingestion or references.
 
 The history search must have a visible close action and remain touch usable.
 It opens upward from the composer, so its height is also capped by the room
-below the top of the view; with a soft keyboard open, its search field and
-close action stay on screen.
+between the composer and the top of the visible chat area. When even its
+minimum height does not fit, it overlaps the top of the composer instead of
+going under the header, so its search field and close action stay on screen
+with a soft keyboard open.
 File selection must stay in a user gesture, and deferred insertions must run
 after the drawer releases focus. Expanded editing must preserve attachment
 and reference state in the shared composer, including IME input. Image/file

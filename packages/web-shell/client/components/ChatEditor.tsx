@@ -59,6 +59,7 @@ import { AddMenu } from './composer/AddMenu';
 import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getShadowAwareActiveElement } from '../utils/dom';
+import { popoverTopEdge } from '../utils/popoverRoom';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
   getComposerTagIconUrl,
@@ -138,6 +139,8 @@ import {
 import styles from './ChatEditor.module.css';
 
 const MAX_DROP_DIALOG_ROWS = 100;
+// Matches the @ reference panel's minimum height.
+const SEARCH_PANEL_MIN_HEIGHT = 96;
 
 export type ComposerToolbarAction =
   | 'approvalMode'
@@ -2182,31 +2185,44 @@ export const ChatEditor = memo(
 
     // The panel opens upward from the composer; a soft keyboard can leave less
     // room above it than the CSS cap, which would slide the search box under
-    // the header.
-    const [searchPanelRoom, setSearchPanelRoom] = useState<number>();
+    // the header. When not even the minimum height fits, the panel overlaps
+    // the top of the composer instead.
+    const [searchPanelFit, setSearchPanelFit] = useState<{
+      room: number;
+      shift: number;
+    }>();
     useLayoutEffect(() => {
       const container = containerRef.current;
       if (!searchMode || !container) return undefined;
+      let frame: number | null = null;
       const update = () => {
-        const safeTop =
-          Number.parseFloat(
-            getComputedStyle(container).getPropertyValue(
-              '--web-shell-popover-safe-top',
-            ),
-          ) || 48;
-        setSearchPanelRoom(
-          Math.max(96, container.getBoundingClientRect().top - safeTop - 8),
+        const room =
+          container.getBoundingClientRect().top - popoverTopEdge(container) - 8;
+        const next = {
+          room: Math.max(SEARCH_PANEL_MIN_HEIGHT, room),
+          shift: Math.max(0, SEARCH_PANEL_MIN_HEIGHT - room),
+        };
+        setSearchPanelFit((prev) =>
+          prev?.room === next.room && prev.shift === next.shift ? prev : next,
         );
       };
+      const scheduleUpdate = () => {
+        if (frame !== null) return;
+        frame = window.requestAnimationFrame(() => {
+          frame = null;
+          update();
+        });
+      };
       update();
-      const resizeObserver = new ResizeObserver(update);
+      const resizeObserver = new ResizeObserver(scheduleUpdate);
       resizeObserver.observe(container);
-      window.addEventListener('resize', update);
-      window.addEventListener('scroll', update, true);
+      window.addEventListener('resize', scheduleUpdate);
+      window.addEventListener('scroll', scheduleUpdate, true);
       return () => {
+        if (frame !== null) window.cancelAnimationFrame(frame);
         resizeObserver.disconnect();
-        window.removeEventListener('resize', update);
-        window.removeEventListener('scroll', update, true);
+        window.removeEventListener('resize', scheduleUpdate);
+        window.removeEventListener('scroll', scheduleUpdate, true);
       };
     }, [searchMode]);
 
@@ -2390,6 +2406,24 @@ export const ChatEditor = memo(
         )
       ) : null;
     const mobileVoiceActive = isMobile && voiceActive;
+    const mobileContextRowVisible =
+      isMobile &&
+      !mobileVoiceActive &&
+      (workspaceSelectVisible || workspaceIndicatorVisible || gitBranchVisible);
+    // The workspace/Git row lives inside the capped box and wraps on narrow
+    // viewports, so its measured height is added back to the cap.
+    const mobileContextRowRef = useRef<HTMLDivElement>(null);
+    const [mobileContextRowHeight, setMobileContextRowHeight] =
+      useState<number>();
+    useLayoutEffect(() => {
+      const row = mobileContextRowRef.current;
+      if (!row) return undefined;
+      const update = () => setMobileContextRowHeight(row.offsetHeight);
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(row);
+      return () => resizeObserver.disconnect();
+    }, [mobileContextRowVisible]);
 
     useLayoutEffect(() => {
       const toolbar = toolbarRef.current;
@@ -2698,6 +2732,13 @@ export const ChatEditor = memo(
         <div
           ref={containerRef}
           className={styles.container}
+          style={
+            mobileContextRowHeight === undefined
+              ? undefined
+              : ({
+                  '--chat-editor-context-row-height': `${mobileContextRowHeight}px`,
+                } as CSSProperties)
+          }
           data-web-shell-composer-surface
           tabIndex={-1}
           data-at-panel-open={hasAtMenu || undefined}
@@ -2745,10 +2786,11 @@ export const ChatEditor = memo(
               ref={searchUiRef}
               className={styles.searchPanel}
               style={
-                searchPanelRoom === undefined
+                searchPanelFit === undefined
                   ? undefined
                   : ({
-                      '--chat-editor-search-room': `${searchPanelRoom}px`,
+                      '--chat-editor-search-room': `${searchPanelFit.room}px`,
+                      '--chat-editor-search-shift': `${searchPanelFit.shift}px`,
                     } as CSSProperties)
               }
               onMouseDown={(event) => event.stopPropagation()}
@@ -3096,15 +3138,14 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            {isMobile &&
-              !mobileVoiceActive &&
-              (workspaceSelectVisible ||
-                workspaceIndicatorVisible ||
-                gitBranchVisible) && (
-                <div className={styles.mobileContextRow}>
-                  {workspaceControls(false)}
-                </div>
-              )}
+            {mobileContextRowVisible && (
+              <div
+                ref={mobileContextRowRef}
+                className={styles.mobileContextRow}
+              >
+                {workspaceControls(false)}
+              </div>
+            )}
             {core.mobileComposer && !mobileVoiceActive && (
               <div
                 className={styles.mobileEditingActions}

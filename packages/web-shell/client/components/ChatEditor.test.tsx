@@ -3720,22 +3720,106 @@ describe('ChatEditor mobile composer actions', () => {
     }
   });
 
+  function historyPanelFit(container: HTMLElement) {
+    const panel = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-history-search]',
+    )!.parentElement!.parentElement!;
+    return {
+      room: panel.style.getPropertyValue('--chat-editor-search-room'),
+      shift: panel.style.getPropertyValue('--chat-editor-search-shift'),
+    };
+  }
+
+  // Only the composer surface and hidden-overflow ancestors get a real top, so
+  // measuring any other node changes the result.
+  function mockComposerGeometry(geometry: {
+    composerTop: number;
+    clipTop: number;
+  }) {
+    return vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { top: geometry.composerTop } as DOMRect;
+        }
+        return {
+          top: this.style.overflowY === 'hidden' ? geometry.clipTop : -1000,
+        } as DOMRect;
+      });
+  }
+
   it('limits the history panel to the room above the composer', () => {
     mobileComposer('draft');
     composerCoreState.searchMode = true;
-    const rect = vi
-      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockReturnValue({ top: 182 } as DOMRect);
+    const rect = mockComposerGeometry({ composerTop: 182, clipTop: 0 });
     try {
       const container = renderChatEditor({});
-      const panel = container.querySelector<HTMLElement>(
-        '[data-web-shell-composer-history-search]',
-      )!.parentElement!.parentElement!;
-      expect(panel.style.getPropertyValue('--chat-editor-search-room')).toBe(
-        '126px',
-      );
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
     } finally {
       rect.mockRestore();
+    }
+  });
+
+  it('re-measures the history panel and keeps it below a clipping ancestor', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const geometry = { composerTop: 182, clipTop: 0 };
+    const rect = mockComposerGeometry(geometry);
+    const settle = (dispatch: () => void) =>
+      act(async () => {
+        dispatch();
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container).room).toBe('174px');
+
+      // A header above the clipping pane leaves less than the minimum height,
+      // so the panel moves down over the composer instead of under the header.
+      container.style.overflowY = 'hidden';
+      geometry.clipTop = 120;
+      await settle(() => window.dispatchEvent(new Event('resize')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '96px',
+        shift: '42px',
+      });
+
+      geometry.composerTop = 300;
+      await settle(() => container.dispatchEvent(new Event('scroll')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '172px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('adds the measured workspace row height to the composer cap', () => {
+    mobileComposer('draft');
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('mobileContextRow') ? 92 : 0;
+      });
+    try {
+      // The branch usually arrives after the composer mounts.
+      const container = renderChatEditor({});
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('');
+      rerenderChatEditor(container, { gitBranch: 'main' });
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('92px');
+    } finally {
+      height.mockRestore();
     }
   });
 
