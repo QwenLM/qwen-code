@@ -21,9 +21,31 @@ export function resolveModelManagement(
 // past the host policy. Keep in sync with packages/cli authCommand.
 const MODEL_SETUP_COMMAND_NAMES = new Set(['auth', 'connect', 'login']);
 
-export function isModelSetupCommand(input: string): boolean {
+/** The command identity a session's command snapshot carries per entry. */
+export interface ModelSetupCommandInfo {
+  name: string;
+  source?: string;
+  altNames?: readonly string[];
+}
+
+export function isModelSetupCommand(
+  input: string,
+  commands?: readonly ModelSetupCommandInfo[],
+): boolean {
   const trimmed = input.trim();
   if (!trimmed.startsWith('/')) return false;
   const firstToken = trimmed.slice(1).trimStart().split(/\s+/, 1)[0];
-  return MODEL_SETUP_COMMAND_NAMES.has(firstToken.toLowerCase());
+  // With a fully loaded snapshot (a builtin entry marks it, per
+  // daemon/session/actions.ts), classify by the RESOLVED command exactly as
+  // the daemon does — exact name, then altNames, both case-sensitive
+  // (commands.ts findCommandByName): a project/user command named `auth`,
+  // `connect` or `login` replaces the builtin and must stay runnable. Until
+  // the snapshot loads, fail closed on the bare names.
+  if (commands?.some((command) => command.source === 'builtin-command')) {
+    const resolved =
+      commands.find((command) => command.name === firstToken) ??
+      commands.find((command) => command.altNames?.includes(firstToken));
+    return resolved?.name === 'auth' && resolved.source === 'builtin-command';
+  }
+  return MODEL_SETUP_COMMAND_NAMES.has(firstToken);
 }

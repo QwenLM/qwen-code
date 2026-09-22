@@ -316,7 +316,7 @@ function SideTaskSession({
     initialPromptSentRef.current = true;
     if (
       !resolveModelManagement(modelManagement).allowAdd &&
-      isModelSetupCommand(prompt)
+      isModelSetupCommand(prompt, connection.commands)
     ) {
       onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
       onInitialPromptRefused?.(tabId);
@@ -341,6 +341,7 @@ function SideTaskSession({
   }, [
     actions,
     catalogOwnerCwd,
+    connection.commands,
     connection.sessionId,
     initialPrompt,
     modelManagement,

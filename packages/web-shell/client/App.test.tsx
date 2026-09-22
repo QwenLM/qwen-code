@@ -16688,9 +16688,11 @@ describe('App session callbacks', () => {
     it.each(['/auth', '/login', '/connect', '/ auth'])(
       'refuses a host-disabled model setup edit (%s) before rewinding',
       async (text) => {
+        const onToast = vi.fn();
         renderApp({
           language: 'en',
           modelManagement: { allowAdd: false, allowDelete: false },
+          onToast,
         });
         await flush();
         let accepted;
@@ -16698,6 +16700,10 @@ describe('App session callbacks', () => {
           accepted = await submit(text);
         });
         expect(accepted).toBe(false);
+        expect(onToast).toHaveBeenCalledWith(
+          'info',
+          'Adding models is disabled by the host.',
+        );
         expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
         expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
         expect(
@@ -27942,6 +27948,27 @@ describe('App session callbacks', () => {
     expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
   });
 
+  it('refuses a host-disabled model setup side task before provisioning', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    const onToast = vi.fn();
+    const { container } = renderApp({
+      modelManagement: { allowAdd: false, allowDelete: false },
+      onToast,
+    });
+    await flush();
+
+    testState.prompt = '/btw side /auth';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    expect(container.querySelector('button[title="Side task"]')).toBeNull();
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'Adding models is disabled by the host.',
+    );
+  });
+
   it('keeps /btw side as a lightweight question without the capability', async () => {
     const { container } = renderApp();
     await flush();
@@ -35299,15 +35326,17 @@ describe('App session callbacks', () => {
     { sessionId: undefined, text: '/ auth' },
     { sessionId: 's1', text: '/ auth' },
   ])(
-    'blocks host-disabled model setup in welcome/session (session $sessionId, input "$text") before callbacks and forwarding',
+    'blocks host-disabled model setup in welcome/session (session $sessionId, input "$text") when the host callback declines',
     async ({ sessionId, text }) => {
       mockConnection.sessionId = sessionId;
+      const onToast = vi.fn();
       const onSlashCommand = vi.fn(() => false);
       // No hiddenSlashCommands pre-filter here: the allowAdd clause itself
       // must be what removes /auth from the suggestion list.
       const { container } = renderApp({
         modelManagement: { allowAdd: false, allowDelete: false },
         onSlashCommand,
+        onToast,
       });
       await flush();
       expect(testState.latestChatEditorProps?.commands).not.toEqual(
@@ -35316,7 +35345,14 @@ describe('App session callbacks', () => {
       testState.prompt = text;
       await clickSubmit(container);
       await flush();
-      expect(onSlashCommand).not.toHaveBeenCalled();
+      // The host's documented override runs before the refusal; '/ auth'
+      // never reaches it because the handler pattern needs a token right
+      // after the slash.
+      expect(onSlashCommand).toHaveBeenCalledTimes(text === '/ auth' ? 0 : 1);
+      expect(onToast).toHaveBeenCalledWith(
+        'info',
+        'Adding models is disabled by the host.',
+      );
       expect(
         container.querySelector('[data-testid="dialog-shell"]'),
       ).toBeNull();
@@ -35324,6 +35360,59 @@ describe('App session callbacks', () => {
       expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     },
   );
+
+  it('lets the host take over /auth when model setup is disabled', async () => {
+    const onToast = vi.fn();
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({
+      modelManagement: { allowAdd: false, allowDelete: false },
+      onSlashCommand,
+      onToast,
+    });
+    await flush();
+    testState.prompt = '/auth';
+    await clickSubmit(container);
+    await flush();
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'auth',
+      args: '',
+      input: '/auth',
+    });
+    expect(onToast).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('keeps a project command shadowing a setup alias runnable under allowAdd: false', async () => {
+    mockConnection.commands = [
+      {
+        name: 'auth',
+        description: 'Configure models',
+        source: 'builtin-command',
+        altNames: ['connect', 'login'],
+      },
+      { name: 'login', description: 'Project login', source: 'project' },
+    ];
+    const { container } = renderApp({
+      modelManagement: { allowAdd: false, allowDelete: false },
+    });
+    await flush();
+    // The shadowing project command stays advertised …
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'login' })]),
+    );
+    // … while the builtin auth entry it shadows part of stays hidden.
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'auth' })]),
+    );
+    testState.prompt = '/login staging';
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/login staging',
+      expect.anything(),
+    );
+  });
 
   it('applies current model-management policy to retained settings callbacks and closes auth', async () => {
     const { container, rerender } = renderApp();

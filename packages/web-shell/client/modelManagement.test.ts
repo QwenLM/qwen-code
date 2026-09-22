@@ -19,7 +19,6 @@ describe('model management policy', () => {
   });
   it.each([
     '/auth',
-    ' /AUTH ',
     '/auth custom',
     '/auth\ncustom',
     // The daemon resolves these to /auth: its altNames, and whitespace it
@@ -37,7 +36,46 @@ describe('model management policy', () => {
     'explain /auth',
     '/model',
     '/delete',
+    // The daemon resolves names case-sensitively, so this reaches it as
+    // prose; folding case would discard ordinary text under a policy toast.
+    ' /AUTH ',
   ])('preserves non-setup input %s', (text) => {
     expect(isModelSetupCommand(text)).toBe(false);
+  });
+
+  const builtinAuth = {
+    name: 'auth',
+    source: 'builtin-command',
+    altNames: ['connect', 'login'],
+  };
+
+  it.each(['/auth', '/login', '/connect', '/ auth'])(
+    'blocks %s when the snapshot resolves it to the builtin auth command',
+    (text) => {
+      expect(isModelSetupCommand(text, [builtinAuth])).toBe(true);
+    },
+  );
+  it('keeps a host/project command shadowing a setup name runnable', () => {
+    const commands = [
+      builtinAuth,
+      { name: 'login', source: 'project' },
+      { name: 'connect', source: 'user' },
+    ];
+    expect(isModelSetupCommand('/login staging', commands)).toBe(false);
+    expect(isModelSetupCommand('/connect', commands)).toBe(false);
+    expect(isModelSetupCommand('/auth', commands)).toBe(true);
+  });
+  it('keeps a project command named auth runnable when it replaces the builtin', () => {
+    const commands = [
+      { name: 'clear', source: 'builtin-command' },
+      { name: 'auth', source: 'project' },
+    ];
+    expect(isModelSetupCommand('/auth acme', commands)).toBe(false);
+  });
+  it('treats a snapshot without builtin entries as still loading', () => {
+    expect(
+      isModelSetupCommand('/auth', [{ name: 'auth', source: 'project' }]),
+    ).toBe(true);
+    expect(isModelSetupCommand('/auth', [])).toBe(true);
   });
 });

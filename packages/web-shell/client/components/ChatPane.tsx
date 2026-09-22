@@ -694,7 +694,8 @@ export function ChatPane({
     clearQueuedPrompts,
   } = useQueuedPrompts({
     getPromptDispatchError: (text) =>
-      !modelManagementRef.current.allowAdd && isModelSetupCommand(text)
+      !modelManagementRef.current.allowAdd &&
+      isModelSetupCommand(text, connectionRef.current.commands)
         ? t('settings.models.addDisabled')
         : undefined,
     connected: connection.status === 'connected',
@@ -919,10 +920,6 @@ export function ChatPane({
       commitAccepted?: ComposerSubmitCommit,
       metadata?: ComposerSubmitMetadata,
     ): boolean => {
-      if (!modelManagementRef.current.allowAdd && isModelSetupCommand(text)) {
-        onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
-        return true;
-      }
       let trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
@@ -944,6 +941,16 @@ export function ChatPane({
         trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
+        return true;
+      }
+      // Only when the host declines does the policy consume a model-setup
+      // command — below the runtimeStopped fence so a stopped runtime keeps
+      // the draft instead of toasting, and ahead of any daemon dispatch.
+      if (
+        !modelManagementRef.current.allowAdd &&
+        isModelSetupCommand(text, connectionRef.current.commands)
+      ) {
+        onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
         return true;
       }
       const planCommand = trimmed.match(/^\/plan(?:\s+(.*))?$/is);
@@ -1372,7 +1379,7 @@ export function ChatPane({
       .filter(
         (command) =>
           modelManagementPolicy.allowAdd ||
-          command.name.toLowerCase() !== 'auth',
+          !isModelSetupCommand(`/${command.name}`, connection.commands),
       )
       .map((command) => {
         const skillKey = skillDescriptionKey(command.name);

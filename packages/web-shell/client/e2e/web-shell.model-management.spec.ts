@@ -172,11 +172,11 @@ for (const allowAdd of [true, false]) {
       // /prompt is the only refusal-relevant route the mock daemon records;
       // the /auth/provider half was decorative, so the request-level install
       // guarantee is carried by AuthMessage.dom.test.tsx instead.
-      expect(
-        daemon.requests.filter(
-          ({ method, path }) => method === 'POST' && path.endsWith('/prompt'),
-        ),
-      ).toHaveLength(0);
+      await expect.poll(() => daemon.promptRequests().length).toBe(0);
+      // Positive control: a plain prompt on this same arm must reach the
+      // recorder, or the zero above cannot tell refusal from a blind filter.
+      await submitLocalCommand(page, 'plain text prompt');
+      await expect.poll(() => daemon.promptRequests().length).toBe(1);
       await evidence(page, 'disabled-auth-command');
     }
   });

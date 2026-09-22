@@ -3120,24 +3120,26 @@ describe('ChatPane', () => {
   });
 
   it.each([false, true])(
-    'blocks model setup before host handling and queueing (busy=%s)',
+    'refuses model setup only after the host handler declines (busy=%s)',
     (busy) => {
       sessionHasActivePromptValue = busy;
-      const onSlashCommand = vi.fn(() => true);
+      const onSlashCommand = vi.fn(() => false);
       const onImageIngestionNotice = vi.fn();
       render({
         modelManagement: { allowAdd: false },
         onSlashCommand,
         onImageIngestionNotice,
       });
-      for (const command of ['/auth', '  /AUTH provider  ']) {
-        let accepted;
-        act(() => {
-          accepted = latestOnSubmit!(command);
-        });
-        expect(accepted).toBe(true);
-      }
-      expect(onSlashCommand).not.toHaveBeenCalled();
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
       expect(sendPrompt).not.toHaveBeenCalled();
       expect(enqueuePrompt).not.toHaveBeenCalled();
       expect(onImageIngestionNotice).toHaveBeenCalledWith(
@@ -3147,8 +3149,35 @@ describe('ChatPane', () => {
     },
   );
 
+  it.each([false, true])(
+    'lets the host take over a disabled model setup command (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => true);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses current model management policy in a retained submit callback', () => {
-    const onSlashCommand = vi.fn(() => true);
+    const onSlashCommand = vi.fn(() => false);
     render({ onSlashCommand });
     const retainedSubmit = latestOnSubmit!;
     const retainedDispatchPolicy = queuedPromptDispatchError!;
@@ -3161,7 +3190,12 @@ describe('ChatPane', () => {
     act(() => {
       expect(retainedSubmit('/auth')).toBe(true);
     });
-    expect(onSlashCommand).not.toHaveBeenCalled();
+    // The host saw the command first and declined; the policy refused it.
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'auth',
+      args: '',
+      input: '/auth',
+    });
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });

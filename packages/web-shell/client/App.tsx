@@ -10953,7 +10953,8 @@ export function App({
     clearQueuedPrompts,
   } = useQueuedPrompts({
     getPromptDispatchError: (text) =>
-      !modelManagementRef.current.allowAdd && isModelSetupCommand(text)
+      !modelManagementRef.current.allowAdd &&
+      isModelSetupCommand(text, connectionRef.current.commands)
         ? t('settings.models.addDisabled')
         : undefined,
     connected,
@@ -14771,7 +14772,7 @@ export function App({
       }
       if (
         !modelManagementRef.current.allowAdd &&
-        isModelSetupCommand(trimmed)
+        isModelSetupCommand(trimmed, connectionRef.current.commands)
       ) {
         pushToast('info', t('settings.models.addDisabled'));
         return false;
@@ -15198,13 +15199,19 @@ export function App({
       ) {
         return false;
       }
-      if (!modelManagementRef.current.allowAdd && isModelSetupCommand(text)) {
-        pushToast('info', t('settings.models.addDisabled'));
-        return true;
-      }
+      // The host's documented slash-command override runs first; only when
+      // it declines does the policy consume a model-setup command — still
+      // ahead of daemon dispatch through the hidden-command forward below.
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
+        return true;
+      }
+      if (
+        !modelManagementRef.current.allowAdd &&
+        isModelSetupCommand(text, connectionRef.current.commands)
+      ) {
+        pushToast('info', t('settings.models.addDisabled'));
         return true;
       }
       if (connectionRef.current.loadingTranscript) {
@@ -16222,6 +16229,16 @@ export function App({
                 .trim();
               if (!question) {
                 pushToast('error', t('btw.side.empty'));
+                return true;
+              }
+              // Refuse before a session is provisioned; the panel's
+              // initial-prompt guard stays as the backstop for tabs created
+              // before a policy flip.
+              if (
+                !modelManagementRef.current.allowAdd &&
+                isModelSetupCommand(question, connectionRef.current.commands)
+              ) {
+                pushToast('info', t('settings.models.addDisabled'));
                 return true;
               }
               createSideTask(question);
@@ -17655,7 +17672,7 @@ export function App({
         (command) =>
           !hiddenCommands.has(normalizeHiddenCommand(command.name)) &&
           (modelManagementPolicy.allowAdd ||
-            normalizeHiddenCommand(command.name) !== 'auth'),
+            !isModelSetupCommand(`/${command.name}`, connection.commands)),
       )
       .map((command) => {
         const skillKey = skillDescriptionKey(command.name);

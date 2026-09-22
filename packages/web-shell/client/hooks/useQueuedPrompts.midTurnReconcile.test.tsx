@@ -429,6 +429,117 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('reports a compensating delete the daemon refused', async () => {
+    const uploaded = deferred<{
+      type: string;
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({});
+      const fileText = '@notes.txt';
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(fileText + ' /auth', undefined, undefined, undefined, [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:notes.txt',
+                kind: 'file',
+                value: 'notes.txt',
+              },
+            },
+          ]);
+      });
+      expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+      // The route answers 200 {removed:false} when the store refuses the
+      // unlink, so the client resolves false instead of rejecting.
+      sdkMock.actions.removeAttachment.mockResolvedValue(false);
+      await harness.render({ getPromptDispatchError: denySetup });
+      await act(async () => {
+        uploaded.resolve({
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        });
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalledWith(
+        expect.any(Error),
+        'queue.attachmentCleanupFailed',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not report a failed compensating delete after the session changed', async () => {
+    const uploaded = deferred<{
+      type: string;
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({});
+      const fileText = '@notes.txt';
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(fileText + ' /auth', undefined, undefined, undefined, [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:notes.txt',
+                kind: 'file',
+                value: 'notes.txt',
+              },
+            },
+          ]);
+      });
+      expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+      sdkMock.actions.removeAttachment.mockRejectedValue(
+        new Error('cleanup failed'),
+      );
+      // The user switches away before the upload settles: the compensating
+      // delete still runs against the old session, but its failure belongs to
+      // that session, not to the one on screen.
+      await harness.render({ sessionId: 'session-b' });
+      await act(async () => {
+        uploaded.resolve({
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        });
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+        'notes.txt',
+        expect.anything(),
+      );
+      expect(harness.reportError).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'queue.attachmentCleanupFailed',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it.each(['/model', 'please explain /auth', '/authenticate'])(
     'keeps unrelated queued prompts enabled: %s',
     async (text) => {

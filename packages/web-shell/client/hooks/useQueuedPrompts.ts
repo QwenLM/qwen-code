@@ -3111,13 +3111,18 @@ export function useQueuedPrompts({
           uploadedAttachmentReferences = [];
           // A failed compensating delete leaves the refused prompt's bytes
           // in the session attachment store; surface it instead of dropping.
+          // A fulfilled `false` — the daemon refused the unlink — counts too,
+          // even though it can also mean both copies were already gone.
           const failedRemoval = removals.find(
-            (result): result is PromiseRejectedResult =>
-              result.status === 'rejected',
+            (result) => result.status === 'rejected' || result.value === false,
           );
-          if (failedRemoval) {
+          // Every sibling report in this chain is gated on still owning the
+          // work; a toast about a session the user already left is noise.
+          if (failedRemoval && targetIsCurrent()) {
             reportError(
-              failedRemoval.reason,
+              failedRemoval.status === 'rejected'
+                ? failedRemoval.reason
+                : new Error('removeAttachment returned false'),
               t('queue.attachmentCleanupFailed'),
             );
           }
