@@ -1312,6 +1312,11 @@ describe('composePostCompactHistory — plan-mode reminder', () => {
       .join('\n');
     expect(flat).toContain('<plan-mode-active>');
     expect(hasPostCompactAttachmentSentinel(result[2])).toBe(true);
+    expect(
+      (result[2]?.parts?.[0] as { text: string }).text.startsWith(
+        '<plan-mode-active>',
+      ),
+    ).toBe(true);
     expect(hasPostCompactAttachmentSentinel(result[0])).toBe(false);
     expect(flat).toMatch(/may not execute modification/i);
     // Tool names must come from the ToolNames constant source, not stale

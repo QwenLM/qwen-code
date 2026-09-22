@@ -25,7 +25,10 @@ export function markPostCompactAttachmentParts(parts: Part[]): Part[] {
     if (part.text.includes(POST_COMPACT_ATTACHMENT_SENTINEL)) return part;
     return {
       ...part,
-      text: POST_COMPACT_ATTACHMENT_SENTINEL + part.text,
+      // Append so the attachment tag stays at offset 0. Older builds recognize
+      // these recordings with startsWith; this build matches the sentinel
+      // anywhere via includes.
+      text: part.text + POST_COMPACT_ATTACHMENT_SENTINEL,
     };
   });
 }

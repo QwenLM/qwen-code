@@ -1194,6 +1194,60 @@ describe('SessionTranscriptReader', () => {
     ]);
   });
 
+  it('projects the latest absorbed snapshot offset onto runtime resume state', async () => {
+    const user = record('u1', null, 'first prompt');
+    const stale: ChatRecord = {
+      ...record('offset-old', 'u1', ''),
+      type: 'system',
+      subtype: 'absorbed_snapshot_offset',
+      message: undefined,
+      systemPayload: {
+        absorbedSnapshotCount: 1,
+        retainedTargetSnapshots: 0,
+      },
+    };
+    const answer = record('a1', 'offset-old', 'answer');
+    const latest: ChatRecord = {
+      ...record('offset-new', 'a1', ''),
+      type: 'system',
+      subtype: 'absorbed_snapshot_offset',
+      message: undefined,
+      systemPayload: {
+        absorbedSnapshotCount: 4,
+        retainedTargetSnapshots: 1,
+      },
+    };
+    const tail = record('u2', 'offset-new', 'later prompt');
+    const invalid: ChatRecord = {
+      ...record('offset-bad', 'u2', ''),
+      type: 'system',
+      subtype: 'absorbed_snapshot_offset',
+      message: undefined,
+      systemPayload: {
+        absorbedSnapshotCount: -1,
+        retainedTargetSnapshots: 0,
+      },
+    };
+    await writeRecords([user, stale, answer, latest, tail, invalid]);
+
+    for (const replay of [
+      { kind: 'none' as const },
+      {
+        kind: 'recent' as const,
+        limit: 1,
+        hideInheritedHistory: false,
+      },
+    ]) {
+      const projection = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readRestoreProjection(sessionId, { replay });
+      expect(projection?.runtime.absorbedSnapshotOffset).toEqual({
+        absorbedSnapshotCount: 4,
+        retainedTargetSnapshots: 1,
+      });
+    }
+  });
+
   it('builds a cold runtime projection with full-loader parity', async () => {
     const source: ChatRecord = {
       ...record('source', null, 'source'),

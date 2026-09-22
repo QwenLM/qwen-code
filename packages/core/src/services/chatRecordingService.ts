@@ -322,6 +322,7 @@ export interface ChatRecord {
     | 'agent_retry'
     | 'agent_session_ready'
     | 'file_history_snapshot'
+    | 'absorbed_snapshot_offset'
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
@@ -389,6 +390,7 @@ export interface ChatRecord {
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
+    | AbsorbedSnapshotOffsetRecordPayload
     | AgentBootstrapRecordPayload
     | AgentRetryRecordPayload
     | AgentSessionReadyRecordPayload
@@ -681,6 +683,31 @@ export interface AttributionSnapshotPayload {
 export interface RewindRecordPayload {
   /** Number of UI history items truncated. */
   truncatedCount: number;
+}
+
+/**
+ * Absolute rewind offset recorded when compression succeeds, plus how many
+ * file-inclusive rewinds have since kept their target snapshot.
+ */
+export interface AbsorbedSnapshotOffsetRecordPayload {
+  absorbedSnapshotCount: number;
+  retainedTargetSnapshots: number;
+}
+
+export function isAbsorbedSnapshotOffsetPayload(
+  payload: unknown,
+): payload is AbsorbedSnapshotOffsetRecordPayload {
+  if (typeof payload !== 'object' || payload === null) return false;
+  const absorbed = (payload as AbsorbedSnapshotOffsetRecordPayload)
+    .absorbedSnapshotCount;
+  const retained = (payload as AbsorbedSnapshotOffsetRecordPayload)
+    .retainedTargetSnapshots;
+  return (
+    Number.isInteger(absorbed) &&
+    absorbed >= 0 &&
+    Number.isInteger(retained) &&
+    retained >= 0
+  );
 }
 
 /**
@@ -2618,6 +2645,29 @@ export class ChatRecordingService {
       }
     } catch (error) {
       debugLogger.error('Error saving rewind record:', error);
+    }
+  }
+
+  /**
+   * Persists the compression rewind offset so resume does not re-infer it
+   * from the live snapshot and prompt counts.
+   */
+  recordAbsorbedSnapshotOffset(
+    payload: AbsorbedSnapshotOffsetRecordPayload,
+  ): void {
+    if (!isAbsorbedSnapshotOffsetPayload(payload)) {
+      return;
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'absorbed_snapshot_offset',
+        systemPayload: payload,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving absorbed snapshot offset:', error);
     }
   }
 

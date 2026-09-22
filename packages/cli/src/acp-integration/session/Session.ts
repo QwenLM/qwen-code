@@ -130,6 +130,8 @@ import {
   findApiRewindCutPoint,
   countApiUserPrompts,
   getStartupContextLength,
+  isApiUserPrompt,
+  isAbsorbedSnapshotOffsetPayload,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -2125,6 +2127,17 @@ export class Session implements SessionContext {
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
+  /**
+   * Snapshots whose prompts compression removed. Null until a successful
+   * compression records it. Not inferred from `snapshotCount - visible`:
+   * counted turns without snapshots (cron, notifications) and a file-inclusive
+   * rewind's retained target both break that parity.
+   */
+  #absorbedSnapshotOffset: number | null = null;
+  /** Target snapshots kept by file-inclusive rewinds since the last record. */
+  #retainedTargetSnapshots = 0;
+  /** Compressed history whose recorded offset could not be corroborated. */
+  #rewindOffsetUnreconciled = false;
   // Resolves the `<<loop.md>>` / `<<loop.md-dynamic>>` sentinels at fire time.
   // Lazily created on the first loop tick; its content cache is reset on
   // compaction (see #sendMessageStreamWithAutoCompression) and it is rebuilt if
@@ -4605,6 +4618,7 @@ export class Session implements SessionContext {
     gaps?: HistoryGap[],
     options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
+    this.restoreRecordedRewindOffset(records);
     this.primeTurnFromHistory(records);
     const skipFinalizeCallIds =
       this.config.getRestoreAskUserQuestion?.() === true
@@ -4657,6 +4671,10 @@ export class Session implements SessionContext {
       apiHistory,
       targetTurnIndex,
     );
+    const rewindWindow = this.#rewindOffsetState(apiHistory);
+    debugLogger.info(
+      `[Session] rewind session=${this.sessionId} target=${targetTurnIndex} absorbed=${rewindWindow.absorbed} visible=${rewindWindow.visible} snapshots=${rewindWindow.snapshotCount} retained=${rewindWindow.retained} apiTruncateIndex=${apiTruncateIndex} rewindFiles=${opts?.rewindFiles !== false}`,
+    );
 
     if (apiTruncateIndex < 0) {
       throw RequestError.invalidParams(
@@ -4697,6 +4715,12 @@ export class Session implements SessionContext {
       ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
+    // The kept target snapshot has no prompt left in history. It sits at the
+    // end of the survivor list, so it must not move the absorbed prefix.
+    if (rewindFiles && targetTurnIndex < snapshotsBeforeRewind.length) {
+      this.#retainedTargetSnapshots += 1;
+      this.#persistRewindOffset();
+    }
 
     this.config
       .getChatRecordingService()
@@ -4728,18 +4752,57 @@ export class Session implements SessionContext {
   /**
    * Absolute file-history snapshot indexes a client may rewind to.
    *
-   * `countApiUserPrompts` is the post-compression tail length. Snapshots keep
-   * their original positions, so using that length as `idx < count` lists the
-   * absorbed prefix and hides the tail. When a compressed prefix is present
-   * and more snapshots remain than tail prompts, the reachable indexes are
-   * the tail's absolute positions. `findApiRewindCutPoint` stays tail-ordinal;
-   * callers subtract `start` before using it.
+   * `start` is the offset recorded when compression succeeded, not
+   * `snapshotCount - visible`. Counted turns that never snapshotted stay
+   * inside `visible` but do not extend `end`. A missing or uncorroborated
+   * offset fail-closes to an empty range.
    */
   getRewindableTurnRange(): { start: number; end: number } {
-    const history = this.captureHistorySnapshot();
-    const visible = countApiUserPrompts(history, ACP_API_USER_PROMPT_OPTIONS);
-    const start = this.#absorbedSnapshotCount(history, visible);
-    return { start, end: start + visible };
+    const window = this.#rewindOffsetState(this.captureHistorySnapshot());
+    return { start: window.start, end: window.end };
+  }
+
+  /**
+   * Restores the offset persisted in the session recording. The latest valid
+   * record wins. Records that do not carry one leave the in-memory offset
+   * alone so a partial replay cannot wipe a live value.
+   */
+  restoreRecordedRewindOffset(records: readonly ChatRecord[]): void {
+    let payload: {
+      absorbedSnapshotCount: number;
+      retainedTargetSnapshots: number;
+    } | null = null;
+    for (const record of records) {
+      if (
+        record.type !== 'system' ||
+        record.subtype !== 'absorbed_snapshot_offset' ||
+        !isAbsorbedSnapshotOffsetPayload(record.systemPayload)
+      ) {
+        continue;
+      }
+      payload = record.systemPayload;
+    }
+    if (!payload) return;
+    this.applyRecordedRewindOffset(payload);
+  }
+
+  /**
+   * Installs the offset taken from the full restore projection. A paged
+   * replay can omit the record; callers apply this after that replay so the
+   * active-chain value wins.
+   */
+  applyRecordedRewindOffset(
+    payload:
+      | {
+          absorbedSnapshotCount: number;
+          retainedTargetSnapshots: number;
+        }
+      | undefined,
+  ): void {
+    if (!isAbsorbedSnapshotOffsetPayload(payload)) return;
+    this.#absorbedSnapshotOffset = payload.absorbedSnapshotCount;
+    this.#retainedTargetSnapshots = payload.retainedTargetSnapshots;
+    this.#rewindOffsetUnreconciled = false;
   }
 
   restoreHistory(history: Content[]): void {
@@ -4751,6 +4814,7 @@ export class Session implements SessionContext {
     }
 
     this.config.getLlmClient()!.setHistory(structuredClone(history));
+    this.#reconcileRewindOffset(history);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -4759,34 +4823,164 @@ export class Session implements SessionContext {
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
-  #absorbedSnapshotCount(apiHistory: Content[], visible: number): number {
+  #historyHasCompressedPrefix(apiHistory: Content[]): boolean {
+    return (
+      getStartupContextLength(apiHistory, { includeCompressed: true }) >
+      getStartupContextLength(apiHistory)
+    );
+  }
+
+  #persistRewindOffset(): void {
+    this.config.getChatRecordingService()?.recordAbsorbedSnapshotOffset({
+      absorbedSnapshotCount: this.#absorbedSnapshotOffset ?? 0,
+      retainedTargetSnapshots: this.#retainedTargetSnapshots,
+    });
+  }
+
+  /**
+   * Records the snapshot prefix compression just removed.
+   *
+   * The in-flight turn may already own a snapshot before its prompt is in
+   * history (user send snapshots first), or it may be in history without a
+   * snapshot (cron, notification). Neither belongs in the absorbed prefix.
+   */
+  #noteAbsorbedSnapshotsAfterCompression(
+    promptId: string,
+    turnInHistory: boolean,
+  ): void {
+    const history = this.#getCurrentChat().getHistoryShallow();
+    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    const visible = countApiUserPrompts(history, ACP_API_USER_PROMPT_OPTIONS);
+    const turnHasSnapshot = snapshots.at(-1)?.promptId === promptId;
+    const pendingSnapshot = turnHasSnapshot && !turnInHistory;
+    const unsnapshottedTurnInHistory = !turnHasSnapshot && turnInHistory;
+    const absorbed = Math.max(
+      0,
+      snapshots.length -
+        visible -
+        (pendingSnapshot ? 1 : 0) +
+        (unsnapshottedTurnInHistory ? 1 : 0),
+    );
+    this.#absorbedSnapshotOffset = absorbed;
+    this.#retainedTargetSnapshots = 0;
+    this.#rewindOffsetUnreconciled = false;
+    this.#persistRewindOffset();
+  }
+
+  #rewindOffsetState(apiHistory: Content[]): {
+    start: number;
+    end: number;
+    visible: number;
+    absorbed: number;
+    retained: number;
+    snapshotCount: number;
+    failClosed: boolean;
+  } {
+    const visible = countApiUserPrompts(
+      apiHistory,
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
     const snapshotCount = this.config
       .getFileHistoryService()
       .getSnapshots().length;
-    if (snapshotCount <= visible) return 0;
-    const compressed =
-      getStartupContextLength(apiHistory, { includeCompressed: true }) >
-      getStartupContextLength(apiHistory);
-    return compressed ? snapshotCount - visible : 0;
+    const retained = this.#retainedTargetSnapshots;
+    if (!this.#historyHasCompressedPrefix(apiHistory)) {
+      const end =
+        retained > 0
+          ? Math.min(visible, Math.max(0, snapshotCount - retained))
+          : visible;
+      return {
+        start: 0,
+        end,
+        visible,
+        absorbed: 0,
+        retained,
+        snapshotCount,
+        failClosed: false,
+      };
+    }
+    if (
+      this.#rewindOffsetUnreconciled ||
+      this.#absorbedSnapshotOffset === null
+    ) {
+      return {
+        start: 0,
+        end: 0,
+        visible,
+        absorbed: -1,
+        retained,
+        snapshotCount,
+        failClosed: true,
+      };
+    }
+    const absorbed = this.#absorbedSnapshotOffset;
+    const tailSlots = snapshotCount - absorbed - retained;
+    const end =
+      tailSlots < 0 ? absorbed : absorbed + Math.min(visible, tailSlots);
+    return {
+      start: absorbed,
+      end,
+      visible,
+      absorbed,
+      retained,
+      snapshotCount,
+      failClosed: false,
+    };
+  }
+
+  /**
+   * A client-installed history has no snapshot adjustment. Keep the recorded
+   * offset only when the snapshot list still corroborates it. Extra counted
+   * prompts (negative gap) still match. Extra snapshots do not: fail closed.
+   */
+  #reconcileRewindOffset(apiHistory: Content[]): void {
+    if (!this.#historyHasCompressedPrefix(apiHistory)) {
+      this.#absorbedSnapshotOffset = null;
+      this.#retainedTargetSnapshots = 0;
+      this.#rewindOffsetUnreconciled = false;
+      return;
+    }
+    if (this.#absorbedSnapshotOffset === null) {
+      this.#rewindOffsetUnreconciled = true;
+      return;
+    }
+    const visible = countApiUserPrompts(
+      apiHistory,
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
+    const snapshotCount = this.config
+      .getFileHistoryService()
+      .getSnapshots().length;
+    const unexplained =
+      snapshotCount -
+      visible -
+      this.#absorbedSnapshotOffset -
+      this.#retainedTargetSnapshots;
+    if (unexplained > 0 || this.#absorbedSnapshotOffset > snapshotCount) {
+      this.#rewindOffsetUnreconciled = true;
+      return;
+    }
+    this.#rewindOffsetUnreconciled = false;
   }
 
   #computeApiTruncationIndexForUserTurn(
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const visible = countApiUserPrompts(
-      apiHistory,
-      ACP_API_USER_PROMPT_OPTIONS,
-    );
-    const absorbed = this.#absorbedSnapshotCount(apiHistory, visible);
-    const tailOrdinal = targetTurnIndex - absorbed;
-    // Ordinal 0 is the cut-point API's "keep the prelude" shortcut, including
-    // an empty tail. Anything before the reachable range was absorbed.
-    if (tailOrdinal < 0) return -1;
-    if (tailOrdinal > 0 && tailOrdinal >= visible) return -1;
+    const window = this.#rewindOffsetState(apiHistory);
+    // Anything outside the recorded window was absorbed, is a retained
+    // target snapshot, or is an empty tail. Ordinal 0 stays valid only
+    // while `end` is past `start`.
+    if (
+      window.failClosed ||
+      targetTurnIndex < window.start ||
+      targetTurnIndex >= window.end
+    ) {
+      return -1;
+    }
     return findApiRewindCutPoint(
       apiHistory,
-      tailOrdinal,
+      targetTurnIndex - window.start,
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -6011,6 +6205,11 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RETRY_META_KEY
               ] === true;
+            // A retry replaces a counted prompt only when the strip actually
+            // popped one. Flag-only retries (model tail, reminder tail, an
+            // already-completed tool loop) push a new prompt and still need
+            // a snapshot.
+            let retryReplacedCountedPrompt = false;
 
             // Continue an interrupted previous turn without a synthetic user
             // message. Classified from full history (the strip pass removes the
@@ -6122,7 +6321,12 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
+              const stripped = this.config
+                .getLlmClient()!
+                .stripOrphanedUserEntriesFromHistory();
+              retryReplacedCountedPrompt = stripped.some((entry) =>
+                isApiUserPrompt(entry, ACP_API_USER_PROMPT_OPTIONS),
+              );
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -6404,11 +6608,14 @@ export class Session implements SessionContext {
             // block in LlmClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
-            // Restore, retry, and interrupted-prompt continuation replay the
-            // same user turn. A second snapshot would outrun the counted
-            // prompts, and after compression that extra slot looks like a
-            // turn the summary absorbed.
-            if (!isRestoreAskUserQuestion && !isRetry && !isContinue) {
+            // Restore and interrupted-prompt continuation replay the same
+            // user turn. A retry skips the snapshot only when the strip
+            // popped a counted prompt; otherwise this send is a new turn.
+            if (
+              !isRestoreAskUserQuestion &&
+              !(isRetry && retryReplacedCountedPrompt) &&
+              !isContinue
+            ) {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
                 await fileHistoryService.makeSnapshot(promptId);
@@ -6833,6 +7040,8 @@ export class Session implements SessionContext {
                         this.#recordCompressionTokenCount(
                           resp.info,
                           requestRouteKey,
+                          promptId,
+                          true,
                         );
                       }
                     }
@@ -7983,7 +8192,12 @@ export class Session implements SessionContext {
             // In-send compression rewrote the shared history; invalidate
             // every retained route count (the pre-send hook never sees
             // this path).
-            this.#recordCompressionTokenCount(response.info, requestRouteKey);
+            this.#recordCompressionTokenCount(
+              response.info,
+              requestRouteKey,
+              promptIdForSend,
+              true,
+            );
           }
         }
       } catch (error) {
@@ -8684,7 +8898,12 @@ export class Session implements SessionContext {
     // must invalidate every retained route count, not just the active
     // route's (see #invalidateRouteTokenCountsForCompression).
     if (compressionInfo) {
-      this.#recordCompressionTokenCount(compressionInfo, requestRouteKey);
+      this.#recordCompressionTokenCount(
+        compressionInfo,
+        requestRouteKey,
+        promptId,
+        false,
+      );
     } else {
       this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     }
@@ -9084,9 +9303,14 @@ export class Session implements SessionContext {
   #recordCompressionTokenCount(
     info: ChatCompressionInfo,
     requestRouteKey: string,
+    promptId?: string,
+    turnInHistory = false,
   ): void {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
+      if (promptId !== undefined) {
+        this.#noteAbsorbedSnapshotsAfterCompression(promptId, turnInHistory);
+      }
       return;
     }
     this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
@@ -10281,6 +10505,8 @@ export class Session implements SessionContext {
                       this.#recordCompressionTokenCount(
                         resp.info,
                         requestRouteKey,
+                        promptId,
+                        true,
                       );
                     }
                   }
@@ -11339,7 +11565,12 @@ export class Session implements SessionContext {
                   // In-send compression rewrote the shared history;
                   // invalidate every retained route count (the pre-send
                   // hook never sees this path).
-                  this.#recordCompressionTokenCount(resp.info, requestRouteKey);
+                  this.#recordCompressionTokenCount(
+                    resp.info,
+                    requestRouteKey,
+                    promptId,
+                    true,
+                  );
                 }
               }
             } catch (error) {

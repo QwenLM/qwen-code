@@ -6069,6 +6069,9 @@ class QwenAgent implements Agent {
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
                 );
+                createdSession.applyRecordedRewindOffset?.(
+                  projection.runtime.absorbedSnapshotOffset,
+                );
                 copyCumulativeUsage(
                   createdSession.cumulativeUsage,
                   replayUsage,
@@ -6113,6 +6116,14 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
+              }
+              // The replay page is a suffix and can omit the offset record.
+              // Re-apply the active-chain value so a partial page cannot
+              // replace it with an older one.
+              if (projection) {
+                createdSession.applyRecordedRewindOffset?.(
+                  projection.runtime.absorbedSnapshotOffset,
+                );
               }
               try {
                 for (const update of streamGoalUpdates) {
@@ -6353,6 +6364,9 @@ class QwenAgent implements Agent {
                 createdSession.primeTurnState(
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
+                );
+                createdSession.applyRecordedRewindOffset?.(
+                  projection.runtime.absorbedSnapshotOffset,
                 );
               });
             },
