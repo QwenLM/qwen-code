@@ -802,8 +802,9 @@ export class InboundGate {
       // session's own standing answer, which does not change while it
       // runs.
       const momentary =
-        decision.cause === 'mode-unknown' ||
-        decision.cause === 'policy-unreadable';
+        decision.policy === 'hold' &&
+        (decision.cause === 'mode-unknown' ||
+          decision.cause === 'policy-unreadable');
       void this.report(frame, momentary ? 'expired' : 'refused');
       return 'refused';
     }
