@@ -2187,9 +2187,6 @@ describe('livePromptEvents', () => {
       expect(events).toContainEqual({
         type: 'task-end',
         id: 'agent1',
-        tools: 2,
-        seconds: 12.4,
-        tokens: '2.1k',
       });
       // Progress for already-seen subagent tool calls is not repeated.
       expect(

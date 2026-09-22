@@ -1664,8 +1664,10 @@ const EN: Messages = {
     'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceRefreshError':
     'Workspace added, but the workspace list could not be refreshed',
-  'sidebar.addWorkspaceAbsError': 'Path must be absolute',
-  'sidebar.addWorkspaceHint': 'Enter the absolute path to a project directory.',
+  'sidebar.addWorkspaceAbsError':
+    'Enter an absolute path or an SSH workspace URL.',
+  'sidebar.addWorkspaceHint':
+    'Enter a local absolute path or ssh://user@host/absolute/project. SSH requires key authentication, a trusted host key and Python 3 on the remote computer. Shell commands also require Bash; Qwen is not required there.',
   'sidebar.addWorkspaceSuggestions': 'Directory suggestions',
   'sidebar.addWorkspacePersist': 'Keep after daemon restart',
   'sidebar.addWorkspacePersistHint':
@@ -3880,6 +3882,20 @@ const EN: Messages = {
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'localControl.open': 'Mobile access',
+  'localControl.expires': (v) =>
+    `One-time QR · Expires in ${v?.seconds ?? ''}s · Refreshes automatically`,
+  'localControl.expired': 'QR code expired. Getting a fresh code…',
+  'localControl.retry': 'Retry',
+  'localControl.noNetwork':
+    'No local network address is available. Open the Web Shell through an address your phone can reach.',
+  'localControl.securePairing':
+    'Scan to grant access until this daemon restarts.',
+  'localControl.insecurePairing':
+    'Scan to grant access until this daemon restarts. Traffic is unencrypted; use a trusted network.',
+  'localControl.securePairingDynamic':
+    "Scan to grant access to this daemon. The device that scans stays signed in until the daemon restarts or that device's tab is closed.",
+  'localControl.insecurePairingDynamic':
+    "Scan to grant access to this daemon. The device that scans stays signed in until the daemon restarts or that device's tab is closed. Traffic is unencrypted; use a trusted network.",
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
@@ -5564,8 +5580,9 @@ const ZH: Messages = {
   'sidebar.addWorkspaceBusyError': '另一个工作区操作正在进行中',
   'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceRefreshError': '工作区已添加，但无法刷新工作区列表',
-  'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',
-  'sidebar.addWorkspaceHint': '请输入项目目录的绝对路径。',
+  'sidebar.addWorkspaceAbsError': '请输入绝对路径或 SSH 工作区地址。',
+  'sidebar.addWorkspaceHint':
+    '请输入本地绝对路径或 ssh://user@host/absolute/project。SSH 需要密钥认证、已确认的主机密钥，以及远端 Python 3。Shell 命令还需要 Bash；远端无需安装 Qwen。',
   'sidebar.addWorkspaceSuggestions': '目录建议',
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
@@ -7613,6 +7630,19 @@ const ZH: Messages = {
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'localControl.open': '手机访问',
+  'localControl.expires': (v) =>
+    `一次性二维码 · ${v?.seconds ?? ''} 秒后过期 · 自动刷新`,
+  'localControl.expired': '二维码已过期，正在获取新码…',
+  'localControl.retry': '重试',
+  'localControl.noNetwork':
+    '没有可用的局域网地址。请通过手机可访问的地址打开 Web Shell。',
+  'localControl.securePairing': '扫码将授予访问权限，直到 daemon 重启。',
+  'localControl.insecurePairing':
+    '扫码将授予访问权限，直到 daemon 重启。流量未加密，请使用受信任网络。',
+  'localControl.securePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。扫码的设备保持登录，直到 daemon 重启或该设备上的标签页关闭。',
+  'localControl.insecurePairingDynamic':
+    '扫码将授予此 daemon 的访问权限。扫码的设备保持登录，直到 daemon 重启或该设备上的标签页关闭。流量未加密，请使用受信任网络。',
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
@@ -7687,7 +7717,7 @@ const ZH: Messages = {
     '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
   'settings.label.general.cleanupPeriodDays': '清理周期（天）',
   'settings.description.general.cleanupPeriodDays':
-    '~/.qwen/file-history/ 中用于 /rewind 的会话备份保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
+    '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
   'settings.label.general.gitCoAuthor.commit': '归因：commit',
   'settings.description.general.gitCoAuthor.commit':
     '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',

@@ -200,11 +200,6 @@ export function nextLivePromptId(config: Config): string {
   return id;
 }
 
-/** Compact token count for task-end stats (matches the scripted demo form). */
-function formatTokenCount(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-}
-
 /**
  * Single-consumer async queue: lets the scheduler's output callbacks enqueue
  * neutral events while the generator is awaiting tool completion, so live
@@ -836,16 +831,7 @@ export async function* livePromptEvents(
           });
         }
         if (agent.status !== 'running' && agent.status !== 'background') {
-          const stats = agent.executionSummary;
-          out.push({
-            type: 'task-end',
-            id: callId,
-            tools: stats?.totalToolCalls ?? agent.toolCalls?.length ?? 0,
-            seconds: Math.round((stats?.totalDurationMs ?? 0) / 100) / 10,
-            tokens: formatTokenCount(
-              stats?.totalTokens ?? agent.tokenCount ?? 0,
-            ),
-          });
+          out.push({ type: 'task-end', id: callId });
         }
         return out;
       }
