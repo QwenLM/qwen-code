@@ -117,15 +117,30 @@ describe('isDirtyTree', () => {
   // `--no-optional-locks` skips the write. The control lives in its own case
   // with a fresh repo, because one ungated status consumes the stat dirt that
   // would otherwise make the guarded probe's hook fire.
+  //
+  // The write needs a racily-clean entry, and whether beforeEach's add and
+  // commit land in one filesystem tick is luck — a loaded runner straddles
+  // the tick, the status then writes nothing, and the control goes silent.
+  // Re-adding with a future-dated mtime forces raciness at any tick; the
+  // re-add itself writes the index and fires the hook, so reset the canary.
+  function plantPostIndexChangeHook(canary: string): void {
+    const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
+    fs.mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true });
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
+    fs.chmodSync(hook, 0o755);
+    const readme = path.join(repo, 'README.md');
+    const future = new Date(Date.now() + 3_600_000);
+    fs.utimesSync(readme, future, future);
+    git(repo, 'add', 'README.md');
+    fs.rmSync(canary, { force: true });
+    fs.writeFileSync(readme, 'changed\n');
+  }
+
   it.skipIf(process.platform === 'win32')(
     'does not run a tree-shipped post-index-change hook',
     async () => {
       const canary = path.join(repo, 'PIC');
-      const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
-      fs.mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true });
-      fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
-      fs.chmodSync(hook, 0o755);
-      fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
+      plantPostIndexChangeHook(canary);
 
       await expect(isDirtyTree(repo)).resolves.toBe(true);
       expect(fs.existsSync(canary)).toBe(false);
@@ -136,11 +151,7 @@ describe('isDirtyTree', () => {
     'an ungated status on a dirty tree runs the tree-shipped post-index-change hook (control)',
     async () => {
       const canary = path.join(repo, 'PIC');
-      const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
-      fs.mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true });
-      fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
-      fs.chmodSync(hook, 0o755);
-      fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n');
+      plantPostIndexChangeHook(canary);
 
       git(repo, 'status', '--porcelain', '--untracked-files=no');
       expect(fs.existsSync(canary)).toBe(true);

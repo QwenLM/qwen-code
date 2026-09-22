@@ -15,6 +15,7 @@ import type {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
+import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
 
@@ -99,6 +100,7 @@ vi.mock('../terminal/TerminalPanel', () => ({
 }));
 
 const { ArtifactPanel } = await import('./ArtifactPanel');
+type ArtifactPanelTab = Parameters<typeof ArtifactPanel>[0]['tabs'][number];
 const { useArtifactWorkspaceTarget } = await import(
   './useArtifactWorkspaceTarget'
 );
@@ -3858,5 +3860,144 @@ describe('ArtifactPanel workspace artifact previews', () => {
 
     expect(container.textContent).toMatch(/director/i);
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('ArtifactPanel trajectory entry', () => {
+  function renderPanel(props: {
+    items?: readonly WebShellRightPanelItem[];
+    onOpenTrajectory?: () => void;
+    trajectoryTabId?: string;
+    tabs?: ArtifactPanelTab[];
+    activeTabId?: string | null;
+  }) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={props.tabs ?? []}
+            activeTabId={props.activeTabId ?? null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            {...(props.items ? { items: props.items } : {})}
+            {...(props.onOpenTrajectory
+              ? { onOpenTrajectory: props.onOpenTrajectory }
+              : {})}
+            {...(props.trajectoryTabId
+              ? { trajectoryTabId: props.trajectoryTabId }
+              : {})}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  const entry = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="right-panel-open-trajectory"]',
+    );
+
+  it('stays hidden for a host that did not ask for it', () => {
+    // The default item set is unchanged by this feature, so a shell that
+    // never mentions the trajectory looks exactly as it did before.
+    const container = renderPanel({ onOpenTrajectory: () => {} });
+    expect(entry(container)).toBeNull();
+  });
+
+  it('stays hidden when the host has no handler to open it with', () => {
+    const container = renderPanel({ items: ['trajectory'] });
+    expect(entry(container)).toBeNull();
+  });
+
+  it('opens the trajectory from the empty state', () => {
+    const onOpenTrajectory = vi.fn();
+    const container = renderPanel({ items: ['trajectory'], onOpenTrajectory });
+    const button = entry(container);
+    expect(button).not.toBeNull();
+    act(() => button!.click());
+    expect(onOpenTrajectory).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the entry once the session already has a trajectory tab', () => {
+    const container = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-1',
+      tabs: [
+        {
+          id: 'trajectory:s-1',
+          kind: 'trajectory',
+          title: 'Trajectory',
+          sessionId: 's-1',
+        },
+      ],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(entry(container)).toBeNull();
+  });
+
+  it('keeps the entry when the open tab belongs to another session', () => {
+    // Tabs outlive the session they were opened for — split view opens one per
+    // pane, and a restored tab keeps its own. Hiding this session's entry
+    // because some other session's tab is open leaves no way in at all.
+    //
+    // The trajectory is the only item this host lists, so the add menu's
+    // trigger stands in for the item inside it: Radix does not render the
+    // content until it is opened.
+    const otherSessionTab: ArtifactPanelTab = {
+      id: 'trajectory:s-1',
+      kind: 'trajectory',
+      title: 'Trajectory',
+      sessionId: 's-1',
+    };
+    const addButton = (container: HTMLElement) =>
+      container.querySelector('[aria-label="Add panel"]');
+
+    const other = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-2',
+      tabs: [otherSessionTab],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(addButton(other)).not.toBeNull();
+
+    const own = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-1',
+      tabs: [otherSessionTab],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(addButton(own)).toBeNull();
+  });
+
+  it('renders the trajectory tab body', () => {
+    const container = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      tabs: [
+        {
+          id: 'trajectory:s-1',
+          kind: 'trajectory',
+          title: 'Trajectory',
+          sessionId: 's-1',
+        },
+      ],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(
+      container.querySelector('[data-testid="trajectory-panel"]'),
+    ).not.toBeNull();
   });
 });

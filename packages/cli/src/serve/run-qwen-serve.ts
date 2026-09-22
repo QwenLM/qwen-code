@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertExecutionSandboxSupported,
+  readOperatorSandboxSettings,
+  InvalidExecutionSandboxConfigError,
+} from '../config/execution-sandbox-settings.js';
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
@@ -23,6 +28,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -110,7 +116,10 @@ import {
 } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
-import { printRemoteQuickstart } from './remote-quickstart.js';
+import {
+  printRemoteQuickstart,
+  tokenQrNoEffectReason,
+} from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -231,14 +240,16 @@ import {
   sanitizeWorkerDiagnostic,
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
-import {
-  channelSelectionNames,
-  normalizeServeChannelSelection,
-} from './channel-selection.js';
+import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
   type ChannelWorkspaceGroup,
+  type ChannelWorkspaceGroupingSkip,
 } from './channel-workspace-grouping.js';
+import {
+  resolveStartupChannelSelection,
+  type StartupChannelDiagnostic,
+} from './channel-startup-restore.js';
 import { type ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type {
   ChannelWorkerControlState,
@@ -2117,6 +2128,12 @@ export interface RunQwenServeDeps {
    */
   bootSettings?: ServeFastPathSettings;
   /**
+   * Reads one registered workspace's settings summary. Only the boot-time
+   * `serve.channels` restore needs it, to read the workspaces the fast path
+   * did not already load for `bootSettings`.
+   */
+  loadWorkspaceBootSettings?: (workspaceCwd: string) => ServeFastPathSettings;
+  /**
    * Pre-resolved daemon debug directory. The full CLI/exported API can pass
    * Storage.getGlobalDebugDir(); the serve fast path intentionally avoids
    * importing core before listen and instead derives this from bootSettings.
@@ -3330,6 +3347,14 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
+  assertExecutionSandboxSupported(
+    readOperatorSandboxSettings(),
+    'serve / ACP / web terminals',
+  );
+  assertExecutionSandboxSupported(
+    deps.bootSettings ?? {},
+    'serve / ACP / web terminals',
+  );
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
@@ -3822,21 +3847,23 @@ async function runQwenServeImpl(
       `At most ${opts.maxRegisteredWorkspaces} --workspace values may be registered.`,
     );
   }
-  // Resolve one budget for journal growth and optional child-count admission.
-  // Child heap arguments continue to use the legacy policy.
+  // Resolve one budget for journal growth and the fixed child partition.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
-  if (opts.childHeapMode === 'admit' && deps.bridge) {
+  if (
+    (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
+    deps.bridge
+  ) {
     throw new TypeError(
       'ACP admission cannot be combined with an injected bridge.',
     );
   }
   const admissionPolicy =
-    opts.childHeapMode === 'admit'
+    opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce'
       ? createChildHeapPolicy({
           budget: opts.daemonMemoryBudget,
-          mode: 'admit',
+          mode: opts.childHeapMode,
         })
       : undefined;
   if (
@@ -3928,6 +3955,7 @@ async function runQwenServeImpl(
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
+          readSshWorkspace(cwd);
         } catch (err) {
           writeStderrLine(
             `qwen serve: skipping persisted workspace registration ${JSON.stringify(
@@ -4025,19 +4053,27 @@ async function runQwenServeImpl(
   } catch (err) {
     // Invalid policy values must fail startup loudly. Discriminate by
     // error class rather than substring-matching the message.
-    if (err instanceof InvalidPolicyConfigError) {
+    if (
+      err instanceof InvalidPolicyConfigError ||
+      err instanceof InvalidExecutionSandboxConfigError
+    ) {
       throw err;
     }
     // All other settings-read failures (corrupted JSON, transient
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* / serve.channels ` +
+        `policy.* / serve.channels / serve.tokenQr ` +
         `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
-        `to apply context.fileName / policy.* / serve.channels overrides.`,
+        `to apply context.fileName / policy.* / serve.channels / ` +
+        `serve.tokenQr overrides.`,
     );
   }
+  assertExecutionSandboxSupported(
+    bootSettings ?? {},
+    'serve / ACP / web terminals',
+  );
   // Init daemon logger early so all subsequent lifecycle events
   // (bridge spawn diagnostics, shutdown errors) are captured to file.
   const daemonLogBaseDir = await resolveDaemonLogBaseDirForRun({
@@ -4051,6 +4087,21 @@ async function runQwenServeImpl(
   });
   loggerLifecycle.initialized(daemonLog);
   let channelSelectionFromSettings = false;
+  // Which workspace a channel name belongs to when ownership is otherwise
+  // ambiguous. Two layers: the boot hints record the workspace that listed the
+  // name in its own `serve.channels` and never change, and the committed groups
+  // layer over them so a later runtime change resolves the way the running
+  // groups do. A commit only overrides the names it carries, so a channel
+  // toggled off and back on still resolves the way it did at boot instead of
+  // turning ambiguous until the next restart. A boot hint naming a workspace
+  // that is no longer registered is inert: `resolveChannelWorkspaceGroups` only
+  // takes a hint that matches one of the live owners.
+  let bootChannelOwnerHints: ReadonlyMap<string, string> = new Map();
+  let channelOwnerHints: ReadonlyMap<string, string> = new Map();
+  // Names a non-primary workspace contributed, which may be dropped instead of
+  // stranding the other workspaces. Empty for an explicit `--channel`
+  // selection and for every runtime change, both of which stay fail-fast.
+  let channelStartupTolerantNames: ReadonlySet<string> = new Set();
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       redactLogCredentials(
@@ -4067,38 +4118,85 @@ async function runQwenServeImpl(
       `workspace serve.channels was not restored: ${detail} Continuing without channels`,
     );
   };
-  if (!opts.channelSelection && bootSettings?.serve?.channels !== undefined) {
-    try {
-      const rawChannels = bootSettings.serve.channels;
-      if (
-        !Array.isArray(rawChannels) ||
-        !rawChannels.every((name): name is string => typeof name === 'string')
-      ) {
-        throw new Error('serve.channels must be a string array.');
-      }
-      const configuredChannels = rawChannels.filter((name, index) => {
-        if (
-          !name ||
-          name !== name.trim() ||
-          sanitizeLogText(name, name.length) !== name
-        ) {
-          daemonLog.warn(
-            `ignored invalid workspace serve.channels entry at index ${index}`,
-          );
-          return false;
-        }
-        return true;
+  const reportStartupChannelDiagnostic = (
+    diagnostic: StartupChannelDiagnostic,
+  ): void => {
+    const detail = sanitizeLogText(
+      redactLogCredentials(diagnostic.message),
+      512,
+    );
+    if (diagnostic.code === 'invalid_entry') {
+      // Matches the pre-multi-workspace behavior: a single unusable entry is
+      // an operator typo, not something worth a boot banner.
+      daemonLog.warn(detail, { workspaceCwd: diagnostic.workspaceCwd });
+      return;
+    }
+    if (diagnostic.code === 'claimed_by_multiple_workspaces') {
+      // Two workspaces listing the same name is what the per-workspace toggle
+      // produces, and ownership still resolves from the channel config alone,
+      // so the channel usually starts exactly as configured. Only a resolution
+      // that actually fails costs the operator a channel, and that reports
+      // itself; this one stays out of the boot banner.
+      daemonLog.warn(detail, {
+        code: diagnostic.code,
+        workspaceCwd: diagnostic.workspaceCwd,
+        ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
       });
-      opts.channelSelection = normalizeServeChannelSelection(
-        configuredChannels,
-        'serve.channels',
-      );
+      return;
+    }
+    writeStderrLine(
+      `qwen serve: workspace ${JSON.stringify(
+        diagnostic.workspaceCwd,
+      )} serve.channels: ${detail}`,
+    );
+    daemonLog.warn(`workspace serve.channels not fully restored: ${detail}`, {
+      code: diagnostic.code,
+      workspaceCwd: diagnostic.workspaceCwd,
+      ...(diagnostic.channel ? { channel: diagnostic.channel } : {}),
+    });
+  };
+  const startupChannelWorkspaces = workspaceInputs
+    .filter((workspace) => !readSshWorkspace(workspace.cwd))
+    .map((workspace, index) => ({
+      workspaceCwd: workspace.cwd,
+      primary: index === 0,
+    }));
+  if (
+    !opts.channelSelection &&
+    (bootSettings?.serve?.channels !== undefined ||
+      startupChannelWorkspaces.length > 1)
+  ) {
+    try {
+      const restored = resolveStartupChannelSelection({
+        workspaces: startupChannelWorkspaces,
+        // The fast path already read the primary workspace; every other
+        // registered workspace is read here, through the same loader, so a
+        // secondary workspace contributes exactly what it would contribute if
+        // it were the one the daemon bound to.
+        loadStartupChannels: (workspaceCwd) =>
+          (workspaceCwd === boundWorkspace
+            ? bootSettings
+            : (deps.loadWorkspaceBootSettings ?? loadServeFastPathSettings)(
+                workspaceCwd,
+              )
+          )?.serve?.channels,
+      });
+      for (const diagnostic of restored.diagnostics) {
+        reportStartupChannelDiagnostic(diagnostic);
+      }
+      opts.channelSelection = restored.selection;
       if (opts.channelSelection) {
         channelSelectionFromSettings = true;
+        bootChannelOwnerHints = restored.ownerHints;
+        channelOwnerHints = restored.ownerHints;
+        channelStartupTolerantNames = restored.tolerantNames;
         channelRuntime = await ensureChannelRuntime();
         daemonLog.info('restoring channels from workspace serve.channels', {
           channels: channelSelectionNames(opts.channelSelection),
           workspaceCwd: boundWorkspace,
+          ...(restored.ownerHints.size > 0
+            ? { requestedByWorkspace: Object.fromEntries(restored.ownerHints) }
+            : {}),
         });
       }
     } catch (error) {
@@ -4413,8 +4511,7 @@ async function runQwenServeImpl(
         );
         // The remote same-origin exception matches the browser's Origin
         // against the scheme and Host the daemon's own socket sees, so it
-        // covers direct listeners only. WebSocket upgrades (terminal, voice)
-        // admit loopback/allowlisted origins alone, and ANY intermediary
+        // covers direct HTTP and WebSocket requests. ANY intermediary
         // that terminates TLS or rewrites the Host header (nginx's default
         // proxy_set_header, k8s Ingress) presents an Origin this daemon
         // cannot match — name them so the operator is not left with a
@@ -4422,10 +4519,9 @@ async function runQwenServeImpl(
         // verbatim and needs nothing.
         if (!opts.allowOrigins || opts.allowOrigins.length === 0) {
           writeStderrLine(
-            'qwen serve: same-origin Web Shell HTTP requests work without ' +
-              '--allow-origin, but WebSocket-backed features (terminal, voice) ' +
-              'and browsers reaching the daemon through a TLS-terminating ' +
-              'proxy still need --allow-origin <origin>. A plain-HTTP ' +
+            'qwen serve: same-origin Web Shell HTTP and WebSocket requests work ' +
+              'without --allow-origin. Browsers reaching the daemon through a ' +
+              'TLS-terminating proxy still need --allow-origin <origin>. A plain-HTTP ' +
               'intermediary that rewrites the Host header (nginx default ' +
               'proxy_set_header, k8s Ingress) needs --allow-origin <origin> ' +
               'for the origin the browser sees, unless it forwards Host ' +
@@ -4901,11 +4997,16 @@ async function runQwenServeImpl(
         },
       );
     } catch (err) {
+      if (err instanceof InvalidExecutionSandboxConfigError) throw err;
       writeStderrLine(
         `qwen serve: could not read full settings for runtime startup ` +
           `(${err instanceof Error ? err.message : String(err)}); falling back to defaults.`,
       );
     }
+    assertExecutionSandboxSupported(
+      runtimeBootSettings?.merged ?? {},
+      'serve workspace runtimes',
+    );
     if (
       deps.trustedWorkspace === undefined &&
       runtimeBootSettings &&
@@ -6232,6 +6333,10 @@ async function runQwenServeImpl(
     };
 
     for (const workspaceInput of workspaceInputs.slice(1)) {
+      assertExecutionSandboxSupported(
+        readOperatorSandboxSettings(),
+        'serve workspace runtimes',
+      );
       const secondaryDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
         bootTrustSnapshot,
         workspaceInput.cwd,
@@ -6250,12 +6355,17 @@ async function runQwenServeImpl(
           },
         );
       } catch (err) {
+        if (err instanceof InvalidExecutionSandboxConfigError) throw err;
         writeStderrLine(
           `qwen serve: could not read full settings for secondary workspace ` +
             `${workspaceInput.cwd} (${err instanceof Error ? err.message : String(err)}); ` +
             `falling back to defaults.`,
         );
       }
+      assertExecutionSandboxSupported(
+        secondarySettings?.merged ?? {},
+        'serve workspace runtimes',
+      );
       if (!secondaryTrusted) {
         daemonLog.warn('secondary workspace is not trusted', {
           workspace: workspaceInput.cwd,
@@ -6902,6 +7012,10 @@ async function runQwenServeImpl(
         provenance === 'managed-scratch' || provenance === 'live-conversation'
           ? true
           : (buildOptions?.trusted ?? decision.targetTrusted);
+      assertExecutionSandboxSupported(
+        readOperatorSandboxSettings(),
+        'serve workspace runtimes',
+      );
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd, {
@@ -6910,6 +7024,7 @@ async function runQwenServeImpl(
           workspaceTrusted: trusted,
         });
       } catch (err) {
+        if (err instanceof InvalidExecutionSandboxConfigError) throw err;
         // Match the startup secondary-workspace path: surface why full settings
         // couldn't be read instead of silently falling back to defaults.
         writeStderrLine(
@@ -6918,6 +7033,10 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
+      assertExecutionSandboxSupported(
+        wsSettings?.merged ?? {},
+        'serve workspace runtimes',
+      );
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings, trusted);
       const wsCustomIgnoreFiles =
         wsSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
@@ -8326,7 +8445,12 @@ async function runQwenServeImpl(
     | typeof import('../config/daemon-trust-policy.js')
     | undefined;
   let channelValidationTrustSnapshot: DaemonTrustPolicySnapshot | undefined;
-  const resolveChannelWorkspaceGroupsAtListen = () => {
+  const resolveChannelWorkspaceGroupsAtListen = ():
+    | {
+        groups: readonly ChannelWorkspaceGroup[];
+        skipped: readonly ChannelWorkspaceGroupingSkip[];
+      }
+    | undefined => {
     const validationSettingsRuntime = channelValidationSettingsRuntime;
     if (
       !opts.channelSelection ||
@@ -8396,7 +8520,10 @@ async function runQwenServeImpl(
       channelWebhookEnvByWorkspace.set(workspace.cwd, effectiveEnv);
       return undefined;
     }
-    const workspaces = workspaceInputs.map((workspace, index) => {
+    const channelWorkspaces = workspaceInputs.filter(
+      (workspace) => !readSshWorkspace(workspace.cwd),
+    );
+    const workspaces = channelWorkspaces.map((workspace, index) => {
       const runtime = resolveRuntime(workspace.cwd);
       const trusted = resolveTrusted(workspace.cwd, index === 0, runtime);
       const settings = validationSettingsRuntime.settings.loadSettings(
@@ -8433,6 +8560,8 @@ async function runQwenServeImpl(
         if (!settings) return {};
         return channelRuntime!.loadChannelsConfig(cwd, settings);
       },
+      preferredOwners: channelOwnerHints,
+      tolerant: channelStartupTolerantNames,
     });
     if (!grouping.ok) {
       throw Object.assign(new Error(grouping.error.message), {
@@ -8440,7 +8569,10 @@ async function runQwenServeImpl(
         ...(grouping.error.channel ? { channel: grouping.error.channel } : {}),
       });
     }
-    return grouping.groups;
+    // A selection that owns more workspaces than channel control supports
+    // still fails loudly through assertChannelControlWorkspaceCapacity; the
+    // restore is dropped whole rather than silently hosting a subset.
+    return { groups: grouping.groups, skipped: grouping.skipped ?? [] };
   };
 
   if (opts.channelSelection) {
@@ -8455,9 +8587,9 @@ async function runQwenServeImpl(
         opts.channelSelection.mode === 'names' &&
         workspaceInputs.length > MAX_CHANNEL_CONTROL_WORKSPACES
       ) {
-        const groups = resolveChannelWorkspaceGroupsAtListen();
+        const resolved = resolveChannelWorkspaceGroupsAtListen();
         assertChannelControlWorkspaceCapacity(
-          groups?.map((group) => group.workspaceCwd) ?? [],
+          resolved?.groups.map((group) => group.workspaceCwd) ?? [],
         );
       }
       reserveChannelServicePidfile(opts.channelSelection);
@@ -8995,8 +9127,11 @@ async function runQwenServeImpl(
           string,
           ReturnType<SettingsRuntime['loadSettings']>
         >();
+        const channelRuntimes = runtimes.filter(
+          (runtime) => !runtime.routeFileSystemFactory.sshWorkspace,
+        );
         const grouping = resolveChannelWorkspaceGroups({
-          workspaces: runtimes.map((runtime) => {
+          workspaces: channelRuntimes.map((runtime) => {
             const settings = settingsRuntime.settings.loadSettings(
               runtime.workspaceCwd,
               {
@@ -9020,6 +9155,11 @@ async function runQwenServeImpl(
               ? workerRuntime.loadChannelsConfig(cwd, settings)
               : {};
           },
+          // A runtime change must resolve ownership the way this daemon
+          // already resolved it; without the hint a name that only boot could
+          // disambiguate would start failing every PUT as ambiguous. Runtime
+          // changes stay fail-fast, so no name is tolerated here.
+          preferredOwners: channelOwnerHints,
         });
         if (!grouping.ok) {
           throw Object.assign(new Error(grouping.error.message), {
@@ -9213,6 +9353,16 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
+              channelOwnerHints = new Map([
+                ...bootChannelOwnerHints,
+                ...groups.flatMap((group) =>
+                  group.selection.mode === 'names'
+                    ? group.selection.names.map(
+                        (name) => [name, group.workspaceCwd] as const,
+                      )
+                    : [],
+                ),
+              ]);
               channelWebhookConfigVersion += 1;
               refreshChannelWebhookConfigs?.();
             },
@@ -9826,7 +9976,49 @@ async function runQwenServeImpl(
       handle.close = () => serveAppLifecycle.close();
 
       try {
-        channelWorkspaceGroups = resolveChannelWorkspaceGroupsAtListen();
+        const resolved = resolveChannelWorkspaceGroupsAtListen();
+        channelWorkspaceGroups = resolved?.groups;
+        if (resolved) {
+          for (const skip of resolved.skipped) {
+            const detail = sanitizeLogText(
+              redactLogCredentials(skip.message),
+              512,
+            );
+            writeStderrLine(
+              `qwen serve: channel "${skip.channel}" was not restored: ${detail}`,
+            );
+            daemonLog.warn(`channel was not restored: ${detail}`, {
+              code: skip.code,
+              channel: skip.channel,
+            });
+          }
+          if (resolved.skipped.length > 0) {
+            // The committed selection has to name exactly what the groups
+            // host: the worker manager, the service lease and
+            // `/workspace/channel` all read it back, and a name nothing hosts
+            // would report itself as enabled forever.
+            const hosted = new Set(
+              resolved.groups.flatMap((group) =>
+                group.selection.mode === 'names' ? group.selection.names : [],
+              ),
+            );
+            const remaining =
+              opts.channelSelection?.mode === 'names'
+                ? opts.channelSelection.names.filter((name) => hosted.has(name))
+                : [];
+            opts.channelSelection =
+              remaining.length > 0
+                ? { mode: 'names', names: remaining }
+                : undefined;
+            if (!opts.channelSelection) {
+              channelWorkspaceGroups = undefined;
+              removeCurrentServePidfile();
+              reportConfiguredChannelStartupFailure(
+                new Error('No configured channel could be hosted.'),
+              );
+            }
+          }
+        }
       } catch (err) {
         removeCurrentServePidfile();
         const error = err instanceof Error ? err : new Error(String(err));
@@ -9874,6 +10066,64 @@ async function runQwenServeImpl(
       // way in.
       const boundAddress =
         typeof addr === 'object' && addr ? addr.address : opts.hostname;
+      // The settings source is resolved here rather than in the yargs
+      // command layer so the serve fast path (which never runs that
+      // handler) honors serve.tokenQr identically. An explicit flag
+      // (either polarity) wins over the setting; the setting applies
+      // only when the flag was omitted.
+      const settingTokenQr = bootSettings?.serve?.tokenQr;
+      if (
+        opts.tokenQr === undefined &&
+        settingTokenQr !== undefined &&
+        typeof settingTokenQr !== 'boolean'
+      ) {
+        // Validated here rather than in the shared settings reader:
+        // throwing there would discard the whole summary — policy.* and
+        // serve.channels with it, silently downgrading permission
+        // mediation to its default — because of a display knob. Name the
+        // field and its type, never the value: a malformed value may be a
+        // literal token pasted into the setting, and a `${VAR}` placeholder
+        // outside INTERNAL_SECRET_ENV_VARS is substituted before it reaches
+        // here — echoing either would re-publish a live bearer into
+        // captured stderr on every boot.
+        writeStderrLine(
+          `qwen serve: serve.tokenQr must be a boolean; ignoring a ${typeof settingTokenQr} value.`,
+        );
+      }
+      // A workspace settings file may carry serve.tokenQr, but only
+      // operator-owned scopes may set it. The interactive CLI warns about
+      // the drop via getSettingsWarnings; the serve fast path has no
+      // LoadedSettings, so the one path that reads the key names it itself.
+      for (const ignoredKey of bootSettings?.ignoredWorkspaceKeys ?? []) {
+        writeStderrLine(
+          `qwen serve: ${ignoredKey} in workspace settings ` +
+            `(${path.join(boundWorkspace, '.qwen', 'settings.json')}) is ` +
+            'ignored; it is honored from user, system, and system-defaults ' +
+            'scopes only.',
+        );
+      }
+      // One resolved posture, not a requested/vetoed boolean pair whose two
+      // falses mean opposite things: the veto is derived from the flag
+      // alone, so a settings-level `false` only declines the opt-in and
+      // leaves the default policy suppression in charge.
+      const tokenQrMode =
+        opts.tokenQr === false
+          ? ('veto' as const)
+          : opts.tokenQr === true || settingTokenQr === true
+            ? ('force' as const)
+            : ('policy' as const);
+      // Name why a requested QR cannot print instead of discarding the
+      // request silently — the same silent-no-op shape this flag exists to
+      // remove. Outside the `if (token)` block on purpose: a loopback bind
+      // with no bearer is the commonest inert case, and it must be reported
+      // too.
+      const tokenQrNoEffect = tokenQrNoEffectReason({
+        requested: tokenQrMode === 'force',
+        webShellMounted,
+        boundAddress,
+        generated: generatedToken,
+      });
+      if (tokenQrNoEffect) writeStderrLine(tokenQrNoEffect);
       if (token) {
         void printRemoteQuickstart({
           bind: opts.hostname,
@@ -9883,6 +10133,7 @@ async function runQwenServeImpl(
           token,
           generated: generatedToken,
           web: webShellMounted,
+          tokenQrMode,
         });
       }
       // Operator log on stderr too (systemd/docker/k8s default
