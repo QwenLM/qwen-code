@@ -1494,6 +1494,11 @@
           "type": "boolean",
           "default": false
         },
+        "workflowPromptProvenance": {
+          "description": "Tell every workflow subagent where its task text came from. A script's agent() prompt is computed at runtime — often from files the run read, an earlier agent's output, or args a host passed — so without this the text arrives as the subagent's own user speaking, and an instruction or an approval claim inside it reads as the user's. The harness prefixes the prompt with what it is, relays the request that triggered the run when the model started it, says no user is present when a host started it, and indents the text so a frame cannot be forged inside it. Turn it off only to reproduce the bare prompts scripts used to receive; QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE=0 does the same for one run. A workspace may not turn it off.",
+          "type": "boolean",
+          "default": true
+        },
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
           "type": "number",
