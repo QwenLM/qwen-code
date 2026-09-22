@@ -349,8 +349,9 @@ phase tree, token usage, cooperative pause/resume, cancel);
 `run_in_background: true` returns a run handle immediately in the interactive
 TUI and delivers completion through the conversation.
 Saved `/<name>` commands typed in the interactive TUI stay in the foreground:
-watch the live tool card or `/workflows`. Completion displays the result and
-delivers it to the model through a notification, without another user prompt.
+watch the live tool card; `/workflows <runId>` shows the run after it settles.
+Completion displays the result and delivers it to the model through a
+notification, without another user prompt.
 
 ## Worked example
 

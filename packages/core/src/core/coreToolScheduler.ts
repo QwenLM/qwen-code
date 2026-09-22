@@ -2137,7 +2137,7 @@ export class CoreToolScheduler {
           args as Record<string, unknown>,
           targetCallId,
           call.request.prompt_id,
-          call.request.isClientInitiated && call.request.source !== 'code_mode',
+          call.request.executionOrigin?.kind === 'client',
         ),
       );
       if (invocationOrError instanceof Error) {
@@ -2447,8 +2447,8 @@ export class CoreToolScheduler {
    * - Future contexts (subagent / direct buildAndExecute / non-scheduler
    *   callers) may invoke this with fewer arguments and still get a
    *   valid invocation back.
-   * Production call sites in this scheduler always pass both — see
-   * the setArgs path at L1036 and the schedule path at L1497.
+   * Scheduling and argument rebuilds pass the request's client provenance;
+   * a missing origin (including nested code-mode calls) does not opt in.
    */
   private buildInvocation(
     tool: AnyDeclarativeTool,
@@ -3165,7 +3165,7 @@ export class CoreToolScheduler {
               policyGate.args,
               reqInfo.callId,
               reqInfo.prompt_id,
-              reqInfo.isClientInitiated && reqInfo.source !== 'code_mode',
+              reqInfo.executionOrigin?.kind === 'client',
             ),
           );
           if (recordPrevalidationCancellation()) continue;

@@ -35,6 +35,39 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** A field label only `/about` renders, spelled the same by both renderers. */
+export const ABOUT_FIELD = 'Memory Usage';
+const ABOUT_UNKNOWN = 'Unknown command: /about';
+
+/**
+ * Ink loads commands after the prompt appears; parallel CLI boots can keep
+ * winning that race for several attempts. Retry only this read-only command
+ * for up to 90 seconds so readiness does not invoke the workflow twice.
+ * A missing transcript row still fails via waitForScreen rather than retrying.
+ */
+export async function sendAboutUntilRendered(
+  session: InteractiveSession,
+): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    await session.idle(500);
+    await session.send('/about');
+    const screen = await session.waitForScreen(
+      (s) => s.includes(ABOUT_FIELD) || s.includes(ABOUT_UNKNOWN),
+      `neither the /about row ("${ABOUT_FIELD}") nor "${ABOUT_UNKNOWN}" reached the screen`,
+      20_000,
+    );
+    if (screen.includes(ABOUT_FIELD)) return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `the /about transcript row ("${ABOUT_FIELD}") never reached the screen: ` +
+          `ink still reported "${ABOUT_UNKNOWN}" at the end of the retry window.\n` +
+          `Screen (last 600):\n${screen.slice(-600)}`,
+      );
+    }
+  }
+}
+
 export interface InteractiveSessionOptions {
   /** Terminal columns, default 100 */
   cols?: number;
@@ -138,6 +171,11 @@ export class InteractiveSession {
     }
     await sleep(300);
     this.ptyProcess.write('\r');
+  }
+
+  /** Send a terminal key sequence without typing text or pressing Enter. */
+  pressKey(sequence: string): void {
+    this.ptyProcess.write(sequence);
   }
 
   /** Wait for text to appear in raw output. */

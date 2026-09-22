@@ -2019,12 +2019,112 @@ describe('WorkflowRunRegistry', () => {
     const completion = vi.fn();
     r.setCompletionCallback(completion);
     r.register(reg('wf_large', { notifyOnCompletion: true }));
-    r.complete('wf_large', { rows: 'x'.repeat(10_000), failed: ['fr'] }, 1_000);
+    r.complete('wf_large', { rows: 'x'.repeat(50_000), failed: ['fr'] }, 1_000);
     const [display, model] = completion.mock.calls[0];
     expect(display).toContain('… (truncated)');
     expect(display).toContain('Reported failed: ["fr"]');
     expect(display.length).toBeLessThan(4_300);
     expect(model).toContain('x'.repeat(10_000));
+    expect(
+      model.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
+    ).toBeLessThanOrEqual(25_000);
+    expect(model).toContain('<result-truncated>');
+    expect(model).toContain('wf_large.json');
+    expect(r.get('wf_large')?.result).toEqual({
+      rows: 'x'.repeat(50_000),
+      failed: ['fr'],
+    });
+  });
+
+  it.each([false, true])(
+    'bounds XML-heavy completion results after escaping (background=%s)',
+    (isBackgrounded) => {
+      const r = new WorkflowRunRegistry();
+      const completion = vi.fn();
+      r.setCompletionCallback(completion);
+      r.register(
+        reg('wf_xml', {
+          notifyOnCompletion: true,
+          isBackgrounded,
+          journalPath: '/tmp/wf_xml/journal.jsonl',
+        }),
+      );
+      r.complete('wf_xml', '"<&>'.repeat(25_000), 1_000);
+      const model = completion.mock.calls[0][1] as string;
+      const result = model.match(/<result>([\s\S]*?)<\/result>/)?.[1];
+      expect(result).toBeDefined();
+      expect(result!.length).toBeLessThanOrEqual(25_000);
+      expect(result).toContain('&quot;&lt;&amp;&gt;');
+      expect(result).not.toMatch(/&[^;]*$/);
+      expect(model).toContain('<result-truncated>');
+      expect(model).toContain('wf_xml.json');
+      expect(model).toContain('/tmp/wf_xml/journal.jsonl');
+    },
+  );
+
+  it('does not interpret string results as structured failure reports', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_string', { notifyOnCompletion: true }));
+    const result = '{"error":{"retried":true,"ok":true}}';
+    r.complete('wf_string', result, 1_000);
+    const [display, model] = completion.mock.calls[0];
+    expect(display).toContain(`Result: ${result}`);
+    expect(display).not.toContain('Reported error:');
+    expect(model).not.toContain('<result-truncated>');
+  });
+
+  it.each(['bigint', 'cyclic'])(
+    'preserves reported fields on a %s result',
+    (shape) => {
+      const r = new WorkflowRunRegistry();
+      const completion = vi.fn();
+      r.setCompletionCallback(completion);
+      r.register(reg('wf_non_json', { notifyOnCompletion: true }));
+      const result: Record<string, unknown> = { failed: ['fr'] };
+      result['rows'] = shape === 'bigint' ? 1n : result;
+      r.complete('wf_non_json', result, 1_000);
+      const display = completion.mock.calls[0][0];
+      expect(display).toContain('non-JSON-serializable');
+      expect(display).toContain('Reported failed: ["fr"]');
+      expect(r.get('wf_non_json')?.status).toBe('completed');
+    },
+  );
+
+  it.each([
+    { errors: ['disk full'], error: 'boom' },
+    { failed: [], errors: [], error: '' },
+  ])(
+    'reports nonempty conventional error fields without changing status: %j',
+    (result) => {
+      const r = new WorkflowRunRegistry();
+      const completion = vi.fn();
+      r.setCompletionCallback(completion);
+      r.register(reg('wf_errors', { notifyOnCompletion: true }));
+      r.complete('wf_errors', { rows: 'x'.repeat(10_000), ...result }, 1_000);
+      const display = completion.mock.calls[0][0];
+      if (result.error) {
+        expect(display).toContain('Reported errors: ["disk full"]');
+        expect(display).toContain('Reported error: boom');
+      } else {
+        expect(display).not.toContain('Reported ');
+      }
+      expect(r.get('wf_errors')?.status).toBe('completed');
+    },
+  );
+
+  it('describes a no-return result without adding a model result element', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_void', { notifyOnCompletion: true }));
+    r.complete('wf_void', undefined, 1_000);
+    const [display, model] = completion.mock.calls[0];
+    expect(display).toContain('Result: (workflow returned no value)');
+    expect(display).not.toContain('Result: undefined');
+    expect(model).not.toContain('<result>');
+    expect(r.get('wf_void')?.result).toBeUndefined();
   });
 
   it('shows recorded agent failures even when the returned value hides them', () => {
@@ -2069,6 +2169,9 @@ describe('WorkflowRunRegistry', () => {
     expect(completion).toHaveBeenCalledOnce();
     const [displayText, modelText, meta] = completion.mock.calls[0];
     expect(displayText).toBe('Background workflow "wf" completed.');
+    expect(modelText).toContain(
+      '<summary>Background workflow "wf" completed.</summary>',
+    );
     expect(modelText).toContain('<kind>workflow</kind>');
     expect(modelText).toContain('<task-id>wf_background</task-id>');
     expect(modelText).toContain('<status>completed</status>');

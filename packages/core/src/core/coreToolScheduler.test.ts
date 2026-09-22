@@ -21508,7 +21508,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     }
 
     override async getDefaultPermission(): Promise<PermissionDecision> {
-      return 'allow';
+      return this.params['needsApproval'] ? 'ask' : 'allow';
     }
 
     getDescription(): string {
@@ -21517,7 +21517,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 
     async execute(): Promise<ToolResult> {
       return {
-        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}; notify=${this.notifyOnCompletion}`,
+        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}; notify=${this.notifyOnCompletion}; args=${JSON.stringify(this.params)}`,
         returnDisplay: '',
       };
     }
@@ -21548,13 +21548,51 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     }
   }
 
-  it.each([
-    { isClientInitiated: false, source: undefined, notify: false },
-    { isClientInitiated: true, source: undefined, notify: true },
-    { isClientInitiated: true, source: 'code_mode' as const, notify: false },
-  ])(
+  it.each(
+    [
+      {
+        isClientInitiated: false,
+        source: undefined,
+        executionOrigin: { kind: 'model' } as const,
+        notify: false,
+      },
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: { kind: 'client' } as const,
+        notify: true,
+      },
+      {
+        isClientInitiated: true,
+        source: 'code_mode' as const,
+        executionOrigin: undefined,
+        notify: false,
+      },
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: { kind: 'model' } as const,
+        notify: false,
+      },
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: undefined,
+        notify: false,
+      },
+      {
+        isClientInitiated: false,
+        source: undefined,
+        executionOrigin: { kind: 'client' } as const,
+        notify: true,
+      },
+    ].flatMap((testCase) => [
+      { ...testCase, rebuild: false },
+      { ...testCase, rebuild: true },
+    ]),
+  )(
     'passes request provenance to the executing invocation: %j',
-    async ({ isClientInitiated, source, notify }) => {
+    async ({ isClientInitiated, source, executionOrigin, notify, rebuild }) => {
       const tool = new PromptIdAwareTool();
       const mockToolRegistry = {
         getTool: () => tool,
@@ -21571,6 +21609,28 @@ describe('CoreToolScheduler prompt_id propagation', () => {
         getToolsByServer: () => [],
       } as unknown as ToolRegistry;
 
+      const messageBus = {
+        request: vi.fn().mockImplementation(
+          async (request: {
+            eventName: string;
+          }): Promise<HookExecutionResponse> => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output:
+              request.eventName === 'PermissionRequest'
+                ? {
+                    hookSpecificOutput: {
+                      decision: {
+                        behavior: 'allow',
+                        updatedInput: { updated: true },
+                      },
+                    },
+                  }
+                : {},
+          }),
+        ),
+      };
       const mockConfig = {
         getSessionId: () => 'test-session-id',
         getUsageStatisticsEnabled: () => true,
@@ -21597,8 +21657,8 @@ describe('CoreToolScheduler prompt_id propagation', () => {
         getIdeMode: () => false,
         getExperimentalZedIntegration: () => false,
         getChatRecordingService: () => undefined,
-        getMessageBus: vi.fn().mockReturnValue(undefined),
-        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getMessageBus: () => messageBus,
+        getDisableAllHooks: () => !rebuild,
       } as unknown as Config;
 
       const onAllToolCallsComplete = vi.fn();
@@ -21616,9 +21676,10 @@ describe('CoreToolScheduler prompt_id propagation', () => {
           {
             callId: 'call-1',
             name: 'promptIdAwareTool',
-            args: {},
+            args: { needsApproval: rebuild },
             isClientInitiated,
             source,
+            executionOrigin,
             prompt_id: 'expected-prompt-id-xyz',
           },
         ],
@@ -21635,6 +21696,11 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0])).toContain(
         `notify=${notify}`,
       );
+      if (rebuild) {
+        expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0])).toContain(
+          'args={\\"updated\\":true}',
+        );
+      }
     },
   );
 

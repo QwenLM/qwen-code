@@ -997,7 +997,7 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
       entry.notifyOnCompletion &&
       !entry.isBackgrounded &&
       isActiveWorkflowStatus(entry.status)
-        ? `Workflow ${entry.runId}: watch progress in this tool card or /workflows ${entry.runId}.\n`
+        ? `Workflow ${entry.runId}: watch progress in this tool card.\n`
         : '';
     return guidance + '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
   } catch {

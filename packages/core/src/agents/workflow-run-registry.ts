@@ -15,8 +15,8 @@
  * State machine: running → pausing → paused → running, with every active
  * state able to settle as completed, failed, or cancelled.
  *
- * Foreground runs return through the normal tool-result channel. Background
- * runs additionally emit one terminal `<task-notification>` through a
+ * Model-started foreground runs return through the tool-result channel.
+ * Background and client-started foreground runs emit `<task-notification>` through a
  * dedicated model-completion callback. That slot is separate from the
  * terminal-bell callback so the CLI can subscribe to both without either
  * consumer replacing the other.
@@ -62,6 +62,10 @@ import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
+
+// Match the default tool-output budget without allowing configuration to
+// disable the notification bound. Count XML-escaped characters on the wire.
+const MAX_COMPLETION_RESULT_CHARS = 25_000;
 
 const mutatingWorkflowTasks = new Map<string, symbol>();
 const activeWorkflowRunKeys = new Map<string, number>();
@@ -668,7 +672,12 @@ export class WorkflowRunRegistry {
 
     const statusText = entry.status === 'completed' ? 'completed' : 'failed';
     const label = stripAnsiAndControl(entry.description) || entry.runId;
-    const summary = `${entry.isBackgrounded ? 'Background workflow' : 'Workflow'} "${label}" ${statusText}.`;
+    const prefix = entry.isBackgrounded ? 'Background workflow' : 'Workflow';
+    const summary = `${prefix} "${label}" ${statusText}.`;
+    const resultText =
+      entry.status === 'completed'
+        ? stringifyCompletionResult(entry.result)
+        : '';
     const failures = buildFailureLines(entry);
     const displayText = entry.isBackgrounded
       ? summary
@@ -676,7 +685,7 @@ export class WorkflowRunRegistry {
           `${summary} Run ID: ${entry.runId}`,
           entry.status === 'failed'
             ? `Error: ${entry.error ?? ''}`
-            : `Result: ${stringifyCompletionResult(entry.result)}`,
+            : `Result: ${resultText}`,
           ...failures,
           ...reportedFailureLines(entry.result),
         ]
@@ -692,12 +701,24 @@ export class WorkflowRunRegistry {
       '<kind>workflow</kind>',
       `<task-id>${escapeXml(entry.runId)}</task-id>`,
       `<status>${entry.status}</status>`,
-      `<summary>${escapeXml(summary)}</summary>`,
+      `<summary>${prefix} "${escapeXml(label)}" ${statusText}.</summary>`,
     ];
     if (entry.status === 'completed' && entry.result !== undefined) {
-      modelParts.push(
-        `<result>${escapeXml(stringifyCompletionResult(entry.result))}</result>`,
-      );
+      const preview = resultText.slice(0, MAX_COMPLETION_RESULT_CHARS);
+      const escaped = escapeXml(preview);
+      const truncated =
+        preview.length < resultText.length ||
+        escaped.length > MAX_COMPLETION_RESULT_CHARS;
+      // A cut inside &quot; or another entity must not leave malformed XML.
+      const modelResult = escaped
+        .slice(0, MAX_COMPLETION_RESULT_CHARS)
+        .replace(/&[^;]*$/, '');
+      modelParts.push(`<result>${modelResult}</result>`);
+      if (truncated) {
+        modelParts.push(
+          `<result-truncated>Preview truncated. Consult the run snapshot (${escapeXml(entry.runId)}.json) for the full result.</result-truncated>`,
+        );
+      }
     }
     if (entry.status === 'failed') {
       modelParts.push(
@@ -1893,6 +1914,7 @@ export class WorkflowRunRegistry {
 }
 
 function stringifyCompletionResult(result: unknown): string {
+  if (result === undefined) return '(workflow returned no value)';
   if (typeof result === 'string') return result;
   try {
     return JSON.stringify(result) ?? String(result);
@@ -1902,16 +1924,16 @@ function stringifyCompletionResult(result: unknown): string {
 }
 
 function reportedFailureLines(result: unknown): string[] {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
   try {
-    const value: unknown = JSON.parse(stringifyCompletionResult(result));
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
     return ['failed', 'errors', 'error'].flatMap((key) => {
-      const failure = (value as Record<string, unknown>)[key];
+      const failure = (result as Record<string, unknown>)[key];
       if (!failure || (Array.isArray(failure) && failure.length === 0))
         return [];
       return [`Reported ${key}: ${stringifyCompletionResult(failure)}`];
     });
-  } catch {
+  } catch (error) {
+    debugLogger.debug('Failed to read workflow result fields:', error);
     return [];
   }
 }

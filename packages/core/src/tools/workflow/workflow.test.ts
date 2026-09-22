@@ -1340,7 +1340,7 @@ await agent('scan package.json')
     expect(registry.list()[0].isBackgrounded).toBe(false);
     expect(
       updateOutput.mock.calls.some(([text]) =>
-        text.includes('watch progress in this tool card or /workflows'),
+        text.includes('watch progress in this tool card.'),
       ),
     ).toBe(true);
     expect(completion).not.toHaveBeenCalled();
@@ -1377,7 +1377,9 @@ await agent('scan package.json')
       await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
       const runId = registry.list()[0].runId;
       expect(updateOutput.mock.lastCall?.[0]).toContain('"status": "running"');
-      expect(updateOutput.mock.lastCall?.[0]).toContain('watch progress');
+      expect(updateOutput.mock.lastCall?.[0]).toContain(
+        `Workflow ${runId}: watch progress in this tool card.`,
+      );
 
       if (source === 'caller') caller.abort();
       else registry.cancel(runId, Date.now());

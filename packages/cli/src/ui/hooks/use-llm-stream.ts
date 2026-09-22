@@ -6373,8 +6373,8 @@ export const useLlmStream = (
     };
   }, [admitNotification, config]);
 
-  // Register background workflow completions onto the shared queue. The
-  // registry keeps this separate from its terminal-bell subscriber.
+  // Register background and client-started foreground workflow completions.
+  // The registry keeps this separate from its terminal-bell subscriber.
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {

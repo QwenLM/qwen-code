@@ -17,7 +17,10 @@ import {
   TestRig,
 } from '../test-helper.js';
 import { pickE2eRenderer } from '../renderer-matrix.js';
-import { InteractiveSession } from './interactive-session.js';
+import {
+  InteractiveSession,
+  sendAboutUntilRendered,
+} from './interactive-session.js';
 
 // OpenTUI's schedule_tool handler is a separate, unwired entry point.
 describe.skipIf(pickE2eRenderer() === 'opentui')(
@@ -52,12 +55,21 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         marker: 'WORKFLOW_RUN_ERROR_12176',
       },
       {
+        source: 'slash',
+        status: 'completed',
+        // Exceeds the wire cap while keeping interactive rendering bounded.
+        script:
+          'return { marker: "WORKFLOW_LARGE_RESULT_12176", rows: "&".repeat(30_000), failed: ["fr"] };',
+        marker: 'WORKFLOW_LARGE_RESULT_12176',
+        largeResult: true,
+      },
+      {
         source: 'model',
         status: 'completed',
         script: 'return { marker: "WORKFLOW_MODEL_RESULT_12176" };',
         marker: 'WORKFLOW_MODEL_RESULT_12176',
       },
-    ])('delivers a $source $status run to the model once', async (testCase) => {
+    ])('delivers $marker once', async (testCase) => {
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
@@ -141,21 +153,7 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         ],
       });
 
-      // The prompt can appear before the async command registry is ready.
-      // Probe a read-only command, never retry the workflow invocation itself.
-      for (let attempt = 0; attempt < 5; attempt++) {
-        await session.idle(500);
-        await session.send('/about');
-        const screen = await session.waitForScreen(
-          (text) =>
-            text.includes('Memory Usage') ||
-            text.includes('Unknown command: /about'),
-          'command registry readiness',
-          20_000,
-        );
-        if (screen.includes('Memory Usage')) break;
-      }
-      expect(await session.screen()).toContain('Memory Usage');
+      await sendAboutUntilRendered(session);
       expect(
         server.requests.filter(({ body }) => body['stream'] === true),
       ).toHaveLength(0);
@@ -171,13 +169,30 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       );
       await session.idle(1_000);
 
-      const screen = await session.screen();
+      let screen = await session.screen();
+      if (testCase.largeResult) {
+        // Ink's virtualized history only exposes the current viewport, not
+        // terminal scrollback. Read preceding pages of the long completion.
+        for (
+          let page = 0;
+          page < 20 &&
+          (!screen.includes(testCase.marker) ||
+            !screen.includes('Run ID: wf_') ||
+            !screen.includes('Reported failed: ["fr"]'));
+          page++
+        ) {
+          session.pressKey('\x1b[5~'); // PageUp
+          await session.idle(500);
+          screen += `\n${await session.screen()}`;
+        }
+        session.pressKey('\x1b[1;5F'); // Ctrl+End
+        await session.idle(500);
+      }
       expect(screen).not.toContain('started in the background');
       expect(screen).toContain(testCase.marker);
       if (isSlash) expect(screen).toContain('Run ID: wf_');
       if (isSlash && testCase.status === 'completed') {
-        expect(screen).toContain('Reported failed:');
-        expect(screen).toContain('fr');
+        expect(screen).toContain('Reported failed: ["fr"]');
       }
       const requests = server.requests.filter(
         ({ body }) => body['stream'] === true,
@@ -190,7 +205,13 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         isSlash ? 1 : 0,
       );
       expect(messages).toContain(testCase.marker);
-      if (isSlash && testCase.status === 'completed') {
+      if (testCase.largeResult) {
+        expect(
+          messages.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
+        ).toBeLessThanOrEqual(25_000);
+        expect(messages).toContain('<result-truncated>');
+        expect(messages).toMatch(/wf_[a-f0-9]+\.json/);
+      } else if (isSlash && testCase.status === 'completed') {
         expect(messages).toContain('&quot;failed&quot;:[&quot;fr&quot;]');
       }
 
@@ -210,6 +231,8 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         followUpRequests.at(-1)!.body['messages'],
       );
       expect(followUp).toContain(testCase.marker);
+      if (testCase.largeResult)
+        expect(followUp).toContain('<result-truncated>');
       expect(followUp.match(/<kind>workflow<\/kind>/g) ?? []).toHaveLength(
         isSlash ? 1 : 0,
       );
