@@ -20,6 +20,7 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 
@@ -290,27 +291,85 @@ describe('ReadFileTool', () => {
       },
     );
 
-    it('should reject offset or limit for notebook files', () => {
-      const params: ReadFileToolParams = {
-        file_path: path.join(tempRootDir, 'test.ipynb'),
-        offset: 0,
-        limit: 10,
-      };
+    it.each([
+      { offset: 0 },
+      { offset: -1 },
+      { limit: 10 },
+      { limit: 0 },
+      { limit: -1 },
+      { offset: 0, limit: 2000, pages: '' },
+      { pages: '1' },
+      { pages: 'invalid' },
+    ])('gives a nullable notebook retry for %j', (pagination) => {
+      const filePath = path.join(tempRootDir, 'test "quoted".IPYNB');
+      const error = tool.validateToolParams({
+        file_path: filePath,
+        ...pagination,
+      });
 
-      expect(() => tool.build(params)).toThrow(
-        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      expect(error).toContain(
+        "For Jupyter notebooks (.ipynb), omit 'offset', 'limit', and 'pages' or set them to null.",
       );
+      const retry = JSON.parse(error!.split('Retry with: ')[1]);
+      expect(retry).toEqual({
+        file_path: filePath,
+        offset: null,
+        limit: null,
+        pages: null,
+      });
+      expect(() => tool.build(retry)).not.toThrow();
     });
 
-    it('should reject pages for notebook files', () => {
-      const params: ReadFileToolParams = {
+    it.each([
+      { offset: null },
+      { limit: null },
+      { pages: null },
+      { offset: null, limit: null, pages: null },
+    ])('normalizes nullable notebook pagination %j', (pagination) => {
+      const invocation = tool.build({
         file_path: path.join(tempRootDir, 'test.ipynb'),
-        pages: '1',
-      };
+        ...pagination,
+      });
+      expect(invocation.params.offset).toBeUndefined();
+      expect(invocation.params.limit).toBeUndefined();
+      expect(invocation.params.pages).toBeUndefined();
+      expect(invocation.getDescription()).toBe('test.ipynb');
+      expect(invocation.toolLocations()).toEqual([
+        { path: invocation.params.file_path, line: undefined },
+      ]);
+    });
 
-      expect(() => tool.build(params)).toThrow(
-        'pages is not supported for Jupyter notebook (.ipynb) files',
-      );
+    it('accepts null pagination when strict mode requires every property', () => {
+      const schema = {
+        ...(tool.schema.parametersJsonSchema as Record<string, unknown>),
+        required: ['file_path', 'offset', 'limit', 'pages'],
+        additionalProperties: false,
+      };
+      expect(
+        SchemaValidator.validate(schema, {
+          file_path: path.join(tempRootDir, 'test.ipynb'),
+          offset: null,
+          limit: null,
+          pages: null,
+        }),
+      ).toBeNull();
+      expect(
+        SchemaValidator.validate(schema, {
+          file_path: null,
+          offset: null,
+          limit: null,
+          pages: null,
+        }),
+      ).not.toBeNull();
+    });
+
+    it.each(['', '   '])('allows empty notebook pages (%j)', (pages) => {
+      expect(() =>
+        tool.build({
+          file_path: path.join(tempRootDir, 'test.ipynb'),
+          pages,
+        }),
+      ).not.toThrow();
     });
   });
 
@@ -649,27 +708,33 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('Read image file: image.png');
     });
 
-    it('should handle PDF file and return appropriate content', async () => {
-      const pdfPath = path.join(tempRootDir, 'document.pdf');
-      // Minimal PDF header
-      const pdfHeader = Buffer.from('%PDF-1.4');
-      await fsp.writeFile(pdfPath, pdfHeader);
-      const params: ReadFileToolParams = { file_path: pdfPath };
-      const invocation = tool.build(params) as ToolInvocation<
-        ReadFileToolParams,
-        ToolResult
-      >;
+    it.each([{}, { offset: null, limit: null, pages: null }])(
+      'reads native PDF content with omitted or null pagination (%j)',
+      async (pagination) => {
+        const pdfPath = path.join(tempRootDir, 'document.pdf');
+        // Minimal PDF header
+        const pdfHeader = Buffer.from('%PDF-1.4');
+        await fsp.writeFile(pdfPath, pdfHeader);
+        const params: ReadFileToolParams = {
+          file_path: pdfPath,
+          ...pagination,
+        };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
 
-      const result = await invocation.execute(abortSignal);
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: pdfHeader.toString('base64'),
-          mimeType: 'application/pdf',
-          displayName: 'document.pdf',
-        },
-      });
-      expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
-    });
+        const result = await invocation.execute(abortSignal);
+        expect(result.llmContent).toEqual({
+          inlineData: {
+            data: pdfHeader.toString('base64'),
+            mimeType: 'application/pdf',
+            displayName: 'document.pdf',
+          },
+        });
+        expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
+      },
+    );
 
     describe('PDF vision bridge fallback', () => {
       function createTextOnlyTool(): ReadFileTool {
@@ -1083,7 +1148,15 @@ describe('ReadFileTool', () => {
         metadata: { language_info: { name: 'python' } },
       };
       await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
-      const params: ReadFileToolParams = { file_path: nbPath };
+      const error = tool.validateToolParams({
+        file_path: nbPath,
+        offset: 0,
+        limit: 0,
+      });
+      expect(error).toContain('Retry with: ');
+      const params: ReadFileToolParams = JSON.parse(
+        error!.split('Retry with: ')[1],
+      );
       const invocation = tool.build(params) as ToolInvocation<
         ReadFileToolParams,
         ToolResult
@@ -1095,6 +1168,11 @@ describe('ReadFileTool', () => {
       expect(result.llmContent).toContain('print("hello")');
       expect(result.llmContent).toContain('hello');
       expect(result.returnDisplay).toBe('Read notebook: test.ipynb');
+      const status = fileReadCache.check(fs.statSync(nbPath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(true);
+      }
     });
 
     it('records truncated notebook reads as not full', async () => {
@@ -1181,6 +1259,7 @@ describe('ReadFileTool', () => {
         file_path: filePath,
         offset: 5, // Start from line 6
         limit: 3,
+        pages: null,
       };
       const invocation = tool.build(params) as ToolInvocation<
         ReadFileToolParams,
@@ -1251,6 +1330,21 @@ describe('ReadFileTool', () => {
         >;
         return invocation.execute(abortSignal);
       }
+
+      it('treats null pagination as a full text read for caching', async () => {
+        const filePath = path.join(tempRootDir, 'nullable.txt');
+        await fsp.writeFile(filePath, 'first\nsecond\nthird');
+        const result = await read({
+          file_path: filePath,
+          offset: null,
+          limit: null,
+          pages: null,
+        });
+        expect(result.llmContent).toBe('first\nsecond\nthird');
+        expect((await read({ file_path: filePath })).llmContent).toContain(
+          'unchanged since last read',
+        );
+      });
 
       it('returns a short error when a text-only model reads a large PDF without pages', async () => {
         const pdfPath = path.join(tempRootDir, 'large.pdf');
