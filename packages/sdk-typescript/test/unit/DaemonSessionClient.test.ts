@@ -340,7 +340,12 @@ describe('DaemonSessionClient', () => {
     };
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/capabilities')) {
-        return jsonResponse(200, { features: ['standalone_sessions_v1'] });
+        return jsonResponse(200, {
+          features: [
+            'standalone_sessions_v1',
+            'standalone_session_transcript_v1',
+          ],
+        });
       }
       if (req.url.includes('/turn-index')) return jsonResponse(200, turnIndex);
       if (req.url.includes('/transcript')) return jsonResponse(200, transcript);
