@@ -51,6 +51,7 @@ import {
   LocalControlService,
 } from './local-control/index.js';
 import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
+import { registerWebShellPairingRoutes } from './routes/web-shell-pairing.js';
 import type {
   DeviceFlowProvider,
   DeviceFlowRegistry,
@@ -2102,7 +2103,11 @@ export function createServeApp(
   // bind is.
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
+  installRemoteSelfOriginMiddleware(
+    app,
+    opts.hostname,
+    opts.token ? credentials : undefined,
+  );
   app.use(allowOriginCors(originAllowlist));
 
   // Pre-auth health sits below the origin wall so matched cross-origin health
@@ -2206,10 +2211,13 @@ export function createServeApp(
   // is on, the LAN listener accepts a revocable pairing token and rejects the
   // runtime token, and the primary listener does the reverse. With no Local
   // Control session this behaves exactly as `bearerAuth(opts.token)` did.
+  if (webShellDir) {
+    registerWebShellPairingRoutes(app, credentials, opts.hostname, rateLimiter);
+  }
   app.use(authenticate);
 
   // Rate limiter: after auth (only count authenticated requests), except
-  // webhook routes which use their own shared-secret auth before bearerAuth.
+  // webhook and pairing routes which mount their limiter before returning.
   if (rateLimiter) {
     app.use(rateLimiter.middleware);
   }
