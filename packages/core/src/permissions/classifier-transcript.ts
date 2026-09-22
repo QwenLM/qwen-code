@@ -32,7 +32,11 @@
 
 import type { Content, Part } from '@google/genai';
 import type { ToolRegistry } from '../tools/tool-registry.js';
-import { ToolNames } from '../tools/tool-names.js';
+import {
+  canonicalToolName,
+  resolveBuiltinToolName,
+  ToolNames,
+} from '../tools/tool-names.js';
 import type {
   TrustedUserAnswerRecord,
   TrustedUserAnswerSnapshot,
@@ -331,7 +335,9 @@ function formatPendingActionPrompt(
  * `toAutoClassifierInput`. Falls back to the raw args when the tool is unknown
  * or declares no projection. Returns `{}` when the projection returns the
  * empty-string sentinel (tool encoded as "no security relevance"), and for an
- * `mcp__*` name the registry cannot resolve — see below.
+ * `mcp__*` name the registry cannot resolve — see below. A bridged call whose
+ * `tool_call` wrapper is unavailable is projected through its target instead
+ * of falling back to the raw bridge envelope.
  */
 function projectFunctionArgs(
   name: string,
@@ -353,6 +359,46 @@ function projectFunctionArgs(
 
   if (projected === '') return {};
   if (projected && typeof projected === 'object') return projected;
+  const normalizedName =
+    resolveBuiltinToolName(name.trim()) ?? name.trim().toLowerCase();
+  if (canonicalToolName(normalizedName) === ToolNames.TOOL_CALL) {
+    const rawTargetName = rawArgs['name'];
+    if (typeof rawTargetName !== 'string') return {};
+
+    let targetName = canonicalToolName(rawTargetName.trim());
+    const lowerTargetName = targetName.toLowerCase();
+    for (const registeredName of toolRegistry.getAllToolNames?.() ?? []) {
+      if (registeredName.toLowerCase() === lowerTargetName) {
+        targetName = registeredName;
+      }
+    }
+    // History is unvalidated. Limit fallback unwrapping to one bridge layer
+    // so a nested tool_call envelope cannot recurse or expose its payload.
+    const normalizedTargetName =
+      resolveBuiltinToolName(targetName) ?? targetName.toLowerCase();
+    if (normalizedTargetName === ToolNames.TOOL_CALL) return {};
+
+    const target = toolRegistry.getTool(targetName);
+    if (!target) return { name: targetName };
+
+    const targetArgs =
+      rawArgs['arguments'] && typeof rawArgs['arguments'] === 'object'
+        ? (rawArgs['arguments'] as Record<string, unknown>)
+        : {};
+    try {
+      const targetProjection = target.toAutoClassifierInput(
+        structuredClone(targetArgs) as never,
+      );
+      if (targetProjection === '') return { name: target.name };
+      return targetProjection === undefined
+        ? { name: target.name, arguments: structuredClone(targetArgs) }
+        : { name: target.name, arguments: targetProjection };
+    } catch {
+      // Match ToolCallTool's fail-closed behavior: a projection failure must
+      // never expose the target's unprojected bridge payload.
+      return { name: target.name };
+    }
+  }
   // The `forwardArguments` opt-out lives on the tool object, so an `mcp__*`
   // call the registry cannot resolve — its server was removed from settings,
   // or the session was resumed without it — has nothing left to express it,

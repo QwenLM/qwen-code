@@ -699,14 +699,12 @@ jobs:
       - uses: 'actions/setup-node@v4'
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
       - name: 'Install npm 11'
         run: 'npm install --global npm@11.19.0'
       - name: 'Install workspace dependencies'
-        run: 'npm ci --ignore-scripts --no-audit --no-fund --progress=false'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only'
       - name: 'Test standalone Node REPL package'
         working-directory: 'packages/node-repl'
         run: |

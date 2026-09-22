@@ -7797,6 +7797,12 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'getExtensionContextFilePaths').mockReturnValue([
         'ext-context.md',
       ]);
+      const extensionRuleSources = [
+        { name: 'charts', dir: '/ext/charts/rules' },
+      ];
+      vi.spyOn(mockConfig, 'getExtensionRuleSources').mockReturnValue(
+        extensionRuleSources,
+      );
       vi.spyOn(mockConfig, 'getContextRuleExcludes').mockReturnValue([
         'exclude-rule',
       ]);
@@ -7834,7 +7840,7 @@ describe('AppContainer State Management', () => {
         true,
         expect.anything(),
         ['exclude-rule'],
-        expect.anything(),
+        expect.objectContaining({ extensionRuleSources }),
       );
       expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);
     });

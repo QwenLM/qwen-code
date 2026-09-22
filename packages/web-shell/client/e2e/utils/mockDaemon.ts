@@ -101,8 +101,19 @@ export interface WebShellDaemonScenario {
   providersDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
+  /**
+   * Page served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as.
+   */
+  transcriptPage?: { events: DaemonEvent[]; hasMore?: boolean };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
+  /**
+   * Directory names `GET /workspace-path-suggestions` lists for a requested
+   * prefix, keyed by that prefix with or without its trailing separator. An
+   * unlisted prefix answers an empty list.
+   */
+  pathSuggestions?: Record<string, string[]>;
   /**
    * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
    * (non-git workspace), matching the real daemon's graceful degradation.
@@ -445,7 +456,9 @@ export function createWebShellDaemonScenario(
     savedWorkflowDetails: overrides.savedWorkflowDetails,
     providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
+    transcriptPage: overrides.transcriptPage,
     workspaceFiles: overrides.workspaceFiles ?? {},
+    pathSuggestions: overrides.pathSuggestions,
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
@@ -778,6 +791,8 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    path === '/workspace-path-suggestions' ||
+    path === '/workspaces' ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
@@ -816,6 +831,7 @@ function isDaemonPath(path: string): boolean {
     path === '/goals' ||
     /^\/file\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
+    /^\/session\/[^/]+\/transcript\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
@@ -837,6 +853,8 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (method === 'GET' && path === '/workspace-path-suggestions') return true;
+  if (method === 'POST' && path === '/workspaces') return true;
   if (
     (method === 'GET' || method === 'POST') &&
     path === '/workspace/settings'
@@ -972,6 +990,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/session\/[^/]+\/transcript\/?$/.test(path)) {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
@@ -1116,6 +1137,45 @@ async function handleDaemonRoute(
     // the visual baselines stay valid. A spec that needs a white-label shell
     // should give this a scenario field rather than loosening it here.
     await json(route, {});
+    return;
+  }
+  if (method === 'GET' && path === '/workspace-path-suggestions') {
+    const prefix = searchParams.get('prefix') ?? '';
+    const listed =
+      scenario.pathSuggestions?.[prefix] ??
+      scenario.pathSuggestions?.[prefix.replace(/\/+$/, '')] ??
+      [];
+    const base = !prefix || prefix.endsWith('/') ? prefix : `${prefix}/`;
+    await json(route, {
+      kind: 'workspace-path-suggestions',
+      dir: prefix,
+      sep: '/',
+      suggestions: listed.map((name) => ({ name, path: `${base}${name}` })),
+      truncated: false,
+    });
+    return;
+  }
+  if (method === 'POST' && path === '/workspaces') {
+    const record = isRecord(body) ? body : {};
+    const cwd = typeof record['cwd'] === 'string' ? record['cwd'] : '';
+    const displayName =
+      typeof record['displayName'] === 'string'
+        ? record['displayName']
+        : undefined;
+    const workspace = {
+      id: `e2e-${cwd.replace(/[^a-zA-Z0-9]+/g, '-')}`,
+      cwd,
+      ...(displayName ? { displayName } : {}),
+      primary: false,
+      trusted: true,
+    };
+    // Mutate the capability snapshot so the refresh the app performs right
+    // after registering reports the new workspace, as the real daemon does.
+    scenario.capabilities = {
+      ...scenario.capabilities,
+      workspaces: [...(scenario.capabilities.workspaces ?? []), workspace],
+    };
+    await json(route, { ...workspace, persisted: record['persist'] === true });
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
@@ -2057,6 +2117,16 @@ async function handleDaemonRoute(
     }
     if (action === 'artifacts') {
       await json(route, sessionArtifactsEnvelope(scenario, sessionId));
+      return;
+    }
+    if (action === 'transcript') {
+      const page = scenario.transcriptPage;
+      await json(route, {
+        v: 1,
+        sessionId,
+        events: page?.events ?? [],
+        hasMore: page?.hasMore ?? false,
+      });
       return;
     }
     if (action === 'prompt') {
