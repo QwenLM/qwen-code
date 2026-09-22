@@ -2454,6 +2454,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         enqueuePeerMessage: ReturnType<typeof vi.fn>;
         isOpenForPeerMessages: ReturnType<typeof vi.fn>;
         hasRoomForPeerMessage: ReturnType<typeof vi.fn>;
+        getConfig: ReturnType<typeof vi.fn>;
         takeUnconsumedPeerDeliveries: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         buildAvailableCommandsSnapshot: ReturnType<typeof vi.fn>;
