@@ -89,6 +89,11 @@ describe('extractPendingPermission', () => {
         }),
       ]);
       expect(permission?.contentIsInput).toBeUndefined();
+      expect(permission?.content).toEqual(
+        content[0].type === 'diff'
+          ? content
+          : [{ type: 'text', text: 'Explicit explanation' }],
+      );
       expect(JSON.stringify(permission?.content)).not.toContain(
         'privateParameter',
       );

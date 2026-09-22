@@ -21,6 +21,9 @@ import {
   type SessionContentGenerator,
 } from './AssistantMessage';
 import styles from './ToolApproval.module.css';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { DiffView } from './tools/DiffView';
+import { useWebShellCustomization } from '../../customization';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
@@ -335,6 +338,7 @@ export function ToolApproval({
   const questionId = useId();
   const descId = useId();
   const commandId = useId();
+  const diffId = useId();
 
   // Reset only when a NEW request arrives. Reading the safe default through a
   // ref keeps this keyed strictly to request identity: if the same request's
@@ -504,6 +508,19 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
+  const diffs = useMemo(
+    () =>
+      hostOwnsEditDiffPreview
+        ? []
+        : request.content
+            .filter((block) => block.type === 'diff')
+            .map((block) => ({
+              path: block.path,
+              diff: buildUnifiedDiff(block.oldText ?? '', block.newText ?? ''),
+            })),
+    [request.content, hostOwnsEditDiffPreview],
+  );
   const command = getCommandFromRawInput(request);
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
@@ -542,6 +559,7 @@ export function ToolApproval({
         questionId,
         descriptionText ? descId : null,
         showsCommandBlock || isGoal ? commandId : null,
+        diffs.length > 0 ? diffId : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -586,6 +604,17 @@ export function ToolApproval({
           {contentText}
         </pre>
       ) : null}
+
+      {diffs.length > 0 && (
+        <div className={styles.content} id={diffId}>
+          {diffs.map((block, index) => (
+            <div key={index}>
+              <div>{block.path}</div>
+              <DiffView diff={block.diff} />
+            </div>
+          ))}
+        </div>
+      )}
 
       {showsPlanWorkflow && (
         <div className={styles.workflow}>

@@ -81,6 +81,21 @@ function getPermissionContent(
   if (Array.isArray(rawContent)) {
     const content = rawContent.flatMap((value): ContentBlock[] => {
       const block = getRecord(value);
+      if (
+        block?.['type'] === 'diff' &&
+        typeof block['path'] === 'string' &&
+        typeof block['newText'] === 'string'
+      ) {
+        return [
+          {
+            type: 'diff',
+            path: block['path'],
+            oldText:
+              typeof block['oldText'] === 'string' ? block['oldText'] : '',
+            newText: block['newText'],
+          },
+        ];
+      }
       const nested = getRecord(block?.['content']);
       const text =
         block?.['type'] === 'text' && typeof block['text'] === 'string'

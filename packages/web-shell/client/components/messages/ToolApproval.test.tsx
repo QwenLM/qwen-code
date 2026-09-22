@@ -13,6 +13,7 @@ import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
+import { WebShellCustomizationProvider } from '../../customization';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -137,6 +138,83 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it.each([false, true])(
+    'preserves edit approval changes and warnings (host owns preview: %s)',
+    (hostOwnsEditDiffPreview) => {
+      const adapted = extractPendingPermission([
+        {
+          id: 'permission-edit',
+          kind: 'permission',
+          requestId: 'request-edit',
+          sessionId: 'session-edit',
+          title: 'Edit: /outside/example.txt',
+          options: [],
+          toolCall: {
+            kind: 'edit',
+            _meta: { toolName: 'replace' },
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: 'Path is outside the workspace',
+                },
+              },
+              {
+                type: 'diff',
+                path: '/outside/example.txt',
+                oldText: 'before11966',
+                newText: 'after11966',
+              },
+            ],
+          },
+          preview: { kind: 'generic' },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ])!;
+      render();
+      act(() =>
+        root!.render(
+          <WebShellCustomizationProvider value={{ hostOwnsEditDiffPreview }}>
+            <I18nProvider language="en">
+              <ToolApproval
+                request={{ ...adapted, options: request.options }}
+                onConfirm={onConfirm}
+              />
+            </I18nProvider>
+          </WebShellCustomizationProvider>,
+        ),
+      );
+      expect(container!.textContent).toContain('Path is outside the workspace');
+      expect(container!.textContent?.includes('before11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      expect(container!.textContent?.includes('after11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      if (!hostOwnsEditDiffPreview) {
+        const dialog = container!.querySelector('[role="alertdialog"]')!;
+        const descriptions = dialog
+          .getAttribute('aria-describedby')!
+          .split(' ')
+          .map((id) => document.getElementById(id)?.textContent)
+          .join(' ');
+        expect(descriptions).toContain('before11966');
+        expect(descriptions).toContain('after11966');
+      }
+      act(() =>
+        optionButtons()
+          .find((button) => button.dataset.optionId === 'reject')!
+          .click(),
+      );
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        'request-edit',
+        'reject',
+      );
+    },
+  );
+
   it('renders generic parameter content even when it equals the title', () => {
     const adapted = extractPendingPermission([
       {
