@@ -538,6 +538,36 @@ control was green the whole time and said nothing about this one. Either land
 the control in the mutated file, or show that the chosen command collects at
 least one test that imports it.
 
+**A test that can skip is coverage only where it executes.** A test gated on
+a capability (`assumeTrue`, `it.skipIf`, a platform filter) passes vacuously
+wherever that capability is missing. A CI matrix chosen for other reasons can
+leave the gated test skipped in every lane. So establish, for each CI lane,
+whether the gate lets the test run: read the lane's skipped list when you
+have its log (a local round), otherwise evaluate the gate against the lane's
+environment as the workflow matrix defines it. When a mutant is killed only
+in an environment CI does not run, report it as a survivor for CI and name
+the environment that kills it. Measured example: the test pinning an
+Android shell's fail-closed branch only runs on a WebView that has
+multi-profile support but lacks complete browsing-data deletion (WebView 124
+on API 35). The CI matrix ran
+API 26 and API 36, and the log listed the test as `SKIPPED` in both lanes. A
+mutant restoring the old fail-open behaviour stayed green on the JVM suite,
+API 26 and API 36, and only a local API 35 emulator killed it. The guard the
+PR had been revised for had no CI protection.
+
+**Adjudicate a survivor by running its build, not by reading it — and label
+what you only inferred.** Calling a survivor a coverage gap, dead code or
+redundant defence is a claim about behaviour. Drive the mutant build through
+the user action the guard exists for, and quote what you observe. If that is
+out of reach within budget, say the classification comes from reading the
+code. Measured example: deleting an editor check that stopped a saved
+credential from following an address change survived every committed test.
+The mutant APK, driven through Edit → change address → Save → Connect, sent
+one daemon's bearer token to a different daemon. That makes the survivor a
+credential leak, not just a gap, and the check the PR added is the only
+barrier. A second survivor, a stale-callback guard, could not be raced by
+hand, so the report said its consequence was inferred.
+
 The mutation runs in reverse too: when the round produces a **candidate
 further fix** (a sibling shape closed, a guard tightened), apply it in a
 scratch copy and rerun the suite. Green on both sides is not reassurance —
@@ -683,6 +713,14 @@ inconclusive.
 - Assert **both sides of the wire** where a protocol is involved: what the
   peer actually received (method, path, headers, exact body, request count)
   and what the caller observed — plus that stderr stayed clean.
+  To record what a client sends to a real `qwen serve`, put the recording
+  relay **behind a port mapping and never rewrite headers**. The daemon's
+  loopback Host allowlist includes its own port, so a client pointed at a
+  relay on another port gets `403`. Keep the client addressing the daemon's
+  port and move the relay under it: for an emulator,
+  `adb reverse tcp:<daemon-port> tcp:<relay-port>`, with the relay forwarding
+  to the daemon. Do not use the daemon's access log as a ledger. It is
+  rate-limited to a 60-line burst refilled at 2 lines per second.
 - **When the oracle is an instrument, corroborate it with a mechanism that
   does not use that instrument.** A tool's _report_ about the system is not
   the system: a cursor query, a profiler number, a coverage percentage can
@@ -701,6 +739,21 @@ inconclusive.
   counts (1085 unminimized comments, `rateLimit.cost = 2`) with a guarantee
   no write could occur — stronger evidence than a fixture and safer than a
   careful hand. Say in the report which wrapper enforced it.
+- **Test the steady state, not only first contact.** The first time a client
+  reaches a real peer, the peer often leaves persistent state behind: a
+  service worker, a cache entry, a cookie, a stored token. Every later
+  request then takes a different path through that state. Fixture peers leave
+  nothing behind, so a claim checked only against a fixture holds only for
+  first contact. Run error and recovery scenarios twice against the real
+  peer: once on a client that has never reached it, and once on a client that
+  has. Measured example: an Android shell's native "cannot reach the daemon →
+  Retry" screen worked for a new connection profile. After the daemon's Web
+  Shell had loaded once, its service worker answered the failed navigation
+  with its own 503 page, and WebView never reported the error to the native
+  side. The worker's "Try again" link (`href=""`) then reloaded without the
+  `#token=` fragment, and the user landed unauthenticated. The committed
+  test fixture registers no worker, and the author's manual runs reported the
+  native error screen, so every run the PR cited was first contact.
 - Every assertion is a scripted comparison that can fail. Keep harnesses as
   `.mjs` files inside the artifact dir so a maintainer can rerun them.
 
@@ -761,6 +814,25 @@ since the merge-base, say so and re-measure there.
   `npx patch-package ink` produced hunk headers carrying the function-context
   suffix that the committed `.d.ts` hunks lacked. Report it at the severity
   it deserves (usually a nit), and say plainly that the content matched.
+- **Migration and persisted-state PRs**: a fresh install of the head build
+  tests the wrong program. Add an **upgrade arm**. Run the base build until it
+  has written real state, the way a user's device or home directory would
+  hold it. Then run head over that same state in place, and assert on what
+  survived. A claim that old data is migrated, cleaned up or reset covers
+  **every store the old version wrote**, not only the stores the new code
+  reads. So diff the file tree the base build left behind, and scan each store
+  after the upgrade and again after the reset path. **Scan in the store's
+  own encoding**: the same WebView kept a token as UTF-16LE in its Session
+  Storage LevelDB log while its Local Storage held an ASCII marker as plain
+  bytes, so an ASCII `grep` for a token can report a false absence.
+  Measured example: an Android shell moved its plaintext development token
+  into a Keystore-encrypted vault, deleted the old preferences file, and
+  passed every migration test. But the base build had
+  also loaded the Web Shell in WebView's default profile, and that profile's
+  Session Storage still held the same token in UTF-16LE. The token survived
+  the migration, cold launches, and a confirmed "Reset connections" whose
+  dialog promised to delete every saved credential. The new code only ever
+  cleaned the named profiles it created itself.
 - **Multi-commit PRs**: verify each commit's claim separately when the
   commits are reachable. In CI they usually are **not** — the checkout is
   depth 2, giving only the merge commit, the base tip (`HEAD^1`), and the PR
@@ -832,6 +904,15 @@ since the merge-base, say so and re-measure there.
   finding. Probe the **default** path of manual dispatch/config combinations
   (what happens when an operator submits the pre-filled form as-is), not
   just the documented happy path.
+- **Native Android (`packages/mobile-shell/`)**: read
+  `references/android.md` before scoping. The `node:22-bookworm` verify
+  image ships no JDK and no Android SDK, and the lane passes no `/dev/kvm`
+  into the container. The Linux `aapt2` that AGP 8.2 downloads is x86-64
+  only, so an arm64 Linux sandbox cannot even build the APK. In the CI
+  lane, measure what the container actually has, and expect device-level
+  claims to go under _Not covered_. The local recipe is in that reference:
+  emulator images picked by WebView capability, where the untrusted build may
+  run, and how to drive the WebView through CDP.
 
 ## Artifact contract (the workflow collects and publishes these)
 

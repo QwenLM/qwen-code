@@ -4767,6 +4767,49 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'A validity control must run before the artifact it invalidates',
     );
+
+    // #12121: the migration moved the plaintext token into an encrypted
+    // vault and passed every test, yet the base build's WebView default
+    // profile kept the same token as UTF-16LE in Session Storage. It
+    // survived the upgrade and a confirmed reset. Only an upgrade arm
+    // (base writes real state, head runs over it) plus an encoding-aware
+    // scan of every store the old version wrote could see it.
+    expect(flat).toContain('upgrade arm');
+    expect(flat).toContain('every store the old version wrote');
+    expect(flat).toContain("Scan in the store's own encoding");
+
+    // #12121: the native Retry screen only existed before the daemon's
+    // service worker was installed. After one successful load, the worker
+    // answered offline navigations itself, and its retry link dropped the
+    // #token= fragment. The author's fixtures never installed a worker.
+    expect(flat).toContain('Test the steady state, not only first contact');
+
+    // #12121: the WebView-124 fail-closed test was SKIPPED in both CI lanes.
+    // A mutant restoring fail-open behaviour was killed only on a local
+    // API 35 emulator.
+    expect(flat).toContain(
+      'A test that can skip is coverage only where it executes',
+    );
+
+    // #12121: a surviving editor-check mutant, driven through the real UI,
+    // sent one daemon's token to another daemon. Reading the code would
+    // have filed it as an ordinary gap. A survivor that cannot be driven is
+    // labelled as inferred.
+    expect(flat).toContain('Adjudicate a survivor by running its build');
+    expect(flat).toContain('label what you only inferred');
+
+    // #12121: a relay on another port fails the daemon's Host allowlist,
+    // and the rate-limited access log is not a request ledger.
+    expect(flat).toContain('behind a port mapping and never rewrite headers');
+
+    // The Android recipe lives in a reference file the restored .qwen tree
+    // carries, so the pointer must resolve.
+    expect(flat).toContain('references/android.md');
+    expect(
+      existsSync(
+        join('.qwen', 'skills', 'verify-pr', 'references', 'android.md'),
+      ),
+    ).toBe(true);
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
