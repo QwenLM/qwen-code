@@ -278,7 +278,7 @@ export interface PromptToolSurface {
  * missing tool would send the model after something it cannot call, which is
  * the defect this gating exists to fix. Lines absent from this table are policy
  * that holds regardless of the tool surface (tool fallback, parallel calls,
- * questions, respecting denials) and are never dropped.
+ * respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;

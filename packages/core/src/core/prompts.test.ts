@@ -1693,7 +1693,7 @@ describe('CodeModeOnly tool guidance', () => {
     expect(prompt).toContain('**Batch Into One Program:**');
     expect(prompt).toContain('await them together with `Promise.all`');
     expect(prompt).not.toContain(
-      'You can call multiple tools in a single response',
+      'Call independent tools in parallel; run dependent calls sequentially',
     );
   });
 

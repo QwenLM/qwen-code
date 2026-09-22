@@ -13,7 +13,7 @@ This first pass changes built-in prompt text and its tests. It preserves public 
 - Merge overlapping convention and communication prose without removing the requirements to inspect relevant code, follow existing dependencies and conventions, and adapt answer depth to the task.
 - State the interaction-mode question policy once in the final reminder. Keep task completion guidance there; remove repeated general-purpose safety and file-reading prose already covered elsewhere.
 - Retain three examples per variant: a managed background server, a scoped refactor, and creating a test file after checking its absence. Preserve the model-specific call formats and the read-before-write example.
-- Shorten example narration, remove the unsolicited commit question, and remove arithmetic, primality, deletion, and duplicate discovery examples. Retained examples must inspect source before editing and report verification only after successful checks.
+- Shorten example narration, remove the unsolicited commit question, and remove arithmetic, primality, deletion, and duplicate discovery examples. The deletion example was the only demonstration of stating a destructive command's blast radius; it is dropped deliberately because the prose mandating that behaviour (`Explain Critical Commands`, and `# Executing actions with care` naming `rm -rf`) is untouched. Retained examples must inspect source before editing and report verification only after successful checks.
 - Shorten redundant tool wording while preserving tool-selection policy, independent-call parallelism, dependency sequencing, absolute paths, and CodeModeOnly output/abort semantics.
 
 ## Rationale and consumers
