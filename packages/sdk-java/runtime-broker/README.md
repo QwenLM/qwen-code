@@ -1,13 +1,21 @@
-# Qwen Managed Runtime Broker State
+# Qwen Managed Runtime Broker Core
 
-This Java 21 module defines the durable state boundary for a future Managed
-Agent Runtime Broker. It contains Runtime binding, Runtime Session, and Tool
-execution records; repository contracts; and thread-safe in-memory
-implementations for tests and single-process prototypes.
+This Java 21 module defines the state and embeddable orchestration core for a
+Managed Agent Runtime Broker. It contains Runtime binding, Runtime Session,
+and Tool execution records; repository contracts; thread-safe in-memory
+implementations; and a framework-neutral service that composes authoritative
+scope resolution, Runtime provisioning, and Runtime transport adapters.
 
-This foundation intentionally does not provision Runtime processes, expose an
-HTTP API, or call the Hosted Harness. Those integrations belong to later PRs
-that depend on this module.
+The service acquires operation and dispatch leases, renews them while external
+work is in flight, converges idempotent Tool execution, records cancellation
+intent, and fails ambiguous dispatch outcomes as `UNKNOWN`. A persisted
+`READY` binding is never reused by a new process without explicit adoption or
+reconciliation; this core currently fails closed when it has no process-local
+attestation for that binding.
+
+The module intentionally does not implement a process or container provider,
+expose an HTTP API, wire Spring, call the Hosted Harness, or define public
+Agent resources. Those adapters belong to later PRs.
 
 Building and running this module requires JDK 21 or later. Its Maven release
 target is 21; services embedding the resulting JAR must also use JDK 21 or later.
@@ -24,7 +32,7 @@ mvn checkstyle:check
 `JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the three private
 Broker tables. The JDBC implementations use only `javax.sql.DataSource`; the
 embedding service owns the connection pool and schema lifecycle. This module
-intentionally does not persist Tool executions or wire a Spring service.
+intentionally does not persist Tool executions or wire a Spring/HTTP adapter.
 
 Run the optional real-MySQL contract with:
 

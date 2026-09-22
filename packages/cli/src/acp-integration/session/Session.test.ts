@@ -75,6 +75,7 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
 } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { DAEMON_INPUT_ANNOTATIONS_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
   BridgeClient,
@@ -10909,6 +10910,125 @@ describe('Session', () => {
       expect(textParts(firstSentMessage())).toEqual([
         '<realtime_delegation>trusted model input</realtime_delegation>',
       ]);
+    });
+
+    it.each([
+      ['file', '@README.md'],
+      ['mcp', '@mcp:o2'],
+      ['extension', '@ext:browser'],
+    ])('records %s input annotations for replay', async (kind, text) => {
+      const inputAnnotations = [
+        {
+          type: 'reference',
+          start: 0,
+          end: text.length,
+          text,
+          reference: { id: text, kind, value: text.slice(1), serialized: text },
+        },
+      ];
+      const expectedAnnotations = structuredClone(inputAnnotations);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text }],
+          _meta: {
+            [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations,
+            privateRequestId: 'not-for-history',
+          },
+        },
+        { version: 1, sessionId: 'test-session-id', promptId: 'tag-prompt' },
+        undefined,
+        'model-only prompt',
+      );
+      inputAnnotations[0].reference.value = 'changed after submission';
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        text,
+        undefined,
+        {
+          displayText: text,
+          hookContext: '',
+          inputAnnotations: expectedAnnotations,
+        },
+        'tag-prompt',
+      );
+      expect(textParts(firstSentMessage())).toEqual(['model-only prompt']);
+    });
+
+    it.each([null, 'invalid', {}, [], [null], ['x'], [[null]]])(
+      'ignores invalid or empty input annotations (%j)',
+      async (inputAnnotations) => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: { inputAnnotations },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'hello',
+          undefined,
+          undefined,
+          undefined,
+        );
+      },
+    );
+
+    it('drops non-object elements from input annotations', async () => {
+      const valid = {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: [null, 'x', valid] },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'hello',
+        undefined,
+        {
+          displayText: 'hello',
+          hookContext: '',
+          inputAnnotations: [valid],
+        },
+        undefined,
+      );
+    });
+
+    it('ignores input annotations beyond the daemon cap', async () => {
+      const inputAnnotations = Array.from({ length: 257 }, (_, i) => ({
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: `ref-${i}`, kind: 'file', value: `f${i}` },
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'hello',
+        undefined,
+        undefined,
+        undefined,
+      );
     });
 
     it.each(['read both', ''])(
@@ -27352,10 +27472,69 @@ describe('Session', () => {
           },
         );
 
+        // No display projection and no annotations ⇒ no `systemPayload`:
+        // pins the deferred branch's no-payload arm so a regression to
+        // unconditional payload recording fails here.
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/advisor check my work',
           undefined,
           undefined,
+          'daemon-advisor',
+        );
+      });
+
+      it('records input annotations for a deferred custom advisor command', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor check my work' }],
+            _meta: {
+              [DAEMON_INPUT_ANNOTATIONS_META_KEY]: [
+                {
+                  type: 'reference',
+                  start: 15,
+                  end: 22,
+                  text: 'my work',
+                  reference: { id: 'work', kind: 'file', value: 'work' },
+                },
+              ],
+            },
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          {
+            displayText: '/advisor check my work',
+            hookContext: '',
+            inputAnnotations: [
+              {
+                type: 'reference',
+                start: 15,
+                end: 22,
+                text: 'my work',
+                reference: { id: 'work', kind: 'file', value: 'work' },
+              },
+            ],
+          },
           'daemon-advisor',
         );
       });

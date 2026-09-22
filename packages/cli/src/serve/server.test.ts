@@ -3268,11 +3268,94 @@ describe('createServeApp', () => {
     },
   );
 
-  it('rejects unwired admission before creating the app', () => {
+  it.each(['admit', 'enforce'] as const)(
+    'rejects unwired %s before creating the app',
+    (mode) => {
+      expect(() =>
+        createServeAppImpl({ ...baseOpts, childHeapMode: mode }),
+      ).toThrow('managed child process wiring');
+    },
+  );
+
+  it('rejects an enforce status snapshot without managed process wiring', () => {
+    const policy = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+      mode: 'enforce',
+    });
     expect(() =>
-      createServeAppImpl({ ...baseOpts, childHeapMode: 'admit' }),
+      createServeAppImpl({ ...baseOpts, childHeapMode: 'enforce' }, undefined, {
+        bridge: fakeBridge(),
+        getChildHeapPolicySnapshot: () => policy.snapshot(),
+      }),
     ).toThrow('managed child process wiring');
   });
+
+  it.each(['off', 'observe', 'admit'] as const)(
+    'rejects enforce backed by a %s policy',
+    (mode) => {
+      expect(() =>
+        createServeAppImpl(
+          { ...baseOpts, childHeapMode: 'enforce' },
+          undefined,
+          {
+            managedChildProcesses: {
+              registry: new ProcessRegistry(),
+              policy: createChildHeapPolicy({
+                budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+                mode,
+              }),
+            },
+          },
+        ),
+      ).toThrow('managed child process wiring');
+    },
+  );
+
+  it.each(['missing-owner', 'unowned-bridge', 'registry-only'] as const)(
+    'rejects enforce with %s wiring',
+    (wiring) => {
+      const bridge = fakeBridge();
+      expect(() =>
+        createServeAppImpl(
+          { ...baseOpts, childHeapMode: 'enforce' },
+          undefined,
+          {
+            ...(wiring === 'registry-only'
+              ? {
+                  workspaceRegistry: createWorkspaceRegistry([
+                    makeWorkspaceRuntimeForTest({
+                      workspaceId: 'primary',
+                      workspaceCwd: '/tmp/enforce-primary',
+                      primary: true,
+                      bridge,
+                    }),
+                    makeWorkspaceRuntimeForTest({
+                      workspaceId: 'secondary',
+                      workspaceCwd: '/tmp/enforce-secondary',
+                      primary: false,
+                      bridge: fakeBridge(),
+                    }),
+                  ]),
+                }
+              : { bridge }),
+            managedChildProcesses: {
+              registry: new ProcessRegistry(),
+              policy: createChildHeapPolicy({
+                budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+                mode: 'enforce',
+              }),
+              ...(wiring === 'missing-owner'
+                ? {}
+                : {
+                    ownsBridge: (candidate: AcpSessionBridge) =>
+                      wiring === 'registry-only' && candidate === bridge,
+                  }),
+            },
+          },
+        ),
+      ).toThrow('managed bridge ownership');
+    },
+  );
 
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
