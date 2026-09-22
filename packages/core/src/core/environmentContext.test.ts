@@ -86,6 +86,17 @@ describe('getDirectoryContextString', () => {
     );
   });
 
+  it('does not inspect local directories for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+
+    const contextString = await getDirectoryContextString(mockConfig as Config);
+
+    expect(contextString).toContain('Use workspace tools');
+    expect(contextString).not.toContain('/test/dir');
+    expect(mockConfig.getWorkspaceContext).not.toHaveBeenCalled();
+    expect(getFolderStructure).not.toHaveBeenCalled();
+  });
+
   it('should return context string for multiple directories', async () => {
     (
       vi.mocked(mockConfig.getWorkspaceContext!)().getDirectories as Mock
@@ -152,6 +163,18 @@ describe('getEnvironmentContext', () => {
     expect(getFolderStructure).toHaveBeenCalledWith('/test/dir', {
       fileService: undefined,
     });
+  });
+
+  it('omits the local operating system for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+
+    const parts = await getEnvironmentContext(mockConfig as Config);
+
+    expect(parts[0].text).toContain("Today's date is");
+    expect(parts[0].text).toContain('Use workspace tools');
+    expect(parts[0].text).not.toContain('My operating system is:');
+    expect(parts[0].text).not.toContain('/test/dir');
+    expect(getFolderStructure).not.toHaveBeenCalled();
   });
 
   it('should return basic environment context for multiple directories', async () => {

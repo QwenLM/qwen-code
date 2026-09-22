@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
@@ -96,6 +98,11 @@ import {
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
+import {
+  BWRAP_MIGRATION_MESSAGE,
+  validateExecutionSandboxSelection,
+} from './execution-sandbox-settings.js';
+import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
@@ -791,6 +798,21 @@ export async function parseArguments(): Promise<CliArgs> {
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
+          const optionArgs = rawArgv.slice(
+            0,
+            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
+          );
+          if (
+            optionArgs.some(
+              (arg, index) =>
+                arg === '--sandbox=bwrap' ||
+                arg === '-s=bwrap' ||
+                ((arg === '--sandbox' || arg === '-s') &&
+                  optionArgs[index + 1] === 'bwrap'),
+            )
+          ) {
+            return BWRAP_MIGRATION_MESSAGE;
+          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -1665,32 +1687,28 @@ export async function loadCliConfig(
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
+  const sshWorkspace = readSshWorkspace(cwd);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
-  const requestedShellExecutionSandbox = hostPolicy?.shellExecutionSandbox;
-  const shellExecutionSandbox = requestedShellExecutionSandbox
-    ? {
-        ...requestedShellExecutionSandbox,
-        maskedPaths: [
-          ...(requestedShellExecutionSandbox.maskedPaths ?? []),
-          path.join(
-            requestedShellExecutionSandbox.workspace,
-            '.qwen',
-            'review-leases',
-          ),
-        ],
-      }
-    : undefined;
-  const sandboxEnabled = Boolean(shellExecutionSandbox);
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings,
+    argv,
+  );
+  const sandboxEnabled = Boolean(
+    executionSandboxSettings || hostPolicy?.shellExecutionSandbox,
+  );
+  if (executionSandboxSettings && hostPolicy?.shellExecutionSandbox) {
+    throw new Error(
+      'Choose operator settings or a programmatic execution sandbox policy, not both.',
+    );
+  }
   if (
     sandboxEnabled &&
-    (!bareMode ||
-      !argv.prompt ||
-      argv.promptInteractive !== undefined ||
+    (argv.promptInteractive !== undefined ||
       argv.inputFormat === 'stream-json' ||
       argv.acp ||
       argv.experimentalAcp ||
@@ -1704,7 +1722,7 @@ export async function loadCliConfig(
       provisionalWorkspace)
   ) {
     throw new Error(
-      'The internal tool execution sandbox requires bare noninteractive mode without ACP, worktrees, LSP, MCP, extensions or provisional workspaces.',
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
     );
   }
   const safeMode =
@@ -1745,6 +1763,25 @@ export async function loadCliConfig(
   if (!Storage.hasRuntimeBaseDirContext()) {
     Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
   }
+  const requestedShellExecutionSandbox =
+    hostPolicy?.shellExecutionSandbox ??
+    (executionSandboxSettings
+      ? createExecutionSandboxPolicy(executionSandboxSettings, cwd)
+      : undefined);
+  const shellExecutionSandbox = requestedShellExecutionSandbox
+    ? {
+        ...requestedShellExecutionSandbox,
+        maskedPaths: [
+          ...(requestedShellExecutionSandbox.maskedPaths ?? []),
+          path.join(
+            requestedShellExecutionSandbox.workspace,
+            '.qwen',
+            'review-leases',
+          ),
+        ],
+      }
+    : undefined;
+
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
@@ -1805,7 +1842,10 @@ export async function loadCliConfig(
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
-    !provisionalWorkspace && !bareMode && argv.experimentalLsp === true;
+    !sshWorkspace &&
+    !provisionalWorkspace &&
+    !bareMode &&
+    argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -2762,6 +2802,36 @@ export async function loadCliConfig(
     agentExecutionBackend: agentExecutionBackend(),
     executionEnvironmentFactory: agentExecutionFactory(),
   };
+
+  if (sshWorkspace) {
+    configParams.executionEnvironment = new SshExecutionEnvironment(
+      sshWorkspace,
+      cwd,
+      {
+        outputThreshold: configParams.truncateToolOutputThreshold,
+        shellDefaultTimeoutMs: configParams.shellDefaultTimeoutMs,
+        customIgnoreFiles: configParams.fileFiltering?.customIgnoreFiles,
+      },
+    );
+    configParams.toolMode = ToolMode.Direct;
+    configParams.disableAllHooks = true;
+    configParams.mcpServers = {};
+    configParams.overrideExtensions = [];
+    configParams.workflowsEnabled = false;
+    configParams.enableManagedAutoMemory = false;
+    configParams.enableManagedAutoDream = false;
+    configParams.enableTeamMemory = false;
+    configParams.enableTeamMemorySync = false;
+    configParams.enableAutoSkill = false;
+    configParams.fileCheckpointingEnabled = false;
+    configParams.artifactEnabled = false;
+    configParams.appendSystemPrompt = [
+      argv.appendSystemPrompt,
+      `This is an SSH workspace on ${sshWorkspace.host}. The project directory is ${sshWorkspace.directory}. All file, search and shell tools operate on that remote project. The local directory ${cwd} is only for session storage; it is not the project. Use remote absolute paths or paths relative to the remote project. Read QWEN.md and AGENTS.md at the remote project root before working if they exist. Remote hooks, skills, MCP, LSP, subagents, workflows and worktree management are unavailable in this session.`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
 
   const config = new Config(configParams);
 
