@@ -25,9 +25,11 @@ const packageRoot = path.resolve(
  */
 async function stageStoreBuild(source, staged) {
   // Checked before the staging directory is removed, because everything below
-  // is destructive. The manifest is what makes a directory a build, so a
-  // missing, empty or non-directory source all fail the same named way rather
-  // than deleting the staged copy on the way to an ENOENT.
+  // is destructive: this script is the only one here that does not follow
+  // EXTENSION_OUT_DIR, so a caller that redirects the build leaves `source`
+  // unbuilt. The manifest is what makes a directory a build, so a missing,
+  // empty or non-directory source all fail the same named way rather than
+  // deleting the staged copy on the way to an ENOENT.
   if (!existsSync(path.join(source, 'manifest.json'))) {
     throw new Error('Nothing to package: ' + source + ' has no manifest.json');
   }
@@ -43,19 +45,11 @@ async function stageStoreBuild(source, staged) {
   return staged;
 }
 
-// Read at call time, not at import: `artifact-scan.js` reads the same two
-// knobs, and packaging ignoring them is what let a redirected build package
-// whatever the default path still held.
-const fromEnvironment = (variable, fallback) =>
-  path.resolve(packageRoot, process.env[variable] || fallback);
-
 export async function packageExtension({
-  source = fromEnvironment('EXTENSION_OUT_DIR', 'dist/extension'),
-  archive = fromEnvironment('EXTENSION_ZIP', 'chrome-extension.zip'),
+  source = path.join(packageRoot, 'dist/extension'),
+  archive = path.join(packageRoot, 'chrome-extension.zip'),
   store = false,
-  // Beside whatever source is in play, including one a caller passed, so the
-  // staging directory never points somewhere the source does not.
-  staged = path.join(path.dirname(source), 'store-extension'),
+  staged = path.join(packageRoot, 'dist/store-extension'),
 } = {}) {
   if (store) source = await stageStoreBuild(source, staged);
   await rm(archive, { force: true });
@@ -94,12 +88,7 @@ if (isMainEntry()) {
   packageExtension({
     store,
     ...(store
-      ? {
-          archive: fromEnvironment(
-            'EXTENSION_ZIP',
-            'chrome-extension-store.zip',
-          ),
-        }
+      ? { archive: path.join(packageRoot, 'chrome-extension-store.zip') }
       : {}),
   }).catch((error) => {
     console.error(error.message);
