@@ -20,6 +20,12 @@ qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.26.0
 
 The server installs the matching SDK and browser SDK as dependencies. The native SDK payload is downloaded for the current platform and verified against the matching release's SHA-256 checksums. It is cached outside the npm package; no workspace SDK bootstrap command is needed. Version 0.26.0 is a local development target until its release is published.
 
+On Windows, run the SDK installation from an elevated terminal: the signed
+UIAccess worker must be installed under `Program Files\Qwen\CuaDriver`.
+An unsigned worker cannot enable UIAccess; do not bypass the signature check.
+Older unsigned releases need a new signed driver release, not a reinstall of
+the same version.
+
 ## Application tasks
 
 ```js
