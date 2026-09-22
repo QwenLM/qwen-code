@@ -143,15 +143,7 @@ export function resolveBundledReferenceRoute(
     const toolNames = registry?.getAllToolNames?.();
     if (!Array.isArray(toolNames)) return 'skill';
     if (!toolNames.includes(ToolNames.SKILL)) return 'inline';
-    if (
-      // CodeModeOnly hides both bridge tools (`code-mode.ts` HIDDEN_TOOLS),
-      // so registration is not reachability there: a bridge pointer would
-      // name tools the session cannot call, while a deferred Skill tool
-      // stays reachable through the `exec` binding. Fall through to `skill`;
-      // the plain pointer stays honest (the #12271 rule at fileUtils.ts).
-      config.getToolMode?.() !== ToolMode.CodeModeOnly &&
-      isToolDeferredBehindToolSearch(config, ToolNames.SKILL)
-    ) {
+    if (isToolDeferredBehindToolSearch(config, ToolNames.SKILL)) {
       // A withheld schema is only reachable through the tool_search +
       // tool_call bridge. Without BOTH halves the Skill tool is registered
       // but invisible, which is no route at all — with tool_search alone the
@@ -215,9 +207,11 @@ export function resolveBundledReferenceSurface(
  * Whether a registered tool's schema can be withheld from the request:
  * permission-deferred by a `tools.eager` allowlist and not listed in
  * `tools.visible`. A ToolSearch reveal is not consulted, because `/clear`
- * drops it — a decision recorded once has to ask this.
+ * drops it — a decision recorded once has to ask this. CodeModeOnly hides the
+ * bridge, so deferred tools remain reachable through `exec` instead.
  */
 function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
+  if (config.getToolMode?.() === ToolMode.CodeModeOnly) return false;
   if (!config.getToolRegistry?.()?.isPermissionDeferred?.(name)) return false;
   return !config.getVisibleTools?.()?.has(name);
 }
