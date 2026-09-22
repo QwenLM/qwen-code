@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +37,7 @@ final class JdbcRepositoryContract {
         verifySchema(dataSource);
         verifyBinding(dataSource, prefix);
         verifySession(dataSource, prefix);
+        verifyExecution(dataSource, prefix);
     }
 
     private static void verifySchema(DataSource dataSource)
@@ -231,6 +233,108 @@ final class JdbcRepositoryContract {
     private static RuntimeScope scope(String tenant) {
         return new RuntimeScope(tenant, "workspace", "generation",
                 "/workspace", "capability", "session");
+    }
+
+    private static void verifyExecution(DataSource dataSource, String prefix)
+            throws Exception {
+        JdbcToolExecutionRepository first =
+                new JdbcToolExecutionRepository(dataSource);
+        JdbcToolExecutionRepository second =
+                new JdbcToolExecutionRepository(dataSource);
+        String idempotencyKey = prefix + "-idempotency";
+
+        List<ToolExecutionRecord> created = invokeConcurrently(32,
+                index -> (index % 2 == 0 ? first : second).findOrCreate(
+                        execution(prefix + "-execution-" + index,
+                                idempotencyKey, prefix + "-digest")));
+        Set<String> executionIds = created.stream()
+                .map(ToolExecutionRecord::getExecutionCallId)
+                .collect(Collectors.toSet());
+        assertEquals(1, executionIds.size());
+        String executionId = executionIds.iterator().next();
+        assertThrows(IllegalArgumentException.class,
+                () -> first.claimDispatch(executionId,
+                        prefix + "-dispatcher-a", Duration.ofNanos(1)));
+
+        ToolExecutionRecord ownerA = first.claimDispatch(executionId,
+                prefix + "-dispatcher-a", Duration.ofMinutes(30));
+        assertEquals(1, ownerA.getDispatchGeneration());
+        ToolExecutionRecord renewedA = first.renewDispatch(executionId,
+                prefix + "-dispatcher-a", ownerA.getDispatchGeneration(),
+                Duration.ofMinutes(30));
+        assertEquals(ownerA.getDispatchGeneration(),
+                renewedA.getDispatchGeneration());
+        assertEquals(ownerA.getVersion() + 1, renewedA.getVersion());
+        ToolExecutionRecord executing = first.compareAndSet(renewedA,
+                renewedA.withState(ToolExecutionRecord.State.EXECUTING,
+                        false),
+                prefix + "-dispatcher-a",
+                renewedA.getDispatchGeneration());
+        ToolExecutionRecord cancelling = second.requestCancel(executionId,
+                executing.getVersion());
+        assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED,
+                cancelling.getState());
+        assertNull(second.claimDispatch(executionId,
+                prefix + "-dispatcher-b", Duration.ofMinutes(30)));
+        assertTrue(second.hasActiveByRuntimeSession(
+                prefix + "-runtime-session"));
+        expire(dataSource, "qwen_tool_execution",
+                "dispatch_lease_until", "execution_call_id", executionId);
+
+        assertNull(second.claimDispatch(executionId,
+                prefix + "-dispatcher-b", Duration.ofMinutes(30)));
+        ToolExecutionRecord unknown = second.findByExecutionCallId(
+                executionId);
+        assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+        assertEquals(prefix + "-dispatcher-a", unknown.getDispatchOwner());
+        assertTrue(unknown.isCancelRequested());
+        assertNull(first.renewDispatch(executionId,
+                prefix + "-dispatcher-a", ownerA.getDispatchGeneration(),
+                Duration.ofMinutes(30)));
+        assertNull(first.compareAndSet(cancelling,
+                cancelling.withResult(result("error"), 1, START),
+                prefix + "-dispatcher-a",
+                cancelling.getDispatchGeneration()));
+        Map<String, Object> result = result("cancelled");
+        ToolExecutionRecord settled = second.resolveUnknown(unknown, result,
+                START);
+        assertEquals(result, settled.getResult());
+        assertFalse(first.hasActiveByRuntimeSession(
+                prefix + "-runtime-session"));
+        assertNull(first.claimDispatch(executionId,
+                prefix + "-dispatcher-a", Duration.ofMinutes(1)));
+
+        JdbcToolExecutionRepository reconstructed =
+                new JdbcToolExecutionRepository(dataSource);
+        ToolExecutionRecord restored = reconstructed
+                .findByExecutionCallId(executionId);
+        assertEquals("cancelled", restored.getExecutionStatus());
+        assertEquals(result, restored.getResult());
+        assertEquals(executionId, reconstructed.findByIdempotencyKey(
+                idempotencyKey).getExecutionCallId());
+        ToolExecutionRecord changed = execution(prefix + "-changed",
+                idempotencyKey, prefix + "-changed-digest");
+        ToolExecutionRecord original = reconstructed.findOrCreate(changed);
+        assertEquals(executionId, original.getExecutionCallId());
+        assertFalse(original.sameRequest(changed));
+    }
+
+    private static ToolExecutionRecord execution(String executionCallId,
+            String idempotencyKey, String digest) {
+        String prefix = idempotencyKey.substring(0,
+                idempotencyKey.length() - "-idempotency".length());
+        return ToolExecutionRecord.prepared(executionCallId, idempotencyKey,
+                prefix + "-binding", 1, prefix + "-harness",
+                prefix + "-runtime-session", prefix + "-turn",
+                prefix + "-tool", digest,
+                Map.of("sessionId", prefix + "-runtime-session",
+                        "promptId", prefix + "-turn", "callId",
+                        prefix + "-tool", "argsDigest", digest));
+    }
+
+    private static Map<String, Object> result(String status) {
+        return Map.of("executionStatus", status, "output",
+                List.of("durable", "result"));
     }
 
     private static void expire(DataSource dataSource, String table,
