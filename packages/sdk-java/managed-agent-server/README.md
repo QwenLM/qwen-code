@@ -50,6 +50,59 @@ The returned `sessionId` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
 not maintain a separate public-to-Harness Session mapping.
 
+## Public Session lifecycle
+
+Flyway V5 adds durable lifecycle commands and soft-deletion timestamps. The
+public control plane owns lifecycle state and tenant/idempotency checks, while
+the Hosted Harness remains the private title authority and the Runtime Broker
+owns execution bindings.
+
+```bash
+curl -sS -X PATCH \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \
+  -H 'Content-Type: application/json' \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: rename-1' \
+  -d '{"title":"investigate checkout failure"}'
+
+curl -sS -X POST \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/archive \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: archive-1'
+
+curl -sS -X POST \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/unarchive \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: unarchive-1'
+
+curl -sS -X DELETE \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: delete-1'
+```
+
+Archive and delete reject an active Turn. Rename waits for the Harness to
+durably commit `session_metadata`; archive closes the Harness attachment and
+drains the Runtime binding; delete closes it only when the Session was active
+and always drains the binding; unarchive clears the Runtime retirement fence
+and loads the Harness lazily on the next Turn. A failed external action leaves
+a `PENDING` command that the same idempotency key can safely resume. The
+command retains the pre-mutation state, so deleting an archived Session does
+not require the already-closed Harness. A different lifecycle command is
+blocked until it completes.
+
+Harness attachment uses strict create/load semantics: create returns `409` for
+an existing private Session authority, while load returns `404` for a missing
+authority and never initializes one. The Java connector probes load before
+create when it cannot prove whether a private authority already exists.
+An in-memory Hosted attachment is bound to one normalized Store endpoint,
+tenant, workspace, and Harness writer generation; an attach or cold-load race
+with a different identity fails closed.
+
+Delete currently writes a public tombstone and hides the Session from get/list
+responses. It does not physically erase the private journal or resources;
+retention, writer sealing, and garbage collection remain future work.
+
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
 revision; the service fails Flyway validation instead of silently rewriting
@@ -80,12 +133,26 @@ listener or trusted service network:
 
 ```bash
 export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
+export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
+export QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION='60s'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 ```
 
-This is the D1a storage service, not an active Hosted Harness backend yet. The
-TypeScript HTTP adapter and new-Session backend selection remain separate
-follow-up work, so the current Harness still uses its local JSONL/resource
-adapter. Resources larger than 64 KiB fail with
+`QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` must be reachable from the Hosted
+Harness. When both the Harness and Store are enabled, Java includes a scoped
+Store descriptor in each new private Hosted Session request. The ordinary
+daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
+HTTP adapter and generates its own writer secret. The Store scope reuses
+`QWEN_MANAGED_AGENT_WORKSPACE_ID`, so the public Session, private journal, and
+Runtime binding have one `(tenantId, workspaceId, sessionId)` identity. Set
+that ID explicitly when enabling the Session Store; if the Runtime Broker also
+has an explicit ID, startup rejects a mismatch.
+
+This activates the durable create and cold-load paths for newly created Hosted
+Sessions. The load path rebuilds the Harness state from the scoped Store and
+does not require a Pod-local transcript. Do not advertise automatic cross-Pod
+recovery yet: the independent-process failure test and admitted in-flight Turn
+reconciliation are still pending. Resources larger than 64 KiB fail with
 `managed_session_oss_disabled` until the immutable OSS path is implemented.
 Production deployments must add mTLS or equivalent service authentication;
 the tenant and writer headers are scope and fencing inputs, not a substitute

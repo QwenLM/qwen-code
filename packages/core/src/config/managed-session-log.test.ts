@@ -25,6 +25,8 @@ import {
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
 import { parseHarnessCheckpointV1 } from '../managed-runtime/managed-harness-checkpoint.js';
+import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import {
   MANAGED_SESSION_COMMIT_SUBTYPE,
   MANAGED_SESSION_EVENT_SUBTYPE,
@@ -188,6 +190,159 @@ function stubStoppedModelStream(
 }
 
 describe('managed session log activation', () => {
+  it('routes the authoritative journal through an injected hosted store', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-hosted-store-'));
+    temporaryDirectories.add(root);
+    const workspace = path.join(root, 'workspace');
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const remoteBaseDir = path.join(root, 'remote-store');
+    await mkdir(workspace, { recursive: true });
+
+    await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
+      const sessionKey = {
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        sessionId,
+      };
+      const remoteTranscriptPath = path.join(remoteBaseDir, 'authority.jsonl');
+      const config = new Config({
+        sessionId,
+        cwd: workspace,
+        targetDir: workspace,
+        debugMode: false,
+        model: 'qwen3-coder-plus',
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        managedSessionLogEnabled: true,
+        managedToolSessionFactory: () => {
+          throw new Error('must not create tools');
+        },
+        managedSessionStore: {
+          mode: 'create',
+          sessionKey,
+          journalStore: new LocalJsonlManagedSessionJournalStore({
+            runtimeBaseDir: remoteBaseDir,
+            sessionId,
+            transcriptPath: remoteTranscriptPath,
+          }),
+          resourceStore: LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: remoteBaseDir,
+            sessionKey,
+          }),
+        },
+      });
+      const localTranscriptPath = config.getTranscriptPath();
+      await mkdir(path.dirname(localTranscriptPath), { recursive: true });
+      vi.spyOn(
+        config as unknown as { initializeInternal(): Promise<void> },
+        'initializeInternal',
+      ).mockResolvedValue(undefined);
+
+      await config.initialize({ sessionExecutionEngine: 'managed' });
+      const recorder = config.getChatRecordingService()!;
+      recorder.recordUserMessage('persist remotely');
+      await recorder.flush();
+
+      await expect(stat(localTranscriptPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(isManagedSessionTranscriptSync(remoteTranscriptPath)).toBe(true);
+      expect(
+        (await transcriptRecords(remoteTranscriptPath)).map(
+          (record) => record['subtype'],
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          MANAGED_SESSION_HEADER_SUBTYPE,
+          MANAGED_SESSION_EVENT_SUBTYPE,
+          MANAGED_SESSION_COMMIT_SUBTYPE,
+        ]),
+      );
+
+      await config.closeSessionWriter();
+      const remoteLock = JSON.parse(
+        await readFile(
+          getSessionWriterLockPath(remoteBaseDir, sessionId),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      expect(remoteLock['state']).toBe('sealed');
+    });
+  });
+
+  it('seals an injected hosted store when recorder activation fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-hosted-store-'));
+    temporaryDirectories.add(root);
+    const workspace = path.join(root, 'workspace');
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const remoteBaseDir = path.join(root, 'remote-store');
+    await mkdir(workspace, { recursive: true });
+
+    await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
+      const sessionKey = {
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        sessionId,
+      };
+      const closeStore = vi.fn<() => Promise<void>>().mockResolvedValue();
+      const config = new Config({
+        sessionId,
+        cwd: workspace,
+        targetDir: workspace,
+        debugMode: false,
+        model: 'qwen3-coder-plus',
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        managedSessionLogEnabled: true,
+        managedToolSessionFactory: () => {
+          throw new Error('must not create tools');
+        },
+        managedSessionStore: {
+          mode: 'create',
+          sessionKey,
+          journalStore: new LocalJsonlManagedSessionJournalStore({
+            runtimeBaseDir: remoteBaseDir,
+            sessionId,
+            transcriptPath: path.join(remoteBaseDir, 'authority.jsonl'),
+          }),
+          resourceStore: LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: remoteBaseDir,
+            sessionKey,
+          }),
+          close: closeStore,
+        },
+      });
+      await mkdir(path.dirname(config.getTranscriptPath()), {
+        recursive: true,
+      });
+      vi.spyOn(
+        config as unknown as { initializeInternal(): Promise<void> },
+        'initializeInternal',
+      ).mockResolvedValue(undefined);
+      vi.spyOn(
+        config.getChatRecordingService()!,
+        'activate',
+      ).mockImplementation(() => {
+        throw new Error('recorder activation failed');
+      });
+
+      await expect(
+        config.initialize({ sessionExecutionEngine: 'managed' }),
+      ).rejects.toThrow('recorder activation failed');
+      expect(closeStore).toHaveBeenCalledOnce();
+
+      const remoteLock = JSON.parse(
+        await readFile(
+          getSessionWriterLockPath(remoteBaseDir, sessionId),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      expect(remoteLock['state']).toBe('sealed');
+    });
+  });
+
   it('records a managed session through the authority and seals on close', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

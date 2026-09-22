@@ -172,6 +172,7 @@ export * from './managed-runtime/managed-session-message-projection.js';
 export * from './managed-runtime/managed-session-record-sink.js';
 export * from './managed-runtime/managed-session-records.js';
 export * from './managed-runtime/managed-session-resources.js';
+export * from './managed-runtime/http-managed-session-store.js';
 export type {
   ManagedSessionCommittedTransaction,
   ManagedSessionJournalHandle,
@@ -448,6 +449,7 @@ export {
 } from './services/session-turn-state.js';
 export * from './services/session-writer-lease.js';
 export {
+  buildManagedSessionRestoreProjection,
   decodeSessionTranscriptCursor,
   decodeSessionTranscriptSnapshot,
   encodeSessionTranscriptCursor,
@@ -470,6 +472,7 @@ export {
   SessionTranscriptTooLargeError,
 } from './services/session-transcript-reader.js';
 export type {
+  ManagedSessionRestoreProjectionInput,
   SelectiveSessionRestoreOptions,
   SessionLiveRestoreProjection,
   SessionRestoreProjection,

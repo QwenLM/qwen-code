@@ -32169,6 +32169,48 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('updateSessionMetadata', () => {
+    it('acknowledges a Hosted title only after the child persists it', async () => {
+      const persisted = deferred<{ persisted: boolean }>();
+      const calls: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                calls.push(params);
+                return persisted.promise;
+              }
+              return {};
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const committing = bridge.commitSessionTitle!(
+        session.sessionId,
+        'Durable title',
+      );
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      persisted.resolve({ persisted: true });
+      await expect(committing).resolves.toMatchObject({
+        displayName: 'Durable title',
+      });
+      expect(calls[0]).toMatchObject({
+        sessionId: session.sessionId,
+        displayName: 'Durable title',
+        titleSource: 'manual',
+      });
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        displayName: 'Durable title',
+      });
+
+      await bridge.shutdown();
+    });
+
     it('publishes session_metadata_updated event', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

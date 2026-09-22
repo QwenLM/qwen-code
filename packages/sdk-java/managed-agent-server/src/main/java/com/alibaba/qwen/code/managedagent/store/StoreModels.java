@@ -11,7 +11,7 @@ public final class StoreModels {
             String agentId, String title, String status,
             String harnessBootId, String harnessEventEpoch,
             long harnessLastEventId, long lastSequence, long createdAt,
-            long updatedAt, long version) {
+            long updatedAt, Long deletedAt, long version) {
     }
 
     public record TurnRecord(String tenantId, String sessionId,
@@ -32,7 +32,19 @@ public final class StoreModels {
 
     public record CommandRecord(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
-            String turnId, long createdAt) {
+            String turnId, String status, String sessionStatusBefore,
+            long createdAt, long updatedAt) {
+    }
+
+    public enum SessionMutationKind {
+        RENAME,
+        ARCHIVE,
+        UNARCHIVE,
+        DELETE
+    }
+
+    public record SessionMutationCommand(String sessionId, String status,
+            String sessionStatusBefore, boolean replayed) {
     }
 
     public record Admission(String sessionId, String turnId,

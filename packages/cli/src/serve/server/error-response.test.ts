@@ -131,6 +131,27 @@ describe('workflow parameter errors', () => {
   });
 });
 
+describe('managed session authority errors', () => {
+  it.each([
+    ['managed_session_already_exists', 409],
+    ['managed_session_not_found', 404],
+  ] as const)('answers %s with %s', (errorKind, statusCode) => {
+    const source = RequestError.invalidParams(
+      { errorKind },
+      `Managed Session authority failed: ${errorKind}`,
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(statusCode);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: errorKind,
+    });
+  });
+});
+
 describe('child capacity errors', () => {
   it.each([false, true])(
     'preserves capacity through runtime wrapper=%s',

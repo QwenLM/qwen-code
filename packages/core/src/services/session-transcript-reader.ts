@@ -306,6 +306,118 @@ export interface SessionRestoreProjection {
   replay?: SessionRestoreReplayPage;
 }
 
+export interface ManagedSessionRestoreProjectionInput {
+  readonly sessionId: string;
+  readonly records: readonly ChatRecord[];
+  readonly replay: SessionRestoreReplaySelection;
+  readonly filePath: string;
+  readonly startTime: string;
+  readonly lastUpdated: string;
+  readonly executionEngine: SessionExecutionEngineState;
+  readonly fallbackLastCompletedUuid: string;
+  readonly customTitle?: string;
+  readonly titleSource?: TitleSource;
+}
+
+/** Rebuilds the existing runtime resume shape from a durable Managed journal. */
+export function buildManagedSessionRestoreProjection(
+  input: ManagedSessionRestoreProjectionInput,
+): SessionRestoreProjection {
+  validateRestoreReplaySelection(input.replay);
+  const records = [...input.records];
+  const apiHistory = new SessionApiHistoryAccumulator();
+  const resumeTokenCounts = new ResumeTokenCountsAccumulator();
+  const turnState = new SessionTurnStateAccumulator(input.sessionId);
+  const fileHistory = new SessionFileHistoryAccumulator();
+  const uiTelemetryEvents: UiEvent[] = [];
+  const goalRecords: GoalRecoveryRecord[] = [];
+  let attributionSnapshot: AttributionSnapshot | undefined;
+  let lastAssistantModel: string | undefined;
+  let lastTokenCountsRecord: ChatRecord | undefined;
+  for (const record of records) {
+    if (record.sessionId !== input.sessionId) {
+      throw new ManagedSessionRecordError(
+        'Managed Session projection contains a record from another session.',
+      );
+    }
+    turnState.addHint(getSessionTurnRecordHint(record, input.sessionId));
+    apiHistory.add(record);
+    fileHistory.add(record);
+    if (isResumeTokenCountsCandidate(record)) lastTokenCountsRecord = record;
+    if (isGoalRecoveryCandidate(record)) {
+      const normalized = normalizeGoalRecoveryRecord(record);
+      if (normalized) goalRecords.push(normalized);
+    }
+    if (record.subtype === 'ui_telemetry') {
+      const uiEvent = (
+        record.systemPayload as UiTelemetryRecordPayload | undefined
+      )?.uiEvent;
+      if (uiEvent) uiTelemetryEvents.push(uiEvent);
+    }
+    if (record.subtype === 'attribution_snapshot') {
+      const snapshot = (
+        record.systemPayload as AttributionSnapshotPayload | undefined
+      )?.snapshot;
+      if (snapshot && typeof snapshot === 'object') {
+        attributionSnapshot = snapshot;
+      }
+    }
+    if (
+      record.type === 'assistant' &&
+      typeof record.model === 'string' &&
+      record.model.trim()
+    ) {
+      lastAssistantModel = record.model;
+    }
+  }
+  if (lastTokenCountsRecord) resumeTokenCounts.add(lastTokenCountsRecord);
+  const turnStateValue = turnState.finish();
+  const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
+  const restoredTokenCounts = resumeTokenCounts.finish();
+  const restoredFileHistory = fileHistory.finish();
+  const runtime: SessionRuntimeResumeState = {
+    apiHistory: apiHistory.finish(),
+    ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
+    uiTelemetryEvents,
+    ...(attributionSnapshot ? { attributionSnapshot } : {}),
+    recording: {
+      lastCompletedUuid:
+        records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
+      turnParentUuids: turnStateValue.turnParentUuids,
+      ...(input.customTitle !== undefined
+        ? { customTitle: input.customTitle }
+        : {}),
+      ...(input.titleSource !== undefined
+        ? { titleSource: input.titleSource }
+        : {}),
+      ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
+      ...(input.executionEngine.status === 'verified' &&
+      input.executionEngine.recorded
+        ? { executionEngine: input.executionEngine.engine }
+        : {}),
+    },
+    goalRecords,
+    ...(goalRecovery.sourceUuid
+      ? { goalRecoverySourceUuid: goalRecovery.sourceUuid }
+      : {}),
+    ...(restoredFileHistory
+      ? { fileHistorySnapshots: restoredFileHistory }
+      : {}),
+    initialTurn: turnStateValue.initialTurn,
+    backgroundNotificationTaskIds: turnStateValue.backgroundNotificationTaskIds,
+  };
+  const replay = managedReplayPage(records, input.replay);
+  return {
+    sessionId: input.sessionId,
+    filePath: input.filePath,
+    startTime: input.startTime,
+    lastUpdated: input.lastUpdated,
+    runtime,
+    executionEngine: input.executionEngine,
+    ...(replay ? { replay } : {}),
+  };
+}
+
 export interface SessionLiveRestoreProjection
   extends SessionSourcesRestoreState {
   sessionId: string;
@@ -3404,110 +3516,30 @@ export class SessionTranscriptReader {
       index,
       readOptions,
     );
-    const apiHistory = new SessionApiHistoryAccumulator();
-    const resumeTokenCounts = new ResumeTokenCountsAccumulator();
-    const turnState = new SessionTurnStateAccumulator(sessionId);
-    const fileHistory = new SessionFileHistoryAccumulator();
-    const uiTelemetryEvents: UiEvent[] = [];
-    const goalRecords: GoalRecoveryRecord[] = [];
-    let attributionSnapshot: AttributionSnapshot | undefined;
-    let lastAssistantModel: string | undefined;
-    let lastTokenCountsRecord: ChatRecord | undefined;
-    for (const record of records) {
-      turnState.addHint(getSessionTurnRecordHint(record, sessionId));
-      // Every record: the accumulator ignores system records that are not a
-      // compaction snapshot, and resets its history when it sees one, so
-      // filtering by type here would rebuild history from before a compaction.
-      apiHistory.add(record);
-      // Also every record, for the same reason in reverse: the file history
-      // accumulator ignores anything that is not a snapshot batch and bounds
-      // what it retains, so it folds the batches exactly as it does on a
-      // legacy transcript.
-      fileHistory.add(record);
-      if (isResumeTokenCountsCandidate(record)) lastTokenCountsRecord = record;
-      if (isGoalRecoveryCandidate(record)) {
-        const normalized = normalizeGoalRecoveryRecord(record);
-        if (normalized) goalRecords.push(normalized);
-      }
-      if (record.subtype === 'ui_telemetry') {
-        const uiEvent = (
-          record.systemPayload as UiTelemetryRecordPayload | undefined
-        )?.uiEvent;
-        if (uiEvent) uiTelemetryEvents.push(uiEvent);
-      }
-      if (record.subtype === 'attribution_snapshot') {
-        const snapshot = (
-          record.systemPayload as AttributionSnapshotPayload | undefined
-        )?.snapshot;
-        if (snapshot && typeof snapshot === 'object') {
-          attributionSnapshot = snapshot;
-        }
-      }
-      if (
-        record.type === 'assistant' &&
-        typeof record.model === 'string' &&
-        record.model.trim()
-      ) {
-        lastAssistantModel = record.model;
-      }
-    }
-    if (lastTokenCountsRecord) resumeTokenCounts.add(lastTokenCountsRecord);
     const persistedTitle =
       readManagedSessionTitleInfoSync(
         index.filePath,
         this.storage.getRuntimeBaseDir(),
       ) ?? {};
-    const turnStateValue = turnState.finish();
-    const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
-    const restoredTokenCounts = resumeTokenCounts.finish();
-    const restoredFileHistory = fileHistory.finish();
-    const runtime: SessionRuntimeResumeState = {
-      apiHistory: apiHistory.finish(),
-      ...(restoredTokenCounts
-        ? { resumeTokenCounts: restoredTokenCounts }
-        : {}),
-      uiTelemetryEvents,
-      ...(attributionSnapshot ? { attributionSnapshot } : {}),
-      recording: {
-        // The projected tail, not the physical one: a new record chains from
-        // the last thing a reader saw, and the wrappers are not that.
-        lastCompletedUuid: records[records.length - 1]?.uuid ?? index.leafUuid,
-        turnParentUuids: turnStateValue.turnParentUuids,
-        ...(persistedTitle.title !== undefined
-          ? { customTitle: persistedTitle.title }
-          : {}),
-        ...(persistedTitle.source !== undefined
-          ? { titleSource: persistedTitle.source }
-          : {}),
-        ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
-        ...(index.executionEngine.status === 'verified' &&
-        index.executionEngine.recorded
-          ? { executionEngine: index.executionEngine.engine }
-          : {}),
-      },
-      goalRecords,
-      ...(goalRecovery.sourceUuid
-        ? { goalRecoverySourceUuid: goalRecovery.sourceUuid }
-        : {}),
-      ...(restoredFileHistory
-        ? { fileHistorySnapshots: restoredFileHistory }
-        : {}),
-      initialTurn: turnStateValue.initialTurn,
-      backgroundNotificationTaskIds:
-        turnStateValue.backgroundNotificationTaskIds,
-    };
-    const replay = managedReplayPage(records, options.replay);
-    await assertIndexSnapshotUnchanged(index, sessionId);
-    offerFreshIndexToCache(index);
-    return {
+    const projection = buildManagedSessionRestoreProjection({
       sessionId,
+      records,
+      replay: options.replay,
       filePath: index.filePath,
       startTime: index.restoreStartTime,
       lastUpdated: index.lastUpdated,
-      runtime,
       executionEngine: index.executionEngine,
-      ...(replay ? { replay } : {}),
-    };
+      fallbackLastCompletedUuid: index.leafUuid,
+      ...(persistedTitle.title !== undefined
+        ? { customTitle: persistedTitle.title }
+        : {}),
+      ...(persistedTitle.source !== undefined
+        ? { titleSource: persistedTitle.source }
+        : {}),
+    });
+    await assertIndexSnapshotUnchanged(index, sessionId);
+    offerFreshIndexToCache(index);
+    return projection;
   }
 
   /** The live counterpart, which carries the replay page only. */

@@ -2,7 +2,7 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
-Status: D0 and the D1a Java store are implemented; the D1b TypeScript contract client and D2-D3 remain proposed. Date: 2026-09-22. This design refines the durable-recovery work in [Managed Agent Storage, Events, and Session Recovery](2026-09-20-managed-agent-storage-event-architecture.md). It covers new Hosted Managed Sessions only; importing existing local Sessions is out of scope for the first release.
+Status: D0, the D1a Java store, the D1b TypeScript HTTP adapters, D2a routing for newly created Hosted Sessions with inline resources, the cold Hosted load path, and the first public Session lifecycle slice are implemented in the current feature-branch working tree. Shared golden fixtures, independent-process failover proof, OSS resources, physical deletion/retention, and D3 recovery gates remain. Date: 2026-09-22. This design refines the durable-recovery work in [Managed Agent Storage, Events, and Session Recovery](2026-09-20-managed-agent-storage-event-architecture.md). It covers new Hosted Managed Sessions only; importing existing local Sessions is out of scope for the first release.
 
 ## 1. Decision
 
@@ -18,17 +18,19 @@ Do not use a shared PVC or one appendable OSS object as the production authority
 
 ## 2. Verified Current Baseline
 
-Standalone still uses the local backend, while D0 isolates it behind storage contracts and D1a adds an unselected remote store service:
+Standalone still uses the local backend. D0 isolates storage behind contracts, D1a implements the remote service, and D1b/D2a select it for new private Hosted creates:
 
 - `LocalManagedSessionAuthority` reads and appends through a `ManagedSessionJournalHandle`; it no longer owns a transcript path or calls `SessionWriterLease` for normal writes.
 - `LocalJsonlManagedSessionJournalStore` wraps `SessionWriterLease`, scans the normal Session transcript, and preserves the existing JSONL bytes and torn-tail behavior.
 - `LocalManagedSessionResourceStore` implements `ManagedSessionResourceStore` and publishes resources under `<runtimeBaseDir>/resources/<sessionId>/`.
 - `openManagedSession` accepts injected journal/resource stores and defaults to those local adapters.
 - Flyway V4 and the Spring internal API now persist a private Managed journal head, exact transaction bytes, resource catalog, and revision-to-resource references. Database-time leases, monotonic writer generations, head CAS, command idempotency, exact-byte verification, and transactional `MYSQL_INLINE` resources are implemented.
-- The Java store is not selected by `openManagedSession` yet. No current Hosted Harness writes to these tables until the D1b TypeScript HTTP adapters and D2 new-Session routing are wired.
+- A private Hosted Harness create request may now select the HTTP journal/resource adapters for one caller-owned Session ID. Ordinary daemon routes reject that capability, and the ACP child accepts it only from its authenticated private managed parent.
+- The active D2 path persists exact journal transactions and resources up to 64 KiB without creating a local authoritative transcript. Private Hosted `loadSession` reacquires the remote writer, verifies and projects the durable journal and referenced resources in memory, and rebuilds the existing restore shape without a local transcript.
+- Store `writerId` is tied to the current Hosted Harness boot ID. Java may replace a stored Harness generation only while it owns the active Turn dispatch lease and before that Turn has attempted admission; it refuses to reinterpret an admitted in-flight Turn under a new event epoch.
 - The existing JSONL contains `session_execution_engine`, `managed_session_header_v1`, `managed_session_event_v1`, and `managed_session_commit_v1` records. The sibling `<sessionId>.ledger.jsonl` is the prompt terminal ledger, not the private Managed journal.
 
-Consequently, a Runtime or Hosted Harness Pod without durable mounted storage loses the transcript and every resource referenced by it. Uploading only the JSONL is also insufficient because checkpoints and message/tool bodies are stored as separate resources.
+Sessions that remain on the local backend still lose their transcript and referenced resources with an ephemeral Runtime or Hosted Harness filesystem. The new Hosted create/load path removes that durability dependency for the journal and inline resources. Uploading only JSONL would still be insufficient because checkpoints and message/tool bodies are separate resources.
 
 Hosted remote mode does not upload the sibling prompt ledger as another file. Its durable facts are represented by the private `turn.settled` transaction and the public Java Turn state. Standalone mode keeps the existing sidecar for compatibility.
 
@@ -67,6 +69,46 @@ Java continues to initiate public Harness and Runtime operations. The storage ca
 
 The same `(tenantId, workspaceId, sessionId)` identifies the Java public Session, private Harness journal, and Runtime binding. There is no second public or Harness Session ID.
 
+### 4.1 Session-management ownership
+
+| Component                 | Owns                                                                                                                                                                         | Must not own                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Java control plane        | Public Session lifecycle, tenant scope, public Turn idempotency/status, Harness and Runtime bindings, the scoped Store descriptor, and the physical MySQL/OSS commit service | Model conversation semantics or direct tool execution        |
+| TypeScript Hosted Harness | Model loop, private context, semantic Managed records, checkpoints, and the single active writer lease for one Session                                                       | Pod-local storage as durable authority or Runtime scheduling |
+| Runtime Broker            | Runtime allocation, endpoint/lease/generation, scheduler adaptation, and reconciliation of tool execution ownership                                                          | Conversation history or model-loop state                     |
+| Tool Runtime              | Workspace-local tools, MCP/skill execution, and replaceable execution caches                                                                                                 | Public Session identity or authoritative transcript          |
+| MySQL and OSS             | Ordered physical journal commits, fencing metadata, receipts, and immutable resource bytes                                                                                   | Agent decisions or recovery policy                           |
+
+Java therefore manages the public Session and grants capabilities; Harness manages the private conversational state; Runtime manages where tools execute. A component can be restarted independently only when the state owned by the other two layers is durably addressable by the same Session key.
+
+### 4.2 Public Session lifecycle protocol
+
+The Java control plane exposes the public lifecycle API and is the sole authority for lifecycle state, tenant checks, and command idempotency:
+
+```text
+PATCH  /v1/agents/sessions/{sessionId}
+POST   /v1/agents/sessions/{sessionId}/archive
+POST   /v1/agents/sessions/{sessionId}/unarchive
+DELETE /v1/agents/sessions/{sessionId}
+```
+
+Every mutation requires `Idempotency-Key`. Java locks the tenant-scoped Session row, creates a durable `PENDING` command with the pre-mutation Session state and a requested event, performs the external Harness/Runtime action, then atomically marks the command `COMPLETED`, advances the public Session projection, and appends the completed event. A dependency failure leaves the command pending. Retrying the same key and request resumes it; a different lifecycle command for that Session receives `session_operation_active`. Reusing the key with different content receives `idempotency_conflict`. Persisting the pre-mutation state also lets an archived Session be deleted without requiring an already-closed Harness to become available again.
+
+| Operation | Preconditions                              | Pending public state                      | Required external action before completion                                                            | Completed public state/event                      |
+| --------- | ------------------------------------------ | ----------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Rename    | `ACTIVE`                                   | remains `ACTIVE` with a pending command   | Hosted Harness durably commits the `session_metadata` title record and acknowledges `persisted: true` | `ACTIVE`; title projection plus `session.updated` |
+| Archive   | `ACTIVE` and no active Turn                | `ARCHIVING`                               | close the live Harness attachment, then drain the Runtime binding                                     | `ARCHIVED`; `session.archived`                    |
+| Unarchive | `ARCHIVED`                                 | remains `ARCHIVED` with a pending command | clear the Runtime retirement fence; Harness is cold-loaded lazily on the next Turn                    | `ACTIVE`; `session.unarchived`                    |
+| Delete    | `ACTIVE` or `ARCHIVED`, and no active Turn | `DELETING`                                | close Harness when it was active, then drain Runtime; an archived Harness is already closed           | `DELETED` tombstone; `session.deleted`            |
+
+Archive and delete reject `ACCEPTED`, `RUNNING`, or `CANCELLING` Turns instead of silently cancelling or duplicating work. Rename is acknowledged publicly only after the private title commit succeeds, so Java's title is a projection rather than a second title authority. Close-by-Session-ID, Runtime drain, and Runtime resume are idempotent, which makes a pending command safe to continue after a lost response or Java restart.
+
+Archive clears the live event cursor but retains the last Harness generation as a private-authority existence sentinel. After unarchive, the next Turn cold-loads that Session before binding a new generation. A Session without a sentinel also probes load first and creates only on an explicit not-found response, covering Sessions whose first private write was metadata rather than a Turn. The private `create` path rejects an existing authority with `409`, while `load` returns `404` instead of initializing an empty authority; this keeps retry recovery from silently replacing or fabricating conversation history.
+
+A live Hosted attachment is additionally bound to the normalized Store endpoint, tenant, workspace, and Harness writer generation. Hot attach, concurrent cold-load coalescing, and restore races all compare that identity and fail closed with `managed_session_store_conflict` instead of letting another tenant or Store descriptor reuse the in-memory Session. Lease duration may change without changing storage identity.
+
+The first delete slice is deliberately a soft tombstone. `GET` and list APIs hide a `DELETED` Session, while the committed public deletion event remains replayable to an already connected client. Private journal/resource bytes are retained until writer sealing, execution reconciliation, legal hold, retention, and garbage collection are implemented. This slice must not be advertised as physical erasure.
+
 ## 5. Core Storage Contracts
 
 Extract behavior from the current concrete local classes without duplicating the Managed state machine:
@@ -90,7 +132,7 @@ interface ManagedSessionResourceStore {
 }
 ```
 
-This is the implemented D0 Core seam. `appendTransaction` always receives one complete semantic transaction. The local adapter keeps the historical per-line sync and recoverable torn-tail behavior. The D1a Java endpoint now accepts the complete remote transaction and applies the physical commit semantics. The remaining D1b HTTP handle will serialize that batch once, acquire or renew its scoped writer grant internally, submit the outer CAS and idempotency metadata derived from the validated header, events, and marker, and return only after Java confirms the exact bytes are committed. Its paired HTTP resource adapter will retain staged inline bytes until that commit.
+This is the implemented Core seam. `appendTransaction` always receives one complete semantic transaction. The local adapter keeps the historical per-line sync and recoverable torn-tail behavior. The D1a Java endpoint accepts the complete remote transaction and applies the physical commit semantics. The D1b HTTP handle serializes that batch once, acquires or renews its scoped writer grant internally, submits outer CAS and idempotency metadata derived from the validated header, events, and marker, and returns only after Java confirms the exact bytes are committed. Its paired HTTP resource adapter retains staged inline bytes until that commit and verifies response metadata, exact transaction bytes, the digest chain, and downloaded resources during restore.
 
 `ManagedSessionAuthority` owns record validation, event sequence rules, command content digests, checkpoint rules, and domain semantics. Store implementations own physical atomicity, writer fencing, exact-byte durability, pagination, and resource verification.
 
@@ -184,7 +226,7 @@ Transaction reads first page over revision and byte-length metadata, then fetch 
 
 Restore reads fail closed on unknown lifecycle or recovery states, unsafe head counters, revision gaps, and head/transaction disagreement. These checks report storage corruption rather than returning a partial authority.
 
-`transactions:commit` carries staged inline resources and inserts them in the same MySQL transaction as their first journal references. An optional `latestCheckpointResourceId` must identify a `managed-checkpoint` resource referenced by that transaction and advances the head atomically. The implemented path accepts raw resources up to and including 64 KiB, bounds their aggregate transaction bytes, verifies length and SHA-256, and returns `managed_session_oss_disabled` for larger resources. The D2 `resources:allocate` and `resources/{resourceId}:finalize` signed-object flow is not implemented. Local development continues to use the local adapter until D1b/D2 routing is complete.
+`transactions:commit` carries staged inline resources and inserts them in the same MySQL transaction as their first journal references. An optional `latestCheckpointResourceId` must identify a `managed-checkpoint` resource referenced by that transaction and advances the head atomically. The implemented path accepts raw resources up to and including 64 KiB, bounds their aggregate transaction bytes, verifies length and SHA-256, and returns `managed_session_oss_disabled` for larger resources. The D2 `resources:allocate` and `resources/{resourceId}:finalize` signed-object flow is not implemented. Standalone and ordinary daemon Sessions continue to select the local adapter; only the private Hosted Harness create path can select the remote adapter.
 
 ## 8. Commit Protocol
 
@@ -247,19 +289,23 @@ Exit condition: standalone behavior and bytes are unchanged; no Java or OSS depe
 
 ### D1: Durable Java store and contract client
 
-Status: D1a is implemented; D1b remains.
+Status: D1a and the TypeScript adapter portion of D1b are implemented.
 
 - Implemented in D1a: four Flyway V4 private tables; the Spring internal API; database-time lease/generation fencing; head CAS and atomic checkpoint-pointer advance; idempotent receipts; exact record-byte storage and verification; paged restore reads; and transactional `MYSQL_INLINE` resources with OSS fail-closed.
-- Remaining in D1b: the TypeScript HTTP journal/resource adapters, a shared golden contract fixture for exact bytes/digests/errors/limits, and an independent-process two-Java-instance MySQL fault test. D1a already exercises two separate store objects against real MySQL, including stale-writer rejection and lost-response replay, but that is not a process-crash proof.
-- Selection of the remote backend for new Hosted Sessions remains D2; D1a is deliberately not on the active Harness path.
+- Implemented in D1b: the paired TypeScript HTTP journal/resource adapters, scoped writer acquire/renew/seal, exact transaction reconstruction and verification, structured Java errors, inline resource staging, and close/reopen tests that use no local transcript.
+- Remaining in D1b: a shared golden contract fixture for exact bytes/digests/errors/limits and an independent-process two-Java-instance MySQL fault test. D1a already exercises two separate store objects against real MySQL, including stale-writer rejection and lost-response replay, but that is not a process-crash proof.
+- D2a now selects this backend for new private Hosted Harness Sessions. Java supplies tenant, workspace, writer identity, endpoint, and lease duration; the Harness generates the writer secret. The descriptor is rejected by ordinary daemon routes and untrusted ACP parents.
 
 Exit condition: two Java instances sharing MySQL reject stale writers and return the same receipt after a lost response.
 
-### D2: OSS resources and new-Session hosted routing
+### D2: OSS resources and Hosted routing
 
+- Status: new-Session routing and cold Hosted load are implemented for inline resources. OSS and the full failure-injection proof remain.
 - Implement the `OSS_OBJECT` path for resources larger than 64 KiB: allocate/upload/finalize/read, scoped signed URLs, digest verification, encryption, and orphan inventory.
-- Select the remote backend for newly created Hosted Managed Sessions. Existing local Sessions remain local; no migration and no dual write.
-- Remove dependence on Pod-local transcript/resource files from the hosted restore path. A local cache is optional and disposable.
+- The remote backend is selected only for newly created Hosted Managed Sessions. Existing local Sessions remain local; there is no migration or dual write.
+- The Hosted `loadSession` path supplies the same scoped Store descriptor used at create time. The ACP child reacquires the durable writer, validates the journal and resource closure, projects reader-facing records, and builds the runtime restore state without consulting a local transcript.
+- The current tests prove the HTTP contracts, route/ACP wiring, and an in-memory close/reopen flow with no local transcript. They do not yet kill one real Harness process and Java instance, preserve a shared MySQL store, and complete a new Turn on another process.
+- Automatic recovery of an already admitted in-flight Turn remains gated: Java refuses a Harness generation change after submission has been attempted until event-epoch and Runtime-side-effect reconciliation can prove the original operation's outcome. Idle or not-yet-admitted recovery does not relax that fence.
 
 Exit condition: delete the original Harness Pod and its filesystem, then restore the same Session and checkpoint on another Harness without losing history.
 

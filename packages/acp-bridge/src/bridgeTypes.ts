@@ -143,6 +143,102 @@ export interface BridgeManagedRuntimeToolExecuteResult {
   error?: { message: string; type?: string };
 }
 
+/** Private Hosted Harness capability for one Session's durable store. */
+export interface BridgeManagedSessionStore {
+  baseUrl: string;
+  tenantId: string;
+  workspaceId: string;
+  writerId: string;
+  leaseDurationMs: number;
+}
+
+const MANAGED_SESSION_STORE_FIELDS = new Set([
+  'baseUrl',
+  'tenantId',
+  'workspaceId',
+  'writerId',
+  'leaseDurationMs',
+]);
+const MANAGED_SESSION_STORE_TENANT_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
+
+export function parseBridgeManagedSessionStore(
+  value: unknown,
+): BridgeManagedSessionStore {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('managedSessionStore must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).some((key) => !MANAGED_SESSION_STORE_FIELDS.has(key))
+  ) {
+    throw new TypeError('managedSessionStore contains an unsupported field');
+  }
+  const baseUrl = requireManagedSessionStoreString(record, 'baseUrl', 2048);
+  const tenantId = requireManagedSessionStoreString(record, 'tenantId', 128);
+  const workspaceId = requireManagedSessionStoreString(
+    record,
+    'workspaceId',
+    512,
+  );
+  const writerId = requireManagedSessionStoreString(record, 'writerId', 512);
+  if (!MANAGED_SESSION_STORE_TENANT_PATTERN.test(tenantId)) {
+    throw new TypeError('managedSessionStore.tenantId is invalid');
+  }
+  const parsedBaseUrl = new URL(baseUrl);
+  if (
+    (parsedBaseUrl.protocol !== 'http:' &&
+      parsedBaseUrl.protocol !== 'https:') ||
+    parsedBaseUrl.username !== '' ||
+    parsedBaseUrl.password !== '' ||
+    parsedBaseUrl.search !== '' ||
+    parsedBaseUrl.hash !== ''
+  ) {
+    throw new TypeError(
+      'managedSessionStore.baseUrl must be an HTTP(S) URL without credentials, query, or fragment',
+    );
+  }
+  const leaseDurationMs = record['leaseDurationMs'];
+  if (
+    typeof leaseDurationMs !== 'number' ||
+    !Number.isInteger(leaseDurationMs) ||
+    leaseDurationMs < 1_000 ||
+    leaseDurationMs > 300_000
+  ) {
+    throw new TypeError(
+      'managedSessionStore.leaseDurationMs must be an integer from 1000 through 300000',
+    );
+  }
+  return Object.freeze({
+    baseUrl: parsedBaseUrl.toString().replace(/\/$/u, ''),
+    tenantId,
+    workspaceId,
+    writerId,
+    leaseDurationMs,
+  });
+}
+
+function requireManagedSessionStoreString(
+  record: Readonly<Record<string, unknown>>,
+  field: string,
+  maxBytes: number,
+): string {
+  const value = record[field];
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    Buffer.byteLength(value, 'utf8') > maxBytes ||
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return (
+        codePoint !== undefined && (codePoint < 0x20 || codePoint === 0x7f)
+      );
+    })
+  ) {
+    throw new TypeError(`managedSessionStore.${field} is invalid`);
+  }
+  return value;
+}
+
 export type { ManagedToolV2Client } from '@qwen-code/qwen-code-core';
 
 export interface RewindRequest {
@@ -199,6 +295,8 @@ export interface BridgeSpawnRequest {
    * sessionId field.
    */
   sessionId?: string;
+  /** Trusted Hosted Harness route only; forwarded through private ACP metadata. */
+  managedSessionStore?: BridgeManagedSessionStore;
 }
 
 /** Internal daemon-only creation surface for a managed standalone session. */
@@ -337,6 +435,8 @@ export interface BridgeRestoreSessionRequest {
   /** Keep inherited fork records as model context without replaying them. */
   hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
+  /** Trusted Hosted Harness load only; forwarded through private ACP metadata. */
+  managedSessionStore?: BridgeManagedSessionStore;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
    * serve layer reads it before restore). Re-seeds the restored live entry so a
@@ -372,6 +472,7 @@ export const LOAD_REPLAY_MAX_BYTES = 32 * 1024 * 1024;
 export const LOAD_REPLAY_MAX_UPDATES = 10_000;
 
 export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+export const MANAGED_SESSION_STORE_META_KEY = 'qwen.managedSessionStore.v1';
 export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
   'qwen.daemon.sessionInitializationDeadlineMs';
 export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
@@ -1953,6 +2054,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
+
+  /** Persist a Hosted Managed title before acknowledging the control plane. */
+  commitSessionTitle?(
+    sessionId: string,
+    title: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionMetadataUpdate>;
 
   /**
    * Re-hydrate the in-memory PR binding list of a live session from the

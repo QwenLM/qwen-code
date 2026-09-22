@@ -33,6 +33,8 @@ export interface OpenManagedSessionOptions {
     readonly rootSnapshotRef: ManagedSessionDurableRef;
     readonly createdBy: string;
   };
+  /** Create requests fail when the durable authority already exists. */
+  readonly requireNew?: boolean;
   /**
    * Identifies the worker advancing the session. Opening installs an activation
    * under this identity, because a writer that opens the log is by definition
@@ -130,6 +132,7 @@ export async function openManagedSession(
       version: options.version,
       resources,
       ...(options.create === undefined ? {} : { create: options.create }),
+      ...(options.requireNew === true ? { requireNew: true } : {}),
     });
   } catch (cause) {
     // An adopted writer is not ours to end: releasing it would pull the lease
@@ -140,11 +143,17 @@ export async function openManagedSession(
     throw cause;
   }
 
-  let activation = await authority.installActivation({
-    activationId: randomUUID(),
-    workerId: options.workerId,
-    leaseDurationMs: options.activationLeaseDurationMs,
-  });
+  let activation: { activationId: string; epoch: number };
+  try {
+    activation = await authority.installActivation({
+      activationId: randomUUID(),
+      workerId: options.workerId,
+      leaseDurationMs: options.activationLeaseDurationMs,
+    });
+  } catch (cause) {
+    await journal.abort().catch(() => undefined);
+    throw cause;
+  }
 
   // Installed before the sink exists, so there is no window in which a record
   // has no activation to name. The callback reads the live binding so a

@@ -25,6 +25,12 @@ import {
   getModelsForProviderProtocol,
   clearCachedCredentialFile,
   createDebugLogger,
+  createHttpManagedSessionStores,
+  buildManagedSessionRestoreProjection,
+  ManagedSessionAlreadyExistsError,
+  ManagedSessionNotFoundError,
+  projectManagedSessionRecords,
+  projectManagedSessionTitleInfo,
   generateSessionRecap,
   findProviderById,
   getAllMemoryFilenames,
@@ -129,6 +135,7 @@ import {
   type AgentParams,
   ApprovalMode,
   type Config,
+  type ConfigParameters,
   type ConfigInitializeOptions,
   type DeviceAuthorizationData,
   type DiscoveredMCPPrompt,
@@ -145,6 +152,7 @@ import {
   type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
   type SessionLiveRestoreProjection,
+  type SessionExecutionEngineState,
   type SessionRestoreProjection,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
@@ -484,6 +492,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MANAGED_SESSION_STORE_META_KEY,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
@@ -491,10 +500,12 @@ import {
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
+  parseBridgeManagedSessionStore,
   WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeConversationDirectoryExpectation,
   type BridgeLoadReplayEnvelope,
+  type BridgeManagedSessionStore,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   beginAcpBootstrapConfigProfiling,
@@ -1151,6 +1162,13 @@ function mapSessionRestoreRequestError(
 ): unknown {
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
+  if (error instanceof ManagedSessionNotFoundError) {
+    return new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
+      errorKind: error.code,
+      httpStatus: 404,
+      sessionId,
+    });
+  }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
       errorKind: 'transcript_snapshot_unavailable',
@@ -6100,6 +6118,167 @@ class QwenAgent implements Agent {
     };
   }
 
+  private createManagedSessionStore(
+    raw: unknown,
+    sessionId: string | undefined,
+    mode: 'create' | 'load',
+  ): ConfigParameters['managedSessionStore'] | undefined {
+    if (raw === undefined) return undefined;
+    if (!this.isTrustedManagedParent()) {
+      throw RequestError.invalidParams(
+        { errorKind: 'managed_session_store_forbidden' },
+        'Managed Session storage is available only to a trusted managed parent',
+      );
+    }
+    if (this.managedToolSessionFactory === undefined) {
+      throw RequestError.invalidParams(
+        { errorKind: 'managed_session_store_without_managed_runtime' },
+        'Managed Session storage requires a Managed Tool Runtime',
+      );
+    }
+    if (sessionId === undefined) {
+      throw RequestError.invalidParams(
+        { errorKind: 'managed_session_store_requires_session_id' },
+        'Managed Session storage requires a caller-supplied session id',
+      );
+    }
+    let descriptor: BridgeManagedSessionStore;
+    try {
+      descriptor = parseBridgeManagedSessionStore(raw);
+    } catch (error) {
+      throw RequestError.invalidParams(
+        { errorKind: 'invalid_managed_session_store' },
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const sessionKey = {
+      tenantId: descriptor.tenantId,
+      workspaceId: descriptor.workspaceId,
+      sessionId,
+    };
+    const stores = createHttpManagedSessionStores({
+      baseUrl: descriptor.baseUrl,
+      sessionKey,
+      writerId: descriptor.writerId,
+      leaseDurationMs: descriptor.leaseDurationMs,
+    });
+    return { mode, sessionKey, ...stores };
+  }
+
+  private createManagedSessionRestore(
+    managedSessionStore: NonNullable<ConfigParameters['managedSessionStore']>,
+    sessionId: string,
+    restoreOptions: SelectiveSessionRestoreOptions,
+  ): {
+    executionEngine: SessionExecutionEngineState;
+    projectionSource: (
+      restoreSessionId: string,
+    ) => Promise<SessionRestoreProjection>;
+  } {
+    const filePath = `managed-session-store:${sessionId}`;
+    const virtualSnapshot = (lastUpdated: string, size: number) => ({
+      filePath,
+      dev: 0,
+      ino: 0,
+      size,
+      lastUpdated,
+    });
+    const executionEngine: SessionExecutionEngineState = {
+      sessionId,
+      snapshot: virtualSnapshot(new Date(0).toISOString(), 0),
+      status: 'verified',
+      engine: 'managed',
+      recorded: true,
+    };
+    return {
+      executionEngine,
+      projectionSource: async (restoreSessionId) => {
+        if (normalizeSessionIdForLookup(restoreSessionId) !== sessionId) {
+          throw new SessionExecutionEngineError(
+            restoreSessionId,
+            'remote storage belongs to another session',
+          );
+        }
+        const journal = await managedSessionStore.journalStore.open({
+          sessionKey: managedSessionStore.sessionKey,
+        });
+        try {
+          const scan = await journal.read();
+          if (scan.header === undefined) {
+            throw new ManagedSessionNotFoundError(sessionId);
+          }
+          const [records, persistedTitle] = await Promise.all([
+            projectManagedSessionRecords({
+              scan,
+              resources: managedSessionStore.resourceStore,
+            }),
+            projectManagedSessionTitleInfo({
+              scan,
+              resources: managedSessionStore.resourceStore,
+            }),
+          ]);
+          let earliestOccurredAt = Number.POSITIVE_INFINITY;
+          let latestOccurredAt = Number.NEGATIVE_INFINITY;
+          const observeOccurredAt = (value: number): void => {
+            if (
+              Number.isFinite(value) &&
+              value >= 0 &&
+              !Number.isNaN(new Date(value).getTime())
+            ) {
+              earliestOccurredAt = Math.min(earliestOccurredAt, value);
+              latestOccurredAt = Math.max(latestOccurredAt, value);
+            }
+          };
+          for (const record of records) {
+            observeOccurredAt(Date.parse(record.timestamp));
+          }
+          for (const event of scan.events) {
+            observeOccurredAt(event.occurredAt);
+          }
+          const fallbackTime = Date.now();
+          const startTime = new Date(
+            Number.isFinite(earliestOccurredAt)
+              ? earliestOccurredAt
+              : fallbackTime,
+          ).toISOString();
+          const lastUpdated = new Date(
+            Number.isFinite(latestOccurredAt) ? latestOccurredAt : fallbackTime,
+          ).toISOString();
+          const verifiedExecutionEngine: SessionExecutionEngineState = {
+            ...executionEngine,
+            snapshot: virtualSnapshot(lastUpdated, scan.committedBytes),
+          };
+          return buildManagedSessionRestoreProjection({
+            sessionId,
+            records,
+            replay: restoreOptions.replay,
+            filePath,
+            startTime,
+            lastUpdated,
+            executionEngine: verifiedExecutionEngine,
+            fallbackLastCompletedUuid: scan.lastRecordUuid ?? sessionId,
+            ...(persistedTitle.title !== undefined
+              ? { customTitle: persistedTitle.title }
+              : {}),
+            ...(persistedTitle.source !== undefined
+              ? { titleSource: persistedTitle.source }
+              : {}),
+          });
+        } catch (error) {
+          try {
+            await journal.abort();
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              'Managed Session restore cleanup failed',
+            );
+          }
+          throw error;
+        }
+      },
+    };
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const cwd = await this.resolveRequestCwd(params.cwd);
     const { mcpServers } = params;
@@ -6115,6 +6294,11 @@ class QwenAgent implements Agent {
     }
     const requestedSessionId =
       parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    const managedSessionStore = this.createManagedSessionStore(
+      params._meta?.[MANAGED_SESSION_STORE_META_KEY],
+      requestedSessionId,
+      'create',
+    );
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
@@ -6176,6 +6360,9 @@ class QwenAgent implements Agent {
                   : {}),
                 ...(deferMcpDiscovery ? { skipMcpDiscovery: true } : {}),
               },
+              undefined,
+              undefined,
+              managedSessionStore,
             ),
           );
           let session: Session;
@@ -6275,6 +6462,11 @@ class QwenAgent implements Agent {
       );
     }
     const restoreOptions = loadRestoreOptions(params);
+    const managedSessionStore = this.createManagedSessionStore(
+      params._meta?.[MANAGED_SESSION_STORE_META_KEY],
+      sessionId,
+      'load',
+    );
     // The daemon already knows it will decline the re-hang (no attached
     // client, fork restore): emit no hint and don't skip finalizing the
     // trailing ask_user_question during replay, so skip and re-hang stay
@@ -6461,10 +6653,15 @@ class QwenAgent implements Agent {
         this.loadScopedSettings(params.cwd, true),
       );
       const persistedSessionId = await profiler.time('existence_check', () =>
-        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
-          const sessionService = new SessionService(params.cwd);
-          return resolvePersistedSessionIdForRestore(sessionService, sessionId);
-        }),
+        managedSessionStore
+          ? Promise.resolve(sessionId)
+          : this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
+              const sessionService = new SessionService(params.cwd);
+              return resolvePersistedSessionIdForRestore(
+                sessionService,
+                sessionId,
+              );
+            }),
       );
       if (!persistedSessionId) {
         profiler.fail('existence_check');
@@ -6478,6 +6675,13 @@ class QwenAgent implements Agent {
       this.settings = settings;
 
       const configProviderRevision = this.modelProviderReloadRevision;
+      const managedSessionRestore = managedSessionStore
+        ? this.createManagedSessionRestore(
+            managedSessionStore,
+            sessionId,
+            restoreOptions,
+          )
+        : undefined;
       const config = await profiler.time('config_setup', () =>
         this.newSessionConfig(
           params.cwd,
@@ -6498,6 +6702,8 @@ class QwenAgent implements Agent {
           },
           undefined,
           restoreOptions,
+          managedSessionStore,
+          managedSessionRestore,
         ),
       );
       if (suppressRestoreAskUserQuestion) {
@@ -15506,6 +15712,13 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    managedSessionStore?: ConfigParameters['managedSessionStore'],
+    managedSessionRestore?: {
+      executionEngine: SessionExecutionEngineState;
+      projectionSource: (
+        sessionId: string,
+      ) => Promise<SessionRestoreProjection | undefined>;
+    },
   ): Promise<Config> {
     cwd = await this.resolveRequestCwd(cwd);
     // Transcript replay is the only recording-disabled Config and must remain
@@ -15543,6 +15756,8 @@ class QwenAgent implements Agent {
             chatRecording,
             restoreOptions,
             sessionIdGenerated,
+            managedSessionStore,
+            managedSessionRestore,
           );
         }),
       );
@@ -15556,6 +15771,13 @@ class QwenAgent implements Agent {
       if (error instanceof SessionExecutionEngineError) {
         throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
           errorKind: error.errorKind,
+        });
+      }
+      if (error instanceof ManagedSessionAlreadyExistsError) {
+        throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
+          errorKind: error.code,
+          httpStatus: 409,
+          sessionId: error.sessionId,
         });
       }
       const writerError = getSessionWriterError(error);
@@ -15581,6 +15803,13 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
     sessionIdGenerated?: boolean,
+    managedSessionStore?: ConfigParameters['managedSessionStore'],
+    managedSessionRestore?: {
+      executionEngine: SessionExecutionEngineState;
+      projectionSource: (
+        sessionId: string,
+      ) => Promise<SessionRestoreProjection | undefined>;
+    },
   ): Promise<Config> {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -15705,10 +15934,13 @@ class QwenAgent implements Agent {
       this.workspaceBinding ||
         this.managedToolInvocationGuard ||
         this.managedToolSessionFactory ||
+        managedSessionStore ||
+        managedSessionRestore ||
         restoreOptions ||
         provisionalWorkspace
         ? {
             managedToolSessionFactory: this.managedToolSessionFactory,
+            managedSessionStore,
             runtimeEnvironment: this.workspaceBinding?.environment,
             workspaceTrusted: this.workspaceBinding?.trusted,
             ...(provisionalWorkspace
@@ -15717,19 +15949,21 @@ class QwenAgent implements Agent {
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }
               : {}),
-            ...(restoreOptions && sessionId
-              ? {
-                  sessionRestore: {
-                    projectionSource: (restoreSessionId) =>
-                      new SessionService(cwd, {
-                        runtimeBaseDir: Storage.getRuntimeBaseDir(),
-                      }).readRestoreProjection(
-                        restoreSessionId,
-                        restoreOptions,
-                      ),
-                  },
-                }
-              : {}),
+            ...(managedSessionRestore
+              ? { sessionRestore: managedSessionRestore }
+              : restoreOptions && sessionId
+                ? {
+                    sessionRestore: {
+                      projectionSource: (restoreSessionId) =>
+                        new SessionService(cwd, {
+                          runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                        }).readRestoreProjection(
+                          restoreSessionId,
+                          restoreOptions,
+                        ),
+                    },
+                  }
+                : {}),
           }
         : undefined,
       buildEnabledSkillNamesProvider(settings),

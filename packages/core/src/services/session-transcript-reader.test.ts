@@ -72,6 +72,7 @@ import {
 } from './session-artifact-persistence.js';
 import {
   clearSessionTranscriptIndexCacheEntriesForTest,
+  buildManagedSessionRestoreProjection,
   encodeSessionTranscriptCursor,
   getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
@@ -640,6 +641,50 @@ describe('SessionTranscriptReader', () => {
       },
     };
   }
+
+  it('builds a cold restore projection from durable Managed records', () => {
+    const user = record('u-managed', null, 'remote prompt');
+    const assistant = {
+      ...record('a-managed', 'u-managed', 'remote answer'),
+      model: 'qwen-managed',
+    };
+    const executionEngine = {
+      sessionId,
+      snapshot: {
+        filePath: `managed-session-store:${sessionId}`,
+        dev: 0,
+        ino: 0,
+        size: 2,
+        lastUpdated: assistant.timestamp,
+      },
+      status: 'verified' as const,
+      engine: 'managed' as const,
+      recorded: true,
+    };
+
+    const projection = buildManagedSessionRestoreProjection({
+      sessionId,
+      records: [user, assistant],
+      replay: { kind: 'all', hideInheritedHistory: false },
+      filePath: executionEngine.snapshot.filePath,
+      startTime: user.timestamp,
+      lastUpdated: assistant.timestamp,
+      executionEngine,
+      fallbackLastCompletedUuid: sessionId,
+    });
+
+    expect(projection.runtime.apiHistory).toEqual([
+      user.message,
+      assistant.message,
+    ]);
+    expect(projection.runtime.recording).toMatchObject({
+      lastCompletedUuid: 'a-managed',
+      lastAssistantModel: 'qwen-managed',
+      executionEngine: 'managed',
+    });
+    expect(projection.executionEngine).toBe(executionEngine);
+    expect(projection.replay?.records).toEqual([user, assistant]);
+  });
 
   function toolCallRecord(
     uuid: string,

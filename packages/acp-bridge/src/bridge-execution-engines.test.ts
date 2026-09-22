@@ -12,7 +12,10 @@ import type {
   BridgeOptions,
 } from './bridgeOptions.js';
 import type { AcpSessionBridge, BridgeSpawnRequest } from './bridgeTypes.js';
-import { REQUESTED_SESSION_ID_META_KEY } from './bridgeTypes.js';
+import {
+  MANAGED_SESSION_STORE_META_KEY,
+  REQUESTED_SESSION_ID_META_KEY,
+} from './bridgeTypes.js';
 import { AcpChannelTeardownError, type ChannelFactory } from './channel.js';
 import {
   BridgeChannelQuarantinedError,
@@ -98,6 +101,150 @@ function restore(
 }
 
 describe('paired execution engine channels', () => {
+  it('forwards a validated Managed Session store only with its session id', async () => {
+    const select = vi.fn<Selector>().mockReturnValue('managed');
+    const { bridge, handles } = pairedBridge(select);
+    const managedSessionStore = {
+      baseUrl: 'https://store.example/',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      writerId: 'writer-a',
+      leaseDurationMs: 60_000,
+    };
+    try {
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: SESSION_ID,
+        managedSessionStore,
+      });
+
+      expect(handles.managed.agent.newSessionCalls[0]?._meta).toMatchObject({
+        [REQUESTED_SESSION_ID_META_KEY]: SESSION_ID,
+        [MANAGED_SESSION_STORE_META_KEY]: {
+          ...managedSessionStore,
+          baseUrl: 'https://store.example',
+        },
+      });
+      await expect(
+        bridge.loadSession({
+          workspaceCwd: WS_A,
+          sessionId: SESSION_ID,
+          managedSessionStore,
+        }),
+      ).resolves.toMatchObject({ sessionId: SESSION_ID, attached: true });
+      expect(handles.managed.agent.loadSessionCalls).toHaveLength(0);
+      await expect(
+        bridge.loadSession({
+          workspaceCwd: WS_A,
+          sessionId: SESSION_ID,
+          managedSessionStore: {
+            ...managedSessionStore,
+            tenantId: 'tenant-b',
+          },
+        }),
+      ).rejects.toThrow(/another Managed Session store/);
+      await expect(
+        bridge.loadSession({ workspaceCwd: WS_A, sessionId: SESSION_ID }),
+      ).rejects.toThrow(/another Managed Session store/);
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          managedSessionStore,
+        }),
+      ).rejects.toThrow(/caller-supplied sessionId/);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('forwards a validated Managed Session store on cold load only', async () => {
+    const select = vi.fn<Selector>().mockReturnValue('managed');
+    const { bridge, handles } = pairedBridge(select);
+    const managedSessionStore = {
+      baseUrl: 'https://store.example/',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      writerId: 'writer-load',
+      leaseDurationMs: 60_000,
+    };
+    try {
+      await bridge.loadSession({
+        workspaceCwd: WS_A,
+        sessionId: SESSION_ID,
+        managedSessionStore,
+      });
+
+      expect(handles.managed.agent.loadSessionCalls[0]?._meta).toMatchObject({
+        [MANAGED_SESSION_STORE_META_KEY]: {
+          ...managedSessionStore,
+          baseUrl: 'https://store.example',
+        },
+      });
+      await expect(
+        bridge.resumeSession({
+          workspaceCwd: WS_A,
+          sessionId: `${SESSION_ID.slice(0, -1)}2`,
+          managedSessionStore,
+        }),
+      ).rejects.toThrow(/session\/load/);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('does not coalesce cold restores across Managed Session stores', async () => {
+    const gate = deferred<void>();
+    const handles = {
+      legacy: engineChannel('legacy'),
+      managed: engineChannel('managed', {
+        loadSessionImpl: async () => {
+          await gate.promise;
+          return { _meta: { [ENGINE_META_KEY]: 'managed' } };
+        },
+      }),
+    };
+    const select = vi.fn<Selector>().mockReturnValue('managed');
+    const { bridge } = pairedBridge(select, {}, handles);
+    const managedSessionStore = {
+      baseUrl: 'https://store.example',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      writerId: 'writer-load',
+      leaseDurationMs: 60_000,
+    };
+    const pending = bridge.loadSession({
+      workspaceCwd: WS_A,
+      sessionId: SESSION_ID,
+      managedSessionStore,
+    });
+    void pending.catch(() => undefined);
+    try {
+      await vi.waitFor(() =>
+        expect(handles.managed.agent.loadSessionCalls).toHaveLength(1),
+      );
+      await expect(
+        bridge.loadSession({
+          workspaceCwd: WS_A,
+          sessionId: SESSION_ID,
+          managedSessionStore: {
+            ...managedSessionStore,
+            tenantId: 'tenant-b',
+          },
+        }),
+      ).rejects.toThrow(/another Managed Session store/);
+      expect(handles.managed.agent.loadSessionCalls).toHaveLength(1);
+      gate.resolve();
+      await expect(pending).resolves.toMatchObject({
+        sessionId: SESSION_ID,
+        attached: false,
+      });
+    } finally {
+      gate.resolve();
+      await pending.catch(() => undefined);
+      await bridge.shutdown();
+    }
+  });
+
   it('rejects a paired configuration combined with the generic factory', () => {
     const factory = vi.fn<ChannelFactory>();
     const select = vi.fn<Selector>().mockReturnValue('managed');

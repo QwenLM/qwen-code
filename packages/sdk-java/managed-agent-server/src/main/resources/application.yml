@@ -25,6 +25,9 @@ qwen:
   managed-agent:
     session-store:
       enabled: ${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}
+      base-url: ${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}
+      workspace-id: ${QWEN_MANAGED_AGENT_WORKSPACE_ID:}
+      writer-lease-duration: ${QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION:60s}
     harness:
       enabled: ${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}
       base-url: ${QWEN_MANAGED_AGENT_HARNESS_BASE_URL:http://127.0.0.1:4170}

@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -189,6 +191,258 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_found"));
+    }
+
+    @Test
+    void managesThePublicSessionLifecycle() throws Exception {
+        String tenant = "tenant-lifecycle-" + UUID.randomUUID();
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString()).get("id").asText();
+
+        int renames = harness.renameCount();
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant + "-other")
+                        .header("Idempotency-Key", "lifecycle-other-tenant")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"not allowed\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_not_found"));
+        assertThat(harness.renameCount()).isEqualTo(renames);
+
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-rename")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"managed title\"}"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "false"))
+                .andExpect(jsonPath("$.metadata.title")
+                        .value("managed title"));
+        assertThat(harness.renameCount()).isEqualTo(renames + 1);
+        assertThat(harness.title(sessionId)).isEqualTo("managed title");
+        assertThat(store.requireSession(tenant, sessionId).harnessBootId())
+                .isNotNull();
+
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-rename")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"managed title\"}"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "true"));
+        assertThat(harness.renameCount()).isEqualTo(renames + 1);
+
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-rename")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"different\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("idempotency_conflict"));
+
+        JsonNode events = objectMapper.readTree(events(tenant, sessionId)
+                .getResponse().getContentAsString()).get("data");
+        assertThat(events).filteredOn(event -> "session.updated".equals(
+                        event.get("type").asText()))
+                .hasSize(1);
+
+        int closes = harness.closeCount();
+        harness.setAvailable(false);
+        try {
+            mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", "lifecycle-archive"))
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.error.code")
+                            .value("hosted_harness_unavailable"));
+        } finally {
+            harness.setAvailable(true);
+        }
+        mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-archive"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "true"))
+                .andExpect(jsonPath("$.status").value("archived"));
+        assertThat(harness.closeCount()).isEqualTo(closes + 1);
+
+        mvc.perform(post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "archived-turn")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"agent.session.input.message\","
+                                + "\"input\":[{\"type\":\"text\","
+                                + "\"text\":\"blocked\"}]}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_not_active"));
+
+        mvc.perform(post("/v1/agents/sessions/{id}/unarchive", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-unarchive"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("active"));
+
+        mvc.perform(delete("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-delete"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "false"))
+                .andExpect(jsonPath("$.object")
+                        .value("agent.session.deleted"))
+                .andExpect(jsonPath("$.deleted").value(true));
+
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isNotFound());
+        mvc.perform(get("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[?(@.id == '%s')]"
+                        .formatted(sessionId)).isEmpty());
+        mvc.perform(delete("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "lifecycle-delete"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "true"));
+    }
+
+    @Test
+    void rejectsArchivalUntilTheActiveTurnSettles() throws Exception {
+        String tenant = "tenant-archive-active-" + UUID.randomUUID();
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "archive-active-create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":["
+                                + "{\"type\":\"text\",\"text\":\"hold\"}]}"))
+                .andExpect(status().isAccepted()).andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString()).get("id").asText();
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                assertThat(harness.hasHeldTurn()).isTrue());
+        int closes = harness.closeCount();
+
+        try {
+            mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", "archive-active"))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code")
+                            .value("turn_active"));
+            assertThat(harness.closeCount()).isEqualTo(closes);
+        } finally {
+            harness.releaseHeldTurns();
+        }
+
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                assertThat(store.findActiveTurn(tenant, sessionId))
+                        .isEmpty());
+        mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "archive-active"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("archived"));
+        assertThat(store.requireSession(tenant, sessionId).harnessBootId())
+                .isNotNull();
+    }
+
+    @Test
+    void deletesAnArchivedSessionWhileTheHarnessIsUnavailable()
+            throws Exception {
+        String tenant = "tenant-archived-delete-" + UUID.randomUUID();
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "archived-delete-create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":["
+                                + "{\"type\":\"text\",\"text\":\"hello\"}]}"))
+                .andExpect(status().isAccepted()).andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString()).get("id").asText();
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+            assertThat(store.findActiveTurn(tenant, sessionId)).isEmpty();
+            assertThat(store.requireSession(tenant, sessionId).harnessBootId())
+                    .isNotNull();
+        });
+        mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "archived-delete-archive"))
+                .andExpect(status().isOk());
+
+        harness.setAvailable(false);
+        try {
+            mvc.perform(delete("/v1/agents/sessions/{id}", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key",
+                                    "archived-delete-delete"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.deleted").value(true));
+        } finally {
+            harness.setAvailable(true);
+        }
+    }
+
+    @Test
+    void retriesAPendingRenameWithTheSameIdempotencyKey() throws Exception {
+        String tenant = "tenant-rename-retry-" + UUID.randomUUID();
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "rename-retry-create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString()).get("id").asText();
+        harness.failNextRename();
+
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "rename-retry")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"retry title\"}"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error.code")
+                        .value("hosted_harness_unavailable"));
+
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "another-rename")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"blocked\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_operation_active"));
+
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "rename-retry")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"retry title\"}"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "true"))
+                .andExpect(jsonPath("$.metadata.title")
+                        .value("retry title"));
+
+        JsonNode events = objectMapper.readTree(events(tenant, sessionId)
+                .getResponse().getContentAsString()).get("data");
+        assertThat(events).filteredOn(event -> "session.updated".equals(
+                        event.get("type").asText()))
+                .hasSize(1);
     }
 
     @Test
@@ -486,6 +740,43 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void transfersHarnessGenerationOnlyBeforeAdmissionUnderDispatchLease() {
+        String tenant = "tenant-harness-takeover-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "takeover-create",
+                "sha256:" + "d".repeat(64), "qwen-code", null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "takeover-turn", "sha256:" + "e".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "f".repeat(64));
+        String owner = "takeover-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-a")).isTrue();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-b")).isTrue();
+        assertThat(store.requireSession(tenant, session.sessionId())
+                .harnessBootId()).isEqualTo("boot-b");
+
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-c")).isFalse();
+        assertThat(store.requireSession(tenant, session.sessionId())
+                .harnessBootId()).isEqualTo("boot-b");
+
+        store.releaseTurnLease(tenant, session.sessionId(), turn.turnId(),
+                owner);
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot-d")).isFalse();
+        assertThat(store.requireSession(tenant, session.sessionId())
+                .harnessBootId()).isEqualTo("boot-b");
+    }
+
+    @Test
     void doesNotPublishRolledBackEvents() throws Exception {
         String tenant = "tenant-rollback-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
@@ -596,6 +887,10 @@ class ManagedAgentServerIntegrationTest {
                 new ConcurrentHashMap<>();
         private final AtomicInteger submits = new AtomicInteger();
         private final AtomicInteger cancels = new AtomicInteger();
+        private final AtomicInteger renames = new AtomicInteger();
+        private final AtomicInteger closes = new AtomicInteger();
+        private final AtomicInteger renameFailures = new AtomicInteger();
+        private final Map<String, String> titles = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> gates =
                 new ConcurrentHashMap<>();
         private final Set<String> cancelled =
@@ -607,14 +902,15 @@ class ManagedAgentServerIntegrationTest {
                 new ConcurrentHashMap<>();
         private final Set<String> uncertainRetries =
                 ConcurrentHashMap.newKeySet();
+        private volatile boolean available = true;
 
         @Override
         public boolean isAvailable() {
-            return true;
+            return available;
         }
 
         @Override
-        public Attachment createOrLoad(String sessionId,
+        public Attachment createOrLoad(String tenantId, String sessionId,
                 boolean created) {
             sessions.add(sessionId);
             return new Attachment(
@@ -622,7 +918,8 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
-        public Admission submit(String sessionId, String promptId,
+        public Admission submit(String tenantId, String sessionId,
+                String promptId,
                 List<Map<String, Object>> input, String payloadDigest) {
             promptIds.put(sessionId, promptId);
             boolean held = input.stream().anyMatch(block ->
@@ -657,7 +954,8 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
-        public SourceStream stream(String sessionId, long lastEventId,
+        public SourceStream stream(String tenantId, String sessionId,
+                long lastEventId,
                 String eventEpoch) {
             String promptId = promptIds.get(sessionId);
             CountDownLatch gate = gates.get(sessionId);
@@ -707,9 +1005,25 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
-        public void cancel(String sessionId) {
+        public void cancel(String tenantId, String sessionId) {
             cancelled.add(sessionId);
             cancels.incrementAndGet();
+        }
+
+        @Override
+        public void rename(String tenantId, String sessionId, String title) {
+            renames.incrementAndGet();
+            if (renameFailures.getAndUpdate(value -> Math.max(0,
+                    value - 1)) > 0) {
+                throw new IllegalStateException("fixture rename failure");
+            }
+            titles.put(sessionId, title);
+        }
+
+        @Override
+        public void closeSession(String tenantId, String sessionId) {
+            closes.incrementAndGet();
+            sessions.remove(sessionId);
         }
 
         boolean hasSession(String sessionId) {
@@ -718,6 +1032,26 @@ class ManagedAgentServerIntegrationTest {
 
         int submitCount() {
             return submits.get();
+        }
+
+        int renameCount() {
+            return renames.get();
+        }
+
+        int closeCount() {
+            return closes.get();
+        }
+
+        String title(String sessionId) {
+            return titles.get(sessionId);
+        }
+
+        void failNextRename() {
+            renameFailures.incrementAndGet();
+        }
+
+        void setAvailable(boolean value) {
+            available = value;
         }
 
         int cancelCount() {

@@ -53,6 +53,8 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
+  parseBridgeManagedSessionStore,
+  type BridgeManagedSessionStore,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
@@ -295,6 +297,8 @@ interface RegisterSessionRoutesDeps {
   >;
   managedPromptService?: ManagedPromptService;
   managedGatewaySessionEvents?: ManagedGatewaySessionEvents;
+  hostedHarness?: boolean;
+  hostedHarnessBootId?: string;
 }
 
 // Chosen cap for one serialized transcript response, kept proportional to
@@ -3297,6 +3301,43 @@ export function registerSessionRoutes(
     }
     const requestedSessionId =
       parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    let managedSessionStore: BridgeManagedSessionStore | undefined;
+    if (body['managedSessionStore'] !== undefined) {
+      if (deps.hostedHarness !== true) {
+        res.status(400).json({
+          error:
+            '`managedSessionStore` is available only on the private Hosted Harness profile',
+          code: 'managed_session_store_forbidden',
+        });
+        return;
+      }
+      if (requestedSessionId === undefined) {
+        res.status(400).json({
+          error: '`managedSessionStore` requires a caller-supplied sessionId',
+          code: 'managed_session_store_requires_session_id',
+        });
+        return;
+      }
+      try {
+        managedSessionStore = parseBridgeManagedSessionStore(
+          body['managedSessionStore'],
+        );
+        if (managedSessionStore.writerId !== deps.hostedHarnessBootId) {
+          res.status(400).json({
+            error:
+              '`managedSessionStore.writerId` must match the current Hosted Harness generation',
+            code: 'managed_session_store_writer_mismatch',
+          });
+          return;
+        }
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : String(error),
+          code: 'invalid_managed_session_store',
+        });
+        return;
+      }
+    }
     let sessionIdReservation: RequestedSessionIdReservation | undefined;
     if (requestedSessionId !== undefined) {
       try {
@@ -3630,6 +3671,7 @@ export function registerSessionRoutes(
         ...(requestedSessionId !== undefined
           ? { sessionId: requestedSessionId }
           : {}),
+        ...(managedSessionStore !== undefined ? { managedSessionStore } : {}),
       });
       spawnCompleted = true;
       // Defensive: the bridge/agent must honor a caller-supplied id. If it was
@@ -4079,6 +4121,51 @@ export function registerSessionRoutes(
       }
       const body = safeBody(req);
       const route = `POST /session/:id/${action}`;
+      let managedSessionStore: BridgeManagedSessionStore | undefined;
+      if (body['managedSessionStore'] !== undefined) {
+        if (action !== 'load') {
+          res.status(400).json({
+            error: '`managedSessionStore` is supported only for session/load',
+            code: 'managed_session_store_load_only',
+          });
+          return;
+        }
+        if (deps.hostedHarness !== true) {
+          res.status(400).json({
+            error:
+              '`managedSessionStore` is available only on the private Hosted Harness profile',
+            code: 'managed_session_store_forbidden',
+          });
+          return;
+        }
+        if (parseCallerSuppliedSessionId(sessionId).kind !== 'valid') {
+          res.status(400).json({
+            error:
+              '`managedSessionStore` requires an RFC UUID v1-v5 session id',
+            code: 'managed_session_store_requires_session_id',
+          });
+          return;
+        }
+        try {
+          managedSessionStore = parseBridgeManagedSessionStore(
+            body['managedSessionStore'],
+          );
+          if (managedSessionStore.writerId !== deps.hostedHarnessBootId) {
+            res.status(400).json({
+              error:
+                '`managedSessionStore.writerId` must match the current Hosted Harness generation',
+              code: 'managed_session_store_writer_mismatch',
+            });
+            return;
+          }
+        } catch (error) {
+          res.status(400).json({
+            error: error instanceof Error ? error.message : String(error),
+            code: 'invalid_managed_session_store',
+          });
+          return;
+        }
+      }
       let resolvedRuntime:
         | { runtime: WorkspaceRuntime; workspaceCwd: string }
         | undefined;
@@ -4096,7 +4183,12 @@ export function registerSessionRoutes(
       }
       if (resolvedRuntime === undefined) return;
       const { runtime, workspaceCwd } = resolvedRuntime;
-      if (await rejectManagedGatewaySession(runtime, sessionId, res)) return;
+      if (
+        managedSessionStore === undefined &&
+        (await rejectManagedGatewaySession(runtime, sessionId, res))
+      ) {
+        return;
+      }
       const assertRuntimeGenerationOpen =
         captureRuntimeGenerationAssertion(runtime);
       const approvalMode = parseOptionalApprovalMode(body, res);
@@ -4117,6 +4209,7 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       if (
+        managedSessionStore === undefined &&
         isInternalWorkspaceRuntime(runtime) &&
         deps.standaloneSessionService &&
         parseCallerSuppliedSessionId(sessionId).kind === 'valid'
@@ -4248,36 +4341,43 @@ export function registerSessionRoutes(
           async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
-            const persistedSessionId = await resolveSessionIdForRestore(
-              sessionService,
-              sessionId,
-            );
-            if (persistedSessionId) {
-              restoredStorageSessionId = persistedSessionId;
-            } else if (isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            const location = await assertSessionRestorable(
-              workspaceCwd,
-              restoredStorageSessionId,
-              sessionId,
-              runtime.sessionRuntimeBaseDir,
-            );
-            if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
+            if (managedSessionStore === undefined) {
+              const persistedSessionId = await resolveSessionIdForRestore(
+                sessionService,
+                sessionId,
+              );
+              if (persistedSessionId) {
+                restoredStorageSessionId = persistedSessionId;
+              } else if (isInternalWorkspaceRuntime(runtime)) {
+                throw new SessionNotFoundError(sessionId);
+              }
+              const location = await assertSessionRestorable(
+                workspaceCwd,
+                restoredStorageSessionId,
+                sessionId,
+                runtime.sessionRuntimeBaseDir,
+              );
+              if (
+                location === undefined &&
+                isInternalWorkspaceRuntime(runtime)
+              ) {
+                throw new SessionNotFoundError(sessionId);
+              }
             }
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
             const metadata =
-              runtime.provenance === 'live-conversation'
-                ? await readLoadableLiveConversationMetadata(
-                    restoredStorageSessionId,
-                    sessionService,
-                  )
-                : await sessionService.readCreationMetadata(
-                    restoredStorageSessionId,
-                  );
+              managedSessionStore !== undefined
+                ? restoreSource
+                : runtime.provenance === 'live-conversation'
+                  ? await readLoadableLiveConversationMetadata(
+                      restoredStorageSessionId,
+                      sessionService,
+                    )
+                  : await sessionService.readCreationMetadata(
+                      restoredStorageSessionId,
+                    );
             // The reserved standalone source is hidden only on the internal
             // Conversations runtime. Ordinary workspace restores keep
             // loading legacy transcripts that happen to carry the reserved
@@ -4286,9 +4386,10 @@ export function registerSessionRoutes(
             // gate and must not become unreachable.
             if (
               metadata === undefined ||
-              metadata.sourceType === 'managed-gateway' ||
-              (isInternalWorkspaceRuntime(runtime) &&
-                isReservedStandaloneSessionSource(metadata))
+              (managedSessionStore === undefined &&
+                (metadata.sourceType === 'managed-gateway' ||
+                  (isInternalWorkspaceRuntime(runtime) &&
+                    isReservedStandaloneSessionSource(metadata))))
             ) {
               throw new SessionNotFoundError(sessionId);
             }
@@ -4315,7 +4416,10 @@ export function registerSessionRoutes(
               restoreRequestMetadata.sourceType === 'channel';
             let isPart4AWorktreeRestore = false;
             let part4AWorktreeKey: string | undefined;
-            if (runtime.provenance !== 'live-conversation') {
+            if (
+              managedSessionStore === undefined &&
+              runtime.provenance !== 'live-conversation'
+            ) {
               const sidecarBeforeRestore = await readWorktreeSessionStrict(
                 sessionService.getWorktreeSessionPath(restoredStorageSessionId),
               );
@@ -4355,7 +4459,7 @@ export function registerSessionRoutes(
                   part4AWorktreeKey = recordedPath;
                 }
               }
-            } else {
+            } else if (managedSessionStore === undefined) {
               suppressWorktreeContextRestore = isChannelRestore;
             }
             deferRestoreAskUserQuestionPrompt =
@@ -4403,7 +4507,10 @@ export function registerSessionRoutes(
               setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
             }
             let liveConversationCwd: string | undefined;
-            if (runtime.provenance === 'live-conversation') {
+            if (
+              managedSessionStore === undefined &&
+              runtime.provenance === 'live-conversation'
+            ) {
               const materialize = deps.materializeLiveConversationDirectory;
               if (!materialize) {
                 throw new Error('Live conversation workspace is unavailable.');
@@ -4438,6 +4545,9 @@ export function registerSessionRoutes(
                       : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...(managedSessionStore !== undefined
+                      ? { managedSessionStore }
+                      : {}),
                     ...restoreRequestMetadata,
                   })
                 : await runtime.bridge.resumeSession({
@@ -4526,6 +4636,7 @@ export function registerSessionRoutes(
               !restored.attached &&
               !restored.hasActivePrompt &&
               !deferRestoreAskUserQuestionPrompt &&
+              managedSessionStore === undefined &&
               runtime.provenance !== 'live-conversation'
             ) {
               try {
@@ -4576,7 +4687,10 @@ export function registerSessionRoutes(
           void cleanupRestoredSession();
           return;
         }
-        if (runtime.provenance !== 'live-conversation') {
+        if (
+          managedSessionStore === undefined &&
+          runtime.provenance !== 'live-conversation'
+        ) {
           const sidecarPath = createWorkspaceRuntimeSessionService(
             runtime,
           ).getWorktreeSessionPath(restoredStorageSessionId);
@@ -4886,6 +5000,7 @@ export function registerSessionRoutes(
           action === 'load' &&
           !session.attached &&
           !session.hasActivePrompt &&
+          managedSessionStore === undefined &&
           runtime.provenance !== 'live-conversation'
         ) {
           try {
@@ -4912,7 +5027,7 @@ export function registerSessionRoutes(
         // skill bodies there just like the SSE egress does (#9234).
         const responseSession = withPromptTerminals(
           session,
-          action === 'load'
+          action === 'load' && managedSessionStore === undefined
             ? readRecentPromptTerminals(
                 createWorkspaceRuntimeSessionService(runtime),
                 sessionId,
@@ -8450,6 +8565,60 @@ export function registerSessionRoutes(
           daemonLog.info('cancel sent', { sessionId, clientId });
         }
         res.status(204).end();
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/title',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/title',
+      async (req, res, sessionId, runtime) => {
+        if (deps.hostedHarness !== true) {
+          res.status(404).json({
+            error: 'Hosted Harness route is unavailable.',
+            code: 'hosted_harness_route_not_found',
+          });
+          return;
+        }
+        const commit = runtime.bridge.commitSessionTitle;
+        if (!commit) {
+          res.status(501).json({
+            error: 'Hosted Harness title commits are unavailable.',
+            code: 'hosted_harness_title_unsupported',
+          });
+          return;
+        }
+        const title = safeBody(req)['title'];
+        if (typeof title !== 'string') {
+          res.status(400).json({
+            error: '`title` must be a string.',
+            code: 'invalid_metadata',
+            field: 'title',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const metadata = await commit.call(
+            runtime.bridge,
+            sessionId,
+            title,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json({
+            sessionId,
+            displayName: metadata.displayName,
+            persisted: true,
+          });
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'POST /session/:id/title',
+            sessionId,
+          });
+        }
       },
     ),
   );

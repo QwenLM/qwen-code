@@ -98,6 +98,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return service.warm(sessionId);
     }
 
+    @Override
+    public CompletionStage<Void> drain(String sessionId) {
+        return service.drainHarness(sessionId);
+    }
+
+    @Override
+    public void resume(String sessionId) {
+        service.resumeHarness(sessionId);
+    }
+
     public URI getBaseUri() {
         return server.getBaseUri();
     }

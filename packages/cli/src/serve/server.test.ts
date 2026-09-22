@@ -242,10 +242,11 @@ import {
 } from './managed-prompt-types.js';
 import { ManagedGatewaySessionEvents } from './managed-gateway-session-events.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
-import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
-import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
-import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
-import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
+import {
+  createHostedHarnessContract,
+  HOSTED_HARNESS_BOOT_ID_HEADER,
+  HOSTED_HARNESS_PROTOCOL_HEADER,
+} from './hosted-harness-contract.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -13066,6 +13067,243 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session', () => {
+    it('rejects Managed Session storage on an ordinary daemon', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          cwd: WS_BOUND,
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          managedSessionStore: {
+            baseUrl: 'https://store.example',
+            tenantId: 'tenant-a',
+            workspaceId: 'workspace-a',
+            writerId: 'writer-a',
+            leaseDurationMs: 60_000,
+          },
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('managed_session_store_forbidden');
+      expect(bridge.calls).toEqual([]);
+    });
+
+    it('forwards Managed Session storage only through Hosted Harness', async () => {
+      const digest = `sha256:${'a'.repeat(64)}`;
+      const bootId = '11111111-1111-4111-8111-111111111111';
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          profile: 'hosted-harness',
+          workspace: WS_BOUND,
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: digest,
+        },
+        undefined,
+        {
+          bridge,
+          hostedHarnessContract: createHostedHarnessContract(digest, bootId),
+        },
+      );
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send({
+          cwd: WS_BOUND,
+          sessionId,
+          managedSessionStore: {
+            baseUrl: 'https://store.example/',
+            tenantId: 'tenant-a',
+            workspaceId: 'workspace-a',
+            writerId: bootId,
+            leaseDurationMs: 60_000,
+          },
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.calls).toHaveLength(1);
+      expect(bridge.calls[0]).toMatchObject({
+        sessionId,
+        managedSessionStore: {
+          baseUrl: 'https://store.example',
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          writerId: bootId,
+          leaseDurationMs: 60_000,
+        },
+      });
+
+      const mismatched = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send({
+          cwd: WS_BOUND,
+          sessionId: '550e8400-e29b-41d4-a716-446655440001',
+          managedSessionStore: {
+            baseUrl: 'https://store.example',
+            tenantId: 'tenant-a',
+            workspaceId: 'workspace-a',
+            writerId: '33333333-3333-4333-8333-333333333333',
+            leaseDurationMs: 60_000,
+          },
+        });
+      expect(mismatched.status).toBe(400);
+      expect(mismatched.body.code).toBe(
+        'managed_session_store_writer_mismatch',
+      );
+      expect(bridge.calls).toHaveLength(1);
+    });
+
+    it('commits a Managed Session title only through Hosted Harness', async () => {
+      const digest = `sha256:${'c'.repeat(64)}`;
+      const bootId = '33333333-3333-4333-8333-333333333333';
+      const sessionId = '550e8400-e29b-41d4-a716-446655440002';
+      const bridge = fakeBridge();
+      const commitSessionTitle = vi.fn(async (_sessionId, title) => ({
+        displayName: title,
+      }));
+      bridge.commitSessionTitle = commitSessionTitle;
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          profile: 'hosted-harness',
+          workspace: WS_BOUND,
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: digest,
+        },
+        undefined,
+        {
+          bridge,
+          hostedHarnessContract: createHostedHarnessContract(digest, bootId),
+        },
+      );
+
+      const create = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send({ cwd: WS_BOUND, sessionId });
+      expect(create.status).toBe(200);
+
+      const renamed = await request(app)
+        .post(`/session/${sessionId}/title`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send({ title: 'Durable title' });
+
+      expect(renamed.status).toBe(200);
+      expect(renamed.body).toEqual({
+        sessionId,
+        displayName: 'Durable title',
+        persisted: true,
+      });
+      expect(commitSessionTitle).toHaveBeenCalledWith(
+        sessionId,
+        'Durable title',
+        undefined,
+      );
+    });
+
+    it('rejects remote Managed Session restore on an ordinary daemon', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440011';
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post(`/session/${sessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          cwd: WS_BOUND,
+          managedSessionStore: {
+            baseUrl: 'https://store.example',
+            tenantId: 'tenant-a',
+            workspaceId: 'workspace-a',
+            writerId: 'writer-load',
+            leaseDurationMs: 60_000,
+          },
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('managed_session_store_forbidden');
+      expect(bridge.loadCalls).toEqual([]);
+    });
+
+    it('cold-loads a remote Managed Session through Hosted Harness', async () => {
+      const digest = `sha256:${'b'.repeat(64)}`;
+      const bootId = '22222222-2222-4222-8222-222222222222';
+      const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          profile: 'hosted-harness',
+          workspace: WS_BOUND,
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: digest,
+        },
+        undefined,
+        {
+          bridge,
+          hostedHarnessContract: createHostedHarnessContract(digest, bootId),
+        },
+      );
+
+      const res = await request(app)
+        .post(`/session/${sessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer harness-secret')
+        .set(HOSTED_HARNESS_PROTOCOL_HEADER, '1')
+        .set(HOSTED_HARNESS_BOOT_ID_HEADER, bootId)
+        .send({
+          cwd: WS_BOUND,
+          managedSessionStore: {
+            baseUrl: 'https://store.example/',
+            tenantId: 'tenant-a',
+            workspaceId: 'workspace-a',
+            writerId: bootId,
+            leaseDurationMs: 60_000,
+          },
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls).toHaveLength(1);
+      expect(bridge.loadCalls[0]).toMatchObject({
+        sessionId,
+        managedSessionStore: {
+          baseUrl: 'https://store.example',
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          writerId: bootId,
+          leaseDurationMs: 60_000,
+        },
+      });
+    });
+
     it('returns a typed safe-retry error when channel initialization times out', async () => {
       const bridge = fakeBridge({
         spawnImpl: async () => {

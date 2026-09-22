@@ -195,9 +195,10 @@ public class HarnessCoordinator {
         warmRuntime(session, claimed);
         requireLease(leaseLost);
         Attachment attachment = harness.createOrLoad(
-                session.sessionId(), session.harnessBootId() != null);
+                session.tenantId(), session.sessionId(),
+                session.harnessBootId() != null);
         if (!store.bindHarness(session.tenantId(), session.sessionId(),
-                attachment.bootId())) {
+                claimed.turnId(), owner, attachment.bootId())) {
             return fail(claimed, "hosted_harness_generation_mismatch",
                     "Hosted Harness generation changed.");
         }
@@ -207,8 +208,8 @@ public class HarnessCoordinator {
         if (current.harnessEventEpoch() == null) {
             store.markSubmissionAttempted(current.tenantId(),
                     current.sessionId(), current.turnId(), owner);
-            Admission admission = harness.submit(session.sessionId(),
-                    current.promptId(), current.input(),
+            Admission admission = harness.submit(session.tenantId(),
+                    session.sessionId(), current.promptId(), current.input(),
                     current.payloadDigest());
             requireLease(leaseLost);
             store.recordAdmission(current.tenantId(), current.sessionId(),
@@ -218,12 +219,12 @@ public class HarnessCoordinator {
                     current.turnId()).orElseThrow();
         }
         if ("CANCELLING".equals(current.status())) {
-            harness.cancel(session.sessionId());
+            harness.cancel(session.tenantId(), session.sessionId());
         }
         long lastEventId = current.harnessLastEventId() == null ? 0
                 : current.harnessLastEventId();
         try (SourceStream stream = harness.stream(
-                session.sessionId(), lastEventId,
+                session.tenantId(), session.sessionId(), lastEventId,
                 current.harnessEventEpoch())) {
             return consumeStream(current, attachment.bootId(), stream,
                     leaseLost);
@@ -416,10 +417,11 @@ public class HarnessCoordinator {
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
             Attachment attachment = harness.createOrLoad(
-                    session.sessionId(), session.harnessBootId() != null);
+                    session.tenantId(), session.sessionId(),
+                    session.harnessBootId() != null);
             if (store.bindHarness(tenantId, sessionId,
-                    attachment.bootId())) {
-                harness.cancel(session.sessionId());
+                    turnId, owner, attachment.bootId())) {
+                harness.cancel(session.tenantId(), session.sessionId());
             }
         } catch (RuntimeException error) {
             LOG.warn("Managed Turn cancellation will recover tenant={}"

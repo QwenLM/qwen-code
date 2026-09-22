@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
@@ -27,6 +28,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import java.nio.charset.StandardCharsets;
@@ -45,20 +48,26 @@ public class ManagedAgentService {
     private static final String CREATE = "CREATE_SESSION";
     private static final String SUBMIT = "SUBMIT_TURN";
     private static final String CANCEL = "CANCEL_TURN";
+    private static final String RENAME = "RENAME_SESSION";
+    private static final String ARCHIVE = "ARCHIVE_SESSION";
+    private static final String UNARCHIVE = "UNARCHIVE_SESSION";
+    private static final String DELETE = "DELETE_SESSION";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
     private final AgentStateStore store;
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
+    private final RuntimeWarmer runtimeWarmer;
 
     public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
-            HarnessConnector harness) {
+            HarnessConnector harness, RuntimeWarmer runtimeWarmer) {
         this.store = store;
         this.digests = digests;
         this.coordinator = coordinator;
         this.harness = harness;
+        this.runtimeWarmer = runtimeWarmer;
     }
 
     public CommandAdmission createSession(String tenantId,
@@ -152,14 +161,93 @@ public class ManagedAgentService {
         return response(admission);
     }
 
+    public SessionMutationResult<PublicSession> renameSession(
+            String tenantId, String idempotencyKey, String sessionId,
+            String title) {
+        validateIdempotencyKey(idempotencyKey);
+        String effectiveTitle = validRenameTitle(title);
+        String requestDigest = digests.digest(Map.of(
+                "sessionId", sessionId, "title", effectiveTitle));
+        SessionMutationCommand command = store.beginSessionMutation(tenantId,
+                RENAME, idempotencyKey, requestDigest, sessionId,
+                SessionMutationKind.RENAME);
+        if (!"COMPLETED".equals(command.status())) {
+            requireHarness();
+            SessionRecord session = store.requireSession(tenantId, sessionId);
+            HarnessConnector.Attachment attachment;
+            try {
+                attachment = harness.createOrLoad(tenantId, sessionId,
+                        session.harnessBootId() != null);
+                harness.rename(tenantId, sessionId, effectiveTitle);
+            } catch (RuntimeException error) {
+                throw dependencyUnavailable("hosted_harness_unavailable",
+                        "The Hosted Harness could not persist the Session title.");
+            }
+            session = store.completeSessionMutation(tenantId, RENAME,
+                    idempotencyKey, sessionId, SessionMutationKind.RENAME,
+                    effectiveTitle, attachment.bootId());
+            return new SessionMutationResult<>(publicSession(session),
+                    command.replayed());
+        }
+        return new SessionMutationResult<>(getPublicSession(tenantId,
+                sessionId), true);
+    }
+
+    public SessionMutationResult<PublicSession> archiveSession(
+            String tenantId, String idempotencyKey, String sessionId) {
+        return lifecycleMutation(tenantId, idempotencyKey, sessionId,
+                ARCHIVE, SessionMutationKind.ARCHIVE);
+    }
+
+    public SessionMutationResult<PublicSession> unarchiveSession(
+            String tenantId, String idempotencyKey, String sessionId) {
+        validateIdempotencyKey(idempotencyKey);
+        String requestDigest = lifecycleDigest(sessionId, UNARCHIVE);
+        SessionMutationCommand command = store.beginSessionMutation(tenantId,
+                UNARCHIVE, idempotencyKey, requestDigest, sessionId,
+                SessionMutationKind.UNARCHIVE);
+        if (!"COMPLETED".equals(command.status())) {
+            try {
+                runtimeWarmer.resume(sessionId);
+            } catch (RuntimeException error) {
+                throw dependencyUnavailable("runtime_broker_unavailable",
+                        "The Runtime Broker could not resume the Session.");
+            }
+            SessionRecord session = store.completeSessionMutation(tenantId,
+                    UNARCHIVE, idempotencyKey, sessionId,
+                    SessionMutationKind.UNARCHIVE, null, null);
+            return new SessionMutationResult<>(publicSession(session),
+                    command.replayed());
+        }
+        return new SessionMutationResult<>(getPublicSession(tenantId,
+                sessionId), true);
+    }
+
+    public SessionMutationResult<DeletedSession> deleteSession(
+            String tenantId, String idempotencyKey, String sessionId) {
+        validateIdempotencyKey(idempotencyKey);
+        String requestDigest = lifecycleDigest(sessionId, DELETE);
+        SessionMutationCommand command = store.beginSessionMutation(tenantId,
+                DELETE, idempotencyKey, requestDigest, sessionId,
+                SessionMutationKind.DELETE);
+        if (!"COMPLETED".equals(command.status())) {
+            SessionRecord session = store.requireSession(tenantId, sessionId);
+            closeAndDrain(session, command.sessionStatusBefore());
+            store.completeSessionMutation(tenantId, DELETE, idempotencyKey,
+                    sessionId, SessionMutationKind.DELETE, null, null);
+        }
+        return new SessionMutationResult<>(new DeletedSession(sessionId,
+                "agent.session.deleted", true), command.replayed());
+    }
+
     public PublicSession getPublicSession(String tenantId,
             String sessionId) {
-        return publicSession(store.requireSession(tenantId, sessionId));
+        return publicSession(requireVisibleSession(tenantId, sessionId));
     }
 
     public WebShellSession getWebShellSession(String tenantId,
             String sessionId) {
-        return webShellSession(store.requireSession(tenantId, sessionId));
+        return webShellSession(requireVisibleSession(tenantId, sessionId));
     }
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
@@ -378,6 +466,70 @@ public class ManagedAgentService {
         }
     }
 
+    private SessionMutationResult<PublicSession> lifecycleMutation(
+            String tenantId, String idempotencyKey, String sessionId,
+            String operation, SessionMutationKind kind) {
+        validateIdempotencyKey(idempotencyKey);
+        String requestDigest = lifecycleDigest(sessionId, operation);
+        SessionMutationCommand command = store.beginSessionMutation(tenantId,
+                operation, idempotencyKey, requestDigest, sessionId, kind);
+        if (!"COMPLETED".equals(command.status())) {
+            SessionRecord session = store.requireSession(tenantId, sessionId);
+            closeAndDrain(session, command.sessionStatusBefore());
+            session = store.completeSessionMutation(tenantId, operation,
+                    idempotencyKey, sessionId, kind, null, null);
+            return new SessionMutationResult<>(publicSession(session),
+                    command.replayed());
+        }
+        return new SessionMutationResult<>(getPublicSession(tenantId,
+                sessionId), true);
+    }
+
+    private void closeAndDrain(SessionRecord session,
+            String sessionStatusBefore) {
+        boolean alreadyClosed = "ARCHIVED".equals(sessionStatusBefore);
+        if (!alreadyClosed && harness.isAvailable()) {
+            try {
+                harness.closeSession(session.tenantId(),
+                        session.sessionId());
+            } catch (RuntimeException error) {
+                throw dependencyUnavailable("hosted_harness_unavailable",
+                        "The Hosted Harness could not close the Session.");
+            }
+        } else if (!alreadyClosed && session.harnessBootId() != null) {
+            throw dependencyUnavailable("hosted_harness_unavailable",
+                    "The Hosted Harness is required to close the Session.");
+        }
+        try {
+            runtimeWarmer.drain(session.sessionId()).toCompletableFuture()
+                    .join();
+        } catch (RuntimeException error) {
+            throw dependencyUnavailable("runtime_broker_unavailable",
+                    "The Runtime Broker could not drain the Session.");
+        }
+    }
+
+    private String lifecycleDigest(String sessionId, String operation) {
+        return digests.digest(Map.of(
+                "sessionId", sessionId, "operation", operation));
+    }
+
+    private SessionRecord requireVisibleSession(String tenantId,
+            String sessionId) {
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        if ("DELETED".equals(session.status())) {
+            throw new ApiException(HttpStatus.NOT_FOUND,
+                    "session_not_found", "The Session was not found.");
+        }
+        return session;
+    }
+
+    private static ApiException dependencyUnavailable(String code,
+            String message) {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, code,
+                message);
+    }
+
     private Admission replay(String tenantId, String operation,
             String idempotencyKey, String requestDigest) {
         return store.findCommand(tenantId, operation, idempotencyKey)
@@ -451,6 +603,19 @@ public class ManagedAgentService {
         return title == null || title.isBlank() ? null : title;
     }
 
+    private static String validRenameTitle(String title) {
+        if (title == null || title.isBlank() || title.length() > 256) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
+                    "Title must contain 1-256 characters.");
+        }
+        if (title.chars().anyMatch(character -> character <= 31
+                || character == 127)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
+                    "Title must not contain control characters.");
+        }
+        return title;
+    }
+
     private static void validateIdempotencyKey(String key) {
         if (key == null || !IDEMPOTENCY_KEY.matcher(key).matches()) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
@@ -519,5 +684,8 @@ public class ManagedAgentService {
     }
 
     private record SessionCursor(long updatedAt, String sessionId) {
+    }
+
+    public record SessionMutationResult<T>(T body, boolean replayed) {
     }
 }

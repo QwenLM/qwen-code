@@ -29,6 +29,10 @@ public final class ApiModels {
             @JsonProperty("turn_id") String turnId) {
     }
 
+    public record UpdateSessionRequest(
+            @NotBlank @Size(max = 256) String title) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record CommandAdmission(
             @JsonProperty("session_id") String sessionId,
@@ -56,6 +60,10 @@ public final class ApiModels {
             Map<String, Object> metadata,
             @JsonProperty("active_turn") PublicTurn activeTurn,
             @JsonProperty("last_event_id") long lastEventId) {
+    }
+
+    public record DeletedSession(String id, String object,
+            boolean deleted) {
     }
 
     public record PublicList<T>(String object, List<T> data,

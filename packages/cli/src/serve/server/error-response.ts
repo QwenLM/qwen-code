@@ -968,6 +968,20 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'managed_session_already_exists') {
+        res.status(409).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
+      if (kind === 'managed_session_not_found') {
+        res.status(404).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
       if (
         kind === 'working_directory_missing' ||
         kind === 'working_directory_compromised'

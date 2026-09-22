@@ -239,6 +239,24 @@ export class ManagedSessionUncommittedTailError extends ManagedSessionRecordErro
   }
 }
 
+export class ManagedSessionAlreadyExistsError extends ManagedSessionRecordError {
+  override readonly code = 'managed_session_already_exists';
+
+  constructor(readonly sessionId: string) {
+    super(`Managed Session ${sessionId} already exists.`);
+    this.name = 'ManagedSessionAlreadyExistsError';
+  }
+}
+
+export class ManagedSessionNotFoundError extends ManagedSessionRecordError {
+  override readonly code = 'managed_session_not_found';
+
+  constructor(readonly sessionId: string) {
+    super(`Managed Session ${sessionId} was not found.`);
+    this.name = 'ManagedSessionNotFoundError';
+  }
+}
+
 export interface OpenManagedSessionAuthorityOptions {
   readonly journal?: ManagedSessionJournalHandle;
   /** Compatibility entry point for callers that already own the local writer. */
@@ -252,6 +270,8 @@ export interface OpenManagedSessionAuthorityOptions {
     readonly rootSnapshotRef: ManagedSessionDurableRef;
     readonly createdBy: string;
   };
+  /** Reject an existing header instead of reopening it through a create path. */
+  readonly requireNew?: boolean;
   readonly now?: () => number;
   /** Required only for domain records, whose bodies live in resources. */
   readonly resources?: ManagedSessionResourceStore;
@@ -346,6 +366,9 @@ export class LocalManagedSessionAuthority {
         scan.uncommitted,
       );
     }
+    if (options.requireNew === true && scan.header !== undefined) {
+      throw new ManagedSessionAlreadyExistsError(options.sessionKey.sessionId);
+    }
     let header = scan.header;
     let lastRecordUuid = scan.lastRecordUuid;
     if (header === undefined) {
@@ -355,9 +378,7 @@ export class LocalManagedSessionAuthority {
         );
       }
       if (options.create === undefined) {
-        throw new ManagedSessionRecordError(
-          'session log has no Managed header and no creation parameters were supplied.',
-        );
+        throw new ManagedSessionNotFoundError(options.sessionKey.sessionId);
       }
       header = parseManagedSessionHeader({
         formatVersion: MANAGED_SESSION_FORMAT_VERSION,

@@ -2746,6 +2746,41 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).not.toHaveBeenCalled();
   });
 
+  it('uses host-provided ownership for a remote deferred projection', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn();
+    const executionEngine = executionEngineProof(sessionId, 'managed');
+    mockConfigConstructorParams.mockClear();
+
+    const config = await loadCliConfig(
+      { experimental: { sessionWriterLease: true } },
+      { resume: sessionId, acp: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      {
+        managedToolSessionFactory: vi.fn(),
+        sessionRestore: { projectionSource, executionEngine },
+      },
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(
+      mockSessionServiceInstance.readExecutionEngine,
+    ).not.toHaveBeenCalled();
+    expect(projectionSource).not.toHaveBeenCalled();
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId,
+        sessionRestoreProjectionSource: expect.any(Function),
+      }),
+    );
+  });
+
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {

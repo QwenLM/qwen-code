@@ -84,6 +84,15 @@ public class RuntimeBrokerConfiguration {
             public CompletableFuture<Void> warm(String sessionId) {
                 return CompletableFuture.completedFuture(null);
             }
+
+            @Override
+            public CompletableFuture<Void> drain(String sessionId) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public void resume(String sessionId) {
+            }
         };
     }
 

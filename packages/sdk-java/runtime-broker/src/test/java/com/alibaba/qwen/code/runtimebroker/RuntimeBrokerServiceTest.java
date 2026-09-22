@@ -747,6 +747,31 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void resumedHarnessCanWarmANewRuntimeAfterDrain() throws Exception {
+        LifecycleProvisioner provisioner = new LifecycleProvisioner();
+        ScheduledExecutorService scheduler = scheduler();
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(sessionScope()),
+                provisioner, new FakeTransport(), Duration.ofHours(1),
+                Duration.ofSeconds(1), scheduler);
+        try {
+            service.warm(HARNESS_SESSION).toCompletableFuture()
+                    .get(1, TimeUnit.SECONDS);
+            service.drainHarness(HARNESS_SESSION).toCompletableFuture()
+                    .get(1, TimeUnit.SECONDS);
+
+            service.resumeHarness(HARNESS_SESSION);
+            service.warm(HARNESS_SESSION).toCompletableFuture()
+                    .get(1, TimeUnit.SECONDS);
+
+            assertEquals(2, provisioner.provisions.get());
+            assertEquals(1, provisioner.releases.get());
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
     void drainHarnessWaitsForInFlightProvisioningBeforeRelease()
             throws Exception {
         LifecycleProvisioner provisioner = new LifecycleProvisioner();

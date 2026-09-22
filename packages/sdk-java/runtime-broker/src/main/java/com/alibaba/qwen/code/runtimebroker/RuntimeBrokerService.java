@@ -322,6 +322,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return CompletableFuture.allOf(drains);
     }
 
+    /** Allows an explicitly restored Harness Session to acquire a new Runtime. */
+    public void resumeHarness(String harnessSessionId) {
+        ensureOpen();
+        String harnessId = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        synchronized (harnessLifecycleLock) {
+            retiredHarnessSessions.remove(harnessId);
+        }
+    }
+
     private CompletionStage<RuntimeScope> resolveScope(
             String harnessSessionId) {
         CompletionStage<RuntimeScope> resolved;

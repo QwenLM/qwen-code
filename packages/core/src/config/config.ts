@@ -354,10 +354,15 @@ import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
 } from '../managed-runtime/managed-session-records.js';
+import { ManagedSessionRecordError } from '../managed-runtime/managed-session-records.js';
 import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
 } from '../utils/sessionStorageUtils.js';
+import type {
+  ManagedSessionJournalStore,
+  ManagedSessionResourceStore,
+} from '../managed-runtime/managed-session-storage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
 import {
@@ -1136,6 +1141,14 @@ export interface ConfigParameters {
   /** Internal trusted-host integration; never loaded from workspace settings. */
   shellExecutionSandbox?: Readonly<BwrapPolicy>;
   managedToolSessionFactory?: ManagedToolSessionFactory;
+  /** Trusted host-selected storage for one Hosted Managed Session. */
+  managedSessionStore?: {
+    readonly mode: 'create' | 'load';
+    readonly sessionKey: ManagedSessionKey;
+    readonly journalStore: ManagedSessionJournalStore;
+    readonly resourceStore: ManagedSessionResourceStore;
+    readonly close?: () => Promise<void>;
+  };
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -2687,6 +2700,7 @@ export class Config {
   private permissionManager: PermissionManager | null = null;
   private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private readonly managedToolSessionFactory?: ManagedToolSessionFactory;
+  private readonly managedSessionStore?: ConfigParameters['managedSessionStore'];
   private managedToolSession?: ManagedToolSession;
   private managedToolSessionClosing = false;
   private managedToolSessionClosePromise?: Promise<void>;
@@ -3275,6 +3289,15 @@ export class Config {
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.managedToolSessionFactory = params.managedToolSessionFactory;
+    this.managedSessionStore = params.managedSessionStore;
+    if (
+      this.managedSessionStore !== undefined &&
+      this.managedSessionStore.sessionKey.sessionId !== this.sessionId
+    ) {
+      throw new ManagedSessionRecordError(
+        'the Hosted Managed Session store belongs to a different session.',
+      );
+    }
     if (params.managedToolSessionFactory) this.managedToolSessionOwner = this;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
@@ -4640,19 +4663,24 @@ export class Config {
 
   /**
    * Opens the authoritative Managed session log on the writer that is about to
-   * become the recorder's. Two writers for one session cannot coexist, so the
-   * lease is adopted rather than acquired, and ending it stays with whoever
-   * holds it -- the recorder, once activation completes.
+   * become the recorder's. The local backend adopts the recorder's process
+   * lease; a Hosted backend acquires its own durable writer while the recorder
+   * retains only the local process guard.
    */
   private async openManagedSessionLog(
     lease: SessionWriterLease,
   ): Promise<ManagedSession> {
     const transcriptPath = this.getTranscriptPath();
     const projectRoot = this.getProjectRoot();
-    const sessionKey: ManagedSessionKey = localManagedSessionKey(
-      projectRoot,
-      this.sessionId,
-    );
+    const remote = this.managedSessionStore;
+    const sessionKey: ManagedSessionKey =
+      remote?.sessionKey ?? localManagedSessionKey(projectRoot, this.sessionId);
+    const resources =
+      remote?.resourceStore ??
+      LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionKey,
+      });
     return openManagedSession({
       runtimeBaseDir: this.sessionRuntimeBaseDir,
       sessionId: this.sessionId,
@@ -4670,12 +4698,21 @@ export class Config {
       // a long session's activation can read as expired while its writer is
       // still live.
       activationLeaseDurationMs: MANAGED_ACTIVATION_LEASE_MS,
-      lease,
+      ...(remote === undefined
+        ? { lease }
+        : {
+            journalStore: remote.journalStore,
+            resourceStore: resources,
+          }),
+      ...(remote?.mode === 'create' ? { requireNew: true } : {}),
       // Only avoids republishing resources a reopened session already has; the
       // authority reads the log itself and ignores these once a header exists.
-      ...(isManagedSessionTranscriptSync(transcriptPath)
+      ...(remote?.mode === 'load' ||
+      (remote === undefined && isManagedSessionTranscriptSync(transcriptPath))
         ? {}
-        : { create: await this.publishManagedSessionRoot(sessionKey) }),
+        : {
+            create: await this.publishManagedSessionRoot(sessionKey, resources),
+          }),
     });
   }
 
@@ -4686,15 +4723,17 @@ export class Config {
    */
   private async publishManagedSessionRoot(
     sessionKey: ManagedSessionKey,
+    resources: ManagedSessionResourceStore = LocalManagedSessionResourceStore.create(
+      {
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionKey,
+      },
+    ),
   ): Promise<{
     definitionRef: ManagedSessionDurableRef;
     rootSnapshotRef: ManagedSessionDurableRef;
     createdBy: string;
   }> {
-    const resources = LocalManagedSessionResourceStore.create({
-      runtimeBaseDir: this.sessionRuntimeBaseDir,
-      sessionKey,
-    });
     const [definitionRef, rootSnapshotRef] = await Promise.all([
       resources.publish(
         'managed-session-definition',
@@ -4846,12 +4885,35 @@ export class Config {
       const managedSession = this.managedSessionLogEnabled
         ? await this.openManagedSessionLog(lease)
         : undefined;
-      recorder.activate(
-        lease,
-        authoritative,
-        persistedTitleInfo,
-        projection?.runtime.recording,
-      );
+      try {
+        recorder.activate(
+          lease,
+          authoritative,
+          persistedTitleInfo,
+          projection?.runtime.recording,
+        );
+      } catch (activationError) {
+        if (managedSession) {
+          const cleanupErrors: unknown[] = [];
+          try {
+            await managedSession.releaseActivation();
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
+          try {
+            await managedSession.close();
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
+          if (cleanupErrors.length > 0) {
+            throw new AggregateError(
+              [activationError, ...cleanupErrors],
+              'Managed session cleanup failed during recorder activation',
+            );
+          }
+        }
+        throw activationError;
+      }
       this.pendingSessionWriterLease = undefined;
       lease = undefined;
       if (managedSession) {
@@ -4879,6 +4941,19 @@ export class Config {
       this.startPendingGoalRestore();
     } catch (error) {
       let failure: unknown = error;
+      if (
+        this.managedSession === undefined &&
+        this.managedSessionStore?.close !== undefined
+      ) {
+        try {
+          await this.managedSessionStore.close();
+        } catch (cleanupError) {
+          failure = new AggregateError(
+            [failure, cleanupError],
+            'Managed Session store cleanup failed during activation',
+          );
+        }
+      }
       const ownedLease = lease ?? this.pendingSessionWriterLease;
       let releaseFailureAlreadyReported = false;
       if (
@@ -11607,6 +11682,16 @@ export class Config {
       });
     } catch (error) {
       failures.push(error);
+    }
+    if (managedSession) {
+      try {
+        // For an adopted local journal this is intentionally a no-op because
+        // the recorder just sealed its lease. A Hosted journal owns a separate
+        // durable writer and must end it here as well.
+        await managedSession.close();
+      } catch (error) {
+        failures.push(error);
+      }
     }
     const pendingLease = activation
       ? undefined

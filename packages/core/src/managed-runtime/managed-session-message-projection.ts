@@ -5,10 +5,12 @@
  */
 
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { validateTranscriptRecord } from '../utils/transcript-records.js';
 import {
   MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
+  type ManagedSessionDurableRef,
   type ManagedSessionEvent,
   type ManagedSessionKey,
 } from './managed-session-records.js';
@@ -23,7 +25,10 @@ import {
   LocalManagedSessionResourceStore,
   readManagedBranchCheckpoint,
 } from './managed-session-resources.js';
-import type { ManagedSessionResourceStore } from './managed-session-storage.js';
+import type {
+  ManagedSessionJournalScan,
+  ManagedSessionResourceStore,
+} from './managed-session-storage.js';
 
 /**
  * Carries the existing transcript history inside the authoritative log.
@@ -170,15 +175,24 @@ export async function readManagedSessionRecords(options: {
     options.sessionKey,
     options.maxBytes,
   );
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: options.runtimeBaseDir,
+    sessionKey: options.sessionKey,
+  });
+  return projectManagedSessionRecords({ scan, resources });
+}
+
+/** Projects an already-verified durable journal through its resource store. */
+export async function projectManagedSessionRecords(options: {
+  readonly scan: ManagedSessionJournalScan;
+  readonly resources: ManagedSessionResourceStore;
+}): Promise<ChatRecord[]> {
+  const { scan, resources } = options;
   if (scan.header === undefined) {
     throw new ManagedSessionRecordError(
       'session log has no Managed header, so it cannot be projected.',
     );
   }
-  const resources = LocalManagedSessionResourceStore.create({
-    runtimeBaseDir: options.runtimeBaseDir,
-    sessionKey: options.sessionKey,
-  });
   const records: ChatRecord[] = [];
   const checkpoints = new Map<string, number>();
   for (const event of scan.events) {
@@ -192,19 +206,79 @@ export async function readManagedSessionRecords(options: {
       checkpoints.set(event.payload['checkpointId'] as string, event.sequence);
     }
     if (branch !== undefined) {
-      records.push(branch);
+      records.push(
+        requireProjectedRecord(branch, scan.header.sessionKey.sessionId),
+      );
       continue;
     }
     const carried = readerFacingBody(event);
     if (carried === undefined) continue;
     const body = await readRecordBody(resources, carried.ref);
     records.push(
-      carried.inDomainEnvelope
-        ? (body as unknown as { record: ChatRecord }).record
-        : body,
+      requireProjectedRecord(
+        carried.inDomainEnvelope
+          ? (body as unknown as { record: ChatRecord }).record
+          : body,
+        scan.header.sessionKey.sessionId,
+      ),
     );
   }
   return records;
+}
+
+/** Restores the latest committed title metadata from a durable journal. */
+export async function projectManagedSessionTitleInfo(options: {
+  readonly scan: ManagedSessionJournalScan;
+  readonly resources: ManagedSessionResourceStore;
+}): Promise<{ title?: string; source?: 'auto' | 'manual' }> {
+  const { scan, resources } = options;
+  if (scan.header === undefined) {
+    throw new ManagedSessionRecordError(
+      'session log has no Managed header, so it cannot be projected.',
+    );
+  }
+  const event = scan.events.findLast(
+    (candidate) =>
+      candidate.kind === 'domain.committed' &&
+      candidate.payload['domain'] === 'session_metadata',
+  );
+  if (event === undefined) return {};
+  const body = JSON.parse(
+    (
+      await resources.read(
+        event.payload['recordRef'] as unknown as ManagedSessionDurableRef,
+      )
+    ).toString('utf8'),
+  ) as { title?: unknown; titleSource?: unknown };
+  if (typeof body.title !== 'string' || body.title.length === 0) return {};
+  return {
+    title: body.title,
+    ...(body.titleSource === 'auto' || body.titleSource === 'manual'
+      ? { source: body.titleSource }
+      : {}),
+  };
+}
+
+function requireProjectedRecord(value: unknown, sessionId: string): ChatRecord {
+  const { record, diagnostics } = validateTranscriptRecord(value);
+  if (record === undefined) {
+    throw new ManagedSessionRecordError(
+      'Managed Session resource contains an invalid reader-facing record.',
+    );
+  }
+  const candidate = record as Partial<ChatRecord>;
+  if (
+    record.sessionId !== sessionId ||
+    typeof candidate.cwd !== 'string' ||
+    typeof candidate.version !== 'string' ||
+    typeof candidate.timestamp !== 'string' ||
+    diagnostics.length > 0
+  ) {
+    throw new ManagedSessionRecordError(
+      'Managed Session resource contains an invalid reader-facing record.',
+    );
+  }
+  return candidate as ChatRecord;
 }
 
 /**

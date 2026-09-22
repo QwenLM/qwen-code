@@ -1,13 +1,16 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -15,7 +18,9 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -67,6 +72,43 @@ public class PublicAgentController {
     public PublicSession get(TenantContext tenant,
             @PathVariable String sessionId) {
         return service.getPublicSession(tenant.tenantId(), sessionId);
+    }
+
+    @PatchMapping("/{sessionId}")
+    public ResponseEntity<PublicSession> rename(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody UpdateSessionRequest request) {
+        return mutation(service.renameSession(tenant.tenantId(),
+                idempotencyKey, sessionId, request.title()));
+    }
+
+    @PostMapping("/{sessionId}/archive")
+    public ResponseEntity<PublicSession> archive(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey) {
+        return mutation(service.archiveSession(tenant.tenantId(),
+                idempotencyKey, sessionId));
+    }
+
+    @PostMapping("/{sessionId}/unarchive")
+    public ResponseEntity<PublicSession> unarchive(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey) {
+        return mutation(service.unarchiveSession(tenant.tenantId(),
+                idempotencyKey, sessionId));
+    }
+
+    @DeleteMapping("/{sessionId}")
+    public ResponseEntity<DeletedSession> delete(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey) {
+        SessionMutationResult<DeletedSession> result = service.deleteSession(
+                tenant.tenantId(), idempotencyKey, sessionId);
+        return ResponseEntity.ok()
+                .header("X-Qwen-Idempotent-Replay",
+                        Boolean.toString(result.replayed()))
+                .body(result.body());
     }
 
     @PostMapping("/{sessionId}/events")
@@ -141,5 +183,13 @@ public class PublicAgentController {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "invalid_event_cursor", "Last-Event-ID is invalid.");
         }
+    }
+
+    private static ResponseEntity<PublicSession> mutation(
+            SessionMutationResult<PublicSession> result) {
+        return ResponseEntity.ok()
+                .header("X-Qwen-Idempotent-Replay",
+                        Boolean.toString(result.replayed()))
+                .body(result.body());
     }
 }

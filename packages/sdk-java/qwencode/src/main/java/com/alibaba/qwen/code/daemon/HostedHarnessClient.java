@@ -157,7 +157,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         ensureOpen();
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
         HttpSupport.Response response = sendMutation(path,
-                Collections.emptyMap(), null, "POST /session/:id/load");
+                request.toJson(), null, "POST /session/:id/load");
         try {
             DaemonClient.requireStatus(response, 200,
                     "POST /session/:id/load");
@@ -422,13 +422,56 @@ public final class HostedHarnessClient implements AutoCloseable {
         removeAttachment(ref);
     }
 
+    public void updateSessionTitle(HarnessSessionRef session, String title) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String value = requireNonBlank(title, "title");
+        if (value.length() > 256) {
+            throw new IllegalArgumentException(
+                    "title must not exceed 256 characters");
+        }
+        String operation = "POST /session/:id/title";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId()) + "/title",
+                Map.of("title", value), ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        Map<String, Object> json = JsonSupport.parseObject(
+                response.getBody(), "Hosted Harness title response");
+        String responseSessionId = parseWireUuid(
+                JsonSupport.requiredString(json, "sessionId", "title"),
+                "title.sessionId");
+        if (!ref.getHarnessSessionId().equals(responseSessionId)) {
+            throw new DaemonProtocolException(
+                    "Hosted Harness title response sessionId does not match");
+        }
+        if (!JsonSupport.requiredBoolean(json, "persisted", "title")) {
+            throw new DaemonProtocolException(
+                    "Hosted Harness did not persist the Session title");
+        }
+    }
+
     public void closeSession(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
+        closeSession(ref.getHarnessSessionId(), ref.getHarnessClientId());
+        removeAttachment(ref);
+        activePrompts.remove(ref.getHarnessSessionId());
+    }
+
+    public void closeSession(String harnessSessionId) {
+        String sessionId = requireUuid(harnessSessionId,
+                "harnessSessionId");
+        closeSession(sessionId, null);
+        AttachmentState state = attachments.remove(sessionId);
+        if (state != null) {
+            state.cancel();
+        }
+        activePrompts.remove(sessionId);
+    }
+
+    private void closeSession(String sessionId, String clientId) {
         String operation = "DELETE /session/:id";
         HttpResponse<HttpSupport.Body> raw;
         try {
-            raw = send(sessionPath(ref.getHarnessSessionId()), "DELETE", null,
-                    ref.getHarnessClientId());
+            raw = send(sessionPath(sessionId), "DELETE", null, clientId);
         } catch (IOException | InterruptedException e) {
             restoreInterrupt(e);
             throw new MutationOutcomeUnknownException(operation, e);
@@ -440,9 +483,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         } catch (DaemonProtocolException e) {
             throw new MutationOutcomeUnknownException(operation, e);
         }
+        if (response.getStatusCode() == 404 && clientId == null) {
+            return;
+        }
         requireMutationStatus(response, 204, operation);
-        removeAttachment(ref);
-        activePrompts.remove(ref.getHarnessSessionId());
     }
 
     @Override

@@ -199,6 +199,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   MID_TURN_RECONCILIATION_RING_SIZE,
+  MANAGED_SESSION_STORE_META_KEY,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
@@ -209,6 +210,7 @@ import {
   activeWorkCloseRetryDelayMs,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
+  parseBridgeManagedSessionStore,
 } from './bridgeTypes.js';
 import {
   startChannelLivenessMonitor,
@@ -259,6 +261,7 @@ import type {
   RuntimeMcpServerRemoveResult,
   BridgeManagedRuntimeToolManifest,
   BridgeManagedRuntimeToolExecuteResult,
+  BridgeManagedSessionStore,
 } from './bridgeTypes.js';
 import {
   isSessionAttachmentReference,
@@ -1160,6 +1163,7 @@ interface ChannelInfo {
 
 interface SessionEntry {
   readonly executionEngine?: SessionExecutionEngine;
+  readonly managedSessionStore?: BridgeManagedSessionStore;
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
@@ -1529,6 +1533,28 @@ interface SessionEntry {
    * is pending. Cancelled by `clearPromptSettledClose` when a subscriber
    * reconnects or the session is explicitly closed / killed. */
   promptSettledCloseTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+function assertManagedSessionStoreBinding(
+  sessionId: string,
+  current: BridgeManagedSessionStore | undefined,
+  requested: BridgeManagedSessionStore | undefined,
+): void {
+  if (
+    (current === undefined && requested === undefined) ||
+    (current !== undefined &&
+      requested !== undefined &&
+      current.baseUrl === requested.baseUrl &&
+      current.tenantId === requested.tenantId &&
+      current.workspaceId === requested.workspaceId &&
+      current.writerId === requested.writerId)
+  ) {
+    return;
+  }
+  throw RequestError.invalidParams(
+    { errorKind: 'managed_session_store_conflict' },
+    `Session "${sessionId}" is already bound to another Managed Session store`,
+  );
 }
 
 function isServeDebugLoggingEnabled(): boolean {
@@ -4549,6 +4575,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     historyPageSize?: number;
     liveReplayMode: 'full' | 'summary';
     hideInheritedHistory: boolean;
+    managedSessionStore?: BridgeManagedSessionStore;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
     lifecycle: { phase: 'active' | 'abandoned' };
@@ -5711,6 +5738,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
     requestedSessionId?: string,
+    managedSessionStore?: BridgeManagedSessionStore,
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
@@ -5796,6 +5824,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ...(requestedSessionId
                   ? {
                       [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                    }
+                  : {}),
+                ...(managedSessionStore
+                  ? {
+                      [MANAGED_SESSION_STORE_META_KEY]: managedSessionStore,
                     }
                   : {}),
                 [SESSION_INITIALIZATION_DEADLINE_META_KEY]:
@@ -5989,7 +6022,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree, branch },
+        {
+          parentSessionId,
+          sourceType,
+          sourceId,
+          worktree,
+          branch,
+          ...(managedSessionStore ? { managedSessionStore } : {}),
+        },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -7496,6 +7536,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       sourceId?: string;
       worktree?: { slug: string; path: string; branch: string };
       branch?: { name: string; baseBranch: string };
+      managedSessionStore?: BridgeManagedSessionStore;
     } = {},
   ): SessionEntry => {
     const childSnapshot = ci.activeWork?.snapshot;
@@ -7512,6 +7553,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.managedSessionStore
+        ? { managedSessionStore: options.managedSessionStore }
+        : {}),
       channel: ci.channel,
       ...(ci.slot.engine ? { executionEngine: ci.slot.engine } : {}),
       connection: ci.connection,
@@ -8427,12 +8471,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         '`standalone` is reserved for daemon-owned session restore',
       );
     }
+    if (req.managedSessionStore !== undefined && action !== 'load') {
+      throw RequestError.invalidParams(
+        { errorKind: 'managed_session_store_load_only' },
+        'managedSessionStore is supported only for session/load',
+      );
+    }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
     const source = parseSessionSource(req.sourceType, req.sourceId);
     if ('error' in source) {
       throw new InvalidSessionMetadataError('sourceType', source.error);
     }
-    req = Object.freeze({ ...req, workspaceCwd: workspaceKey, ...source });
+    req = Object.freeze({
+      ...req,
+      workspaceCwd: workspaceKey,
+      ...source,
+      ...(req.managedSessionStore
+        ? {
+            managedSessionStore: parseBridgeManagedSessionStore(
+              req.managedSessionStore,
+            ),
+          }
+        : {}),
+    });
     if (
       req.approvalMode !== undefined &&
       !KNOWN_APPROVAL_MODES.has(req.approvalMode)
@@ -8475,6 +8536,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const existing = byId.get(req.sessionId);
     if (existing) {
       assertAttachableSessionEntry(req.sessionId, existing);
+      assertManagedSessionStoreBinding(
+        req.sessionId,
+        existing.managedSessionStore,
+        req.managedSessionStore,
+      );
       const replayFields =
         historyPageSize !== undefined
           ? await refreshedReplayFieldsFor(
@@ -8577,6 +8643,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
+      assertManagedSessionStoreBinding(
+        req.sessionId,
+        inFlight.managedSessionStore,
+        req.managedSessionStore,
+      );
       // Cold restores only coalesce when their effective request shapes
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
@@ -9020,6 +9091,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ...(hideInheritedHistory
                     ? { [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true }
                     : {}),
+                  ...(req.managedSessionStore
+                    ? {
+                        [MANAGED_SESSION_STORE_META_KEY]:
+                          req.managedSessionStore,
+                      }
+                    : {}),
                   ...(req.suppressWorktreeContextRestore
                     ? {
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
@@ -9191,6 +9268,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (racedEntry) {
         restoreEvents.close();
         assertAttachableSessionEntry(req.sessionId, racedEntry);
+        assertManagedSessionStoreBinding(
+          req.sessionId,
+          racedEntry.managedSessionStore,
+          req.managedSessionStore,
+        );
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
@@ -9316,6 +9398,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : {}),
           ...(req.sourceType ? { sourceType: req.sourceType } : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.managedSessionStore
+            ? { managedSessionStore: req.managedSessionStore }
+            : {}),
         },
       );
       releaseAdmissionOnce();
@@ -9581,6 +9666,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(historyPageSize !== undefined ? { historyPageSize } : {}),
       liveReplayMode,
       hideInheritedHistory,
+      ...(req.managedSessionStore
+        ? { managedSessionStore: req.managedSessionStore }
+        : {}),
       publicPromise: promise,
       settlementPromise,
       lifecycle: restoreLifecycle,
@@ -10318,7 +10406,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { worktree: Object.freeze({ ...req.worktree }) }
           : {}),
         ...(req.branch ? { branch: Object.freeze({ ...req.branch }) } : {}),
+        ...(req.managedSessionStore
+          ? {
+              managedSessionStore: parseBridgeManagedSessionStore(
+                req.managedSessionStore,
+              ),
+            }
+          : {}),
       };
+      if (
+        req.managedSessionStore !== undefined &&
+        req.sessionId === undefined
+      ) {
+        throw new Error(
+          'managedSessionStore requires a caller-supplied sessionId',
+        );
+      }
 
       // Resolve the effective scope for THIS call. A per-request
       // `req.sessionScope` overrides the daemon-wide default; omitting
@@ -10659,6 +10762,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           req.worktree,
           req.branch,
           req.sessionId,
+          req.managedSessionStore,
           daemonOwnedStandaloneCreation,
           trustedStandaloneSpawn
             ? () => {
@@ -12825,6 +12929,48 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             /* bus already closed */
           }
         }
+      }
+      return {
+        displayName: entry.displayName,
+        ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      };
+    },
+
+    async commitSessionTitle(sessionId, title, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        typeof title !== 'string' ||
+        title.trim() === '' ||
+        title.length > MAX_DISPLAY_NAME_LENGTH ||
+        hasControlCharacter(title)
+      ) {
+        throw new InvalidSessionMetadataError(
+          'displayName',
+          `must be a non-empty string of at most ${MAX_DISPLAY_NAME_LENGTH} characters without control characters`,
+        );
+      }
+      if (context?.clientId !== undefined) {
+        resolveTrustedClientId(entry, context.clientId);
+      }
+      const result = (await withTimeout(
+        Promise.race([
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+            sessionId,
+            displayName: title,
+            titleSource: 'manual',
+          }),
+          getTransportClosedReject(entry),
+        ]),
+        initTimeoutMs,
+        'commitSessionTitle',
+      )) as { persisted?: unknown };
+      if (result?.persisted !== true) {
+        throw new Error(`Session '${sessionId}' title was not persisted`);
+      }
+      if (entry.displayName !== title) {
+        entry.displayName = title;
+        markSessionCatalogChanged();
       }
       return {
         displayName: entry.displayName,

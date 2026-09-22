@@ -26,6 +26,7 @@ import {
   assertSessionExecutionEngine,
   ideContextStore,
   type ResumedSessionData,
+  type SessionExecutionEngineState,
   type SessionRestoreProjection,
   type LspClient,
   type ToolName,
@@ -1633,6 +1634,7 @@ export async function loadCliConfig(
     processNetworkOwner?: true;
     toolInvocationGuard?: ToolInvocationGuard;
     managedToolSessionFactory?: ManagedToolSessionFactory;
+    managedSessionStore?: ConfigParameters['managedSessionStore'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
@@ -1640,6 +1642,7 @@ export async function loadCliConfig(
       projectionSource: (
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
+      executionEngine?: SessionExecutionEngineState;
     };
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
@@ -2277,6 +2280,7 @@ export async function loadCliConfig(
       const executionEngine =
         sessionRestoreProjection?.executionEngine ??
         sessionData?.executionEngine ??
+        hostPolicy?.sessionRestore?.executionEngine ??
         (deferProjectionUntilWriterLease
           ? await sessionService.readExecutionEngine(sessionId)
           : undefined);
@@ -2472,6 +2476,7 @@ export async function loadCliConfig(
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     managedToolSessionFactory: hostPolicy?.managedToolSessionFactory,
+    managedSessionStore: hostPolicy?.managedSessionStore,
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {

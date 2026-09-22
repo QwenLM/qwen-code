@@ -3182,6 +3182,10 @@ export function createServeApp(
     conversationRuntimeActivity,
     managedPromptService: deps.managedPromptService,
     managedGatewaySessionEvents: deps.managedGatewaySessionEvents,
+    hostedHarness: opts.profile === 'hosted-harness',
+    ...(hostedHarnessContract
+      ? { hostedHarnessBootId: hostedHarnessContract.bootId }
+      : {}),
     ...(standaloneSessionService ? { standaloneSessionService } : {}),
     isLiveSessionActive: (sessionId: string) =>
       liveCoordinator.isActiveSession(sessionId),

@@ -10,6 +10,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResul
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import java.time.Duration;
@@ -30,6 +32,14 @@ public interface AgentStateStore {
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId);
+
+    SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind);
+
+    SessionRecord completeSessionMutation(String tenantId, String operation,
+            String idempotencyKey, String sessionId,
+            SessionMutationKind kind, String title, String harnessBootId);
 
     Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest);
@@ -77,8 +87,8 @@ public interface AgentStateStore {
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
 
-    boolean bindHarness(String tenantId, String sessionId,
-            String harnessBootId);
+    boolean bindHarness(String tenantId, String sessionId, String turnId,
+            String owner, String harnessBootId);
 
     void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);

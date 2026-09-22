@@ -292,6 +292,24 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ManagedSessionAlreadyExistsError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).ManagedSessionAlreadyExistsError,
+  ManagedSessionNotFoundError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).ManagedSessionNotFoundError,
+  createHttpManagedSessionStores: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).createHttpManagedSessionStores,
+  buildManagedSessionRestoreProjection: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).buildManagedSessionRestoreProjection,
+  projectManagedSessionRecords: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).projectManagedSessionRecords,
+  projectManagedSessionTitleInfo: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).projectManagedSessionTitleInfo,
   getModelsForProviderProtocol: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).getModelsForProviderProtocol,
@@ -1325,7 +1343,9 @@ import {
   CHANNEL_LIVENESS_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  MANAGED_SESSION_STORE_META_KEY,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -2462,6 +2482,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     authenticate: (args: Record<string, unknown>) => Promise<void>;
     stopAdmission: () => void;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    loadSession: (args: Record<string, unknown>) => Promise<unknown>;
     setSessionConfigOption: (args: Record<string, unknown>) => Promise<unknown>;
     beginManagedShutdown: () => {
       configs: Config[];
@@ -5012,6 +5033,124 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('binds a trusted Hosted Harness session to the remote authority store', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    await setupSessionMocks(sessionId);
+    mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(true);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        managedToolSessionFactory: vi.fn(),
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+
+    await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: {
+        [REQUESTED_SESSION_ID_META_KEY]: sessionId,
+        [MANAGED_SESSION_STORE_META_KEY]: {
+          baseUrl: 'https://store.example',
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          writerId: 'writer-a',
+          leaseDurationMs: 60_000,
+        },
+      },
+    });
+
+    const policy = vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9];
+    expect(policy?.managedSessionStore?.sessionKey).toEqual({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      sessionId,
+    });
+    expect(policy?.managedSessionStore?.mode).toBe('create');
+    expect(policy?.managedSessionStore?.journalStore).toBeDefined();
+    expect(policy?.managedSessionStore?.resourceStore).toBeDefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('admits a remote Hosted Harness restore without a local transcript', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    mockRenderPreparedGoalUpdate.mockResolvedValue({ updates: [] });
+    await setupSessionMocks(sessionId);
+    mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(true);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        managedToolSessionFactory: vi.fn(),
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+
+    await agent.loadSession({
+      sessionId,
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: {
+        [MANAGED_SESSION_STORE_META_KEY]: {
+          baseUrl: 'https://store.example',
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          writerId: 'writer-b',
+          leaseDurationMs: 60_000,
+        },
+      },
+    });
+
+    const policy = vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9];
+    expect(policy?.managedSessionStore?.sessionKey).toEqual({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      sessionId,
+    });
+    expect(policy?.managedSessionStore?.mode).toBe('load');
+    expect(policy?.sessionRestore?.executionEngine).toMatchObject({
+      sessionId,
+      status: 'verified',
+      engine: 'managed',
+      recorded: true,
+    });
+    expect(policy?.sessionRestore?.projectionSource).toEqual(
+      expect.any(Function),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('forces the session writer lease for a Conversations-marked child regardless of the setting', async () => {
     const innerConfig = await setupSessionMocks('session-writer-lease-marked');
     innerConfig.getCronScheduler = vi
@@ -5782,6 +5921,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getCronScheduler: vi.fn(),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       getSessionSourceId: vi.fn().mockReturnValue(undefined),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),

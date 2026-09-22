@@ -100,6 +100,16 @@ class HostedHarnessClientTest {
                     CreateHarnessSession.builder()
                             .harnessSessionId(SESSION_ID)
                             .approvalMode(DaemonApprovalMode.DEFAULT)
+                            .managedSessionStore(
+                                    ManagedSessionStoreConnection.builder()
+                                            .baseUri(URI.create(
+                                                    "https://store.example/"))
+                                            .tenantId("tenant-a")
+                                            .workspaceId("workspace-a")
+                                            .writerId(BOOT_ID)
+                                            .leaseDuration(
+                                                    Duration.ofSeconds(45))
+                                            .build())
                             .build());
             assertEquals(SESSION_ID, session.getHarnessSessionId());
             assertEquals(CLIENT_ID, session.getHarnessClientId());
@@ -114,6 +124,14 @@ class HostedHarnessClientTest {
         assertTrue(body.get().contains("\"sessionId\":\"" + SESSION_ID
                 + "\""));
         assertTrue(body.get().contains("\"sessionScope\":\"thread\""));
+        assertTrue(body.get().contains("\"managedSessionStore\":{"
+                + "\"baseUrl\":\"https://store.example\","));
+        assertTrue(body.get().contains("\"tenantId\":\"tenant-a\""));
+        assertTrue(body.get().contains(
+                "\"workspaceId\":\"workspace-a\""));
+        assertTrue(body.get().contains("\"writerId\":\"" + BOOT_ID
+                + "\""));
+        assertTrue(body.get().contains("\"leaseDurationMs\":45000"));
         assertFalse(body.get().contains("cwd"));
     }
 
@@ -258,8 +276,12 @@ class HostedHarnessClientTest {
 
     @Test
     void coversLoadStatusTranscriptHeartbeatAndLifecycleMutations() {
+        AtomicReference<String> loadBody = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/load",
-                exchange -> sendSessionJson(exchange, 200, sessionJson()));
+                exchange -> {
+                    loadBody.set(readBody(exchange));
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
         server.createContext("/session/" + SESSION_ID + "/status",
                 exchange -> sendSessionJson(exchange, 200,
                         "{\"sessionId\":\"" + SESSION_ID
@@ -295,7 +317,15 @@ class HostedHarnessClientTest {
 
         try (HostedHarnessClient client = newClient()) {
             HarnessSessionRef session = client.loadSession(
-                    new LoadHarnessSession(SESSION_ID));
+                    new LoadHarnessSession(SESSION_ID,
+                            ManagedSessionStoreConnection.builder()
+                                    .baseUri(URI.create(
+                                            "https://store.example/"))
+                                    .tenantId("tenant-a")
+                                    .workspaceId("workspace-a")
+                                    .writerId(BOOT_ID)
+                                    .leaseDuration(Duration.ofSeconds(45))
+                                    .build()));
             assertFalse(client.getStatus(session).hasActivePrompt());
             HarnessTranscriptPage transcript = client.getTranscript(
                     GetHarnessTranscript.builder()
@@ -315,6 +345,11 @@ class HostedHarnessClientTest {
         assertEquals(1, cancelled.get());
         assertEquals(1, detached.get());
         assertEquals(1, deleted.get());
+        assertTrue(loadBody.get().contains("\"managedSessionStore\":{"));
+        assertTrue(loadBody.get().contains(
+                "\"baseUrl\":\"https://store.example\""));
+        assertTrue(loadBody.get().contains("\"writerId\":\"" + BOOT_ID
+                + "\""));
     }
 
     @Test
@@ -426,6 +461,47 @@ class HostedHarnessClientTest {
         assertEquals(0, deleted.get());
     }
 
+    @Test
+    void commitsSessionTitleThroughThePrivateHarnessRoute() {
+        createSessionRoute();
+        AtomicReference<String> titleBody = new AtomicReference<>();
+        AtomicReference<String> clientId = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/title",
+                exchange -> {
+                    titleBody.set(readBody(exchange));
+                    clientId.set(exchange.getRequestHeaders().getFirst(
+                            HostedHarnessClient.CLIENT_ID_HEADER));
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"displayName\":\"renamed\","
+                                    + "\"persisted\":true}");
+                });
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            client.updateSessionTitle(session, "renamed");
+        }
+
+        assertEquals(CLIENT_ID, clientId.get());
+        assertTrue(titleBody.get().contains("\"title\":\"renamed\""));
+    }
+
+    @Test
+    void closeByIdTreatsAnAbsentLiveHarnessSessionAsClosed() {
+        AtomicInteger closes = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            closes.incrementAndGet();
+            sendControlPlaneSessionJson(exchange, 404,
+                    "{\"code\":\"session_not_found\"}");
+        });
+
+        try (HostedHarnessClient client = newClient()) {
+            client.closeSession(SESSION_ID);
+        }
+
+        assertEquals(1, closes.get());
+    }
+
     private HostedHarnessClient newClient() {
         return HostedHarnessClient.builder()
                 .baseUri(baseUri)
@@ -494,6 +570,11 @@ class HostedHarnessClientTest {
         sendJson(exchange, status, body, true);
     }
 
+    private static void sendControlPlaneSessionJson(HttpExchange exchange,
+            int status, String body) throws IOException {
+        sendJson(exchange, status, body, true, BOOT_ID, false);
+    }
+
     private static void sendJson(HttpExchange exchange, int status,
             String body, boolean includeBootId) throws IOException {
         sendJson(exchange, status, body, includeBootId, BOOT_ID);
@@ -502,8 +583,14 @@ class HostedHarnessClientTest {
     private static void sendJson(HttpExchange exchange, int status,
             String body, boolean includeBootId, String bootId)
             throws IOException {
+        sendJson(exchange, status, body, includeBootId, bootId, true);
+    }
+
+    private static void sendJson(HttpExchange exchange, int status,
+            String body, boolean includeBootId, String bootId,
+            boolean requireClientId) throws IOException {
         if (includeBootId) {
-            assertPrivateHeaders(exchange);
+            assertPrivateHeaders(exchange, requireClientId);
         }
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type",
@@ -543,6 +630,11 @@ class HostedHarnessClientTest {
     }
 
     private static void assertPrivateHeaders(HttpExchange exchange) {
+        assertPrivateHeaders(exchange, true);
+    }
+
+    private static void assertPrivateHeaders(HttpExchange exchange,
+            boolean requireClientId) {
         assertEquals("Bearer harness-token",
                 exchange.getRequestHeaders().getFirst("Authorization"));
         assertEquals("1", exchange.getRequestHeaders().getFirst(
@@ -550,8 +642,12 @@ class HostedHarnessClientTest {
         assertEquals(BOOT_ID, exchange.getRequestHeaders().getFirst(
                 HostedHarnessClient.BOOT_ID_HEADER));
         String path = exchange.getRequestURI().getPath();
-        if (!"/session".equals(path) && !path.endsWith("/load")) {
+        if (requireClientId && !"/session".equals(path)
+                && !path.endsWith("/load")) {
             assertEquals(CLIENT_ID, exchange.getRequestHeaders().getFirst(
+                    HostedHarnessClient.CLIENT_ID_HEADER));
+        } else if (!requireClientId) {
+            assertNull(exchange.getRequestHeaders().getFirst(
                     HostedHarnessClient.CLIENT_ID_HEADER));
         }
     }

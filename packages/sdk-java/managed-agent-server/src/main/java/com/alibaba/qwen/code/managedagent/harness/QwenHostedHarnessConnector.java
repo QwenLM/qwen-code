@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
+import com.alibaba.qwen.code.daemon.ManagedSessionStoreConnection;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
@@ -21,13 +22,17 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedAgentProperties.Harness properties;
+    private final ManagedAgentProperties.SessionStore sessionStore;
+    private final String workspaceId;
     private final DaemonApprovalMode approvalMode;
     private volatile HostedHarnessClient client;
-    private final Map<String, HarnessSessionRef> attachments =
+    private final Map<AttachmentKey, HarnessSessionRef> attachments =
             new ConcurrentHashMap<>();
 
     public QwenHostedHarnessConnector(ManagedAgentProperties properties) {
         this.properties = properties.getHarness();
+        this.sessionStore = properties.getSessionStore();
+        this.workspaceId = sessionStore.getWorkspaceId();
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -36,6 +41,21 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     + " token and capability digest");
         }
         URI.create(this.properties.getBaseUrl());
+        if (sessionStore.isEnabled()
+                && (sessionStore.getBaseUrl() == null
+                        || sessionStore.getBaseUrl().isBlank()
+                        || workspaceId == null || workspaceId.isBlank())) {
+            throw new IllegalStateException("Enabled Managed Session Store"
+                    + " requires base URL and Runtime workspace ID");
+        }
+        String runtimeWorkspaceId = properties.getRuntimeBroker()
+                .getWorkspaceId();
+        if (sessionStore.isEnabled() && runtimeWorkspaceId != null
+                && !runtimeWorkspaceId.isBlank()
+                && !workspaceId.equals(runtimeWorkspaceId)) {
+            throw new IllegalStateException("Managed Session Store and"
+                    + " Runtime Broker workspace IDs must match");
+        }
         this.approvalMode = parseApprovalMode(
                 this.properties.getApprovalMode());
     }
@@ -46,18 +66,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public Attachment createOrLoad(String sessionId, boolean loadExisting) {
+    public Attachment createOrLoad(String tenantId, String sessionId,
+            boolean loadExisting) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef attached = attachments.computeIfAbsent(
-                sessionId, ignored -> loadExisting
-                        ? load(sessionId) : create(sessionId));
+                key, ignored -> loadExisting
+                        ? load(tenantId, sessionId)
+                        : loadOrCreate(tenantId, sessionId));
         return new Attachment(attached.getHarnessBootId());
     }
 
     @Override
-    public Admission submit(String sessionId, String promptId,
+    public Admission submit(String tenantId, String sessionId,
+            String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
-                .session(attachment(sessionId))
+                .session(attachment(tenantId, sessionId))
                 .promptId(promptId)
                 .payloadDigest(payloadDigest);
         input.forEach(builder::addContent);
@@ -67,11 +91,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public SourceStream stream(String sessionId, long lastEventId,
+    public SourceStream stream(String tenantId, String sessionId,
+            long lastEventId,
             String eventEpoch) {
         HarnessEventStream stream = client().streamEvents(
                 StreamHarnessEvents.builder()
-                        .session(attachment(sessionId))
+                        .session(attachment(tenantId, sessionId))
                         .lastEventId(lastEventId)
                         .eventEpoch(eventEpoch)
                         .build());
@@ -97,8 +122,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void cancel(String sessionId) {
-        client().cancelTurn(attachment(sessionId));
+    public void cancel(String tenantId, String sessionId) {
+        client().cancelTurn(attachment(tenantId, sessionId));
+    }
+
+    @Override
+    public void rename(String tenantId, String sessionId, String title) {
+        client().updateSessionTitle(attachment(tenantId, sessionId), title);
+    }
+
+    @Override
+    public void closeSession(String tenantId, String sessionId) {
+        attachments.remove(new AttachmentKey(tenantId, sessionId));
+        client().closeSession(sessionId);
     }
 
     @Override
@@ -110,33 +146,69 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         attachments.clear();
     }
 
-    private HarnessSessionRef attachment(String sessionId) {
-        HarnessSessionRef attachment = attachments.get(sessionId);
+    private HarnessSessionRef attachment(String tenantId, String sessionId) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef attachment = attachments.get(key);
         if (attachment == null) {
-            createOrLoad(sessionId, true);
-            attachment = attachments.get(sessionId);
+            createOrLoad(tenantId, sessionId, true);
+            attachment = attachments.get(key);
         }
         return attachment;
     }
 
-    private HarnessSessionRef create(String sessionId) {
+    private HarnessSessionRef create(String tenantId, String sessionId) {
         try {
-            return client().createSession(CreateHarnessSession.builder()
+            CreateHarnessSession.Builder builder = CreateHarnessSession
+                    .builder()
                     .harnessSessionId(sessionId)
-                    .approvalMode(approvalMode)
-                    .build());
+                    .approvalMode(approvalMode);
+            ManagedSessionStoreConnection store = managedSessionStore(
+                    tenantId);
+            if (store != null) {
+                builder.managedSessionStore(store);
+            }
+            return client().createSession(builder.build());
         } catch (DaemonHttpException error) {
             if (error.getStatusCode() != 409) {
                 throw error;
             }
-            return load(sessionId);
+            return load(tenantId, sessionId);
         } catch (SessionCreationOutcomeUnknownException error) {
-            return load(sessionId);
+            return load(tenantId, sessionId);
         }
     }
 
-    private HarnessSessionRef load(String sessionId) {
-        return client().loadSession(new LoadHarnessSession(sessionId));
+    private HarnessSessionRef load(String tenantId, String sessionId) {
+        ManagedSessionStoreConnection store = managedSessionStore(tenantId);
+        return client().loadSession(store == null
+                ? new LoadHarnessSession(sessionId)
+                : new LoadHarnessSession(sessionId, store));
+    }
+
+    private HarnessSessionRef loadOrCreate(String tenantId,
+            String sessionId) {
+        try {
+            return load(tenantId, sessionId);
+        } catch (DaemonHttpException error) {
+            if (error.getStatusCode() != 404) {
+                throw error;
+            }
+            return create(tenantId, sessionId);
+        }
+    }
+
+    private ManagedSessionStoreConnection managedSessionStore(
+            String tenantId) {
+        if (!sessionStore.isEnabled()) {
+            return null;
+        }
+        return ManagedSessionStoreConnection.builder()
+                .baseUri(URI.create(sessionStore.getBaseUrl()))
+                .tenantId(tenantId)
+                .workspaceId(workspaceId)
+                .writerId(client().capabilities().getBootId())
+                .leaseDuration(sessionStore.getWriterLeaseDuration())
+                .build();
     }
 
     private HostedHarnessClient client() {
@@ -172,5 +244,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException(
                     "Unsupported Hosted Harness approval mode", error);
         }
+    }
+
+    private record AttachmentKey(String tenantId, String sessionId) {
     }
 }

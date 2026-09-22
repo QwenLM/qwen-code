@@ -12,6 +12,10 @@ import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import {
+  ManagedSessionAlreadyExistsError,
+  ManagedSessionNotFoundError,
+} from './managed-session-authority.js';
+import {
   openManagedSession,
   type ManagedSession,
 } from './managed-session-assembly.js';
@@ -75,6 +79,7 @@ function open(
     lease?: SessionWriterLease;
     journalStore?: ManagedSessionJournalStore;
     resourceStore?: ManagedSessionResourceStore;
+    requireNew?: boolean;
   } = {},
 ): Promise<ManagedSession> {
   return openManagedSession({
@@ -93,6 +98,7 @@ function open(
     ...(options.resourceStore === undefined
       ? {}
       : { resourceStore: options.resourceStore }),
+    ...(options.requireNew === true ? { requireNew: true } : {}),
     ...(options.create === false
       ? {}
       : {
@@ -234,13 +240,28 @@ describe('managed session assembly', () => {
     const workspace = await createWorkspace();
 
     // No creation parameters and no existing header: opening cannot succeed.
-    await expect(open(workspace, { create: false })).rejects.toThrow();
+    await expect(open(workspace, { create: false })).rejects.toBeInstanceOf(
+      ManagedSessionNotFoundError,
+    );
 
     // The writer was released rather than left held or sealed, so a fresh open
     // succeeds instead of colliding with an abandoned lock.
     const session = await open(workspace);
     expect(session.authority.committedSequence).toBe(1);
     await session.close();
+  });
+
+  it('does not reopen an existing authority through a create path', async () => {
+    const workspace = await createWorkspace();
+    const created = await open(workspace);
+    await created.close();
+
+    await expect(open(workspace, { requireNew: true })).rejects.toBeInstanceOf(
+      ManagedSessionAlreadyExistsError,
+    );
+
+    const restored = await open(workspace, { create: false });
+    await restored.close();
   });
 
   it('leaves an adopted writer to its owner', async () => {

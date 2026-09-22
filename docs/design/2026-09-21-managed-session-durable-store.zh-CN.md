@@ -2,7 +2,7 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
-状态：D0 与 D1a Java Store 已实现；D1b TypeScript 契约客户端和 D2-D3 尚待实现。日期：2026-09-22。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
+状态：当前 feature 分支工作树已实现 D0、D1a Java Store、D1b TypeScript HTTP adapter、面向新建 Hosted Session 和 inline 资源的 D2a 路由、Hosted 冷加载链路，以及第一阶段公共 Session 生命周期。共享 golden fixture、独立进程故障切换证明、OSS 资源、物理删除/保留策略和 D3 恢复门禁仍待完成。日期：2026-09-22。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
 
 ## 1. 决策
 
@@ -18,17 +18,19 @@ Hosted Managed Session 不再把 Runtime 本地 JSONL 作为生产权威，而�
 
 ## 2. 已核验的当前基线
 
-Standalone 仍使用本地后端；D0 已通过存储契约将其隔离，D1a 则增加了尚未被选择的远端 Store 服务：
+Standalone 仍使用本地后端。D0 已通过契约隔离存储，D1a 实现远端服务，D1b/D2a 则让新建的私有 Hosted Session 选择该服务：
 
 - `LocalManagedSessionAuthority` 通过 `ManagedSessionJournalHandle` 读写；正常写入不再直接持有 transcript path 或调用 `SessionWriterLease`。
 - `LocalJsonlManagedSessionJournalStore` 包装 `SessionWriterLease`、扫描普通 Session transcript，并保持既有 JSONL 字节与 torn-tail 语义。
 - `LocalManagedSessionResourceStore` 实现 `ManagedSessionResourceStore`，把资源发布到 `<runtimeBaseDir>/resources/<sessionId>/`。
 - `openManagedSession` 支持注入 journal/resource store，默认选择上述本地 adapter。
 - Flyway V4 和 Spring 内部 API 已能保存私有 Managed journal head、事务精确字节、资源目录及 revision 到资源的引用；数据库时间 lease、单调 writer generation、head CAS、command 幂等、精确字节校验和事务化 `MYSQL_INLINE` 均已实现。
-- Java Store 尚未被 `openManagedSession` 选择。在 D1b TypeScript HTTP adapter 与 D2 新 Session 路由接入前，当前 Hosted Harness 不会写入这些表。
+- 私有 Hosted Harness 创建请求现在可以为一个调用方指定的 Session ID 选择 HTTP journal/resource adapter。普通 daemon 路由会拒绝该 capability，ACP 子进程也只接受经过认证的私有 managed parent 下发的配置。
+- 当前 D2 活跃路径会持久化精确 journal 事务和不超过 64 KiB 的资源，并且不创建本地权威 transcript。私有 Hosted `loadSession` 会重新获取远端 writer，在内存中校验和投影 durable journal 及其引用资源，并在没有本地 transcript 的情况下重建既有恢复结构。
+- Store `writerId` 与当前 Hosted Harness boot ID 绑定。只有 Java 持有 active Turn dispatch lease 且该 Turn 尚未尝试准入时，才允许替换已记录的 Harness generation；已经准入的在途 Turn 不会被重新解释成新 event epoch。
 - 现有 JSONL 包含 `session_execution_engine`、`managed_session_header_v1`、`managed_session_event_v1` 和 `managed_session_commit_v1`。同目录的 `<sessionId>.ledger.jsonl` 是 prompt 终态账本，不是私有 Managed journal。
 
-因此，没有持久挂载的 Runtime 或 Hosted Harness Pod 被回收后，会同时丢失 transcript 及其引用的全部资源。只上传 JSONL 也不够，因为 checkpoint、消息和工具正文位于独立资源中。
+仍使用本地后端的 Session，在 Runtime 或 Hosted Harness 使用临时文件系统时，Pod 回收后依然会丢失 transcript 及其引用资源。新的 Hosted 创建/加载路径已经去掉 journal 和 inline 资源对该本地持久盘的依赖。只上传 JSONL 仍然不够，因为 checkpoint、消息和工具正文位于独立资源中。
 
 Hosted 远端模式不会再把同目录的 prompt ledger 作为另一个文件上传；其中需要长期保留的事实由私有 `turn.settled` 事务和 Java 公共 Turn 状态表达。Standalone 模式为兼容继续保留现有 sidecar。
 
@@ -67,6 +69,46 @@ Java 继续主动发起公开的 Harness 和 Runtime 操作。存储回调是一
 
 Java 公共 Session、Harness 私有 journal 和 Runtime binding 共用同一个 `(tenantId, workspaceId, sessionId)`，不新增第二套 public 或 Harness Session ID。
 
+### 4.1 Session 管理职责
+
+| 组件                      | 负责                                                                                                                               | 不应负责                                         |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Java 管控面               | 公共 Session 生命周期、tenant scope、公共 Turn 幂等与状态、Harness/Runtime binding、scoped Store 描述，以及 MySQL/OSS 物理提交服务 | 模型会话语义或直接工具执行                       |
+| TypeScript Hosted Harness | 模型循环、私有上下文、Managed 语义记录、checkpoint，以及单个 Session 的唯一 active writer lease                                    | 把 Pod 本地存储当成长期权威，或负责 Runtime 调度 |
+| Runtime Broker            | Runtime 分配、endpoint/lease/generation、调度器适配，以及工具执行归属对账                                                          | 会话历史或模型循环状态                           |
+| Tool Runtime              | Workspace 本地工具、MCP/skill 执行和可替换的执行缓存                                                                               | 公共 Session 身份或权威 transcript               |
+| MySQL 与 OSS              | 有序物理 journal commit、fencing 元数据、回执和不可变资源字节                                                                      | Agent 决策或恢复策略                             |
+
+因此，Java 管公共 Session 并发放 capability，Harness 管私有会话状态，Runtime 管工具在哪里执行。只有另外两层拥有的状态都能通过同一个 Session key 长期寻址时，其中任意一层才能独立重启。
+
+### 4.2 公共 Session 生命周期协议
+
+Java 管控面对外提供生命周期 API，并且是生命周期状态、tenant 校验和命令幂等的唯一权威：
+
+```text
+PATCH  /v1/agents/sessions/{sessionId}
+POST   /v1/agents/sessions/{sessionId}/archive
+POST   /v1/agents/sessions/{sessionId}/unarchive
+DELETE /v1/agents/sessions/{sessionId}
+```
+
+每个变更都必须携带 `Idempotency-Key`。Java 先锁定 tenant 范围的 Session 行，写入包含变更前 Session 状态的长期 `PENDING` command 和 requested event，再执行 Harness/Runtime 外部动作，最后原子地把 command 标记为 `COMPLETED`、推进公共 Session 投影并追加完成事件。依赖失败时 command 保持 pending；使用相同 key 和相同请求重试会继续执行，针对同一 Session 的其他生命周期命令会得到 `session_operation_active`，相同 key 携带不同内容则得到 `idempotency_conflict`。持久化变更前状态也使归档 Session 在删除时不必等待已经关闭的 Harness 再次可用。
+
+| 操作     | 前置条件                              | Pending 时公共状态                        | 完成前必须成功的外部动作                                                      | 完成后的公共状态/事件                  |
+| -------- | ------------------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------- |
+| 重命名   | `ACTIVE`                              | 保持 `ACTIVE`，同时存在 pending command   | Hosted Harness 长期提交 `session_metadata` 标题记录，并确认 `persisted: true` | `ACTIVE`；标题投影与 `session.updated` |
+| 归档     | `ACTIVE` 且无活动 Turn                | `ARCHIVING`                               | 关闭在线 Harness attachment，再 drain Runtime binding                         | `ARCHIVED`；`session.archived`         |
+| 取消归档 | `ARCHIVED`                            | 保持 `ARCHIVED`，同时存在 pending command | 清除 Runtime retirement fence；下一次 Turn 再惰性冷加载 Harness               | `ACTIVE`；`session.unarchived`         |
+| 删除     | `ACTIVE` 或 `ARCHIVED`，且无活动 Turn | `DELETING`                                | 原状态为 active 时关闭 Harness，再 drain Runtime；归档 Harness 已经关闭       | `DELETED` tombstone；`session.deleted` |
+
+归档和删除遇到 `ACCEPTED`、`RUNNING` 或 `CANCELLING` Turn 时直接拒绝，不会隐式取消或重复工作。重命名只有在私有标题提交成功后才对外确认，因此 Java 的标题只是投影，不会形成第二个标题权威。按 Session ID 关闭、Runtime drain 和 Runtime resume 都是幂等动作，使 pending command 能在响应丢失或 Java 重启后安全续跑。
+
+归档会清除在线事件游标，但保留最后一代 Harness generation，作为私有权威已经存在的哨兵。取消归档后，下一次 Turn 会先冷加载该 Session，再绑定新的 generation。没有哨兵的 Session 也会先探测 load，只有明确收到 not-found 才执行 create，从而覆盖首次私有写入是元数据而不是 Turn 的 Session。私有 `create` 路径遇到已有权威时返回 `409`，而 `load` 在权威不存在时返回 `404`，不会顺手初始化空权威，从而避免重试恢复静默替换或凭空生成会话历史。
+
+在线 Hosted attachment 还会绑定到规范化后的 Store endpoint、tenant、workspace 和 Harness writer generation。热 attach、并发冷加载合并和 restore race 都会比较这组身份；一旦不同，就以 `managed_session_store_conflict` fail closed，而不会让另一个 tenant 或 Store 描述复用内存中的 Session。lease 时长变化不改变存储身份。
+
+第一阶段删除有意只实现软 tombstone。`GET` 和列表 API 会隐藏 `DELETED` Session，而已连接客户端仍可重放已经提交的公共删除事件。私有 journal/resource 字节会继续保留，直到 writer seal、execution 对账、legal hold、保留期和垃圾回收全部实现。因此不能把当前能力宣称为物理擦除。
+
 ## 5. Core 存储契约
 
 从当前具体本地类中提取能力，但不复制 Managed 状态机：
@@ -90,7 +132,7 @@ interface ManagedSessionResourceStore {
 }
 ```
 
-以上是已经落地的 D0 Core 接缝。`appendTransaction` 每次接收一笔完整的语义事务。本地 adapter 保留历史上的逐行 sync 与可恢复 torn-tail 行为。D1a Java endpoint 已接收完整远端事务并执行物理提交语义。剩余的 D1b HTTP handle 将对整批记录只序列化一次，在内部获取或续租 scoped writer grant，从已校验的 header、event 和 marker 派生外层 CAS 与幂等元数据，并仅在 Java 确认精确字节已提交后返回；配套 HTTP resource adapter 会将 inline 暂存字节保留到该次提交。
+以上是已实现的 Core 接缝。`appendTransaction` 每次接收一笔完整的语义事务。本地 adapter 保留历史上的逐行 sync 与可恢复 torn-tail 行为。D1a Java endpoint 接收完整远端事务并执行物理提交语义。D1b HTTP handle 对整批记录只序列化一次，在内部获取或续租 scoped writer grant，从已校验的 header、event 和 marker 派生外层 CAS 与幂等元数据，并仅在 Java 确认精确字节已提交后返回；配套 HTTP resource adapter 会将 inline 暂存字节保留到该次提交，并在恢复时校验响应元数据、精确事务字节、摘要链和下载资源。
 
 `ManagedSessionAuthority` 负责记录校验、事件 sequence、command content digest、checkpoint 规则和领域语义；Store 实现负责物理原子性、writer fencing、精确字节持久化、分页和资源校验。
 
@@ -184,7 +226,7 @@ transaction 读取会先按 revision 与 byte-length 元数据分页，再拉取
 
 恢复读取对未知 lifecycle/recovery 状态、不安全的 head 计数、revision 缺口以及 head/transaction 不一致统一 fail-closed；这些情况会报告存储损坏，而不会返回残缺权威。
 
-`transactions:commit` 携带待提交 inline resources，并在它们首次被 journal 引用的同一 MySQL 事务中写入。可选的 `latestCheckpointResourceId` 必须指向本事务引用的 `managed-checkpoint` 资源，并与 head 原子推进。已实现路径接收不超过 64 KiB 的原始资源，限制单事务 inline 总字节数，校验长度与 SHA-256，并对更大资源返回 `managed_session_oss_disabled`。D2 的 `resources:allocate` 与 `resources/{resourceId}:finalize` 签名对象流程尚未实现。在 D1b/D2 路由完成前，本地开发继续使用 local adapter。
+`transactions:commit` 携带待提交 inline resources，并在它们首次被 journal 引用的同一 MySQL 事务中写入。可选的 `latestCheckpointResourceId` 必须指向本事务引用的 `managed-checkpoint` 资源，并与 head 原子推进。已实现路径接收不超过 64 KiB 的原始资源，限制单事务 inline 总字节数，校验长度与 SHA-256，并对更大资源返回 `managed_session_oss_disabled`。D2 的 `resources:allocate` 与 `resources/{resourceId}:finalize` 签名对象流程尚未实现。Standalone 和普通 daemon Session 仍选择 local adapter；只有私有 Hosted Harness 创建路径可以选择 remote adapter。
 
 ## 8. 提交协议
 
@@ -247,19 +289,23 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 
 ### D1：Java 长期 Store 与契约客户端
 
-状态：D1a 已实现，D1b 尚待完成。
+状态：D1a 与 D1b 的 TypeScript adapter 部分已实现。
 
 - D1a 已实现：Flyway V4 四张私有表；Spring 内部 API；基于数据库时间的 lease/generation fencing；head CAS 与 checkpoint 指针原子推进；幂等回执；精确 record bytes 存储与校验；分页恢复读取；以及 OSS fail-closed 的事务化 `MYSQL_INLINE` 资源。
-- D1b 待实现：TypeScript HTTP journal/resource adapter，双方共享的精确字节/摘要/错误码/限额 golden fixture，以及两个独立 Java 进程共享 MySQL 的故障测试。D1a 已在真实 MySQL 上以两个独立 Store 对象覆盖旧 writer 拒绝与响应丢失重放，但这不等价于进程崩溃证明。
-- 新建 Hosted Session 选择远端 backend 仍属于 D2；D1a 有意不进入当前 Harness 活跃链路。
+- D1b 已实现：配套 TypeScript HTTP journal/resource adapter、scoped writer 获取/续租/seal、精确事务重建与校验、结构化 Java 错误、inline 资源暂存，以及不使用本地 transcript 的关闭/重开测试。
+- D1b 待实现：双方共享的精确字节/摘要/错误码/限额 golden fixture，以及两个独立 Java 进程共享 MySQL 的故障测试。D1a 已在真实 MySQL 上以两个独立 Store 对象覆盖旧 writer 拒绝与响应丢失重放，但这不等价于进程崩溃证明。
+- D2a 已为新建私有 Hosted Harness Session 选择该 backend。Java 下发 tenant、workspace、writer 身份、endpoint 和 lease 时长，Harness 自己生成 writer secret；普通 daemon 路由和不可信 ACP parent 都会拒绝该描述。
 
 退出条件：两个共享 MySQL 的 Java 实例能拒绝旧 writer，并在提交响应丢失后返回同一回执。
 
-### D2：OSS 资源与新 Session hosted 路由
+### D2：OSS 资源与 Hosted 路由
 
+- 状态：新 Session 路由和 Hosted 冷加载已支持 inline 资源；OSS 与完整故障注入证明仍待完成。
 - 为超过 64 KiB 的资源实现 `OSS_OBJECT` 路径：allocate/upload/finalize/read、scoped signed URL、摘要校验、加密和孤儿盘点。
-- 新建 Hosted Managed Session 选择远端后端；既有本地 Session 继续本地运行，不迁移、不双写。
-- hosted 恢复不再依赖 Pod 本地 transcript/resource；本地缓存可选且可丢弃。
+- 仅新建 Hosted Managed Session 选择远端后端；既有本地 Session 继续本地运行，不迁移、不双写。
+- Hosted `loadSession` 会下发与 create 相同作用域的 Store 描述。ACP 子进程重新获取 durable writer，校验 journal 与 resource 闭包，投影 reader-facing records，并且不读取本地 transcript 就构建 runtime restore state。
+- 当前测试已证明 HTTP 契约、route/ACP 接线，以及不使用本地 transcript 的内存 close/reopen 流程；尚未完成“杀掉一个真实 Harness 进程和 Java 实例、保留共享 MySQL Store、再由另一进程完成新 Turn”的故障实验。
+- 已准入在途 Turn 的自动恢复仍受门禁约束：在 event epoch 与 Runtime 副作用对账能够证明原操作结果前，Java 会拒绝 submission attempted 之后的 Harness generation 切换。空闲或尚未准入的恢复不会放宽该 fence。
 
 退出条件：删除原 Harness Pod 及其文件系统后，另一个 Harness 能恢复同一 Session 和 checkpoint，历史无缺失。
 

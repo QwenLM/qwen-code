@@ -8,12 +8,17 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties {
     private final Harness harness = new Harness();
+    private final SessionStore sessionStore = new SessionStore();
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
 
     public Harness getHarness() {
         return harness;
+    }
+
+    public SessionStore getSessionStore() {
+        return sessionStore;
     }
 
     public Dispatch getDispatch() {
@@ -100,6 +105,45 @@ public class ManagedAgentProperties {
 
         public void setHeartbeatInterval(Duration heartbeatInterval) {
             this.heartbeatInterval = heartbeatInterval;
+        }
+    }
+
+    public static class SessionStore {
+        private boolean enabled;
+        private String baseUrl = "";
+        private String workspaceId = "";
+        private Duration writerLeaseDuration = Duration.ofSeconds(60);
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String baseUrl) {
+            this.baseUrl = baseUrl;
+        }
+
+        public String getWorkspaceId() {
+            return workspaceId;
+        }
+
+        public void setWorkspaceId(String workspaceId) {
+            this.workspaceId = workspaceId;
+        }
+
+        public Duration getWriterLeaseDuration() {
+            return writerLeaseDuration;
+        }
+
+        public void setWriterLeaseDuration(Duration writerLeaseDuration) {
+            this.writerLeaseDuration = writerLeaseDuration;
         }
     }
 

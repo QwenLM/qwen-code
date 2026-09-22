@@ -37,7 +37,7 @@ class EmbeddedRuntimeBrokerTest {
         when(store.findSessionById(SESSION_ID)).thenReturn(
                 Optional.of(new SessionRecord("tenant-a", SESSION_ID,
                         "qwen-code", null, "ACTIVE",
-                        null, null, 0, 0, 1, 1, 0)));
+                        null, null, 0, 0, 1, 1, null, 0)));
         ManagedAgentProperties properties = properties();
 
         try (EmbeddedRuntimeBroker broker = broker(store, properties)) {

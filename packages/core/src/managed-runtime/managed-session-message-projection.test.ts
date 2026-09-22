@@ -16,6 +16,7 @@ import {
 } from './managed-session-authority.js';
 import {
   ManagedSessionMessageProjection,
+  projectManagedSessionTitleInfo,
   readManagedSessionRecords,
 } from './managed-session-message-projection.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
@@ -354,6 +355,64 @@ describe('managed session message projection', () => {
       }
     },
   );
+
+  it('rejects an invalid timestamp in a durable reader-facing record', async () => {
+    const harness = await createHarness();
+    try {
+      await harness.projection.commit(
+        command('commitMessage', 'invalid-timestamp'),
+        {
+          record: {
+            ...records[0],
+            timestamp: 'not-a-timestamp',
+          },
+        },
+        HOLDS,
+      );
+    } finally {
+      await harness.close();
+    }
+
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).rejects.toThrow(/invalid reader-facing record/);
+  });
+
+  it('projects the latest durable session title for cold restore', async () => {
+    const harness = await createHarness();
+    try {
+      await harness.authority.commitDomainRecord(
+        command('renameSession', 'title-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      await harness.authority.commitDomainRecord(
+        command('renameSession', 'title-2'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Restored title', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    } finally {
+      await harness.close();
+    }
+    const scan = await readManagedSessionLog(
+      harness.transcriptPath,
+      sessionKey,
+    );
+
+    await expect(
+      projectManagedSessionTitleInfo({ scan, resources: harness.store }),
+    ).resolves.toEqual({ title: 'Restored title', source: 'manual' });
+  });
 
   it.each(['none', 'before', 'after', 'both'] as const)(
     'reads historical branches, retries and resumes the state chain (state position: %s)',
