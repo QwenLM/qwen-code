@@ -5,7 +5,6 @@
  */
 
 import type { IncomingMessage } from 'node:http';
-import { TLSSocket } from 'node:tls';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -63,6 +62,7 @@ import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { socketOwnOrigin } from '../server/self-origin.js';
 import type { RequestedSessionIdAdmission } from '../session-id-admission.js';
 import {
   RPC,
@@ -1723,11 +1723,8 @@ export function mountAcpHttp(
           const isListenerOrigin =
             upgradeListenerIdentity.kind === 'local-control' &&
             upgradeListenerIdentity.origin === origin.toLowerCase();
-          const scheme =
-            socket instanceof TLSSocket && socket.encrypted ? 'https' : 'http';
           const isPrimaryOrigin =
-            authenticatedRemoteBind &&
-            new URL(`${scheme}://${host}`).origin === origin;
+            authenticatedRemoteBind && socketOwnOrigin(socket, host) === origin;
           if (
             !isLoopbackOrigin &&
             !isAllowlistedOrigin &&

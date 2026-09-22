@@ -40,7 +40,8 @@ Authorization header 传入的配对码。它只接受签发时的 origin，且�
 
 主监听 HTTP 的 Host 校验不变。已认证的非 loopback 主监听现在允许 Origin 与
 实际 socket 的协议及 Host 匹配的 WebSocket 升级请求。该场景跳过基于 loopback
-socket 的 Host 白名单，与 REST 现有的非 loopback 策略一致，仍要求有效 bearer。
+socket 的 Host 白名单，与 REST 现有的非 loopback 策略一致，仍要求有效
+bearer —— 在这条路径上，DNS rebinding 的 Host 防护完全依赖 bearer。
 这适用于主监听上的全部 WebSocket 功能，包括 ACP、终端和语音，runtime 凭证与
 设备凭证均可使用。loopback 与 Local Control 监听保留原有校验。
 终止 TLS 或改写 Host 的代理仍需为浏览器的 origin 配置 `--allow-origin`。
@@ -54,9 +55,13 @@ daemon 从不信任转发头，因此在 TLS 终结代理之后，配对二维�
 配对码只能存在于已经初始化的 runtime 中。
 
 使用浏览器连接 daemon 时的地址。若 wildcard 监听经 loopback 访问，提供
-现有符合条件的局域网接口，多个接口时由用户选择。保留 HTTP 或 HTTPS，
+现有符合条件的局域网接口，多个接口时由用户选择。loopback 的判定依据
+`--hostname` 的字面拼写而非解析结果：解析到 loopback 的域名（例如
+`lvh.me`）按远程绑定处理，配对仍然可用，但广播的地址可能只有 loopback
+可达。保留 HTTP 或 HTTPS，
 提示 HTTP 流量未加密，不自动增加 TLS。最多保存 64 个有效配对码，超过时
-移除最早签发的码。
+移除最早签发的码 —— 被移除的配对码可能尚未过期：短时间内大量签发会使
+当前正在展示的二维码失效，该码在兑换时会按过期处理。
 
 ## 受影响组件
 

@@ -160,6 +160,52 @@ describe('web shell boot', () => {
     }
   });
 
+  it('connects with the exchanged device token when the pairing succeeds', async () => {
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).endsWith('/web-shell/pairing/exchange')) {
+        return {
+          status: 200,
+          ok: true,
+          headers: new Headers(),
+          json: async () => ({ token: 'fresh-device-token' }),
+        };
+      }
+      return {
+        status: 200,
+        ok: true,
+        headers: new Headers(),
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal('fetch', fetch);
+    window.history.replaceState(null, '', '/#pairing=good-code');
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.rendered).toHaveLength(1));
+
+    const gate = document.createElement('div');
+    document.body.appendChild(gate);
+    await act(async () => {
+      createRoot(gate).render(testState.rendered[0]);
+    });
+
+    // The invitation is exchanged exactly once and the session proceeds on
+    // the issued device credential, never the invitation itself.
+    const exchanges = fetch.mock.calls.filter(([url]) =>
+      String(url).endsWith('/web-shell/pairing/exchange'),
+    );
+    expect(exchanges).toHaveLength(1);
+    const probes = fetch.mock.calls.filter(([url]) =>
+      String(url).endsWith('/capabilities'),
+    );
+    expect(probes.length).toBeGreaterThan(0);
+    for (const [, init] of probes) {
+      expect(init).toMatchObject({
+        headers: { Authorization: 'Bearer fresh-device-token' },
+      });
+    }
+  });
+
   it('offers the rescan recovery when the stored credential is also rejected', async () => {
     const fetch = vi.fn().mockResolvedValue({
       status: 401,

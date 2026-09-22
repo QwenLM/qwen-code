@@ -122,10 +122,12 @@ predicate (`web-shell-preauth.ts`) exempts the shell entry points (`/`, `//`,
 `/assets*`, `/manifest.webmanifest`, `/sw.js`, `/mcp-app-sandbox`, exact
 `/session/:id` document navigations) from
 the credential check because browser module-script fetches carry `Origin`
-without `Authorization`. WebSocket upgrades and TLS-front-proxy `https` origins
-are not covered: the upgrade gate keeps its own CSWSH policy (loopback origin,
-`--allow-origin` entry, or the Local Control listener's own origin), and a
-proxy's `https` origin can never match the plain socket's scheme.
+without `Authorization`. TLS-front-proxy `https` origins are not
+covered: a proxy's `https` origin can never match the plain socket's scheme.
+The upgrade gate keeps its own CSWSH policy — loopback origin, `--allow-origin`
+entry, the Local Control listener's own origin, or, on an authenticated
+non-loopback primary listener, the listener's own origin when the upgrade
+carries a valid bearer.
 
 ### `bearerAuth`
 
@@ -149,7 +151,7 @@ Non-loopback binds bypass the primary gate (operator chose the surface area; bea
 
 Reject any request with an `Origin` header. CLI/SDK never set Origin; only browsers do. Returns deterministic `403 { error: 'Request denied by CORS policy' }` rather than the 500 HTML the `cors` package's error-callback would produce. The runtime app no longer installs this wall — it runs `allowOriginCors` over the mutable allowlist (below); the deny behavior survives there as the unmatched-origin branch. The wall remains in the bootstrap app (run-qwen-serve.ts) that serves requests before the runtime starts.
 
-Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the canonical loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`) or the exact bound loopback address. Scheme-matched port-less origins are accepted only for their default port (`http` on 80, `https` on 443). On non-loopback binds a second middleware (`installRemoteSelfOriginMiddleware`, in the same file) covers the shell's XHRs instead: it bearer-authenticates a request whose canonical `Origin` equals the direct socket scheme plus the normalized `Host` authority — forwarded headers are never trusted — and strips that `Origin` before the wall, so those requests need no `--allow-origin` entry. Cross-origin and `null` origins remain rejected, and the WebSocket upgrade routes plus a TLS-front-proxy `https` origin still require one (see [Middleware chain](#middleware-chain-http-request-order)).
+Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the canonical loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`) or the exact bound loopback address. Scheme-matched port-less origins are accepted only for their default port (`http` on 80, `https` on 443). On non-loopback binds a second middleware (`installRemoteSelfOriginMiddleware`, in the same file) covers the shell's XHRs instead: it bearer-authenticates a request whose canonical `Origin` equals the direct socket scheme plus the normalized `Host` authority — forwarded headers are never trusted — and strips that `Origin` before the wall, so those requests need no `--allow-origin` entry. Cross-origin and `null` origins remain rejected, and a TLS-front-proxy `https` origin still requires one (see [Middleware chain](#middleware-chain-http-request-order)). The WebSocket upgrade routes run a separate CSWSH gate that, on an authenticated non-loopback primary listener, admits the listener's own origin when the upgrade carries a valid bearer, so they need no entry there either.
 
 ### `allowOriginCors` (runtime app, always installed)
 

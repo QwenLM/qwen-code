@@ -12,6 +12,7 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../utils/clipboard';
+import { useSharedNow } from '../hooks/useSharedNow';
 import {
   LocalControlRequestError,
   requestLocalControl,
@@ -41,13 +42,16 @@ export function LocalControlQrButton({
   const [error, setError] = useState('');
   const [address, setAddress] = useState<string>();
   const [attempt, setAttempt] = useState(0);
-  const [now, setNow] = useState(Date.now);
+  // A ticking clock only matters while a dynamic expiry is on screen; on the
+  // legacy path (no expiresInMs) nothing rendered depends on it.
+  const now = useSharedNow(open && status?.expiresAt !== undefined);
 
   useEffect(() => {
     if (!open) return;
     let ignore = false;
     let refreshTimer: ReturnType<typeof setTimeout>;
     let emptyReplies = 0;
+    let failures = 0;
     setStatus(undefined);
     setError('');
     const refresh = async () => {
@@ -86,7 +90,7 @@ export function LocalControlQrButton({
             ? undefined
             : Date.now() + next.expiresInMs;
         setStatus({ ...next, expiresAt, dynamic });
-        setNow(Date.now());
+        failures = 0;
         setError('');
         if (expiresAt) {
           refreshTimer = setTimeout(
@@ -116,15 +120,23 @@ export function LocalControlQrButton({
       } catch (failure) {
         if (ignore) return;
         setError(failure instanceof Error ? failure.message : String(failure));
-        refreshTimer = setTimeout(() => void refresh(), 5000);
+        // A permanently failing daemon (a restart that changed the
+        // credential) must not be polled forever: widen the cadence after
+        // the first failures, then stop — the manual Retry button re-arms
+        // the effect.
+        failures += 1;
+        if (failures <= 6) {
+          refreshTimer = setTimeout(
+            () => void refresh(),
+            failures < 3 ? 5000 : 30_000,
+          );
+        }
       }
     };
     void refresh();
-    const clock = setInterval(() => setNow(Date.now()), 1000);
     return () => {
       ignore = true;
       clearTimeout(refreshTimer);
-      clearInterval(clock);
     };
   }, [open, baseUrl, token, address, attempt]);
 
@@ -203,6 +215,19 @@ export function LocalControlQrButton({
                       : 'localControl.insecurePairing',
                 )}
               </p>
+            )}
+            {status.dynamic && address !== undefined && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                // A picked LAN address is otherwise sticky for the popover's
+                // lifetime; this hands the choice back to the daemon's
+                // candidate list.
+                onClick={() => setAddress(undefined)}
+              >
+                {t('localControl.changeNetwork')}
+              </Button>
             )}
           </div>
         )}

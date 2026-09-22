@@ -33,6 +33,9 @@ describe('pairing bootstrap', () => {
         method: 'POST',
         headers: { Authorization: 'Bearer one-time' },
         redirect: 'error',
+        // The exchange must be abortable: a hung daemon stalls boot, and the
+        // 10 s timeout is what lets the watchdog fire first.
+        signal: expect.any(AbortSignal),
       }),
     );
     expect(persistDaemonToken).toHaveBeenCalledWith(

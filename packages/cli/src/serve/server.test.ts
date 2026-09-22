@@ -4292,6 +4292,41 @@ describe('createServeApp', () => {
       expect(issued.body.active).toBe(true);
     });
 
+    it('accepts a paired device credential through the self-origin middleware', async () => {
+      const app = createServeApp(
+        { ...nonTrustedEmbedOpts, token: 'runtime-secret' },
+        undefined,
+        { webShellDir },
+      );
+      // A non-loopback Host keeps issuance off the LAN-candidate path so the
+      // round trip is deterministic.
+      const authority = 'qwen.test:4170';
+      const issued = await request(app)
+        .post('/web-shell/pairing')
+        .set('Host', authority)
+        .set('Authorization', 'Bearer runtime-secret');
+      expect(issued.status).toBe(200);
+      const code = new URLSearchParams(
+        new URL(issued.body.url).hash.slice(1),
+      ).get('pairing')!;
+      const exchanged = await request(app)
+        .post('/web-shell/pairing/exchange')
+        .set('Host', authority)
+        .set('Authorization', `Bearer ${code}`);
+      expect(exchanged.status).toBe(200);
+
+      // The widened credential source must let the device token through the
+      // same-origin gate on the primary listener: a same-origin POST from
+      // the paired shell reaches the route instead of stopping at the gate.
+      const reissued = await request(app)
+        .post('/web-shell/pairing')
+        .set('Host', authority)
+        .set('Origin', `http://${authority}`)
+        .set('Authorization', `Bearer ${exchanged.body.token}`);
+      expect(reissued.status).toBe(200);
+      expect(reissued.body.active).toBe(true);
+    });
+
     it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
       // Express non-strict routing matches a raw `//` against `app.get('/')`
       // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.

@@ -3830,6 +3830,7 @@ const EN: Messages = {
     "Scan to grant access to this daemon. The device that scans stays signed in until the daemon restarts or that device's tab is closed. Traffic is unencrypted; use a trusted network.",
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
+  'localControl.changeNetwork': 'Change network',
   'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
   'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
@@ -7517,6 +7518,7 @@ const ZH: Messages = {
     '扫码将授予此 daemon 的访问权限。扫码的设备保持登录，直到 daemon 重启或该设备上的标签页关闭。流量未加密，请使用受信任网络。',
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
+  'localControl.changeNetwork': '更换网络',
   'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
   'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,

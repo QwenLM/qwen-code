@@ -35,6 +35,7 @@ export function registerWebShellPairingRoutes(
   credentials: CredentialStore,
   hostname: string,
   rateLimiter?: Pick<RateLimiterInstance, 'middleware' | 'checkRate'>,
+  getPort?: () => number,
 ): void {
   const invitations = new Map<string, { origin: string; expiresAt: number }>();
   // The loopback half canonicalizes the operator's spelling (`127.1`) the way
@@ -134,15 +135,28 @@ export function registerWebShellPairingRoutes(
           } else {
             url.hostname = formatHostForAuthority(hostname);
           }
+          // The daemon's port goes with its socket, not the browser's: a
+          // port-translating tunnel or a forwarded address would otherwise
+          // leave the QR pointing at the browser's port.
+          const port = getPort?.();
+          if (port !== undefined) url.port = String(port);
         }
         const secret = randomBytes(32).toString('base64url');
         url.hash = `pairing=${secret}`;
-        const { default: qrcode } = await import('qrcode-terminal');
-        qrcode.setErrorLevel('Q');
-        let qrText = '';
-        qrcode.generate(url.toString(), { small: true }, (code) => {
-          qrText = code.trimEnd();
-        });
+        // QR encoding is best-effort: qrcode-terminal throws when the
+        // payload exceeds capacity (e.g. a very long Host), and an
+        // unencodable payload must not fail issuance — the URL alone still
+        // pairs the device.
+        let qrText: string | undefined;
+        try {
+          const { default: qrcode } = await import('qrcode-terminal');
+          qrcode.setErrorLevel('Q');
+          qrcode.generate(url.toString(), { small: true }, (code) => {
+            qrText = code.trimEnd();
+          });
+        } catch {
+          qrText = undefined;
+        }
         const now = Date.now();
         for (const [key, invitation] of invitations) {
           if (invitation.expiresAt <= now) invitations.delete(key);

@@ -38,6 +38,7 @@ function setup(
     allowOrigins?: string[];
     rateLimit?: boolean;
     logger?: DaemonLogger;
+    port?: number;
   } = {},
 ) {
   const app = express();
@@ -62,7 +63,13 @@ function setup(
       })
     : undefined;
   if (limiter) limiters.push(limiter);
-  registerWebShellPairingRoutes(app, credentials, hostname, limiter);
+  registerWebShellPairingRoutes(
+    app,
+    credentials,
+    hostname,
+    limiter,
+    options.port === undefined ? undefined : () => options.port!,
+  );
   app.use(bearerAuth(credentials));
   if (limiter) app.use(limiter.middleware);
   app.post('/probe', (_req, res) => res.sendStatus(204));
@@ -421,6 +428,86 @@ describe('Web Shell pairing', () => {
     // Assigning the unbracketed literal to URL.hostname would silently
     // no-op and leave the QR pointing at the browser's own loopback.
     expect(new URL(response.body.url).hostname).toBe('[2001:db8::5]');
+  });
+
+  it('still issues a usable invitation when the URL exceeds QR capacity', async () => {
+    const { app, exchange } = setup();
+    const longHost = `${'a'.repeat(2000)}.test`;
+    const issued = await request(app)
+      .post('/web-shell/pairing')
+      .set('Host', `${longHost}:4170`)
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(issued.status).toBe(200);
+    expect(issued.body.url).toContain(longHost);
+    // The QR glyph is the only casualty of an over-capacity payload; the
+    // invitation itself must still redeem.
+    expect(issued.body.qrText).toBeUndefined();
+    const code = codeOf(issued);
+    expect((await exchange(code, `${longHost}:4170`)).status).toBe(200);
+  });
+
+  it('substitutes the daemon port alongside the bound address', async () => {
+    vi.mocked(listLanCandidates).mockReturnValue([
+      { interfaceName: 'en0', address: '192.168.1.2' },
+    ]);
+    const { app, exchange } = setup('0.0.0.0', 'runtime-secret', {
+      port: 4170,
+    });
+    // A port-translating tunnel lets the operator browse localhost:8080 while
+    // the daemon listens on 4170; the QR must carry the daemon's port.
+    const issued = await request(app)
+      .post('/web-shell/pairing')
+      .set('Host', 'localhost:8080')
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(issued.status).toBe(200);
+    const issuedUrl = new URL(issued.body.url);
+    expect(issuedUrl.origin).toBe('http://192.168.1.2:4170');
+    const code = codeOf(issued);
+    // The stored origin is the rewritten one: the tunnel's own port must not
+    // redeem, the daemon's port must.
+    expect((await exchange(code, '192.168.1.2:8080')).status).toBe(401);
+    expect((await exchange(code, '192.168.1.2:4170')).status).toBe(200);
+  });
+
+  it('preserves operator access logs after an unthrottled exchange flood', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const logger: DaemonLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      raw: vi.fn(),
+      getLogPath: () => '',
+      getDaemonId: () => 'pairing-test',
+      getStatus: () => ({
+        runId: 'pairing-test',
+        mode: 'stderr-only',
+        health: 'ok',
+        issues: [],
+        droppedRecords: 0,
+        droppedBytes: 0,
+      }),
+      flush: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+    };
+    const { app, exchange } = setup('0.0.0.0', 'runtime-secret', { logger });
+    // No rate limiter: every invalid code is a 401, and the flood must drain
+    // only the reject budget, never the operator's.
+    for (let i = 0; i < 70; i++) {
+      expect((await exchange('invalid')).status).toBe(401);
+    }
+    for (let i = 0; i < 6; i++) {
+      await request(app)
+        .get('/probe')
+        .set('Host', authority)
+        .set('Origin', origin)
+        .set('Authorization', 'Bearer runtime-secret')
+        .expect(204);
+    }
+    expect(logger.info).toHaveBeenCalledTimes(6);
+    expect(logger.info).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /probe', status: 204 }),
+    );
   });
 
   it('evicts only the oldest live invitation at the cap', async () => {

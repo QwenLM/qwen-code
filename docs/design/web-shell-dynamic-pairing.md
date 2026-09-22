@@ -52,7 +52,8 @@ Primary HTTP Host validation is unchanged. On authenticated non-loopback
 primary listeners, WebSocket upgrades now accept an Origin matching the actual
 socket scheme and Host. They skip the loopback-socket Host allowlist in that
 case, matching REST's existing non-loopback policy, and still require a valid
-bearer. This applies to all primary WebSocket features, including ACP,
+bearer — on that path the DNS-rebinding Host defence rests on the bearer
+alone. This applies to all primary WebSocket features, including ACP,
 terminal, and voice, for runtime and device credentials alike. Loopback and
 Local Control listeners keep their existing gates. Proxies that terminate TLS
 or rewrite Host still need `--allow-origin` for the browser's origin. The
@@ -70,9 +71,14 @@ only exist in an initialized runtime.
 
 Use the daemon address through which the browser connected. For a wildcard
 listener reached over loopback, offer the existing eligible LAN interfaces
-and let the user choose when there is more than one. Pairing preserves HTTP
+and let the user choose when there is more than one. Loopback classification
+follows the operator's `--hostname` spelling, never resolution: a name that
+resolves to loopback (for example `lvh.me`) is treated as a remote bind, so
+pairing stays available there and can advertise a loopback-only address. Pairing preserves HTTP
 or HTTPS and explains that HTTP traffic is unencrypted. It does not add TLS.
-At most 64 live invitations are retained; issuing more discards the oldest.
+At most 64 live invitations are retained; issuing more discards the oldest,
+which may still be unexpired — a burst of issuance can void a QR currently on
+screen, and that code then fails at exchange as expired.
 
 ## Affected components
 

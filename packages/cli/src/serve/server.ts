@@ -2197,7 +2197,13 @@ export function createServeApp(
   // runtime token, and the primary listener does the reverse. With no Local
   // Control session this behaves exactly as `bearerAuth(opts.token)` did.
   if (webShellDir) {
-    registerWebShellPairingRoutes(app, credentials, opts.hostname, rateLimiter);
+    registerWebShellPairingRoutes(
+      app,
+      credentials,
+      opts.hostname,
+      rateLimiter,
+      getPort,
+    );
   }
   app.use(authenticate);
 

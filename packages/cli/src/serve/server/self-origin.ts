@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request } from 'express';
+import type { Duplex } from 'node:stream';
 import { TLSSocket } from 'node:tls';
 import { bearerAuth } from '../auth.js';
 import { isPreAuthWebShellRequest } from '../web-shell-preauth.js';
@@ -12,6 +13,26 @@ import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
 import { ACCESS_LOG_REJECT_LOCAL } from './access-log.js';
 import type { ListenerScopedCredentials } from '../local-control/credentials.js';
+
+/**
+ * Canonical `scheme://authority` for a request's own listener: the scheme
+ * from the socket (never forwarded headers) and the Host header normalized
+ * the way browsers serialize Origin — lowercase, scheme-default port
+ * omitted. The REST self-origin middleware and the WebSocket upgrade gate
+ * both compare the Origin header against this value; sharing the
+ * normalization keeps the two gates from diverging (a URL-parse-based
+ * compare would, for example, strip userinfo or a path out of Host).
+ */
+export function socketOwnOrigin(socket: Duplex, host: string): string {
+  const scheme =
+    socket instanceof TLSSocket && socket.encrypted ? 'https' : 'http';
+  let authority = host.toLowerCase();
+  if (scheme === 'http' && authority.endsWith(':80'))
+    authority = authority.slice(0, -3);
+  else if (scheme === 'https' && authority.endsWith(':443'))
+    authority = authority.slice(0, -4);
+  return `${scheme}://${authority}`;
+}
 
 export function installRemoteSelfOriginMiddleware(
   app: Application,
@@ -27,20 +48,7 @@ export function installRemoteSelfOriginMiddleware(
       next();
       return;
     }
-    const scheme =
-      req.socket instanceof TLSSocket && req.socket.encrypted
-        ? 'https'
-        : 'http';
-    // Browsers serialize Origin with a lowercase host and omit the
-    // scheme-default port, while an intermediary may case-preserve Host or
-    // keep an explicit default port. Normalize Host the same way before
-    // comparing; never forwarded headers.
-    let authority = host.toLowerCase();
-    if (scheme === 'http' && authority.endsWith(':80'))
-      authority = authority.slice(0, -3);
-    else if (scheme === 'https' && authority.endsWith(':443'))
-      authority = authority.slice(0, -4);
-    if (origin !== `${scheme}://${authority}`) {
+    if (origin !== socketOwnOrigin(req.socket, host)) {
       next();
       return;
     }

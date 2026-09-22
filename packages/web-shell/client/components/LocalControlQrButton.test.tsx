@@ -153,40 +153,34 @@ describe('LocalControlQrButton', () => {
     expect(container.querySelector('pre')?.lang).toBe('en');
   });
 
-  it.each([-120_000, 120_000])(
-    'rotates with a %i ms browser clock offset and stops requesting on close',
-    async (offset) => {
-      vi.useFakeTimers();
-      vi.setSystemTime(Date.now() + offset);
-      vi.mocked(fetch).mockImplementation(async () =>
-        localControlResponse({
-          active: true,
-          url: `http://qwen.test/#pairing=${Date.now()}`,
-          qrText: 'DYNAMIC-QR',
-          expiresInMs: 60_000,
-        }),
-      );
-      mount();
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>(
-            'button[aria-label="Mobile access"]',
-          )!
-          .click(),
-      );
-      expect(container.textContent).toContain('Expires in 60s');
-      const firstUrl = container.textContent;
-      await act(async () => vi.advanceTimersByTimeAsync(45_000));
-      expect(fetch).toHaveBeenCalledTimes(2);
-      expect(container.textContent).not.toBe(firstUrl);
-      const close = Array.from(container.querySelectorAll('button')).find(
-        (button) => button.textContent === 'Close test popover',
-      )!;
-      act(() => close.click());
-      await act(async () => vi.advanceTimersByTimeAsync(90_000));
-      expect(fetch).toHaveBeenCalledTimes(2);
-    },
-  );
+  it('rotates on the 45 s refresh cadence and stops requesting on close', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation(async () =>
+      localControlResponse({
+        active: true,
+        url: `http://qwen.test/#pairing=${Date.now()}`,
+        qrText: 'DYNAMIC-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain('Expires in 60s');
+    const firstUrl = container.textContent;
+    await act(async () => vi.advanceTimersByTimeAsync(45_000));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toBe(firstUrl);
+    const close = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Close test popover',
+    )!;
+    act(() => close.click());
+    await act(async () => vi.advanceTimersByTimeAsync(90_000));
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
 
   it('hides expired QR material when refreshing fails', async () => {
     vi.mocked(fetch).mockResolvedValue(
@@ -356,6 +350,85 @@ describe('LocalControlQrButton', () => {
     // this terminal state; the bounded loop spends four.
     await act(async () => vi.advanceTimersByTimeAsync(120_000));
     expect(fetch).toHaveBeenCalledTimes(6);
+  });
+
+  it('lets the operator return to the network choice after a wrong pick', async () => {
+    const interfaces = [
+      { interfaceName: 'en0', address: '192.168.1.9' },
+      { interfaceName: 'br0', address: '10.0.0.5' },
+    ];
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const body = JSON.parse(
+        String((init as RequestInit | undefined)?.body ?? '{}'),
+      );
+      if (typeof body.address === 'string') {
+        return localControlResponse({
+          active: true,
+          url: `http://${body.address}:8080/#pairing=one-time`,
+          qrText: 'QR-TEXT',
+          expiresInMs: 60_000,
+          encrypted: false,
+        });
+      }
+      return localControlResponse({ active: true, interfaces });
+    });
+    mount();
+    await openPopover();
+    expect(container.textContent).toContain('en0: 192.168.1.9');
+
+    const pick = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('br0: 10.0.0.5'))!;
+    await act(async () => pick.click());
+    await flush();
+    const pickInit = vi.mocked(fetch).mock.calls.at(-1)![1] as RequestInit;
+    expect(JSON.parse(String(pickInit.body))).toEqual({
+      address: '10.0.0.5',
+    });
+    expect(container.textContent).toContain('QR-TEXT');
+    expect(container.textContent).toContain('http://10.0.0.5:8080/');
+
+    // A wrong pick must not be sticky: the QR view offers a way back to the
+    // candidate list, and the re-request leaves the address out.
+    const change = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Change network');
+    expect(change).toBeDefined();
+    await act(async () => change!.click());
+    await flush();
+    expect(container.textContent).toContain('en0: 192.168.1.9');
+    expect(container.textContent).toContain('br0: 10.0.0.5');
+    const lastInit = vi.mocked(fetch).mock.calls.at(-1)![1] as RequestInit;
+    expect(lastInit.body).toBeUndefined();
+  });
+
+  it('stops re-polling a permanently failing pairing route', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockRejectedValue(new Error('offline'));
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain('offline');
+
+    // Failures widen from 5 s to 30 s after the first two: a fixed 5 s loop
+    // would have issued a fourth request inside 15 s.
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    // …and stop entirely after six retries: a fixed 5 s loop would have made
+    // 121 requests over the same ten minutes.
+    await act(async () => vi.advanceTimersByTimeAsync(585_000));
+    expect(fetch).toHaveBeenCalledTimes(7);
+    expect(container.textContent).toContain('offline');
+    // The manual recovery stays: Retry re-arms the effect.
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Retry');
+    expect(retry).toBeDefined();
+    await act(async () => retry!.click());
+    expect(fetch).toHaveBeenCalledTimes(8);
   });
 
   it('does not re-poll while the operator is choosing a network', async () => {

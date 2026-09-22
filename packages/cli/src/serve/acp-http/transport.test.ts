@@ -8,6 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import {
+  createServer as createHttpsServer,
+  type Server as HttpsServer,
+} from 'node:https';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -11541,7 +11545,61 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
 // ── WebSocket transport security tests ────────────────────────────────
 describe('ACP WebSocket transport security', () => {
-  let server: Server;
+  // Long-lived self-signed cert (CN=localhost, SAN IP:127.0.0.1), used only
+  // to put a real TLSSocket under the upgrade gate — the own-origin scheme
+  // must come from the socket. Not a real secret; the same fixture as
+  // server/self-origin.test.ts.
+  const TLS_CERT = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUfuVC8Ulq3HIg+1tf36JrjAa6dr4wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDYzMDAyMjIxOVoYDzIxMjYw
+NjA2MDIyMjE5WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCnEk5caJsr2ShJwi4bkAMr1/IzzueiUFbnnqs3XpaB
+ANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2MVHoDMH3zx4V36VcXUaeR+/wZbFRN
+94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATGJZkzmGT8+M5CqDCW4isHlpGvbn0T
+SdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wTAOIM8e8HC1VTMw1OhXDAus6ro7z+
+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7kmYwT9J1Gyw9cQQj8vcipyLq6q3Hz
+iMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIYshAYRsKNAgMBAAGjbzBtMB0GA1Ud
+DgQWBBSM8bvfq77vXg5fsuhYGXsLuKjqxzAfBgNVHSMEGDAWgBSM8bvfq77vXg5f
+suhYGXsLuKjqxzAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGHBH8AAAGCCWxv
+Y2FsaG9zdDANBgkqhkiG9w0BAQsFAAOCAQEAGUBgaBYEO119e28j61PTijfhw7mV
+Q8AxlUjlv+HHx+IAPR+E8w7jiS97oxvFSIkmbV+FAQOWwTE+oNvrL5qSFlG7cI60
+wj+Jxwxr+/SShV5Jm7JlynAGxOvOZ1mfxzyGrlm5cg4hoRvcoWAtB/qtiIyFIz/s
+fDAdZiFXRoTaZnpyPWA6iydf3mc0ZOastHib+mlFb+aedKz9by/f2Z1CY6RfckEj
+20c9Mar85RYkVtVTIWNSwItASmQVBaoXsXK33y4C0P1NmPoYBzyPSXsOlmIZXui5
+WYj2mrPe2DL5gCeNUxMhmzgv0bgoYiksHmdyNjRmO5AQlcdjX/7CHg0zEQ==
+-----END CERTIFICATE-----
+`;
+  const TLS_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCnEk5caJsr2ShJ
+wi4bkAMr1/IzzueiUFbnnqs3XpaBANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2M
+VHoDMH3zx4V36VcXUaeR+/wZbFRN94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATG
+JZkzmGT8+M5CqDCW4isHlpGvbn0TSdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wT
+AOIM8e8HC1VTMw1OhXDAus6ro7z+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7k
+mYwT9J1Gyw9cQQj8vcipyLq6q3HziMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIY
+shAYRsKNAgMBAAECggEAQW/tG0qphEog+orAznDgnRqOtfYTScLX1w6RlzVIE60H
+p3HPs/1B7HOHNyWxZtCPbxVI47NAAwfCbyVjSL6EhqgeQbI2N173GDmvKzH/7y3D
+3GraM+L4tZOSw80KVTdpzqSObInk6IMuu4FceRX2cBLvjrIbne1l1yoFU8Yd3SCM
+t8J46vMys7Rh4yR0iOl1hFeLYj8KolTdp6uNYTxaHMt363G7/TcJYRqjrLkpBpXJ
+dJiP58a3WulvVKVHBjZYVmHLlkvla7LQ9tPRsk0gUQfzNpLzl6oBacrNrRv1F7Oe
+keYqt+Kpy9HhZIHt57ahwKmjhjrfIUpyQadF/me0rQKBgQDVbLV6VngGjMSCPQOQ
+VZcAMFZ+y1fgaHeVZwuFeRlCEHBDDmw5eWdUdUQNIRckpqf0IlU39aP/cLgjNZ0W
+nmxfUwhdgEMam2aHZ/8eqrOl0HTa+F5PWz8NPLKsQ970vPb1XCsoEtDVXEsMqK+s
+4h+zjRzy6lLy2cWvYZrDr/KwywKBgQDIZmitKO0MIJOWeqwI3MQvbBXCz9aEIG+3
+0ISQreD/7Z/IEcwrMpDD+z1sOj9OUO2GFflECdhtqo416cv3uo8LLABxuzsYOgug
+ZPgW9oPKVRLfqc43/n0JMtIvS+Na/7C/nCNwcZZZU91V+VG4+1rexINQybnCRbQw
+cBZLcX8nBwKBgQDMdZhl2vChVbnsCwee/l/qjmROk/9bvLjTKCSheaH46Eaj9u03
+IlcbUjwfV9QUCJReDYYWVf0GebXuBS64vIyVxbX93SJsGvPeRILjniT8dPd9zvKK
+k5+TztJctaiiTWVJKUMu4NevjvtW5UNnHDnCiS1yiYltnbMEkTzyu1yEgQKBgAYk
+pYbRX1rk0MFnJ0jqQ5VUkeIz7taEDAiterLYsbIGvcQrT3/vf+KSHBLqQjCLaIyY
+tdhxGNJbzRo3/YmtjV8BTU4vOCOI+/xBvB0wF2AndXmnweuTgI+8oBbVE7YhanCl
+P6zdvocke/97shailemISqI6XNhovJpThUtwwj4XAoGATwSvzX0VLRpoWwDl30oi
+hxyfpb0iCzGik49j/oL+ZB5C8F8AdBpza8eTXJAeAVP7L5nvWffMgvcXs5sGMF7e
+ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
+1Qm2tDpPnmCd1BedIYWCnHA=
+-----END PRIVATE KEY-----
+`;
+
+  let server: Server | HttpsServer;
   let lanServer: Server | undefined;
   let acpHandle: AcpHttpHandle | undefined;
   let port: number;
@@ -11568,6 +11626,7 @@ describe('ACP WebSocket transport security', () => {
       webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
+      tls?: boolean;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -11615,7 +11674,11 @@ describe('ACP WebSocket transport security', () => {
             }
           : {}),
       });
-      const listeningServer = app.listen(0, '127.0.0.1', () => {
+      const listeningServer = (
+        opts.tls
+          ? createHttpsServer({ cert: TLS_CERT, key: TLS_KEY }, app)
+          : createServer(app)
+      ).listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
         if (opts.reportedLocalPort !== undefined) {
           listeningServer.prependListener('upgrade', (_request, socket) => {
@@ -11688,6 +11751,29 @@ describe('ACP WebSocket transport security', () => {
       if (origin) headers['Origin'] = origin;
       const ws = new WebSocket(`ws://${host}:${port}/acp`, {
         headers,
+        handshakeTimeout: 2000,
+      });
+      ws.once('open', () => {
+        ws.close();
+        resolve({ code: 101 });
+      });
+      ws.once('unexpected-response', (_req, res) => {
+        resolve({ code: res.statusCode ?? 0 });
+      });
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+  }
+
+  // Same raw-status probe as wsConnectRaw, over TLS: the self-signed fixture
+  // is accepted client-side only so the server sees a real encrypted socket.
+  function wssConnectRaw(
+    origin: string,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<{ code: number }> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(`wss://127.0.0.1:${port}/acp`, {
+        headers: { Origin: origin, ...extraHeaders },
+        rejectUnauthorized: false,
         handshakeTimeout: 2000,
       });
       ws.once('open', () => {
@@ -11834,6 +11920,12 @@ describe('ACP WebSocket transport security', () => {
     // only the URL-parse normalization matches `Host: qwen.test:80` to it.
     ['qwen.test:80', 'http://qwen.test', 101],
     ['qwen.test:4170', 'http://qwen.test', 403],
+    // The own-origin compare is the literal one the REST gate uses: a URL
+    // parse would strip userinfo, a path, or IPv6 padding out of Host and
+    // admit these; the literal authority compare must not.
+    ['qwen.test@daemon.test:4170', 'http://daemon.test:4170', 403],
+    ['daemon.test:4170/x', 'http://daemon.test:4170', 403],
+    ['[0:0:0:0:0:0:0:1]:4170', 'http://[::1]:4170', 403],
   ])(
     'checks non-loopback primary device access with Host %s and origin %s',
     async (host, origin, code) => {
@@ -11893,6 +11985,27 @@ describe('ACP WebSocket transport security', () => {
     expect(rebound.code).toBe(403);
     const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
     expect(legit.code).toBe(101);
+  });
+
+  it('checks the TLS half of the non-loopback primary origin gate', async () => {
+    await startServer({
+      hostname: '0.0.0.0',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+      tls: true,
+    });
+    // Over a TLS socket the own origin is https:-schemed; an http: Origin on
+    // the same authority is not same-origin traffic.
+    const legit = await wssConnectRaw(`https://qwen.test:${port}`, {
+      Host: `qwen.test:${port}`,
+      Authorization: 'Bearer device-token',
+    });
+    expect(legit.code).toBe(101);
+    const downgrade = await wssConnectRaw(`http://qwen.test:${port}`, {
+      Host: `qwen.test:${port}`,
+      Authorization: 'Bearer device-token',
+    });
+    expect(downgrade.code).toBe(403);
   });
 
   it('rejects WS upgrade with cross-origin Origin header', async () => {
