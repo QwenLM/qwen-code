@@ -594,9 +594,10 @@ export function renderIssueBody({
     ].join('\n');
   }
 
-  // Search only ever uses the first MAX_SEARCH_MARKERS markers, so the body
-  // need not carry more — a total-suite failure can fail every test at once and
-  // an unbounded body crosses GitHub's 65,536-character limit.
+  // The body carries only the first MAX_SEARCH_MARKERS test markers; the
+  // workflow-scoped bridge is an extra search query and is intentionally not
+  // emitted on per-test bodies. A total-suite failure can fail every test at
+  // once, and an unbounded body crosses GitHub's 65,536-character limit.
   const bodyMarkers = analysis.markers.slice(0, MAX_SEARCH_MARKERS);
   const testLines = cappedTestLines(analysis.tests);
 
