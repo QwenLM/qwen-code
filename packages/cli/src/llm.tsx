@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getRelaunchEnvProvenance } from './config/environment.js';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
   AuthType,
   type ChatRecord,
@@ -98,6 +101,7 @@ import {
 import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
@@ -527,6 +531,23 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings.merged,
+    argv,
+  );
+  if (
+    executionSandboxSettings &&
+    (argv.acp ||
+      argv.experimentalAcp ||
+      argv.worktree !== undefined ||
+      argv.experimentalLsp ||
+      argv.mcpConfig ||
+      argv.extensions?.length)
+  ) {
+    throw new Error(
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP or extensions.',
+    );
+  }
   // A user-level .env or settings reload may have reintroduced the marker;
   // the accepted value already lives in immutable local state.
   delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
@@ -537,7 +558,7 @@ export async function main() {
     process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
     process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
   }
-  await cleanupCheckpoints();
+  if (!executionSandboxSettings) await cleanupCheckpoints();
   // Performance checkpoint
   profileCheckpoint('after_load_settings');
 
@@ -630,7 +651,7 @@ export async function main() {
       process.env['QWEN_SANDBOX_IMAGE'] ??
       settings.merged.tools?.sandboxImage;
     // Only the container backends run an image with its own in-process updater;
-    // `sandbox-exec` and `bwrap` confine this process in place, so neither the
+    // `sandbox-exec` confines this process in place, so neither the
     // image handoff nor the host-update relaunch marker applies to them.
     // Narrowed to the config (not a boolean) so `.image` stays type-safe below.
     const containerSandbox =
@@ -665,6 +686,7 @@ export async function main() {
         [],
         // Pass separated hooks for proper source attribution
         {
+          systemHooks: settings.getSystemHooks(),
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
@@ -784,12 +806,19 @@ export async function main() {
       );
       process.exit(0);
     } else {
-      // Relaunch app so we always have a child process that can be internally
-      // restarted if needed.
+      // Interactive and streaming modes keep a supervisor for in-session
+      // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: privateAcpChildEnv,
+        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
         onUpdateRelaunch,
+        replaceProcess:
+          !isAcpMode &&
+          argv.inputFormat !== InputFormat.STREAM_JSON &&
+          !argv.promptInteractive &&
+          !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+          argv.jsonFd === undefined &&
+          Boolean(argv.prompt),
       });
     }
   }
@@ -972,6 +1001,7 @@ export async function main() {
       argv.extensions,
       // Pass separated hooks for proper source attribution
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
@@ -1007,7 +1037,7 @@ export async function main() {
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
-    if (settingsWatcher) {
+    if (settingsWatcher && !config.getShellExecutionSandbox?.()) {
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,
@@ -1031,7 +1061,9 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
-      isBareMode(argv.bare) || config.isSafeMode()
+      isBareMode(argv.bare) ||
+      config.isSafeMode() ||
+      config.getShellExecutionSandbox?.()
         ? undefined
         : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
     extensionFileWatcher?.startWatching();
@@ -1117,6 +1149,10 @@ export async function main() {
       } catch {
         // Best-effort — don't block shutdown
       }
+    });
+
+    registerCleanup(() => config.shutdownExecutionEnvironments(), {
+      first: true,
     });
 
     // Register cleanup for MCP clients as early as possible
@@ -1228,6 +1264,7 @@ export async function main() {
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.
+        prepareFileWatchersForProcessExit();
         await runExitCleanup();
       }
       process.exit(0);
@@ -1273,6 +1310,12 @@ export async function main() {
     profileCheckpoint('before_render');
 
     if (config.isInteractive()) {
+      // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      const interruptedWorkflowsNotice =
+        await getInterruptedWorkflowRunsNotice(config);
+      if (interruptedWorkflowsNotice) {
+        startupWarnings.push(interruptedWorkflowsNotice);
+      }
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
       // runNonInteractive's main/drain loops. In TUI mode the same call
@@ -1313,7 +1356,12 @@ export async function main() {
       const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      const selection = selectTuiRenderer();
+      const selection = selectTuiRenderer(
+        undefined,
+        undefined,
+        process.env,
+        config.getScreenReader(),
+      );
       if (selection.renderer === 'opentui') {
         try {
           const { startOpenTuiUI } = await import(

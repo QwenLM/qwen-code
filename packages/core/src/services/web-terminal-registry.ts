@@ -48,6 +48,7 @@ export interface CreateWebTerminalOptions {
   terminalId?: string;
   workspaceCwd: string;
   env?: Readonly<NodeJS.ProcessEnv>;
+  command?: { file: string; args: string[] };
 }
 
 export interface CreateWebTerminalResult {
@@ -246,7 +247,8 @@ export class WebTerminalRegistry {
     const ptyImpl = ptyLoad.impl;
 
     const env = { ...(options.env ?? process.env) };
-    const { file, args } = resolveWebTerminalShell(process.platform, env);
+    const { file, args } =
+      options.command ?? resolveWebTerminalShell(process.platform, env);
     delete env['NO_COLOR'];
     delete env['FORCE_COLOR'];
     delete env['npm_config_prefix'];

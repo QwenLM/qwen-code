@@ -62,6 +62,7 @@ import {
   parseSessionSource,
   summarizeReplay,
 } from '@qwen-code/acp-bridge';
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -1909,6 +1910,17 @@ export function registerSessionRoutes(
             safeBody(req)['rewindFiles'] !== false) ||
           (options.cwdBound === 'sync-output-language' &&
             safeBody(req)['syncOutputLanguage'] === true);
+        if (
+          runtime.routeFileSystemFactory.sshWorkspace &&
+          cwdBound &&
+          route !== 'POST /session/:id/continue'
+        ) {
+          res.status(501).json({
+            code: 'ssh_workspace_operation_unsupported',
+            error: 'This operation is not supported for SSH workspaces.',
+          });
+          return;
+        }
         if (standalone && (options.promptAdmission || cwdBound)) {
           const service = deps.standaloneSessionService;
           if (!service) {
@@ -2834,6 +2846,17 @@ export function registerSessionRoutes(
     const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
     if (resolvedRuntime === undefined) return;
     const { runtime, workspaceCwd } = resolvedRuntime;
+    if (
+      runtime.routeFileSystemFactory.sshWorkspace &&
+      (body['branch'] != null || body['worktree'] != null)
+    ) {
+      res.status(501).json({
+        code: 'ssh_workspace_operation_unsupported',
+        error:
+          'Create branches and worktrees through the remote agent or SSH terminal.',
+      });
+      return;
+    }
     if (runtime.provenance === 'live-conversation') {
       res.status(400).json({
         error:
@@ -6617,18 +6640,20 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const action = safeBody(req)['action'];
+        const body = safeBody(req);
+        const action = body['action'];
         if (
           action !== 'pause' &&
           action !== 'resume' &&
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           res.status(400).json({
             error:
-              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           });
           return;
         }
@@ -6646,6 +6671,7 @@ export function registerSessionRoutes(
               taskId,
               action,
               clientId !== undefined ? { clientId } : undefined,
+              readServeWorkflowActionInput(body),
             ),
           );
       },

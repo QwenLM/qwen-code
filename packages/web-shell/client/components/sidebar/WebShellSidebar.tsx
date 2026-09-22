@@ -100,7 +100,7 @@ import {
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
-import { isLocalDaemon } from '../../config/daemon';
+import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
@@ -2649,9 +2649,11 @@ export function WebShellSidebar({
 
   const copyWorkspacePath = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
-      void writeClipboardText(candidate.cwd).catch((error: unknown) => {
-        onError(error, t('sidebar.copyWorkspacePathFailed'));
-      });
+      void writeClipboardText(candidate.ssh?.directory ?? candidate.cwd).catch(
+        (error: unknown) => {
+          onError(error, t('sidebar.copyWorkspacePathFailed'));
+        },
+      );
     },
     [onError, t],
   );
@@ -5926,6 +5928,7 @@ export function WebShellSidebar({
                     <Fragment key={ws.id}>
                       <WorkspaceSection
                         workspace={ws}
+                        remote={!isPageOriginDaemon(workspace.baseUrl)}
                         renderHeader={
                           lockedWorkspaceCwd && lockedWorkspaceOptions?.render
                             ? (expanded) =>
@@ -6101,7 +6104,10 @@ export function WebShellSidebar({
                                         copyPath: () => copyWorkspacePath(ws),
                                       }
                                     : {}),
-                                  ...(localOpenEnabled && ws.trusted && realPath
+                                  ...(localOpenEnabled &&
+                                  ws.trusted &&
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openFolder: () => {
                                           void openWorkspaceFolderLocally(
@@ -6112,7 +6118,8 @@ export function WebShellSidebar({
                                     : {}),
                                   ...(localTerminalEnabled &&
                                   ws.trusted &&
-                                  realPath
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openTerminal: () => {
                                           void openWorkspaceTerminalLocally(
@@ -6131,6 +6138,7 @@ export function WebShellSidebar({
                                   // branch the composer never shows the armed
                                   // intent and the daemon rejects the session.
                                   ...(ws.trusted &&
+                                  !ws.ssh &&
                                   onNewWorktreeSession &&
                                   gitBranch
                                     ? {
@@ -6403,12 +6411,15 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {footerItems.has('localFiles') && (
-                <LocalFilesControl
-                  triggerClassName={styles.collapseButton}
-                  workspaces={workspaces}
-                />
-              )}
+              {footerItems.has('localFiles') &&
+                // The browser-local bridge is only offered when the connected
+                // daemon is the page's own origin (see isPageOriginDaemon).
+                isPageOriginDaemon(workspace.baseUrl) && (
+                  <LocalFilesControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                  />
+                )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}
