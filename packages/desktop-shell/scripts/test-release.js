@@ -874,17 +874,25 @@ function testBootstrapBridgeConfiguration() {
     path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
     'utf8',
   );
+  // One class shared by both parsers, and wide enough for any Rust identifier.
+  // If the two drift, or the class is narrower than the names it parses, a
+  // command is dropped from `listed` and `registered` identically: deepEqual
+  // still passes and the grant loop below never demands its capability, so a
+  // command that is registered but ungranted ships green and is only denied at
+  // runtime. Both parses stay bounded to the declaration slices, so the wide
+  // class cannot pick up unrelated identifiers elsewhere in the file.
+  const COMMAND_NAME = '[A-Za-z0-9_]+';
   const commandsStart = build.indexOf('const COMMANDS');
   const listed = [
     ...build
       .slice(commandsStart, build.indexOf('];', commandsStart))
-      .matchAll(/"([a-z_]+)"/g),
+      .matchAll(new RegExp(`"(${COMMAND_NAME})"`, 'g')),
   ].map(([, command]) => command);
   const handlerStart = main.indexOf('generate_handler![');
   const registered = [
     ...main
       .slice(handlerStart, main.indexOf('])', handlerStart))
-      .matchAll(/\b([a-z_]+),/g),
+      .matchAll(new RegExp(`\\b(${COMMAND_NAME}),`, 'g')),
   ].map(([, command]) => command);
   assert.deepEqual(
     [...listed].sort(),
@@ -947,6 +955,27 @@ function testZoomHotkeyScript() {
   // Simulating the constant proves nothing if the webview never receives it, so
   // pin the injection the same way the titlebar script is pinned above.
   assert.match(main, /initialization_script\(ZOOM_HOTKEY_SCRIPT\)/);
+  // Pinning only the injection would leave the persisted factor free to go
+  // unapplied: both application sites discard their Result via `let _ =`, so
+  // dropping either - or re-applying on Started, before the document exists -
+  // ships green with no runtime error, and the README's "the chosen factor is
+  // restored on the next launch" quietly stops being true.
+  assert.match(main, /\.on_page_load\(/);
+  assert.match(
+    main,
+    /PageLoadEvent::Finished/,
+    'Zoom must be re-applied after the document finishes loading.',
+  );
+  assert.match(
+    main,
+    /webview\.set_zoom\(state\.settings\.zoom\(\)\.unwrap_or\(DEFAULT_ZOOM\)\)/,
+    'on_page_load must apply the persisted factor to the webview.',
+  );
+  assert.match(
+    main,
+    /let _ = window\.set_zoom\(zoom\);/,
+    'Startup must apply the persisted factor to the first document.',
+  );
 
   const listeners = [];
   const invoked = [];
@@ -1070,9 +1099,15 @@ function testZoomHotkeyScript() {
   for (let event = 0; event < 30; event += 1) {
     dispatch('wheel', { ctrlKey: true, deltaY: -2 });
   }
-  assert.ok(
-    invoked.length - burst <= 2,
-    `A 30-event pinch burst must not emit one zoom step per event, got ${
+  // Exact, not merely bounded from above. An upper bound alone passes both when
+  // the threshold is lowered - a third of a mouse notch then buys a full step,
+  // which is the clamp-sweeping outcome this comment says the accumulator
+  // prevents - and when it is raised past the burst total, where the pinch path
+  // is simply dead and emits nothing.
+  assert.equal(
+    invoked.length - burst,
+    1,
+    `A 30-event pinch burst (-60) must emit exactly one zoom step, got ${
       invoked.length - burst
     }.`,
   );
@@ -1092,6 +1127,32 @@ function testZoomHotkeyScript() {
     'A horizontal swipe carries no zoom: it and its scroll must pass through.',
   );
   assert.equal(invoked.length, afterBurst);
+
+  // The other side of the threshold, which is what pins it from below: a burst
+  // that stops one event short must buy nothing at all. It is already owned
+  // though - preventDefault has cancelled its scroll on every event - so it
+  // must stop propagating too, or the page's wheel consumers read a scroll that
+  // cannot happen once per sub-threshold event while no zoom is emitted.
+  const subThreshold = invoked.length;
+  for (let event = 0; event < 29; event += 1) {
+    assert.equal(
+      dispatch('wheel', { ctrlKey: true, deltaY: -2 }),
+      true,
+      'An owned sub-threshold pinch event must still cancel the native scroll.',
+    );
+  }
+  assert.equal(
+    invoked.length,
+    subThreshold,
+    `A sub-threshold burst (-58) must not zoom, got ${
+      invoked.length - subThreshold
+    }.`,
+  );
+  assert.equal(
+    stopped,
+    true,
+    'An owned sub-threshold pinch must stop propagating to the page wheel consumers.',
+  );
 }
 
 function testResolveLogRoot() {

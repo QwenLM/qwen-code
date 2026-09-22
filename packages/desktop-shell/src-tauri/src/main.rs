@@ -81,14 +81,18 @@ const ZOOM_HOTKEY_SCRIPT: &str = r#"
       // A horizontal swipe carries no deltaY: leave it and its scroll alone.
       if (event.deltaY === 0) return;
       wheelDelta += event.deltaY;
+      // The gesture is ours from its first owned event, not only from the one
+      // that commits a step. preventDefault just cancels the native scroll, so
+      // without this the page's own wheel consumers still read the pinch - and
+      // every sub-threshold accumulation event inside it - as a scroll that
+      // provably will not happen: they drop the transcript selection and
+      // anchor, and page older/newer history in. Both unowned early returns
+      // sit above this, so a gesture the shell does not zoom on keeps
+      // propagating untouched.
       event.preventDefault();
+      event.stopPropagation();
       if (Math.abs(wheelDelta) < WHEEL_ZOOM_THRESHOLD) return;
       send(wheelDelta < 0 ? 'in' : 'out');
-      // This notch is ours now. preventDefault only cancels the native scroll,
-      // so without this the page's own wheel consumers still read the pinch as
-      // a scroll that just provably will not happen: they drop the transcript
-      // selection and anchor, and page older/newer history in.
-      event.stopPropagation();
       wheelDelta = 0;
     },
     { capture: true, passive: false },
