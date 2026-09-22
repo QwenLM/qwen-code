@@ -13,6 +13,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
         <h2.version>2.3.232</h2.version>
+        <jackson.version>2.20.0</jackson.version>
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
         <junit5.version>5.14.1</junit5.version>
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
@@ -34,6 +35,12 @@
     </dependencyManagement>
 
     <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
