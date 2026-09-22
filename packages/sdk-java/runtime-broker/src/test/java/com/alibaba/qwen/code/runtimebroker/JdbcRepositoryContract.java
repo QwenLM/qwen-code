@@ -361,6 +361,22 @@ final class JdbcRepositoryContract {
         typedReference.put("argsDigest", prefix + "-types-digest");
         typedReference.put("attempt", 1L);
         typedReference.put("note", null);
+        for (Number nonFinite : List.of(Double.NaN,
+                Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                Float.NaN, Float.POSITIVE_INFINITY,
+                Float.NEGATIVE_INFINITY)) {
+            Map<String, Object> invalidReference = new LinkedHashMap<>(
+                    typedReference);
+            invalidReference.put("attempt", nonFinite);
+            assertThrows(IllegalArgumentException.class,
+                    () -> ToolExecutionRecord.prepared(
+                            prefix + "-invalid-types-execution", typesKey,
+                            prefix + "-types-binding", 1,
+                            prefix + "-types-harness",
+                            prefix + "-types-runtime-session",
+                            prefix + "-types-turn", prefix + "-types-tool",
+                            prefix + "-types-digest", invalidReference));
+        }
         ToolExecutionRecord typedCandidate = ToolExecutionRecord.prepared(
                 prefix + "-types-execution", typesKey,
                 prefix + "-types-binding", 1, prefix + "-types-harness",

@@ -67,6 +67,10 @@ final class BrokerValues {
             }
             return Collections.unmodifiableList(copy);
         }
+        if (value instanceof Number number && !isJsonFinite(number)) {
+            throw new IllegalArgumentException(
+                    "JSON number must be finite");
+        }
         // Mutable Number subtypes (AtomicLong, adders) would alias caller
         // state into a record, so only immutable JSON scalars pass.
         if (value == null || value instanceof String || value instanceof Boolean
