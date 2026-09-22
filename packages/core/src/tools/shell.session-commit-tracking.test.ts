@@ -34,8 +34,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { Config } from '../config/config.js';
-import { ApprovalMode } from '../config/config.js';
-import type { ShellExecutionResult } from '../services/shellExecutionService.js';
+import { ApprovalMode, deriveApprovalModeConfig } from '../config/config.js';
+import {
+  getShellAbortReasonKind,
+  isSignalTermination,
+  type ShellExecutionResult,
+} from '../services/shellExecutionService.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -55,17 +59,20 @@ import {
  */
 const realExecute = vi.hoisted(() => vi.fn());
 
-vi.mock('../services/shellExecutionService.js', () => ({
+// Spread the real module and override only the executor. Re-implementing
+// `isSignalTermination` / `getShellAbortReasonKind` here duplicates twelve
+// lines from `shell.test.ts` and drifts: production reads `kind` as an *own*
+// property inside a try/catch precisely so a prototype-only or throwing
+// `kind` cannot reach the background branch, which a copy written from memory
+// does not reproduce. The seam's stated reason survives the swap — `utils/
+// getPty.ts` imports only `./errors.js` at module level and loads
+// `@lydell/node-pty` lazily inside `loadPty()`, so importing the real module
+// never pulls in a PTY.
+vi.mock('../services/shellExecutionService.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../services/shellExecutionService.js')
+  >()),
   ShellExecutionService: { execute: realExecute },
-  isSignalTermination: (signal: number | NodeJS.Signals | null) =>
-    signal !== null && signal !== 0,
-  getShellAbortReasonKind: (reason: unknown) =>
-    typeof reason === 'object' &&
-    reason !== null &&
-    'kind' in reason &&
-    reason.kind === 'background'
-      ? 'background'
-      : 'cancel',
 }));
 
 const AMEND_COMMAND = 'git commit --amend --no-edit';
@@ -113,6 +120,17 @@ describe.skipIf(process.platform === 'win32')(
       vi.clearAllMocks();
       clearSessionCommits();
       CommitAttributionService.resetInstance();
+
+      // Every repo below is real and every commit really runs, so a
+      // machine-wide hook manager (`core.hooksPath` in the host's or the
+      // system gitconfig — husky, lefthook, pre-commit) would run the host's
+      // pre-commit hook inside the temp repo and decide whether this suite
+      // passes: it expects the host's linters, exits non-zero, and every row
+      // errors in `beforeEach`. Same scrub as `memory/team-memory-sync.test.ts`;
+      // it also covers the fake executor, whose `spawnSync` passes no `env`.
+      // The identity the rows assert on is set repo-locally and survives.
+      vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+      vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
 
       realExecute.mockImplementation(
         async (
@@ -199,6 +217,7 @@ describe.skipIf(process.platform === 'win32')(
     });
 
     afterEach(() => {
+      vi.unstubAllEnvs();
       clearSessionCommits();
       CommitAttributionService.resetInstance();
       fs.rmSync(repoDir, { recursive: true, force: true });
@@ -545,6 +564,50 @@ describe.skipIf(process.platform === 'win32')(
       });
 
       expect(decision.via).not.toBe('blocked:destructive-command');
+    });
+
+    it('keeps production abort/signal helpers behind the executor-only mock', () => {
+      // The seam exists so this suite does not depend on node-pty, and it
+      // replaces `execute` only. Production reads `kind` as an *own* property
+      // inside a try/catch, precisely so a prototype-only or throwing `kind`
+      // cannot take the promote branch; a hand-rolled copy written with
+      // `'kind' in reason` returns 'background' on the input below. This row
+      // is what keeps such a copy from coming back.
+      expect(
+        getShellAbortReasonKind(Object.create({ kind: 'background' })),
+      ).toBe('cancel');
+      expect(isSignalTermination(0)).toBe(false);
+      expect(isSignalTermination('SIGTERM')).toBe(true);
+    });
+
+    it('keeps the root registry when a derived overlay changes its own mode', async () => {
+      // `deriveApprovalModeConfig` installs an own `setApprovalMode` that
+      // delegates to the prototype method, so a subagent's child-local
+      // transition cleared the *root* session's registry — against the design
+      // that such transitions stay child-local. The root session then
+      // hard-blocked an amend of its own commit, minutes old, with a reason
+      // that is false. Clearing is fail-closed, so the cost is a wrong block
+      // rather than a lifted one, but it is still the wrong answer.
+      await commitAndAssertExempt();
+
+      const realConfig = makeFakeConfig({
+        targetDir: repoDir,
+        cwd: repoDir,
+        approvalMode: ApprovalMode.AUTO,
+      });
+      vi.spyOn(realConfig, 'isTrustedFolder').mockReturnValue(true);
+
+      const overlay = deriveApprovalModeConfig(
+        realConfig,
+        realConfig.getApprovalMode(),
+      );
+      overlay.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+
+      // The transition really happened, and it stayed child-local.
+      expect(overlay.config.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+      expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
+
+      expect(amendVerdict()).toBeNull();
     });
   },
 );

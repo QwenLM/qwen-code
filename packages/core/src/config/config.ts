@@ -8410,7 +8410,14 @@ export class Config {
       // where the user re-decides how much the agent may do unattended.
       // Clearing is fail-closed. Gated on a real transition so a no-op re-set,
       // which several callers do, cannot drop registrations still in use.
-      clearSessionCommits();
+      // Root Config only, like the workflow-revision stamp above: a derived
+      // overlay's `setApprovalMode` delegates here, and a subagent flipping
+      // its own mode is child-local, not a decision about the root session's
+      // autonomy. Clearing there cost the root a false "not made by the agent
+      // in this session" block on its own commit.
+      if (!isDerivedConfig(this)) {
+        clearSessionCommits();
+      }
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
