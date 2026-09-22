@@ -157,6 +157,7 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  GroupSenderPolicy,
   ObservedChannelIdentity,
   ObservedChannelContactObservation,
   ObservedChannelContact,

@@ -1288,6 +1288,59 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
+    it('keeps group traffic on senderPolicy when groupSenderPolicy is unset', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['admin'],
+        groupPolicy: 'open',
+      });
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('admits any group member with groupSenderPolicy=open', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['admin'],
+        groupPolicy: 'open',
+        groupSenderPolicy: 'open',
+      });
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
+      );
+      expect(bridge.prompt).toHaveBeenCalled();
+
+      bridge.prompt.mockClear();
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('gates group members with allowedGroupUsers', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['admin'],
+        groupPolicy: 'open',
+        groupSenderPolicy: 'allowlist',
+        allowedGroupUsers: ['member1'],
+      });
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'member1' }),
+      );
+      expect(bridge.prompt).toHaveBeenCalled();
+
+      bridge.prompt.mockClear();
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, senderId: 'stranger' }),
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      bridge.prompt.mockClear();
+      await ch.handleInbound(envelope({ senderId: 'member1' }));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('observes a user after inbound gates pass', async () => {
       const observe = vi.fn();
       const ch = createChannel({}, { observedContacts: { observe } });
@@ -1990,8 +2043,7 @@ describe('ChannelBase', () => {
 
       await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
       const segment = ch.responseChunks[0]!.segment as
-        | { segmentId?: string }
-        | undefined;
+        { segmentId?: string } | undefined;
       expect(segment?.segmentId).toEqual(expect.any(String));
       expect(ch.responseBoundaries).toEqual([]);
       expect(order).toEqual(['input_requested', 'present']);
@@ -15479,14 +15531,11 @@ describe('ChannelBase', () => {
       expect(ch.taskEvents[0]).not.toHaveProperty('segmentId');
       expect(ch.responseChunks).toHaveLength(3);
       const firstSegment = ch.responseChunks[0]!.segment as
-        | { runId?: string; segmentId?: string }
-        | undefined;
+        { runId?: string; segmentId?: string } | undefined;
       const repeatedSegment = ch.responseChunks[1]!.segment as
-        | { segmentId?: string }
-        | undefined;
+        { segmentId?: string } | undefined;
       const secondSegment = ch.responseChunks[2]!.segment as
-        | { segmentId?: string }
-        | undefined;
+        { segmentId?: string } | undefined;
       expect(firstSegment).toMatchObject({
         runId: expect.any(String),
         segmentId: expect.any(String),

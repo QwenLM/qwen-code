@@ -673,12 +673,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
               conversationId.trim().length > 0 &&
               group.requireMention === false,
           )
-          .map(
-            ([conversationId]): DwsImSource => ({
-              kind: 'group',
-              conversationId,
-            }),
-          );
+          .map(([conversationId]): DwsImSource => ({
+            kind: 'group',
+            conversationId,
+          }));
     const imSources: DwsImSource[] =
       config.groupPolicy === 'disabled'
         ? []
@@ -1406,8 +1404,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     if (!this.dmGate.check(envelope).allowed) return 'denied';
     if (isGroup && this.config.groupPolicy === 'pairing') return 'allowed';
-    if (this.gate.isAllowed(delivery.senderId)) return 'allowed';
-    return this.config.senderPolicy === 'pairing' ? 'unknown' : 'denied';
+    const senderGate = this.senderGateFor(isGroup);
+    if (senderGate.isAllowed(delivery.senderId)) return 'allowed';
+    return senderGate === this.gate && this.config.senderPolicy === 'pairing'
+      ? 'unknown'
+      : 'denied';
   }
 
   private deferImDelivery(

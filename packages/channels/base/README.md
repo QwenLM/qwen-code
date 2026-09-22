@@ -82,7 +82,8 @@ In daemon-managed mode, every named channel's `cwd` must resolve to exactly one 
 Inbound:  Platform message
             → Envelope (with attachments)
             → GroupGate (group policy + mention gating)
-            → SenderGate (allowlist / pairing / open)
+            → SenderGate (allowlist / pairing / open; group traffic follows
+              groupSenderPolicy when it is decoupled from senderPolicy)
             → Slash commands (/clear, /help, /status)
             → SessionRouter (resolve or create agent session)
             → Resolve attachments (images → bridge, files → prompt text)
@@ -103,7 +104,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `ChannelBase`   | Abstract base class — extend this to build a channel adapter                         |
 | `AcpBridge`     | Current standalone `qwen channel start` bridge implementation over `qwen-code --acp` |
 | `SessionRouter` | Maps senders to agent sessions with configurable scoping                             |
-| `SenderGate`    | DM access control (allowlist / pairing / open)                                       |
+| `SenderGate`    | Sender access control (allowlist / pairing / open), one axis per side                |
 | `GroupGate`     | Group chat policy and @mention gating                                                |
 | `PairingStore`  | Pairing code generation, approval, and allowlist persistence                         |
 

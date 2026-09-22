@@ -37,8 +37,7 @@ export interface ChannelSettingsMutationOptions {
   expectedRevision: string;
 }
 
-export interface ChannelSettingsUpsertOptions
-  extends ChannelSettingsMutationOptions {
+export interface ChannelSettingsUpsertOptions extends ChannelSettingsMutationOptions {
   config: Record<string, unknown> & { type: string };
   secrets?: Record<string, ChannelSecretUpdate>;
 }
@@ -144,6 +143,7 @@ function assertSharedField(
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
+    groupSenderPolicy: new Set(['inherit', 'open', 'allowlist']),
     sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
   };
@@ -159,7 +159,7 @@ function assertSharedField(
     }
     return true;
   }
-  if (key === 'allowedUsers') {
+  if (key === 'allowedUsers' || key === 'allowedGroupUsers') {
     if (
       !Array.isArray(value) ||
       value.some((item) => typeof item !== 'string')
@@ -635,11 +635,7 @@ export class WorkspaceChannelSettingsStore {
       multiSession: nextConfig['multiSession'] === true,
       sessionScope:
         (nextConfig['sessionScope'] as
-          | 'user'
-          | 'thread'
-          | 'chat_thread'
-          | 'single'
-          | undefined) ??
+          'user' | 'thread' | 'chat_thread' | 'single' | undefined) ??
         plugin.defaultSessionScope ??
         'user',
       groupHistoryLimit: nextConfig['groupHistoryLimit'],

@@ -209,11 +209,7 @@ interface ChannelMemoryRecallCacheEntry {
 
 export type ChannelMemoryRecallCacheStatus = 'hit' | 'miss' | 'bypass';
 export type ChannelMemoryRecallResult =
-  | 'selected'
-  | 'empty'
-  | 'stale'
-  | 'read_error'
-  | 'revision_unstable';
+  'selected' | 'empty' | 'stale' | 'read_error' | 'revision_unstable';
 
 export interface ChannelMemoryRecallObservation {
   durationMs: number;
@@ -460,6 +456,8 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
+  /** Sender axis for group traffic; `undefined` means it follows `gate`. */
+  protected groupSenderGate?: SenderGate;
   protected router: SessionRouter;
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
@@ -1423,6 +1421,17 @@ export abstract class ChannelBase {
       config.allowedUsers,
       pairingStore,
     );
+    // Undefined keeps the group axis on `senderPolicy`, which is the historical
+    // behavior. A decoupled axis gets its own gate and its own member list, and
+    // never pairs: an approval would also unlock direct messages.
+    this.groupSenderGate =
+      config.groupSenderPolicy === 'open' ||
+      config.groupSenderPolicy === 'allowlist'
+        ? new SenderGate(
+            config.groupSenderPolicy,
+            config.allowedGroupUsers ?? [],
+          )
+        : undefined;
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
@@ -3499,8 +3508,7 @@ export abstract class ChannelBase {
 
   private denialResponse(pending: PendingPermission): {
     outcome:
-      | { outcome: 'selected'; optionId: string }
-      | { outcome: 'cancelled' };
+      { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' };
   } {
     const option = this.denialOption(pending);
     if (option) {
@@ -4942,7 +4950,9 @@ export abstract class ChannelBase {
       this.dmGate.check(envelope).allowed &&
       (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
         ? true
-        : this.gate.isAllowed(normalizedTarget.senderId)) &&
+        : this.senderGateFor(envelope.isGroup).isAllowed(
+            normalizedTarget.senderId,
+          )) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -6051,7 +6061,7 @@ export abstract class ChannelBase {
     const senderId = truncateGroupHistoryField(envelope.senderId);
     if (
       this.config.groupPolicy !== 'pairing' &&
-      !this.gate.isAllowed(senderId)
+      !this.senderGateFor(true).isAllowed(senderId)
     ) {
       return;
     }
@@ -6144,7 +6154,9 @@ export abstract class ChannelBase {
     const lines =
       this.config.groupPolicy === 'pairing'
         ? entries
-        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+        : entries.filter((entry) =>
+            this.senderGateFor(true).isAllowed(entry.senderId),
+          );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6159,6 +6171,15 @@ export abstract class ChannelBase {
     });
 
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
+  }
+
+  /**
+   * Sender gate that applies to one message axis. Group traffic follows
+   * `groupSenderPolicy` once it is decoupled; otherwise both axes share one
+   * gate, which is the historical behavior.
+   */
+  protected senderGateFor(isGroup: boolean): SenderGate {
+    return isGroup && this.groupSenderGate ? this.groupSenderGate : this.gate;
   }
 
   protected preflightInbound(
@@ -6213,16 +6234,19 @@ export abstract class ChannelBase {
       return true;
     }
 
+    const senderGate = this.senderGateFor(envelope.isGroup);
+
     if (
       options.deferPairingRequests === true &&
+      senderGate === this.gate &&
       this.config.senderPolicy === 'pairing' &&
-      !this.gate.isAllowed(envelope.senderId)
+      !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
       return true;
     }
 
-    const result = this.gate.check(envelope.senderId, envelope.senderName);
+    const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
@@ -6392,8 +6416,7 @@ export abstract class ChannelBase {
    * not reverted to raw IDs by the next initial write.
    */
   protected persistedObservedContacts():
-    | ObservedChannelContactGraph
-    | undefined {
+    ObservedChannelContactGraph | undefined {
     const list = this.observedContacts?.list;
     if (!list) return undefined;
     try {

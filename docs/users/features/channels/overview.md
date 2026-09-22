@@ -69,6 +69,8 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                               |
 | `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                             |
 | `dmPolicy`          | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
+| `groupSenderPolicy` | No               | Who may use the bot inside an admitted group: `inherit` (default, follows `senderPolicy`), `open`, or `allowlist` (checked against `allowedGroupUsers`)                                                                 |
+| `allowedGroupUsers` | No               | Group-member IDs allowed when `groupSenderPolicy: "allowlist"`. Separate from `allowedUsers`                                                                                                                            |
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
 | `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
@@ -80,6 +82,18 @@ Controls who can interact with the bot:
 - **`allowlist`** (default) — Only users listed in `allowedUsers` can send messages. Others are silently ignored.
 - **`pairing`** — Unknown senders receive a pairing code. The bot operator approves them via CLI, and they're added to a persistent allowlist. Users in `allowedUsers` skip pairing entirely. See [DM Pairing](#dm-pairing) below.
 - **`open`** — Anyone can send messages. Use with caution.
+
+### Group Sender Policy
+
+`senderPolicy` also gates who may speak to the bot inside a group, so a group that `groupPolicy` admits still drops messages from users outside the allowlist. Set `groupSenderPolicy` to decouple the two axes:
+
+- **`inherit`** (default) — group traffic follows `senderPolicy`, the historical behavior.
+- **`open`** — any member of an admitted group may use the bot, while `senderPolicy` keeps governing direct messages. This is the usual choice for a team bot that answers in groups but only for a few people in private chat.
+- **`allowlist`** — group traffic is checked against `allowedGroupUsers`, a list separate from `allowedUsers`.
+
+`pairing` is deliberately absent from this axis: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
+
+The Web Shell channel editor does not expose `groupSenderPolicy` or `allowedGroupUsers` yet, and saving a channel there rewrites its config from the rendered fields — set both keys in `settings.json` until the editor learns them.
 
 ### Session Scope
 

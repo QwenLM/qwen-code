@@ -7,6 +7,13 @@ export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+/**
+ * Who may use the bot inside a group the channel already admitted.
+ * `inherit` keeps the historical behavior of following `senderPolicy`.
+ * `pairing` is deliberately absent: pairing approvals are stored per user and
+ * would also unlock direct messages, which is the coupling this axis removes.
+ */
+export type GroupSenderPolicy = 'inherit' | 'open' | 'allowlist';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
@@ -63,6 +70,10 @@ export interface ChannelConfig {
   outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
   dmPolicy: DmPolicy; // default: "open"
+  /** Who may use the bot inside an admitted group. Default: "inherit". */
+  groupSenderPolicy?: GroupSenderPolicy;
+  /** Member allowlist used when `groupSenderPolicy` is `allowlist`. */
+  allowedGroupUsers?: string[];
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
@@ -194,14 +205,10 @@ export interface ChannelPromptOwner {
 }
 
 export type UserInputPresentationResult =
-  | { kind: 'presented' }
-  | { kind: 'handled' }
-  | { kind: 'unsupported' };
+  { kind: 'presented' } | { kind: 'handled' } | { kind: 'unsupported' };
 
 export type UserInputSettlementReason =
-  | 'resolved_outside_presenter'
-  | 'cancelled'
-  | 'run_cancelled';
+  'resolved_outside_presenter' | 'cancelled' | 'run_cancelled';
 
 export type ChannelUserInputResponse = RequestPermissionResponse & {
   answers?: Record<string, string>;
@@ -427,8 +434,7 @@ interface ChannelConfigFieldDescriptorBase {
   description?: string;
 }
 
-export interface ChannelConfigValueFieldDescriptor
-  extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigValueFieldDescriptor extends ChannelConfigFieldDescriptorBase {
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
@@ -437,8 +443,7 @@ export interface ChannelConfigValueFieldDescriptor
   properties?: never;
 }
 
-export interface ChannelConfigPlainValueFieldDescriptor
-  extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigPlainValueFieldDescriptor extends ChannelConfigFieldDescriptorBase {
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
@@ -446,8 +451,7 @@ export interface ChannelConfigPlainValueFieldDescriptor
   properties?: never;
 }
 
-export interface ChannelConfigEnumFieldDescriptor
-  extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigEnumFieldDescriptor extends ChannelConfigFieldDescriptorBase {
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
@@ -456,8 +460,7 @@ export interface ChannelConfigEnumFieldDescriptor
   properties?: never;
 }
 
-export interface ChannelConfigNumberFieldDescriptor
-  extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigNumberFieldDescriptor extends ChannelConfigFieldDescriptorBase {
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
@@ -466,8 +469,7 @@ export interface ChannelConfigNumberFieldDescriptor
   properties?: never;
 }
 
-export interface ChannelConfigObjectFieldDescriptor
-  extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigObjectFieldDescriptor extends ChannelConfigFieldDescriptorBase {
   kind: 'object';
   required?: false;
   envResolvable?: never;

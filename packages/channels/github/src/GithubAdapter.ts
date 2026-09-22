@@ -313,11 +313,7 @@ interface PendingFinalDelivery {
 }
 
 type InboundTaskState =
-  | 'accepted'
-  | 'running'
-  | 'reply_pending'
-  | 'failed'
-  | 'cancelled';
+  'accepted' | 'running' | 'reply_pending' | 'failed' | 'cancelled';
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
 
@@ -1351,7 +1347,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // Approved paired groups bypass the sender gate in preflight, so the
       // directed lane must mirror that or follow-ups fail mention gating.
       const allowed =
-        this.gate.isAllowed(senderId) ||
+        this.senderGateFor(true).isAllowed(senderId) ||
         (directed &&
           this.config.groupPolicy === 'pairing' &&
           this.groupGate.isGroupApproved(ctx.chatId));
@@ -1458,7 +1454,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        this.gate.isAllowed(sender)
+        this.senderGateFor(true).isAllowed(sender)
       );
     });
     for (const comment of newComments) {
