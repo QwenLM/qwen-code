@@ -8,12 +8,22 @@ import {
   APPROVAL_MODES,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_TRANSCRIPT_MAX_LIMIT,
-  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
-  SessionTranscriptPageTooLargeError,
   type ApprovalMode,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
+import {
+  parseReplayMode,
+  parseTranscriptCursorQuery,
+  parseTranscriptDirectionQuery,
+  parseTranscriptLimitQuery,
+  parseTranscriptRecordBoundaryQuery,
+  parseTranscriptSnapshotQuery,
+  parseTranscriptStartQuery,
+  parseTranscriptTurnAnchorQuery,
+  serializeWorkspaceTranscriptResponse,
+  workspaceTranscriptCursorExceedsLimit,
+} from './transcript-query-validation.js';
 import type {
   CreateStandaloneSessionRequest,
   CreatedStandaloneSession,
@@ -23,6 +33,7 @@ import type {
 } from '../conversations/standalone-session-service.js';
 import { omitSkillDetailsFromReplayArrays } from '../skill-details-redaction.js';
 import { redactWorkflowsFromReplayArrays } from '../workflow-session-gate.js';
+import { summarizeReplay } from '@qwen-code/acp-bridge';
 import type { SendBridgeError } from '../server/error-response.js';
 import { InvalidCursorError } from '../server/session-list.js';
 import {
@@ -32,162 +43,6 @@ import {
 import { parseClientIdHeader, safeBody } from '../server/request-helpers.js';
 
 const MAX_PAGE_SIZE = 100;
-
-// Chosen cap for one serialized transcript response, kept proportional to
-// the core expanded-page ceiling so the two cannot drift arbitrarily.
-const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
-  2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
-const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
-
-function parseTranscriptLimitQuery(
-  rawLimit: unknown,
-  res: Response,
-): number | undefined | null {
-  if (rawLimit === undefined) return undefined;
-  if (typeof rawLimit !== 'string' || rawLimit.trim() === '') {
-    res.status(400).json({
-      error: '`limit` must be a positive integer',
-      code: 'invalid_transcript_limit',
-    });
-    return null;
-  }
-  if (!/^\d+$/.test(rawLimit)) {
-    res.status(400).json({
-      error: '`limit` must be a positive integer',
-      code: 'invalid_transcript_limit',
-    });
-    return null;
-  }
-  const limit = Number(rawLimit);
-  if (
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > SESSION_TRANSCRIPT_MAX_LIMIT
-  ) {
-    res.status(400).json({
-      error: `\`limit\` must be between 1 and ${SESSION_TRANSCRIPT_MAX_LIMIT}`,
-      code: 'invalid_transcript_limit',
-      maxLimit: SESSION_TRANSCRIPT_MAX_LIMIT,
-    });
-    return null;
-  }
-  return limit;
-}
-
-function parseTranscriptCursorQuery(
-  rawCursor: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawCursor === undefined) return undefined;
-  if (typeof rawCursor !== 'string' || rawCursor.trim() === '') {
-    res.status(400).json({
-      error: '`cursor` must be a non-empty string',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return rawCursor;
-}
-
-function parseTranscriptSnapshotQuery(
-  rawSnapshot: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawSnapshot === undefined) return undefined;
-  if (typeof rawSnapshot !== 'string' || rawSnapshot.trim() === '') {
-    res.status(400).json({
-      error: '`snapshot` must be a non-empty string',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return rawSnapshot;
-}
-
-function parseTranscriptStartQuery(
-  rawStart: unknown,
-  res: Response,
-): number | undefined | null {
-  if (rawStart === undefined) return undefined;
-  if (typeof rawStart !== 'string' || !/^\d+$/.test(rawStart)) {
-    res.status(400).json({
-      error: '`start` must be a non-negative integer',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  const start = Number(rawStart);
-  if (!Number.isSafeInteger(start)) {
-    res.status(400).json({
-      error: '`start` must be a non-negative safe integer',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return start;
-}
-
-function parseTranscriptRecordBoundaryQuery(
-  rawBoundary: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawBoundary === undefined) return undefined;
-  if (
-    typeof rawBoundary !== 'string' ||
-    rawBoundary.trim() === '' ||
-    rawBoundary.length > 200
-  ) {
-    res.status(400).json({
-      error: '`beforeRecordId` must be a non-empty record id',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return rawBoundary;
-}
-
-function parseTranscriptTurnAnchorQuery(
-  rawAnchor: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawAnchor === undefined) return undefined;
-  if (
-    typeof rawAnchor !== 'string' ||
-    rawAnchor.trim() === '' ||
-    rawAnchor.length > 200
-  ) {
-    res.status(400).json({
-      error: '`atRecordId` must be a non-empty record id',
-      code: 'invalid_turn_anchor',
-    });
-    return null;
-  }
-  return rawAnchor;
-}
-
-function workspaceTranscriptCursorExceedsLimit(
-  cursor: string,
-  maxBytes = WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
-): boolean {
-  return Buffer.byteLength(cursor) > maxBytes;
-}
-
-function serializeWorkspaceTranscriptResponse(
-  result: unknown,
-  sessionId: string,
-  maxBytes = WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES,
-): string {
-  const serialized = JSON.stringify(result);
-  const responseBytes = Buffer.byteLength(serialized);
-  if (responseBytes > maxBytes) {
-    throw new SessionTranscriptPageTooLargeError(
-      sessionId,
-      responseBytes,
-      maxBytes,
-    );
-  }
-  return serialized;
-}
 
 export interface RegisterStandaloneSessionRoutesDeps {
   service: StandaloneSessionService;
@@ -203,6 +58,21 @@ function sendInvalidRequest(res: Response, message: string): void {
     errorKind: 'invalid_request',
     retryable: false,
   });
+}
+
+// Every query-taking route in this file enforces an exact key set so a
+// misspelled parameter cannot silently degrade into a default page.
+function requireExactQuery(
+  req: Request,
+  res: Response,
+  allowed: readonly string[],
+): boolean {
+  const allowedKeys = new Set(allowed);
+  if (Object.keys(req.query).every((key) => allowedKeys.has(key))) {
+    return true;
+  }
+  sendInvalidRequest(res, 'The request query contains unknown fields.');
+  return false;
 }
 
 function objectBody(
@@ -696,6 +566,7 @@ export function registerStandaloneSessionRoutes(
 
   app.get('/standalone/sessions/:id/turn-index', (req, res) =>
     handle('GET /standalone/sessions/:id/turn-index', req, res, async () => {
+      if (!requireExactQuery(req, res, ['limit', 'snapshot', 'start'])) return;
       const limit = parseTranscriptLimitQuery(req.query['limit'], res);
       if (limit === null) return;
       const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
@@ -734,10 +605,34 @@ export function registerStandaloneSessionRoutes(
 
   app.get('/standalone/sessions/:id/transcript', (req, res) =>
     handle('GET /standalone/sessions/:id/transcript', req, res, async () => {
+      if (
+        !requireExactQuery(req, res, [
+          'compactedReplayMode',
+          'limit',
+          'cursor',
+          'direction',
+          'beforeRecordId',
+          'atRecordId',
+          'snapshot',
+        ])
+      ) {
+        return;
+      }
+      const compactedReplayMode = parseReplayMode(
+        req.query,
+        res,
+        'compactedReplayMode',
+      );
+      if (compactedReplayMode === null) return;
       const limit = parseTranscriptLimitQuery(req.query['limit'], res);
       if (limit === null) return;
       const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
       if (cursor === null) return;
+      const direction = parseTranscriptDirectionQuery(
+        req.query['direction'],
+        res,
+      );
+      if (direction === null) return;
       const beforeRecordId = parseTranscriptRecordBoundaryQuery(
         req.query['beforeRecordId'],
         res,
@@ -751,6 +646,11 @@ export function registerStandaloneSessionRoutes(
       const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
       if (snapshot === null) return;
       if (
+        (direction !== undefined &&
+          (cursor !== undefined ||
+            beforeRecordId !== undefined ||
+            atRecordId !== undefined ||
+            snapshot !== undefined)) ||
         (cursor !== undefined &&
           (beforeRecordId !== undefined ||
             atRecordId !== undefined ||
@@ -784,16 +684,24 @@ export function registerStandaloneSessionRoutes(
         {
           ...(limit !== undefined ? { limit } : {}),
           ...(cursor !== undefined ? { cursor } : {}),
+          ...(direction !== undefined ? { direction } : {}),
           ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
           ...(atRecordId !== undefined ? { atRecordId } : {}),
           ...(snapshot !== undefined ? { snapshot } : {}),
         },
       );
+      // Match the workspace-qualified transcript route: a `summary` request
+      // receives the summary projection, not the full replayed events.
+      const events =
+        compactedReplayMode === 'summary'
+          ? summarizeReplay(page.events ?? [])
+          : (page.events ?? []);
+      const result = { ...page, events };
       res
         .status(200)
         .set('Cache-Control', 'no-store')
         .type('application/json')
-        .send(serializeWorkspaceTranscriptResponse(page, page.sessionId));
+        .send(serializeWorkspaceTranscriptResponse(result, result.sessionId));
     }),
   );
 

@@ -12,12 +12,19 @@ import type {
   DaemonSession,
   DaemonSessionArchiveState,
   DaemonSessionSummary,
+  DaemonSessionTranscriptPage,
+  DaemonSessionTurnIndexPage,
   DaemonWorkspaceProvidersStatus,
 } from './types.js';
 
 export const STANDALONE_SESSIONS_CAPABILITY = 'standalone_sessions_v1';
 export const STANDALONE_SESSION_OPTIONS_CAPABILITY =
   'standalone_session_options_v1';
+// Dedicated tag for the turn-index/transcript paging routes: the route
+// contract is newer than `standalone_sessions_v1`, and an older daemon 404s
+// on these paths — preflight so the miss is a loud capability error.
+export const STANDALONE_SESSION_TRANSCRIPT_CAPABILITY =
+  'standalone_session_transcript_v1';
 
 export type DaemonStandaloneSessionOptions = Omit<
   DaemonWorkspaceProvidersStatus,
@@ -498,6 +505,54 @@ export function parseStandaloneListPage(
   for (const session of page['sessions'])
     parseStandaloneSummary(session, route);
   return page as unknown as DaemonStandaloneSessionListPage;
+}
+
+export function parseStandaloneTurnIndexPage(
+  value: unknown,
+  route: string,
+  expectedSessionId?: string,
+): DaemonSessionTurnIndexPage {
+  const page = asRecord(value, route);
+  requireString(page, 'snapshot', route);
+  if (!Array.isArray(page['turns'])) {
+    throw new DaemonStandaloneProtocolError(route, 'expected turns[]');
+  }
+  if (
+    page['totalTurns'] !== undefined &&
+    typeof page['totalTurns'] !== 'number'
+  ) {
+    throw new DaemonStandaloneProtocolError(
+      route,
+      'expected totalTurns number',
+    );
+  }
+  requireSessionId(page, route, expectedSessionId);
+  return page as unknown as DaemonSessionTurnIndexPage;
+}
+
+export function parseStandaloneTranscriptPage(
+  value: unknown,
+  route: string,
+  expectedSessionId?: string,
+): DaemonSessionTranscriptPage {
+  const page = asRecord(value, route);
+  if (!Array.isArray(page['events'])) {
+    throw new DaemonStandaloneProtocolError(route, 'expected events[]');
+  }
+  if (typeof page['hasMore'] !== 'boolean') {
+    throw new DaemonStandaloneProtocolError(route, 'expected hasMore boolean');
+  }
+  if (
+    page['nextCursor'] !== undefined &&
+    typeof page['nextCursor'] !== 'string'
+  ) {
+    throw new DaemonStandaloneProtocolError(
+      route,
+      'expected nextCursor string',
+    );
+  }
+  requireSessionId(page, route, expectedSessionId);
+  return page as unknown as DaemonSessionTranscriptPage;
 }
 
 export function parseStandaloneDirectoryResult(

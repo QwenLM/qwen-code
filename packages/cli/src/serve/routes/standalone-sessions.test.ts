@@ -9,6 +9,7 @@ import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { summarizeReplay } from '@qwen-code/acp-bridge';
 import {
   StandaloneSessionServiceError,
   type ListStandaloneSessionsOptions,
@@ -684,5 +685,104 @@ describe('standalone session routes', () => {
     expect(response.status).toBe(400);
     expect(response.body.code).toBe('invalid_transcript_cursor');
     expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('forwards standalone transcript direction to the service', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?direction=backward`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      direction: 'backward',
+    });
+  });
+
+  it('rejects an unsupported standalone transcript direction', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?direction=forward`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('rejects direction combined with another transcript anchor', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?direction=backward&cursor=cur-1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid standalone transcript compactedReplayMode', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?compactedReplayMode=condensed`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_compacted_replay_mode');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('projects compactedReplayMode=summary onto the response events', async () => {
+    const { app, service } = createHarness();
+    const events = [
+      {
+        v: 1 as const,
+        type: 'session_update' as const,
+        data: { update: { kind: 'unknown' } },
+      },
+    ] as unknown as Awaited<
+      ReturnType<typeof service.getTranscriptPage>
+    >['events'];
+    service.getTranscriptPage.mockResolvedValueOnce({
+      v: 1 as const,
+      sessionId,
+      events,
+      hasMore: false,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+    });
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?compactedReplayMode=summary`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toEqual(summarizeReplay(events));
+  });
+
+  it('rejects unknown query keys on the transcript route', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?bogus=1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown query keys on the turn-index route', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?bogus=1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.getTurnIndexPage).not.toHaveBeenCalled();
   });
 });

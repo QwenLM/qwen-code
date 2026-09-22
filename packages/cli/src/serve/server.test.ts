@@ -779,6 +779,7 @@ const EXPECTED_REGISTERED_FEATURES = [
         feature,
         'standalone_sessions_v1',
         'standalone_session_options_v1',
+        'standalone_session_transcript_v1',
       ];
     }
     return [feature];
@@ -3372,7 +3373,8 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'standalone_sessions_v1' ||
-          feature === 'standalone_session_options_v1'
+          feature === 'standalone_session_options_v1' ||
+          feature === 'standalone_session_transcript_v1'
         ) {
           expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
           expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);

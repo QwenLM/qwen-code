@@ -141,6 +141,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_export: { since: 'v1' },
   standalone_sessions_v1: { since: 'v1' },
   standalone_session_options_v1: { since: 'v1' },
+  // Dedicated standalone transcript paging surface:
+  // `GET /standalone/sessions/:id/turn-index` and
+  // `GET /standalone/sessions/:id/transcript`. New route contract = new
+  // tag — a client that preflighted only `standalone_sessions_v1` must
+  // not silently receive a surface an older daemon 404s on.
+  standalone_session_transcript_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
   session_turn_navigation: { since: 'v1' },
@@ -627,6 +633,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'standalone_session_options_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
+  [
+    'standalone_session_transcript_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
   ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],

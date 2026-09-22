@@ -894,16 +894,32 @@ export class StandaloneSessionService {
       this.options.assertRuntimeCurrent(runtime);
       await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
       return this.options.lifecycle.runSharedMany([sessionId], async () => {
+        if (await this.options.deletionJournal.hasRecord(sessionId)) {
+          throw serviceError('standalone_session_conflict', sessionId, true);
+        }
         const { storageSessionId } = await this.assertActiveStandaloneSession(
           runtime,
           sessionId,
         );
-        const page = await new SessionTranscriptReader(
-          runtime.workspaceCwd,
-          undefined,
-          runtime.sessionRuntimeBaseDir,
-        ).readTurnIndexPage(storageSessionId, options);
-        return { ...page, sessionId };
+        return runWithWorkspaceRuntimeStorage(runtime, async () => {
+          // Snapshot-less reads page over the live tail, so flush the
+          // recorder first — the bridge-backed path this route replaces
+          // does exactly that (a bare read can momentarily omit the
+          // just-completed turn because record writes are fire-and-forget).
+          if (options.snapshot === undefined) {
+            try {
+              await runtime.bridge.flushSessionTranscript?.(sessionId);
+            } catch (error) {
+              if (!(error instanceof SessionNotFoundError)) throw error;
+            }
+          }
+          const page = await new SessionTranscriptReader(
+            runtime.workspaceCwd,
+            undefined,
+            runtime.sessionRuntimeBaseDir,
+          ).readTurnIndexPage(storageSessionId, options);
+          return { ...page, sessionId };
+        });
       });
     });
   }
@@ -918,49 +934,90 @@ export class StandaloneSessionService {
       this.options.assertRuntimeCurrent(runtime);
       await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
       return this.options.lifecycle.runSharedMany([sessionId], async () => {
+        if (await this.options.deletionJournal.hasRecord(sessionId)) {
+          throw serviceError('standalone_session_conflict', sessionId, true);
+        }
         const { storageSessionId } = await this.assertActiveStandaloneSession(
           runtime,
           sessionId,
         );
-        const page = await new SessionTranscriptReader(
-          runtime.workspaceCwd,
-          undefined,
-          runtime.sessionRuntimeBaseDir,
-        ).readPage(storageSessionId, {
-          ...options,
-          maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
-        });
-        const replay = await replayTranscriptRecordPage({
-          sessionId,
-          page,
-          encodeCursor: (state: SessionTranscriptCursorState) =>
-            encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
-        });
-        return {
-          v: 1 as const,
-          sessionId,
-          events: replay.updates.map((update) =>
-            omitSkillDetailsForSdkSurface({
-              v: 1 as const,
-              type: 'session_update' as const,
-              data: update,
-            }),
-          ),
-          ...(replay.nextCursor ? { nextCursor: replay.nextCursor } : {}),
-          hasMore: replay.hasMore,
-          startTime: replay.startTime,
-          lastUpdated: replay.lastUpdated,
-          ...(replay.partial
-            ? {
-                partial: true as const,
-                replayError: replay.replayError,
+        return runWithWorkspaceRuntimeStorage(runtime, async () => {
+          if (
+            options.cursor === undefined &&
+            options.direction === 'backward'
+          ) {
+            try {
+              await runtime.bridge.flushSessionTranscript?.(sessionId);
+            } catch (error) {
+              if (!(error instanceof SessionNotFoundError)) throw error;
+            }
+          }
+          // Gate dangling-call finalization on the live-prompt state sampled
+          // before AND after the read, exactly like the workspace-qualified
+          // and ACP reference implementations: a prompt still in flight may
+          // own the tail's tool calls, and finalizing them would fabricate a
+          // failure update for a call that is still running (issue #9704).
+          const getLivePromptState = (): {
+            live: boolean;
+            activePrompt: boolean;
+          } => {
+            try {
+              return {
+                live: true,
+                activePrompt:
+                  runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
+              };
+            } catch (error) {
+              if (error instanceof SessionNotFoundError) {
+                return { live: false, activePrompt: false };
               }
-            : {}),
-          ...(page.targetRecordId
-            ? { targetRecordId: page.targetRecordId }
-            : {}),
-          ...(page.hasOlder !== undefined ? { hasOlder: page.hasOlder } : {}),
-        };
+              throw error;
+            }
+          };
+          const promptStateBeforeRead = getLivePromptState();
+          const page = await new SessionTranscriptReader(
+            runtime.workspaceCwd,
+            undefined,
+            runtime.sessionRuntimeBaseDir,
+          ).readPage(storageSessionId, {
+            ...options,
+            maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+          });
+          const activePromptAfterRead = getLivePromptState().activePrompt;
+          const replay = await replayTranscriptRecordPage({
+            sessionId,
+            page,
+            finalizeDangling:
+              !promptStateBeforeRead.activePrompt && !activePromptAfterRead,
+            encodeCursor: (state: SessionTranscriptCursorState) =>
+              encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
+          });
+          return {
+            v: 1 as const,
+            sessionId,
+            events: replay.updates.map((update) =>
+              omitSkillDetailsForSdkSurface({
+                v: 1 as const,
+                type: 'session_update' as const,
+                data: update,
+              }),
+            ),
+            ...(replay.nextCursor ? { nextCursor: replay.nextCursor } : {}),
+            hasMore: replay.hasMore,
+            startTime: replay.startTime,
+            lastUpdated: replay.lastUpdated,
+            ...(replay.partial
+              ? {
+                  partial: true as const,
+                  replayError: replay.replayError,
+                }
+              : {}),
+            ...(page.targetRecordId
+              ? { targetRecordId: page.targetRecordId }
+              : {}),
+            ...(page.hasOlder !== undefined ? { hasOlder: page.hasOlder } : {}),
+          };
+        });
       });
     });
   }
