@@ -1084,17 +1084,19 @@ export function createDaemonTurnNavigationStore(
     request: HistoryViewportRequest,
     releaseAnchor: () => void,
   ): Promise<DaemonTurnLocation> {
+    const activeClient = client;
+    const capturedSession = sessionEpoch;
     try {
       return await walkViewportSearchHit(hit, request, () => {});
     } catch (error) {
       if (!(error instanceof HistoricalTranscriptWindowFullError)) throw error;
     }
-    const activeClient = client;
     const entry = findIndexEntry(hit.turnOrdinal);
     const valid = () =>
       request.isCurrent() &&
       hit.sessionId === sessionId &&
       hit.revision === viewportSnapshot.revision &&
+      capturedSession === sessionEpoch &&
       activeClient !== undefined &&
       isCurrentClient(activeClient);
     if (!valid() || !activeClient || entry?.entry.turnId !== hit.turnId)
@@ -1203,6 +1205,8 @@ export function createDaemonTurnNavigationStore(
     request: HistoryViewportRequest,
     releaseAnchor: () => void,
   ): Promise<DaemonTurnLocation> {
+    const activeClient = client;
+    const capturedSession = sessionEpoch;
     const finishLiveLocation = (location: DaemonTurnLocation) => {
       publish({
         selected: {
@@ -1218,7 +1222,10 @@ export function createDaemonTurnNavigationStore(
     const valid = () =>
       request.isCurrent() &&
       hit.sessionId === sessionId &&
-      hit.revision === viewportSnapshot.revision;
+      hit.revision === viewportSnapshot.revision &&
+      capturedSession === sessionEpoch &&
+      activeClient !== undefined &&
+      isCurrentClient(activeClient);
     if (!valid()) throw new Error('Conversation search result expired');
     await loadOrdinal(hit.turnOrdinal);
     if (

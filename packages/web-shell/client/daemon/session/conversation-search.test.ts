@@ -880,3 +880,101 @@ it('replaces the historical selection when an exact search record becomes live d
   expect(location).toMatchObject({ view: 'live', blockId: 'a1' });
   expect(store.getSnapshot().selected?.location).toEqual(location);
 });
+
+it.each([false, true])(
+  'does not resurrect selection after disconnect while awaiting an external boundary load (reconnect: %s)',
+  async (reconnect) => {
+    const { store, client, first, second } = fixture();
+    second.unshift(first.pop()!);
+    await ready(store);
+    const hit = (
+      await store.scanConversation('older MATCH', { isCurrent: () => true })
+    ).hits[0]!;
+    const anchor = await store.locateOrdinal(0);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(client.getTranscriptPage).mockImplementationOnce(async () => {
+      await gate;
+      return {
+        v: 1,
+        sessionId: 'session',
+        events: second.map((data) => ({ v: 1, type: 'test', data })),
+        hasMore: false,
+      };
+    });
+    const boundary = store.loadViewportBoundary(anchor.rangeId!, 'newer', {
+      isCurrent: () => true,
+    });
+    expect(store.getViewportSnapshot().ranges[0]!.newer.kind).toBe('loading');
+    let settled = false;
+    const pending = store
+      .locateViewportSearchHit(hit, { isCurrent: () => true }, () => {})
+      .then(
+        (location) => ({ location }),
+        (error: unknown) => ({ error }),
+      )
+      .finally(() => {
+        settled = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    store.configure({
+      sessionId: 'session',
+      supported: true,
+      client: undefined,
+    });
+    expect(store.getSnapshot().selected).toBeUndefined();
+    expect(store.getViewportSnapshot().revision).toBe(hit.revision);
+    if (reconnect) {
+      store.configure({ sessionId: 'session', supported: true, client });
+    }
+    store.observeLiveBlocks([second[0]!]);
+    release();
+    await boundary;
+    expect.soft(await pending).toMatchObject({ error: expect.any(Error) });
+    expect(store.getSnapshot().selected).toBeUndefined();
+  },
+);
+
+it('invalidates a full-window fallback across same-client reconnection', async () => {
+  const { store, client, second } = fixture(1);
+  await ready(store);
+  const hit = (
+    await store.scanConversation('Newest answer', { isCurrent: () => true })
+  ).hits[0]!;
+  const original = await store.locateOrdinal(0);
+  store.setViewportAnchor('reader', original.pageId);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let reads = 0;
+  vi.mocked(client.getTranscriptPage).mockImplementation(async () => {
+    if (++reads === 2) await gate;
+    return {
+      v: 1,
+      sessionId: 'session',
+      targetRecordId: 'u2',
+      events: second.map((data) => ({ v: 1, type: 'test', data })),
+      hasMore: false,
+    };
+  });
+  const pending = store
+    .locateViewportSearchHit(hit, { isCurrent: () => true }, () =>
+      store.setViewportAnchor('reader'),
+    )
+    .then(
+      (location) => ({ location }),
+      (error: unknown) => ({ error }),
+    );
+  await vi.waitFor(() => expect(reads).toBe(2));
+  store.configure({ sessionId: 'session', supported: true, client: undefined });
+  expect(store.getSnapshot().selected).toBeUndefined();
+  store.configure({ sessionId: 'session', supported: true, client });
+  store.observeLiveBlocks([second[1]!]);
+  release();
+  expect.soft(await pending).toMatchObject({ error: expect.any(Error) });
+  expect(store.getSnapshot().selected).toBeUndefined();
+});
