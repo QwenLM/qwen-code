@@ -306,6 +306,45 @@ describe('parseArguments', () => {
     process.argv = originalArgv;
   });
 
+  it.each([
+    ['--sandbox', 'bwrap'],
+    ['--sandbox=bwrap'],
+    ['-s', 'bwrap'],
+    ['-s=bwrap'],
+  ])(
+    'reports bwrap migration before prompt conflicts: %j',
+    async (...flags) => {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+      mockWriteStderrLine.mockClear();
+      try {
+        await expect(parseArguments()).rejects.toThrow('process.exit called');
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('Whole-CLI bwrap has been removed'),
+        );
+      } finally {
+        exit.mockRestore();
+      }
+    },
+  );
+
+  it('preserves boolean sandbox flags and literal prompt text', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', '-p', 'bwrap'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      prompt: 'bwrap',
+    });
+    process.argv = ['node', 'script.js', '--no-sandbox', 'query'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'query',
+    });
+    process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
+    expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
+  });
+
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
     const output: string[] = [];
@@ -4918,8 +4957,6 @@ describe('loadCliConfig with includeDirectories', () => {
     );
     expect(ordinary.getShellExecutionSandbox()).toBeUndefined();
     const rejectedModes: Array<[string, Partial<CliArgs>]> = [
-      ['interactive frontend', { bare: false }],
-      ['missing prompt', { prompt: undefined }],
       ['prompt-interactive frontend', { promptInteractive: 'fixture' }],
       ['stream-json frontend', { inputFormat: 'stream-json' }],
       ['worktree startup', { worktree: 'review' }],
@@ -4939,8 +4976,25 @@ describe('loadCliConfig with includeDirectories', () => {
           false,
           { shellExecutionSandbox: policy },
         ),
-      ).rejects.toThrow('requires bare noninteractive mode');
+      ).rejects.toThrow('does not yet support');
     }
+    const normal = await loadCliConfig(
+      {},
+      { ...argv, bare: false },
+      policy.workspace,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { shellExecutionSandbox: policy },
+    );
+    expect(normal.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
+    expect(normal.getBareMode()).toBe(false);
     vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
     await expect(
       loadCliConfig(

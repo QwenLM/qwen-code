@@ -14,7 +14,13 @@
  * same numbers/sections as the original. Tab/shift+tab switch, Esc closes.
  */
 
-import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
@@ -103,7 +109,15 @@ export function OpenTuiStatsDialog(props: {
   isFocused?: boolean;
 }) {
   const { config, onClose, isFocused = true } = props;
-  const [tab, setTab] = useState<StatsTabName>('session');
+  const [tab, setTabState] = useState<StatsTabName>('session');
+  // A held Tab hands the whole burst to the handler from the last render, so
+  // the cycle must read where the previous key of the burst landed.
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const setTab = (next: StatsTabName) => {
+    tabRef.current = next;
+    setTabState(next);
+  };
   // Re-render on every telemetry update so stats stay live while the dialog
   // is open (ink re-renders via SessionStatsProvider's update event).
   const [, forceUpdate] = useState(0);
@@ -120,7 +134,7 @@ export function OpenTuiStatsDialog(props: {
     const original = toOriginalKey(key);
     if (original.name === 'tab') {
       const order = TABS.map((t) => t.name);
-      const idx = order.indexOf(tab);
+      const idx = order.indexOf(tabRef.current);
       setTab(
         order[(idx + (original.shift ? -1 : 1) + order.length) % order.length],
       );

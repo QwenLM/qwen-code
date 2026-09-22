@@ -181,6 +181,32 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     expect(readdirSync(state)).toEqual([]);
   });
 
+  it('inherits redirected stdin through the relay launch', async () => {
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    const handle = await executeBwrap(
+      policy(),
+      { ...payload(), inheritStdin: true },
+      () => {},
+      new AbortController().signal,
+    );
+    await handle.result;
+    expect(launch.mock.calls[0][0].inheritStdin).toBe(true);
+  });
+
+  it('rejects conflicting stdin modes before creating control state', async () => {
+    const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');
+    await expect(
+      executeBwrap(
+        policy(),
+        { ...payload(), stdin: 'input', inheritStdin: true },
+        () => {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('both piped and inherited');
+    expect(launch).not.toHaveBeenCalled();
+    expect(readdirSync(state)).toEqual([]);
+  });
+
   it('skips absent masks without mutating a read-only workspace', async () => {
     const maskedPath = path.join(workspace, '.qwen', 'review-leases');
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
