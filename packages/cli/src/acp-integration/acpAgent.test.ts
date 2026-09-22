@@ -2445,6 +2445,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+        cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
@@ -3588,6 +3589,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).not.toHaveBeenCalled();
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
 
     mockConnectionState.resolve();
@@ -3649,6 +3651,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalledOnce();
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
     expect(abort).not.toHaveBeenCalled();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
@@ -3697,6 +3700,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       vi.useRealTimers();
     }
     expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(lastSessionMock?.cancelMcpAppCalls).toHaveBeenCalledOnce();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
 
@@ -3745,6 +3749,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       vi.useRealTimers();
     }
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
 
@@ -3796,6 +3801,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalled();
     expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(lastSessionMock?.cancelMcpAppCalls).toHaveBeenCalledOnce();
     expect(abort).toHaveBeenCalledOnce();
     const firstSettleOrder =
       lastSessionMock!.waitForActiveTurnsToSettle.mock.invocationCallOrder[0];
@@ -5239,6 +5245,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
           waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
           waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+          cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
           enqueueBackgroundNotification: vi
             .fn()
@@ -6582,6 +6589,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
     expect(cancellationSettled).toBe(false);
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
 
     finishPrompt?.({ stopReason: 'cancelled' });
     await expect(cancellation).resolves.toEqual({ cancelled: true });
@@ -6601,6 +6609,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod(PROMPT_CANCEL_METHOD, { sessionId }),
     ).resolves.toEqual({ cancelled: false });
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -25464,6 +25473,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           getId: vi.fn().mockReturnValue(liveSessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
+          cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: liveCancelPendingPrompt,
           beginClose: liveBeginClose,
           beginCloseIfAvailable: liveBeginCloseIfAvailable,
@@ -27165,6 +27175,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForCloseGateToRelease: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+        cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
@@ -27582,6 +27593,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         beginCloseIfAvailable: vi.fn().mockReturnValue(releaseCloseGate),
         waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+        cancelMcpAppCalls: vi.fn(),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         isTurnIdle: vi.fn().mockReturnValue(true),
@@ -28299,6 +28311,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
         await agent.cancel({ sessionId: params.sessionId });
         expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+        expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -28335,6 +28348,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         // follow-up operations still reach the adopted session.
         await agent.cancel({ sessionId });
         expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+        expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -30082,6 +30096,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginClose: vi.fn().mockReturnValue(vi.fn()),
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
+      cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       isTurnIdle: vi.fn().mockReturnValue(true),
@@ -30200,6 +30215,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         message: 'Session restore timed out after 30000ms',
       });
       expect(releaseCloseGate).toHaveBeenCalledOnce();
+      expect(firstSession.cancelMcpAppCalls).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
       mockConnectionState.resolve();

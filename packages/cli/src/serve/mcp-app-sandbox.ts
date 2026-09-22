@@ -77,8 +77,9 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
       (() => {
         if (window.self === window.top) return;
         const hostOrigin = __HOST_ORIGIN__;
+        const opaque = __OPAQUE_ORIGIN__;
         const inner = document.createElement('iframe');
-        inner.setAttribute('sandbox', 'allow-scripts allow-forms allow-same-origin');
+        inner.setAttribute('sandbox', opaque ? 'allow-scripts allow-forms' : 'allow-scripts allow-forms allow-same-origin');
         inner.style.cssText = 'width:100%;height:100%;border:0;background:transparent';
         document.body.appendChild(inner);
 
@@ -95,7 +96,7 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
             inner.contentWindow?.postMessage(event.data, '*');
             return;
           }
-          if (event.source === inner.contentWindow && event.origin === window.location.origin) {
+          if (event.source === inner.contentWindow && event.origin === (opaque ? 'null' : window.location.origin)) {
             window.parent.postMessage(event.data, hostOrigin);
           }
         });
@@ -155,7 +156,7 @@ export function mountMcpAppSandbox(app: Application): () => void {
     pending.delete(host!);
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
-      'Content-Security-Policy': resource.csp,
+      'Content-Security-Policy': `sandbox allow-scripts allow-forms allow-same-origin; ${resource.csp}`,
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'origin',
@@ -165,7 +166,7 @@ export function mountMcpAppSandbox(app: Application): () => void {
       MCP_APP_SANDBOX_HTML.replace(
         '__HOST_ORIGIN__',
         JSON.stringify(resource.hostOrigin),
-      ),
+      ).replace('__OPAQUE_ORIGIN__', 'false'),
     );
   });
   const start = () => {
@@ -205,6 +206,22 @@ export function mountMcpAppSandbox(app: Application): () => void {
     }
     if (closed) {
       res.status(503).end();
+      return;
+    }
+    if (req.query['mode'] === 'opaque') {
+      res
+        .set({
+          'Content-Security-Policy': `sandbox allow-scripts allow-forms; ${buildMcpAppCsp(parseMcpAppCsp(req.query['csp']))}`,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        })
+        .type('html')
+        .send(
+          MCP_APP_SANDBOX_HTML.replace(
+            '__HOST_ORIGIN__',
+            JSON.stringify(hostOrigin),
+          ).replace('__OPAQUE_ORIGIN__', 'true'),
+        );
       return;
     }
     try {

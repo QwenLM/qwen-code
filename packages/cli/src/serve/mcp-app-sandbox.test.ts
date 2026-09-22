@@ -101,6 +101,9 @@ describe('MCP App sandbox', () => {
     );
     expect(response.headers['cache-control']).toContain('no-store');
     expect(response.headers['origin-agent-cluster']).toBe('?1');
+    expect(response.headers['content-security-policy']).toMatch(
+      /^sandbox allow-scripts allow-forms allow-same-origin;/,
+    );
     expect(response.text).toContain(
       "'allow-scripts allow-forms allow-same-origin'",
     );
@@ -157,6 +160,24 @@ describe('MCP App sandbox', () => {
       'right',
       'http://127.0.0.1:4170',
     );
+  });
+
+  it('serves the opaque fallback on the existing channel with an immutable restrictive CSP', async () => {
+    const response = await request(makeApp()).get('/mcp-app-sandbox').query({
+      hostOrigin: 'http://localhost:4170',
+      mode: 'opaque',
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers['location']).toBeUndefined();
+    expect(response.headers['content-security-policy']).toMatch(
+      /^sandbox allow-scripts allow-forms;/,
+    );
+    expect(response.headers['content-security-policy']).not.toContain(
+      'allow-same-origin',
+    );
+    expect(response.headers['cache-control']).toContain('no-store');
+    expect(response.text).toContain('const opaque = true;');
+    expect(response.text).toContain('sandbox-proxy-ready');
   });
 
   it('settles a registration when shutdown races initial listener startup', async () => {

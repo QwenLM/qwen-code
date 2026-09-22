@@ -4025,6 +4025,7 @@ class QwenAgent implements Agent {
           }`,
         );
       }
+      session.cancelMcpAppCalls();
       void session.cancelPendingPrompt().catch((error) => {
         debugLogger.debug(
           `Session ${session.getId()} cancel during managed shutdown failed: ${
@@ -4759,6 +4760,7 @@ class QwenAgent implements Agent {
       await waitForSessionDrain(
         (async () => {
           try {
+            session.cancelMcpAppCalls();
             await session.cancelPendingPrompt();
           } catch (err) {
             debugLogger.debug(

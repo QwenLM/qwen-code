@@ -630,6 +630,30 @@ describe('TurnBoundaryCompactionEngine', () => {
       ).toBe(false);
     });
 
+    it('preserves the newest App when evicting older text makes it fit', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 1000 });
+      engine.ingest(makeTextChunk(1, 'x'.repeat(800)));
+      engine.ingest(makeTurnComplete(2));
+      engine.ingest(
+        makeToolCallUpdate(3, 'app', 'completed', {
+          rawOutput: {
+            type: 'mcp_app',
+            html: 'y'.repeat(400),
+            fallbackText: 'chart',
+          },
+        }),
+      );
+      engine.ingest(makeTurnComplete(4));
+      const events = engine.snapshot().compactedTurns;
+      expect(events.some((event) => event.type === 'history_truncated')).toBe(
+        true,
+      );
+      expect(events.find((event) => event.id === 3)).toHaveProperty(
+        'data.update.rawOutput.html',
+        'y'.repeat(400),
+      );
+    });
+
     it('retains the newest oversized live turn without a truncation marker', () => {
       const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 128 });
 

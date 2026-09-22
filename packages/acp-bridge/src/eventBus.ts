@@ -1222,13 +1222,15 @@ class BoundedAsyncQueue<T> {
     }
     let bytes = getBytes();
     const reduced =
-      this.liveBytes + bytes > this.maxBytes ? fallback?.() : undefined;
+      this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes
+        ? fallback?.()
+        : undefined;
     if (reduced) {
       value = reduced.value;
       bytes = reduced.bytes;
     }
-    // First-item rule: an empty queue admits one over-budget frame, even
-    // a reduced one (parity with the replay path's `replayedCount > 0`
+    // First-item rule: an empty queue admits one over-budget frame
+    // without degrading it (parity with the replay path's `replayedCount > 0`
     // guarantee). A subscriber with an empty backlog is keeping up;
     // evicting it buys nothing — the ring keeps the original frame and a
     // resume would replay the identical bytes.

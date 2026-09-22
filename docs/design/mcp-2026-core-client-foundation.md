@@ -33,7 +33,7 @@ The following remain separate follow-ups:
 - modern-only remote (HTTP / SSE / TCP) protocol negotiation;
 - interactive MRTR elicitation and approval across TUI, WebShell, headless, and
   ACP;
-- MCP App initiated tool calls, links, downloads, messages, model-context
+- links, downloads, messages, model-context
   updates, and fullscreen display;
 - migration of Qwen Code's internal IDE, Computer Use, and embedded MCP server
   integrations, which are not configured external MCP sessions.
@@ -95,7 +95,8 @@ These settings travel with discovered tools through metadata enrichment,
 qualified names, per-session projections, and reconnect retries. They are part
 of the pool fingerprint so sessions with different resource policies cannot
 reuse the first session's limits. Existing settings reconciliation detects the
-changed configuration. No new daemon route or sandbox capability is added.
+changed configuration. The resource-limit settings themselves add no daemon
+route or sandbox capability.
 
 The 4 MiB ceiling provides headroom for bundled applications while leaving room
 under the existing 32 MiB transcript/replay limit even with JSON escaping (up to
@@ -116,16 +117,22 @@ budget, the page table drops each MCP App display's `html` whole (replay
 mounts the iframe only for non-empty `html` and never re-fetches the resource)
 and the turn stays navigable on `fallbackText`; only a page with nothing left
 to degrade fails closed. Larger accepted documents increase transcript and
-replay payloads. Streaming transfer limits and App-initiated tool calls remain
-outside this change.
+replay payloads. Streaming transfer limits remain outside this change. App-initiated server
+tool calls are specified in [MCP App server tool calls](mcp-app-server-tools.md).
 
-For live delivery, an MCP App that would overflow a subscriber's byte queue is
-retried for that subscriber with whole HTML removed and its text result intact.
-Healthy subscribers and the replay ring retain the original App. If the text
-fallback also exceeds the queue budget, normal eviction still applies; frame
-count limits and forced replay delivery remain unchanged.
+For live delivery, an empty subscriber queue admits the original App under the
+existing oversized-first-frame rule. Only a nonempty backlog that would overflow
+the byte budget retries with whole HTML removed, and only when nonempty text
+fallback is available. Direct delivery and the replay ring retain the original
+App; the degraded queued copy keeps the same event ID. Successful degradation
+does not evict the subscriber or request resync. If fallback cannot fit, normal
+eviction applies; frame count limits and forced replay delivery are unchanged.
 
-The daemon's unauthenticated `/mcp-app-sandbox` route returns an uncached
+Compacted replay first removes HTML from older App segments, then evicts older
+segments. It removes the newest App's HTML only if the retained replay still
+exceeds its budget, preserving that App when evicting old text is sufficient.
+
+The daemon's unauthenticated `/mcp-app-sandbox` route defaults to an uncached
 redirect to a dedicated static-only listener bound to `127.0.0.1` on a random
 port. Each render receives a fresh `<uuid>.localhost` origin. The listener
 serves only the registered Host, GET method and resource path, deletes the
@@ -138,8 +145,11 @@ per-render origin and can access each other's DOM and origin-scoped storage;
 they are one trust boundary. They share no origin with WebShell, the daemon or
 another App, so they cannot read WebShell `sessionStorage` or call daemon APIs
 as same-origin clients. `Origin-Agent-Cluster: ?1` prevents `document.domain`
-from relaxing the per-render origin boundary. Top navigation, popups and
-other ungranted sandbox capabilities remain restricted.
+from relaxing the per-render origin boundary. The HTTP response enforces `sandbox allow-scripts allow-forms allow-same-origin`
+in CSP, so editing iframe attributes cannot remove restrictions on top
+navigation, popups and other ungranted capabilities. An unreachable isolated
+origin falls back through the daemon connection to a response with opaque
+CSP sandboxing (without `allow-same-origin`); see the linked App design.
 
 AppBridge and postMessage deliver HTML, tool input and tool results to the
 inner iframe. The proxy validates parent and child origins, applies resource

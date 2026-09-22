@@ -629,7 +629,7 @@ describe('EventBus', () => {
     }
   });
 
-  it('degrades an App before it fills an empty queue and disconnects on the next frame', async () => {
+  it('keeps an oversized App intact in an empty queue and evicts on the next frame', async () => {
     const bus = new EventBus();
     const abort = new AbortController();
     const iter = bus
@@ -649,19 +649,28 @@ describe('EventBus', () => {
           },
         },
       });
-      const following = bus.publish({
+      bus.publish({
         type: 'session_update',
         data: { text: 'Done' },
       });
       const delivered = (await iter.next()).value;
       expect(delivered).toMatchObject({ id: app?.id, type: 'session_update' });
-      expect(delivered).toHaveProperty('data.update.rawOutput.html', '');
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.html',
+        'x'.repeat(3 * 1024 * 1024),
+      );
       expect(delivered).toHaveProperty(
         'data.update.rawOutput.fallbackText',
         'Dashboard ready',
       );
-      expect((await iter.next()).value).toBe(following);
-      expect(bus.subscriberCount).toBe(1);
+      expect((await iter.next()).value).toMatchObject({
+        type: 'slow_client_warning',
+      });
+      expect((await iter.next()).value).toMatchObject({
+        type: 'client_evicted',
+        data: { reason: 'queue_bytes_overflow' },
+      });
+      expect(bus.subscriberCount).toBe(0);
     } finally {
       abort.abort();
       bus.close();
@@ -705,12 +714,15 @@ describe('EventBus', () => {
         });
         expect(bus.subscriberCount).toBe(0);
       } else {
-        // First-item rule: an empty queue admits the degraded frame — the
+        // First-item rule: an empty queue admits the original frame — the
         // subscriber is keeping up, and the ring keeps the original frame
         // for a `Last-Event-ID` resume.
         const delivered = (await iterator.next()).value;
         expect(delivered).toMatchObject({ type: 'session_update' });
-        expect(delivered).toHaveProperty('data.update.rawOutput.html', '');
+        expect(delivered).toHaveProperty(
+          'data.update.rawOutput.html',
+          'x'.repeat(2000),
+        );
         expect(delivered).toHaveProperty(
           'data.update.rawOutput.fallbackText',
           'y'.repeat(2000),
@@ -722,7 +734,7 @@ describe('EventBus', () => {
     },
   );
 
-  it('admits a degraded App frame that still overflows an empty queue', async () => {
+  it('preserves App HTML when its tool result overflows an empty queue', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 1200,
     });
@@ -732,9 +744,7 @@ describe('EventBus', () => {
       [Symbol.asyncIterator]();
     try {
       // `html` is tiny; the untruncated `toolResult` is what overflows.
-      // The degrade blanks `html` only, so the reduced frame still exceeds
-      // the budget — an empty queue admits it rather than evicting a
-      // caught-up subscriber.
+      // An empty queue admits the original frame without stripping HTML.
       bus.publish({
         type: 'session_update',
         data: {
@@ -753,7 +763,10 @@ describe('EventBus', () => {
       });
       const delivered = (await iterator.next()).value;
       expect(delivered).toMatchObject({ type: 'session_update' });
-      expect(delivered).toHaveProperty('data.update.rawOutput.html', '');
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.html',
+        '<b>ok</b>',
+      );
       expect(delivered).toHaveProperty(
         'data.update.rawOutput.fallbackText',
         'Dashboard ready',

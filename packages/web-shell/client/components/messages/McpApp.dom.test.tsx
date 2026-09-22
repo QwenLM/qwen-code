@@ -16,8 +16,16 @@ const appBridgeMocks = vi.hoisted(() => ({
     onsandboxready?: () => void;
     oninitialized?: () => void;
     oncalltool?: (
-      params: { name: string; arguments?: Record<string, unknown> },
-      extra: { signal: AbortSignal },
+      params: {
+        name: string;
+        arguments?: Record<string, unknown>;
+        _meta?: { progressToken?: string | number };
+      },
+      extra: {
+        signal: AbortSignal;
+        requestId?: number;
+        sendNotification?: ReturnType<typeof vi.fn>;
+      },
     ) => Promise<unknown>;
   } | null,
   lastCapabilities: undefined as unknown,
@@ -225,6 +233,43 @@ describe('McpApp host lifetime', () => {
     });
   });
 
+  it('retries an unreachable isolated origin through an opaque inline sandbox then shows fallback', async () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = renderApp(appDisplay());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      const iframe = container.querySelector('iframe');
+      expect(iframe?.getAttribute('src')).toContain('mode=opaque');
+      expect(iframe?.getAttribute('sandbox')).toBe('allow-scripts allow-forms');
+      expect(container.textContent).toContain('restricted App sandbox');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(container.textContent).toContain('Demo result');
+      expect(iframe?.getAttribute('src')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('explains initialization failure for an HTML-only App and closes its frame', async () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = renderApp(appDisplay({ fallbackText: '' }));
+      await act(async () => {
+        appBridgeMocks.last?.onsandboxready?.();
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(container.textContent).toContain('MCP App could not initialize.');
+      expect(container.querySelector('iframe')?.getAttribute('src')).toBeNull();
+      expect(appBridgeMocks.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders fallbackText for compacted html and never mounts the sandbox', () => {
     const { container } = renderApp(appDisplay({ html: '' }));
 
@@ -324,6 +369,112 @@ describe('McpApp host lifetime', () => {
 });
 
 describe('McpApp server tool bridge', () => {
+  it.each([0, 'app-progress', undefined])(
+    'keeps pending calls alive with the declared token %s and stops on abort',
+    async (progressToken) => {
+      vi.useFakeTimers();
+      try {
+        let resolve!: (value: unknown) => void;
+        const callTool = vi.fn(
+          () =>
+            new Promise((done) => {
+              resolve = done;
+            }),
+        );
+        const { rerender } = renderApp(appDisplay());
+        rerender(
+          <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+            <McpAppSessionContext.Provider value="s">
+              <McpApp display={appDisplay()} />
+            </McpAppSessionContext.Provider>
+          </McpAppToolsContext.Provider>,
+        );
+        await act(async () => {
+          appBridgeMocks.last?.oninitialized?.();
+        });
+        const abort = new AbortController();
+        const sendNotification = vi.fn().mockResolvedValue(undefined);
+        const pending = appBridgeMocks.last!.oncalltool!(
+          { name: 'slow', _meta: { progressToken } },
+          { signal: abort.signal, requestId: 7, sendNotification },
+        );
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000);
+        });
+        if (progressToken === undefined)
+          expect(sendNotification).not.toHaveBeenCalled();
+        else {
+          expect(sendNotification).toHaveBeenCalledTimes(2);
+          expect(sendNotification).toHaveBeenLastCalledWith({
+            method: 'notifications/progress',
+            params: { progressToken, progress: 2 },
+          });
+        }
+        abort.abort();
+        const calls = sendNotification.mock.calls.length;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000);
+        });
+        expect(sendNotification).toHaveBeenCalledTimes(calls);
+        resolve({ content: [] });
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['success', 'failure'] as const)(
+    'stops progress after tool %s',
+    async (outcome) => {
+      vi.useFakeTimers();
+      try {
+        let finish!: () => void;
+        const callTool = vi.fn(
+          () =>
+            new Promise((resolve, reject) => {
+              finish = () =>
+                outcome === 'success'
+                  ? resolve({ content: [] })
+                  : reject(new Error('failed'));
+            }),
+        );
+        const { rerender } = renderApp(appDisplay());
+        rerender(
+          <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+            <McpAppSessionContext.Provider value="s">
+              <McpApp display={appDisplay()} />
+            </McpAppSessionContext.Provider>
+          </McpAppToolsContext.Provider>,
+        );
+        await act(async () => {
+          appBridgeMocks.last?.oninitialized?.();
+        });
+        const sendNotification = vi.fn().mockResolvedValue(undefined);
+        const result = appBridgeMocks.last!.oncalltool!(
+          { name: 'slow', _meta: { progressToken: 7 } },
+          {
+            signal: new AbortController().signal,
+            requestId: 7,
+            sendNotification,
+          },
+        ).catch((error: unknown) => error);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30_000);
+        });
+        expect(sendNotification).toHaveBeenCalledOnce();
+        finish();
+        await result;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000);
+        });
+        expect(sendNotification).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('pins the source server, forwards raw results, and cancels on session change', async () => {
     const raw = {
       content: [],

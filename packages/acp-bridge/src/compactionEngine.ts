@@ -907,7 +907,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   }
 
   private enforceReplayWindow(): void {
-    this.degradeReplayAppHtml();
+    this.degradeReplayAppHtml(this.replaySegments.length - 1);
     let droppedSegmentCount = 0;
     let droppedBytes = 0;
     let droppedEvents = 0;
@@ -932,6 +932,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         lastDroppedRecordId = droppedRecordId;
       }
     }
+
+    this.degradeReplayAppHtml(this.replaySegments.length);
 
     if (droppedSegmentCount > 0) {
       // Freeze the pagination anchor at the first eviction so later
@@ -984,14 +986,15 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
    * segment crowds out every older turn and is then itself evicted by
    * the next one — a reconnecting client could not replay the App at
    * all. The renderer falls back to `fallbackText`; the full document
-   * stays re-pageable from the persisted transcript. Segment events are
+   * remains in the persisted transcript. The newest segment is degraded
+   * only if eviction of older segments cannot make it fit. Segment events are
    * replaced with copies: the live ring keeps the original frame for
    * `Last-Event-ID` resume.
    */
-  private degradeReplayAppHtml(): void {
+  private degradeReplayAppHtml(end: number): void {
     for (
       let i = this.replaySegmentStart;
-      i < this.replaySegments.length && this.replayBytes > this.maxReplayBytes;
+      i < end && this.replayBytes > this.maxReplayBytes;
       i++
     ) {
       const segment = this.replaySegments[i]!;

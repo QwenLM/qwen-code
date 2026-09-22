@@ -4356,7 +4356,7 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
-    for (const controller of this.mcpAppCalls.values()) controller.abort();
+
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
       resolveGate = resolve;
@@ -4445,7 +4445,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
-    for (const controller of this.mcpAppCalls.values()) controller.abort();
+    this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
     }
@@ -12893,6 +12893,10 @@ export class Session implements SessionContext {
     }
 
     return reminders;
+  }
+
+  cancelMcpAppCalls(): void {
+    for (const controller of this.mcpAppCalls.values()) controller.abort();
   }
 
   cancelMcpAppCall(callId: string): void {

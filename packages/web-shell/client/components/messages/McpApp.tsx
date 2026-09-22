@@ -136,6 +136,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   themeRef.current = theme;
   const [height, setHeight] = useState(260);
   const [error, setError] = useState<string>();
+  const [opaqueSandbox, setOpaqueSandbox] = useState(false);
   const cspKey = display.csp ? JSON.stringify(display.csp) : '';
   const toolArgumentsKey = JSON.stringify(display.toolArguments);
   const toolResultKey = JSON.stringify(display.toolResult);
@@ -146,8 +147,10 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       window.location.href,
     );
     if (!resolved) return undefined;
-    return applySandboxCspQuery(resolved, cspKey);
-  }, [daemonBaseUrl, cspKey]);
+    const url = new URL(applySandboxCspQuery(resolved, cspKey));
+    if (opaqueSandbox) url.searchParams.set('mode', 'opaque');
+    return url.toString();
+  }, [daemonBaseUrl, cspKey, opaqueSandbox]);
 
   useEffect(() => {
     setError(undefined);
@@ -155,6 +158,8 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     if (!iframe || !sandboxUrl) return;
     const generation = ++mountGenerationRef.current;
     let initialized = false;
+    let active = true;
+    let ready = false;
     const current = displayRef.current;
     const bridge = new AppBridge(
       null,
@@ -171,20 +176,65 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     const appAbort = new AbortController();
     if (callTool) {
       bridge.oncalltool = async (params, extra) => {
-        const result = await callTool(
-          {
-            serverName: current.serverName,
-            resourceUri: current.resourceUri,
-            name: params.name,
-            arguments: params.arguments ?? {},
-          },
-          AbortSignal.any([extra.signal, appAbort.signal]),
-        );
-        return result as AppToolResult;
+        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        let progress = 0;
+        const progressToken = params._meta?.progressToken;
+        // ext-apps omits the base MCP progress notification from its union.
+        const sendProgress =
+          extra.sendNotification as unknown as (notification: {
+            method: 'notifications/progress';
+            params: { progressToken: string | number; progress: number };
+          }) => Promise<void>;
+        const heartbeat =
+          signal.aborted ||
+          (typeof progressToken !== 'string' &&
+            typeof progressToken !== 'number')
+            ? undefined
+            : setInterval(() => {
+                void sendProgress({
+                  method: 'notifications/progress',
+                  params: { progressToken, progress: ++progress },
+                }).catch(() => {});
+              }, 30_000);
+        const stopHeartbeat = () => clearInterval(heartbeat);
+        signal.addEventListener('abort', stopHeartbeat, { once: true });
+        try {
+          const result = await callTool(
+            {
+              serverName: current.serverName,
+              resourceUri: current.resourceUri,
+              name: params.name,
+              arguments: params.arguments ?? {},
+            },
+            signal,
+          );
+          return result as AppToolResult;
+        } finally {
+          stopHeartbeat();
+          signal.removeEventListener('abort', stopHeartbeat);
+        }
       };
     }
 
+    const failInitialization = () => {
+      active = false;
+      appAbort.abort();
+      iframe.removeAttribute('src');
+      void bridge.close().catch(() => {});
+      setError('sandbox-load-failed');
+    };
+    let readyTimeout = setTimeout(() => {
+      if (!active) return;
+      if (!opaqueSandbox) setOpaqueSandbox(true);
+      else failInitialization();
+    }, 10_000);
     bridge.onsandboxready = () => {
+      if (!active || ready) return;
+      ready = true;
+      clearTimeout(readyTimeout);
+      readyTimeout = setTimeout(() => {
+        if (active && !initialized) failInitialization();
+      }, 30_000);
       const resource = displayRef.current;
       void bridge
         .sendSandboxResourceReady({
@@ -194,7 +244,9 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         .catch((reason: unknown) => setError(String(reason)));
     };
     bridge.oninitialized = () => {
+      if (!active) return;
       initialized = true;
+      clearTimeout(readyTimeout);
       const resource = displayRef.current;
       void bridge
         .sendToolInput({ arguments: resource.toolArguments })
@@ -218,11 +270,13 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         ),
       )
       .then(() => {
-        iframe.src = sandboxUrl;
+        if (active) iframe.src = sandboxUrl;
       })
       .catch((reason: unknown) => setError(String(reason)));
 
     return () => {
+      active = false;
+      clearTimeout(readyTimeout);
       appAbort.abort();
       bridgeRef.current = null;
       const unload = () => {
@@ -245,6 +299,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     };
   }, [
     sandboxUrl,
+    opaqueSandbox,
     callTool,
     display.serverName,
     display.resourceUri,
@@ -268,15 +323,27 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         <span>MCP App</span>
         <span className={styles.server}>{display.serverName}</span>
       </div>
+      {opaqueSandbox && !error ? (
+        <div className={styles.fallback}>
+          Using a restricted App sandbox because the isolated origin is
+          unavailable. Apps requiring a non-opaque origin may not work here.
+        </div>
+      ) : null}
       {error ? (
-        <div className={styles.fallback}>{display.fallbackText}</div>
+        <div className={styles.fallback}>
+          {display.fallbackText || 'MCP App could not initialize.'}
+        </div>
       ) : null}
       <iframe
         ref={iframeRef}
         title={`${display.serverName} MCP App`}
         className={styles.frame}
         style={{ height, display: error ? 'none' : undefined }}
-        sandbox="allow-scripts allow-forms allow-same-origin"
+        sandbox={
+          opaqueSandbox
+            ? 'allow-scripts allow-forms'
+            : 'allow-scripts allow-forms allow-same-origin'
+        }
         referrerPolicy="origin"
         onError={() => setError('sandbox-load-failed')}
       />

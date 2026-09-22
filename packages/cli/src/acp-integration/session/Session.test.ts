@@ -1206,28 +1206,39 @@ describe('Session', () => {
       expect(callTool).not.toHaveBeenCalled();
     });
 
-    it('holds the session while awaiting approval and aborts on close', async () => {
-      const { callTool } = installAppTool();
-      vi.mocked(mockClient.requestPermission).mockReturnValue(
-        new Promise(() => {}),
-      );
-      const pending = session.callMcpAppTool('mcp-app-close', request);
-      const rejected = pending.catch((error: unknown) => error);
-      await vi.waitFor(() =>
-        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
-      );
-      expect(session.isTurnIdle()).toBe(false);
-      expect(session.collectActiveWorkHolds()).toContainEqual({
-        category: 'session',
-        id: 'session:active-turn',
-      });
-      expect(() => session.beginHistoryMutation()).toThrow('busy');
-      const release = session.beginClose();
-      expect(await rejected).toBeInstanceOf(Error);
-      release();
-      expect(callTool).not.toHaveBeenCalled();
-      expect(session.isTurnIdle()).toBe(true);
-    });
+    it.each(['dispose', 'cancelMcpAppCalls'] as const)(
+      'preserves a pending App across a reversible close gate until %s',
+      async (cancel) => {
+        const { callTool } = installAppTool();
+        vi.mocked(mockClient.requestPermission).mockReturnValue(
+          new Promise(() => {}),
+        );
+        const pending = session.callMcpAppTool('mcp-app-close', request);
+        const rejected = pending.catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        expect(session.isTurnIdle()).toBe(false);
+        expect(session.collectActiveWorkHolds()).toContainEqual({
+          category: 'session',
+          id: 'session:active-turn',
+        });
+        expect(() => session.beginHistoryMutation()).toThrow('busy');
+        let settled = false;
+        void rejected.then(() => {
+          settled = true;
+        });
+        const release = session.beginClose();
+        release();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(session.isTurnIdle()).toBe(false);
+        session[cancel]();
+        expect(await rejected).toBeInstanceOf(Error);
+        expect(callTool).not.toHaveBeenCalled();
+        expect(session.isTurnIdle()).toBe(cancel === 'cancelMcpAppCalls');
+      },
+    );
   });
 
   afterEach(() => {
