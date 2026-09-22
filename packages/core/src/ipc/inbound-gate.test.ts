@@ -2538,31 +2538,43 @@ describe('a host that cannot present a held message', () => {
     name: string;
     hold: (h: Harness) => void;
     frame: () => PeerUserFrame;
+    /**
+     * What its sender is told. A cause that cannot change while the
+     * session runs is the session's own answer — `refused`, stop. A
+     * momentary one is not an answer about this session at all, so the
+     * receipt is the retry-neutral `expired`.
+     */
+    receipt: 'refused' | 'expired';
   }> = [
     {
       name: 'an explicit setting',
       hold: (h) => h.setPolicy('hold'),
       frame: () => frame({ fromMode: 'prompting' }),
+      receipt: 'refused',
     },
     {
       name: 'a setting it could not read',
       hold: (h) => h.throwOnPolicy(),
       frame: () => frame({ fromMode: 'prompting' }),
+      receipt: 'expired',
     },
     {
       name: 'an approval mode it could not read',
       hold: (h) => h.setMode(null),
       frame: () => frame({ fromMode: 'prompting' }),
+      receipt: 'expired',
     },
     {
       name: 'a sender that asserted no mode',
       hold: () => {},
       frame: () => frame({ fromMode: undefined }),
+      receipt: 'refused',
     },
     {
       name: 'a sender whose class differs',
       hold: (h) => h.setMode(ApprovalMode.DEFAULT),
       frame: () => frame({ fromMode: 'bypass' }),
+      receipt: 'refused',
     },
   ];
 
@@ -2575,9 +2587,24 @@ describe('a host that cannot present a held message', () => {
       expect(h.gate.admit(f)).toBe('refused');
       expect(h.gate.getHeld()).toHaveLength(0);
       expect(h.delivered).toHaveLength(0);
-      expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'refused' });
+      expect(h.statuses.at(-1)).toEqual({
+        msgId: f.msgId,
+        status: cause.receipt,
+      });
     });
   }
+
+  it('tells a sender the message ran out while the session goes away', async () => {
+    // Not `refused`: the session was not declining what this sender
+    // sends, it was leaving. Nothing is parked either way.
+    const h = harness({ presentsHolds: false, mode: ApprovalMode.DEFAULT });
+    await h.gate.shutdown();
+    const f = frame({ fromMode: 'bypass' });
+
+    expect(h.gate.admit(f)).toBe('refused');
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+  });
 
   it('leaves the same message admissible again', () => {
     // A hold this host could not present is refused for want of a

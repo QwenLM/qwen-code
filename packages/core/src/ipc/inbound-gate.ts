@@ -768,10 +768,15 @@ export class InboundGate {
     // setting outranks both a trusted controller and this session's own
     // processes, so refusing there would turn away messages this gate
     // accepts without asking anyone.
-    const policy =
-      decision.policy === 'hold' && this.options.presentsHolds === false
-        ? 'refuse'
-        : decision.policy;
+    // Not while shutting down: the branch below answers every message
+    // the same way, and `refused` there would tell a sender this session
+    // declines its messages when it was only going away. Nothing is
+    // parked either way.
+    const convertsHold =
+      decision.policy === 'hold' &&
+      this.options.presentsHolds === false &&
+      !this.shuttingDown;
+    const policy = convertsHold ? 'refuse' : decision.policy;
 
     if (policy === 'refuse') {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
@@ -782,16 +787,24 @@ export class InboundGate {
       // turning the next verbatim attempt into a `duplicate`, which would
       // replace "stop" with "fold it into a later message".
       this.forgetAdmittedBody(frame, origin);
-      // Tombstoned only when the policy itself refused. A hold this host
-      // could not present is refused for want of a reviewer, and some of
-      // the reasons a message is held are momentary — a settings reader
-      // that threw while a session tore down reads as `policy-unreadable`.
-      // Settling the id would refuse that exact message for good, which is
-      // the trade the queue-full path already declines to make.
       if (decision.policy === 'refuse') {
         this.recordSettled(frame.msgId, 'refused');
+        void this.report(frame, 'refused');
+        return 'refused';
       }
-      void this.report(frame, 'refused');
+      // A hold this host could not present, refused for want of a
+      // reviewer. Two of the causes are momentary — an approval mode that
+      // could not be read while a session tore down, a settings reader
+      // that threw — so the id is left unsettled, and the receipt says
+      // the message ran out rather than telling its sender this session
+      // declines what it sends: settling or refusing would stop a sender
+      // that the next attempt would have reached. The other three are the
+      // session's own standing answer, which does not change while it
+      // runs.
+      const momentary =
+        decision.cause === 'mode-unknown' ||
+        decision.cause === 'policy-unreadable';
+      void this.report(frame, momentary ? 'expired' : 'refused');
       return 'refused';
     }
 
