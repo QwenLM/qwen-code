@@ -143,7 +143,11 @@ export interface MessageListProps {
   transcriptReloadPaused?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
-   * expanded and un-collapsible so streaming output is never hidden.
+   * expanded and un-collapsible so streaming output is never hidden. When
+   * false, stale assistant/thinking/tool-group-thought streaming flags left
+   * by a restored replay are settled before render — and stay settled when
+   * the session responds again — which is what hosts observe through
+   * MarkdownRenderContext.isStreaming.
    */
   isResponding?: boolean;
   welcomeHeader?: ReactNode;
@@ -3047,11 +3051,19 @@ export const MessageList = memo(
           sourceMessages: readonly Message[];
           compactMode: boolean;
           pendingApproval: PermissionRequest | null;
-          isResponding: boolean;
           value: Message[];
         }
       | undefined
     >(undefined);
+    // Ids an idle render found still carrying a streaming flag; those rows
+    // stay settled when the session responds again. Advanced only
+    // post-commit — render-phase writes go to the pending ref.
+    const settledStaleMessageIdsRef = useRef<ReadonlySet<string> | undefined>(
+      undefined,
+    );
+    const pendingSettledMessageIdsRef = useRef<ReadonlySet<string> | undefined>(
+      undefined,
+    );
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
       const tail = messages[messages.length - 1];
@@ -3060,8 +3072,7 @@ export const MessageList = memo(
         streamingTailContentOnly &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
-        cached.pendingApproval === pendingApproval &&
-        cached.isResponding === isResponding
+        cached.pendingApproval === pendingApproval
       ) {
         if (
           tail?.role === 'assistant' &&
@@ -3081,18 +3092,43 @@ export const MessageList = memo(
           ? mergeCompactToolGroups(standaloneTools, pendingApproval)
           : standaloneTools;
       }
-      // A restored replay can retain a streaming block after the daemon has
-      // already reported the whole session idle. The session lifecycle is the
-      // authoritative backstop for rendered completion in that state.
-      if (!isResponding) value = value.map(settleStaleStreamingMessage);
       mergedMessagesCache.current = {
         sourceMessages: messages,
         compactMode,
         pendingApproval,
-        isResponding,
         value,
       };
-      return value;
+      // A restored replay can retain streaming flags on assistant/thinking
+      // text after the daemon has already reported the whole session idle,
+      // and nothing repairs them at the source. Idle renders settle those
+      // flags for display — stale tool statuses are not covered — and record
+      // the settled ids so responding renders keep them settled instead of
+      // reviving them until the next idle render. The cache keeps the
+      // unsettled array so the compact thinking-tail patcher can still find
+      // the streaming flag it patches on.
+      if (isResponding) {
+        const settledIds = settledStaleMessageIdsRef.current;
+        return settledIds?.size
+          ? value.map((message) =>
+              settledIds.has(message.id)
+                ? settleStaleStreamingMessage(message)
+                : message,
+            )
+          : value;
+      }
+      let staleIds: Set<string> | undefined;
+      const settled = value.map((message) => {
+        const next = settleStaleStreamingMessage(message);
+        if (next !== message) (staleIds ??= new Set()).add(message.id);
+        return next;
+      });
+      if (staleIds) {
+        pendingSettledMessageIdsRef.current = new Set([
+          ...(settledStaleMessageIdsRef.current ?? []),
+          ...staleIds,
+        ]);
+      }
+      return settled;
     }, [
       compactMode,
       isResponding,
@@ -3100,6 +3136,12 @@ export const MessageList = memo(
       pendingApproval,
       streamingTailContentOnly,
     ]);
+    useLayoutEffect(() => {
+      const pending = pendingSettledMessageIdsRef.current;
+      if (!pending) return;
+      settledStaleMessageIdsRef.current = pending;
+      pendingSettledMessageIdsRef.current = undefined;
+    }, [mergedMessages]);
     const displayItemsCache = useRef<
       | {
           sourceMessages: readonly Message[];

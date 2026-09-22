@@ -5642,6 +5642,47 @@ describe('MessageList — turn collapse (DOM)', () => {
     },
   );
 
+  it('keeps the compact thinking tail on the streamed-tail patch path while idle', () => {
+    const toolGroup = toolMsg('g1');
+    const thinking: Message = {
+      id: 't1',
+      role: 'thinking',
+      content: 'plan',
+      isStreaming: true,
+      timestamp: 1_001,
+    };
+    const base: Message[] = [userMsg('u1'), toolGroup, thinking];
+    const container = mount(base, undefined, {
+      isResponding: false,
+      compactMode: true,
+    });
+    const renderedBefore = messageItemTestState.toolArrays.length;
+    const stableTools = messageItemTestState.toolArrays.at(-1);
+    expect(stableTools).toBeDefined();
+
+    rerenderMessages(
+      container,
+      [base[0]!, base[1]!, { ...thinking, content: 'plan delta' }],
+      { isResponding: false },
+    );
+    rerenderMessages(
+      container,
+      [base[0]!, base[1]!, { ...thinking, content: 'plan delta two' }],
+      { isResponding: false },
+    );
+
+    // A full re-merge would rebuild the aggregated group's tools array on
+    // every tick; the streamed-tail patch reuses it.
+    expect(
+      container
+        .querySelector('[data-thought-content]')
+        ?.getAttribute('data-thought-content'),
+    ).toBe('plan delta two');
+    const afterTicks = messageItemTestState.toolArrays.slice(renderedBefore);
+    expect(afterTicks.length).toBeGreaterThan(0);
+    expect(afterTicks.every((tools) => tools === stableTools)).toBe(true);
+  });
+
   it('falls back safely when streamed assistant content is undefined', () => {
     const assistant = {
       ...asstMsg('a1'),

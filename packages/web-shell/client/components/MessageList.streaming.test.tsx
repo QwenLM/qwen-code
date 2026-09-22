@@ -47,9 +47,8 @@ function messageFor(role: StreamingRole, isStreaming: boolean): Message {
   return { id: 'response', role, content, isStreaming };
 }
 
-function mountTranscript(
-  role: StreamingRole,
-  isStreaming: boolean,
+function mountMessages(
+  messages: Message[],
   renderMode: 'document' | 'interactive' = 'document',
 ) {
   vi.stubGlobal(
@@ -64,24 +63,22 @@ function mountTranscript(
   document.body.appendChild(container);
   const root = createRoot(container);
   mounted.push({ root, container });
-  const message = messageFor(role, isStreaming);
-  const messages: Message[] = [
-    { id: 'prompt', role: 'user', content: 'Question' },
-    message,
-  ];
   const transformMarkdown = vi.fn(
     (_content: string, context: MarkdownRenderContext) =>
       context.isStreaming ? 'citation pending' : 'citation settled',
   );
   const customization = { markdown: { transformMarkdown } };
-  const render = (isResponding: boolean) => {
+  const render = (
+    isResponding: boolean,
+    nextMessages: Message[] = messages,
+  ) => {
     act(() => {
       root.render(
         <I18nProvider language="en">
           <WebShellCustomizationProvider value={customization}>
             <TranscriptRenderModeProvider value={renderMode}>
               <MessageList
-                messages={messages}
+                messages={nextMessages}
                 pendingApproval={null}
                 isResponding={isResponding}
               />
@@ -91,7 +88,20 @@ function mountTranscript(
       );
     });
   };
-  return { container, message, transformMarkdown, render };
+  return { container, transformMarkdown, render };
+}
+
+function mountTranscript(
+  role: StreamingRole,
+  isStreaming: boolean,
+  renderMode: 'document' | 'interactive' = 'document',
+) {
+  const message = messageFor(role, isStreaming);
+  const mountedView = mountMessages(
+    [{ id: 'prompt', role: 'user', content: 'Question' }, message],
+    renderMode,
+  );
+  return { ...mountedView, message };
 }
 
 describe('MessageList effective Markdown streaming state', () => {
@@ -159,7 +169,7 @@ describe('MessageList effective Markdown streaming state', () => {
   );
 
   it.each(['assistant', 'thinking', 'tool_group'] as const)(
-    'does not revive settled %s content when the session becomes active',
+    'keeps an already-settled %s row settled when the session becomes active',
     (role) => {
       const { container, transformMarkdown, render } = mountTranscript(
         role,
@@ -177,4 +187,62 @@ describe('MessageList effective Markdown streaming state', () => {
       expect(container.textContent).not.toContain('citation pending');
     },
   );
+
+  it.each(['assistant', 'thinking', 'tool_group'] as const)(
+    'does not revive a settled stale %s row when the session becomes active',
+    (role) => {
+      const { container, transformMarkdown, render } = mountTranscript(
+        role,
+        true,
+      );
+      render(false);
+      expect(container.textContent).toContain('citation settled');
+
+      render(true);
+      expect(
+        transformMarkdown.mock.calls.every(
+          ([, context]) => context.isStreaming === false,
+        ),
+      ).toBe(true);
+      expect(container.textContent).toContain('citation settled');
+      expect(container.textContent).not.toContain('citation pending');
+    },
+  );
+
+  it('keeps a new live turn streaming while a settled stale row stays settled', () => {
+    const prompt: Message = { id: 'prompt', role: 'user', content: 'Question' };
+    const stale = messageFor('assistant', true);
+    const { container, transformMarkdown, render } = mountMessages([
+      prompt,
+      stale,
+    ]);
+    render(false);
+    expect(container.textContent).toContain('citation settled');
+
+    render(true, [
+      prompt,
+      stale,
+      { id: 'prompt-2', role: 'user', content: 'Follow up' },
+      {
+        id: 'live',
+        role: 'assistant',
+        content: 'Live answer',
+        isStreaming: true,
+      },
+    ]);
+
+    const staleCalls = transformMarkdown.mock.calls.filter(
+      ([text]) => text === content,
+    );
+    expect(staleCalls.length).toBeGreaterThan(0);
+    expect(
+      staleCalls.every(([, context]) => context.isStreaming === false),
+    ).toBe(true);
+    expect(transformMarkdown).toHaveBeenCalledWith('Live answer', {
+      source: 'assistant',
+      isStreaming: true,
+    });
+    expect(container.textContent).toContain('citation settled');
+    expect(container.textContent).toContain('citation pending');
+  });
 });
