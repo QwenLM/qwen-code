@@ -883,6 +883,9 @@ export class ToolRegistry {
     if (!tools.some((tool) => tool.name === ToolNames.EXEC)) {
       return tools.map((tool) => tool.schema);
     }
+    const hasToolCallBridge =
+      tools.some((tool) => tool.name === ToolNames.TOOL_SEARCH) &&
+      tools.some((tool) => tool.name === ToolNames.TOOL_CALL);
     const plan = this.getCodeModeBindingPlan(allowedNames);
     const bindings = new Map(
       plan.bindings.map((binding) => [binding.name, binding]),
@@ -901,6 +904,7 @@ export class ToolRegistry {
           false,
           topLevelBindingNames,
           canSearchDeferredSchemas,
+          hasToolCallBridge,
         );
       }
       const binding = bindings.get(tool.name);

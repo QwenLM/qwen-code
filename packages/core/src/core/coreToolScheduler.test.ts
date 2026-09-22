@@ -20546,17 +20546,17 @@ describe('CoreToolScheduler activation wiring', () => {
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
     expect(responseText).toContain(
-      'Use the invocation surface available in this session',
+      'Load a skill by name using the tool interface declared in this session',
     );
-    // Direct mode never registers exec, so the reminder must not name the
-    // exec surface — a model following it would call an undeclared tool.
-    expect(responseText).toContain('pass its name to the top-level Skill tool');
+    expect(responseText).not.toContain(
+      'pass its name to the top-level Skill tool',
+    );
     expect(responseText).not.toContain(
       "await tools.skill({ skill: '<name>' })",
     );
   });
 
-  it('names both invocation surfaces in hybrid code mode', async () => {
+  it('defers to declared invocation surfaces in hybrid code mode', async () => {
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
     const { scheduler, onAllToolCallsComplete } =
       buildSchedulerWithSkillManager({
@@ -20581,11 +20581,18 @@ describe('CoreToolScheduler activation wiring', () => {
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
-    expect(responseText).toContain('pass its name to the top-level Skill tool');
-    expect(responseText).toContain("await tools.skill({ skill: '<name>' })");
+    expect(responseText).toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
+    expect(responseText).not.toContain(
+      'pass its name to the top-level Skill tool',
+    );
+    expect(responseText).not.toContain(
+      "await tools.skill({ skill: '<name>' })",
+    );
   });
 
-  it('names only the exec surface in code_mode_only', async () => {
+  it('defers to declared invocation surfaces in code_mode_only', async () => {
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
     const { scheduler, onAllToolCallsComplete } =
       buildSchedulerWithSkillManager({
@@ -20614,10 +20621,15 @@ describe('CoreToolScheduler activation wiring', () => {
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
+    expect(responseText).toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
     expect(responseText).not.toContain(
       'pass its name to the top-level Skill tool',
     );
-    expect(responseText).toContain("await tools.skill({ skill: '<name>' })");
+    expect(responseText).not.toContain(
+      "await tools.skill({ skill: '<name>' })",
+    );
   });
 
   it('stays silent when SkillTool is registered but was never declared', async () => {
@@ -20654,7 +20666,7 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
     expect(responseText).not.toContain(
-      'Use the invocation surface available in this session',
+      'Load a skill by name using the tool interface declared in this session',
     );
     expect(responseText).not.toContain('tsx-helper');
     // The half that starves the parent. Moving this call outside the gate
@@ -20695,7 +20707,7 @@ describe('CoreToolScheduler activation wiring', () => {
 
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
     expect(getResponseText(completed[0])).toContain(
-      'Use the invocation surface available in this session',
+      'Load a skill by name using the tool interface declared in this session',
     );
     // …and the announcement IS consumed here, so the parent does not repeat
     // what this agent already showed. The pair is what makes the negative

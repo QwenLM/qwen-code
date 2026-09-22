@@ -416,7 +416,7 @@ export interface QueryOptions {
    * registered; when either is unregistered (`tools.toolSearch.enabled: false`
    * denies both; a `tool_search` or `tool_call` deny rule, or a
    * `tools.disabled` entry removes one) the
-   * demoted tools that remain hidden are not offered to the model and cannot
+   * demoted tools that remain hidden are absent from top-level declarations and cannot
    * be reached through the bridge for that session, and a warning is
    * written to the CLI process's stderr. The SDK forwards it only when
    * stderr is piped (`debug: true` or a `stderr` handler) and the effective
@@ -430,7 +430,9 @@ export interface QueryOptions {
    * direct call to a still-hidden demoted tool, which any tool-set
    * refresh (resume, MCP discovery, the first plan-mode entry in a
    * session, a subagent definition change) re-declares.
-   * These bridge and warning rules describe direct tool mode. CodeModeOnly
+   * These bridge and warning rules apply to direct and hybrid code modes.
+   * In hybrid mode, exec retains callable nested bindings; their schemas are
+   * included in exec when either bridge tool is unavailable. CodeModeOnly
    * hides both bridge tools, includes callable deferred tools' full schemas
    * in exec, and skips deferred reminders and this warning; tools.eager does
    * not make those nested tools unreachable or reduce their schema tokens.
@@ -487,7 +489,7 @@ export interface QueryOptions {
    *   when either is unregistered (`tools.toolSearch.enabled: false` denies
    *   both; a `tool_search` or `tool_call` deny rule, or a
    *   `tools.disabled` entry removes one) the
-   *   demoted tools that remain hidden are not offered to the model and cannot
+   *   demoted tools that remain hidden are absent from top-level declarations and cannot
    *   be reached through the bridge for that session, and a warning is
    *   written to the CLI process's stderr. The SDK forwards it only when
    *   stderr is piped (`debug: true` or a `stderr` handler) and the effective
@@ -501,7 +503,9 @@ export interface QueryOptions {
    *   contains a direct call to a still-hidden demoted tool, which any
    *   tool-set refresh (resume, MCP discovery, the first plan-mode
    *   entry in a session, a subagent definition change) re-declares (#9827).
-   *   These bridge and warning rules describe direct tool mode. CodeModeOnly
+   *   These bridge and warning rules apply to direct and hybrid code modes.
+   *   In hybrid mode, exec retains callable nested bindings; their schemas are
+   *   included in exec when either bridge tool is unavailable. CodeModeOnly
    *   hides both bridge tools, includes callable deferred tools' full schemas
    *   in exec, and skips deferred reminders and this warning; tools.eager does
    *   not make those nested tools unreachable or reduce their schema tokens.

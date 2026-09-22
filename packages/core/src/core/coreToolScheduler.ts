@@ -228,11 +228,7 @@ import {
   runWithToolCallSource,
   type CodeModeToolResult,
 } from '../code-mode/tool-call-runtime.js';
-import {
-  isCodeModeEnabled,
-  isCodeModeToolCallAllowed,
-  ToolMode,
-} from '../tools/code-mode.js';
+import { isCodeModeToolCallAllowed, ToolMode } from '../tools/code-mode.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -6121,23 +6117,8 @@ export class CoreToolScheduler {
                 }));
               }
               if (activatedEntries.length > 0) {
-                // Name only the invocation surfaces this session has: the
-                // exec surface exists only when a code mode is enabled and
-                // exec was registered, and CodeModeOnly rejects top-level
-                // Skill calls.
-                const execSurfaceAvailable =
-                  isCodeModeEnabled(this.config.getToolMode?.()) &&
-                  !!this.toolRegistry.getTool(ToolNames.EXEC);
-                const topLevelSurfaceAvailable =
-                  this.config.getToolMode?.() !== ToolMode.CodeModeOnly;
-                const invocationGuidance =
-                  execSurfaceAvailable && topLevelSurfaceAvailable
-                    ? "pass its name to the top-level Skill tool, or call `await tools.skill({ skill: '<name>' })` from exec"
-                    : execSurfaceAvailable
-                      ? "call `await tools.skill({ skill: '<name>' })` from exec"
-                      : 'pass its name to the top-level Skill tool';
                 reminderBlocks.push(
-                  `The following skill(s) became available based on the file you just accessed. Use the invocation surface available in this session: ${invocationGuidance}:\n<available_skills>\n${renderAvailableSkillsBlock(
+                  `The following skill(s) became available based on the file you just accessed. Load a skill by name using the tool interface declared in this session:\n<available_skills>\n${renderAvailableSkillsBlock(
                     activatedEntries,
                   )}\n</available_skills>`,
                 );

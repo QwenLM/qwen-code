@@ -239,6 +239,7 @@ export function buildExecDescription(
   codeModeOnly = true,
   topLevelBindingNames: ReadonlySet<string> = new Set(),
   canSearchDeferredSchemas = false,
+  hasToolCallBridge = canSearchDeferredSchemas,
 ): string {
   const allTools = plan.bindings.map(
     ({ name, jsName, description, deferred }) => ({
@@ -265,14 +266,17 @@ export function buildExecDescription(
       : codeModeOnly
         ? plan.bindings.map(describeBinding).join('\n')
         : [
-            'Nested tool declarations for directly exposed tools are included in their top-level tool descriptions. With both tool_search and tool_call available, tool_search returns deferred parameter schemas without changing top-level declarations. Match the returned schema name exactly to ALL_TOOLS.name, then call tools[entry.jsName] with arguments shaped by that schema. If no entry matches, do not normalize or guess a binding; use tool_call outside exec, or an available direct tool, subject to normal validation and approval.',
+            'Nested tool declarations for directly exposed tools are included in their top-level tool descriptions.',
+            hasToolCallBridge
+              ? 'With both tool_search and tool_call available, tool_search returns deferred parameter schemas without changing top-level declarations. Match the returned schema name exactly to ALL_TOOLS.name, then call tools[entry.jsName] with arguments shaped by that schema. If no entry matches, do not normalize or guess a binding; use tool_call outside exec, or an available direct tool, subject to normal validation and approval.'
+              : 'Other nested parameter schemas are declared below. Match tool names exactly to ALL_TOOLS.name, then call tools[entry.jsName] with arguments shaped by that schema. If no entry matches, the tool has no nested binding; do not normalize or guess one.',
             uncoveredBindings.map(describeBinding).join('\n'),
           ]
             .filter(Boolean)
             .join('\n');
   const toolsDescription = codeModeOnly
     ? 'the code-mode-callable tool functions declared below.'
-    : 'the code-mode-callable functions listed in ALL_TOOLS. Parameter schemas are in their top-level tool descriptions, below, or returned by tool_search; use the exact ALL_TOOLS name-to-jsName mapping.';
+    : `the code-mode-callable functions listed in ALL_TOOLS. Parameter schemas are in their top-level tool descriptions or below${hasToolCallBridge ? ', or returned by tool_search' : ''}; use the exact ALL_TOOLS name-to-jsName mapping.`;
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
@@ -309,6 +313,7 @@ export function buildExecDeclaration(
   codeModeOnly = true,
   topLevelBindingNames?: ReadonlySet<string>,
   canSearchDeferredSchemas?: boolean,
+  hasToolCallBridge?: boolean,
 ): FunctionDeclaration {
   return {
     ...execTool.schema,
@@ -317,6 +322,7 @@ export function buildExecDeclaration(
       codeModeOnly,
       topLevelBindingNames,
       canSearchDeferredSchemas,
+      hasToolCallBridge,
     ),
   };
 }

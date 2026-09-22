@@ -200,7 +200,7 @@ describe('code mode exposure', () => {
         },
       }),
     );
-    for (const name of ['tool_search', 'agent', 'exec'])
+    for (const name of ['tool_search', 'tool_call', 'agent', 'exec'])
       registry.registerTool(new MockTool({ name }));
 
     const declarations = registry.getFunctionDeclarations();
@@ -208,6 +208,7 @@ describe('code mode exposure', () => {
       'agent',
       'exec',
       'read_file',
+      'tool_call',
       'tool_search',
     ]);
     const readFileDescription = declarations.find(
@@ -285,6 +286,8 @@ describe('code mode exposure', () => {
     ]);
     expect(initial[0]?.description).toContain('"name":"deferred_tool"');
     expect(initial[0]?.description).not.toContain('tools.deferred_tool(args:');
+    expect(initial[0]?.description).toContain('use tool_call outside exec');
+    expect(initial[0]?.description).toContain('returned by tool_search');
     expect(registry.getDeferredToolSummary().map((item) => item.name)).toEqual([
       'deferred_tool',
     ]);
@@ -294,6 +297,7 @@ describe('code mode exposure', () => {
       new Set(['deferred_tool']),
     );
     expect(filtered[0]?.description).toContain('tools.deferred_tool(args:');
+    expect(filtered[0]?.description).toContain('use tool_call outside exec');
 
     const revealed = registry.getFunctionDeclarations({
       includeDeferred: true,
@@ -333,6 +337,9 @@ describe('code mode exposure', () => {
       expect(description).toContain(
         'tools.deferred_tool(args: { "path": string })',
       );
+      expect(description).not.toContain('use tool_call outside exec');
+      expect(description).not.toContain('returned by tool_search');
+      expect(description).toContain('the tool has no nested binding');
     },
   );
 

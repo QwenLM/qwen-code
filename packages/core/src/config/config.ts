@@ -3027,6 +3027,7 @@ export class Config {
   private fastModel?: string;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
+  private readonly codeModeWarnings = { containerFallback: false };
   /**
    * Per-session web_search call count. An object that is never reassigned:
    * derived Configs (`deriveConfig` → `Object.create(base)`) must mutate the
@@ -11348,7 +11349,11 @@ export class Config {
           'Container execution cannot be combined with tools.mode = "code_mode_only".',
         );
       }
-      if (this.getToolMode() === ToolMode.CodeMode) {
+      if (
+        this.getToolMode() === ToolMode.CodeMode &&
+        !this.codeModeWarnings.containerFallback
+      ) {
+        this.codeModeWarnings.containerFallback = true;
         // eslint-disable-next-line no-console -- the fallback must be visible without debug logging
         console.warn(
           'Container execution does not support exec; continuing with direct tools for tools.mode = "code_mode".',

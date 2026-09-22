@@ -40,6 +40,7 @@ import { decodeBufferWithEncodingInfo } from '../services/sync-file-encoding.js'
 import { iconvEncode } from './iconvHelper.js';
 import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import {
@@ -166,6 +167,7 @@ describe('fileUtils', () => {
       getFunctionDeclarations: () => [
         { name: 'read_file' },
         { name: 'tool_search' },
+        { name: 'tool_call' },
       ],
       getDeferredToolSummary: () => [{ name: 'zoom_image' }],
       getCodeModeBindingPlan: () => ({
@@ -1409,6 +1411,7 @@ describe('fileUtils', () => {
 
     it.each<{
       codeModeOnly: boolean;
+      toolMode?: ToolMode;
       declared: string[];
       deferred: string[];
       bindings: string[];
@@ -1423,7 +1426,7 @@ describe('fileUtils', () => {
       },
       {
         codeModeOnly: false,
-        declared: ['read_file', 'tool_search'],
+        declared: ['read_file', 'tool_search', 'tool_call'],
         deferred: ['zoom_image'],
         bindings: [],
         hint:
@@ -1451,9 +1454,37 @@ describe('fileUtils', () => {
         bindings: ['zoom_image'],
         hint: ' If details are too small, call tools.zoom_image with coordinates normalized from 0 to 1000.',
       },
+      ...[[], ['tool_search'], ['tool_call'], ['tool_search', 'tool_call']].map(
+        (bridgeTools) => ({
+          codeModeOnly: false,
+          toolMode: ToolMode.CodeMode,
+          declared: ['read_file', 'exec', ...bridgeTools],
+          deferred: ['zoom_image'],
+          bindings: ['zoom_image'],
+          hint:
+            bridgeTools.length === 2
+              ? ' If details are too small, review zoom_image with tool_search and invoke it through tool_call, with coordinates normalized from 0 to 1000.'
+              : ' If details are too small, call tools.zoom_image with coordinates normalized from 0 to 1000.',
+        }),
+      ),
+      ...[[], ['tool_search'], ['tool_call']].map((bridgeTools) => ({
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', ...bridgeTools],
+        deferred: ['zoom_image'],
+        bindings: ['zoom_image'],
+        hint: '',
+      })),
     ])(
       'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
-      async ({ codeModeOnly, declared, deferred, bindings, hint }) => {
+      async ({
+        codeModeOnly,
+        toolMode,
+        declared,
+        deferred,
+        bindings,
+        hint,
+      }) => {
         await sharp({
           create: { width: 20, height: 10, channels: 3, background: '#306090' },
         })
@@ -1463,6 +1494,7 @@ describe('fileUtils', () => {
         const result = await processSingleFileContent(testImageFilePath, {
           ...mockConfig,
           getCodeModeOnly: () => codeModeOnly,
+          getToolMode: () => toolMode,
           getToolRegistry: () => ({
             getFunctionDeclarations: () => declared.map((name) => ({ name })),
             getDeferredToolSummary: () => deferred.map((name) => ({ name })),

@@ -218,7 +218,7 @@ describe('execution environment ownership', () => {
     expect(parent.getExecutionEnvironment()).toBeUndefined();
   });
 
-  it('warns when a hybrid container registry falls back to direct tools', async () => {
+  it('warns once per root session when hybrid container registries fall back to direct tools', async () => {
     const parent = new Config({ ...params, toolMode: ToolMode.CodeMode });
     const child = deriveConfig(parent, {
       getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
@@ -233,6 +233,17 @@ describe('execution environment ownership', () => {
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining('continuing with direct tools'),
       );
+      await child.createToolRegistry(undefined, { skipDiscovery: true });
+      await deriveConfig(parent, {
+        getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
+      }).createToolRegistry(undefined, { skipDiscovery: true });
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      await deriveConfig(
+        new Config({ ...params, toolMode: ToolMode.CodeMode }),
+        { getExecutionEnvironment: () => ({}) as ExecutionEnvironment },
+      ).createToolRegistry(undefined, { skipDiscovery: true });
+      expect(warn).toHaveBeenCalledTimes(2);
     } finally {
       warn.mockRestore();
     }
