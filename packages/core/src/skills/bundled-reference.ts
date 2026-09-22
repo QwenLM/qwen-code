@@ -218,6 +218,7 @@ export function resolveBundledReferenceSurface(
  * drops it — a decision recorded once has to ask this.
  */
 function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
+  if (config.getToolMode?.() === ToolMode.CodeModeOnly) return false;
   if (!config.getToolRegistry?.()?.isPermissionDeferred?.(name)) return false;
   return !config.getVisibleTools?.()?.has(name);
 }

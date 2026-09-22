@@ -297,6 +297,11 @@ describe('isToolHiddenBehindToolSearch', () => {
       false,
     ],
     ['not deferred', {}, false],
+    [
+      'deferred under CodeModeOnly',
+      { deferred: [ToolNames.WORKFLOW], toolMode: ToolMode.CodeModeOnly },
+      false,
+    ],
   ])('answers for a tool that is %s', (_case, options: StubOptions, hidden) => {
     expect(
       isToolHiddenBehindToolSearch(
