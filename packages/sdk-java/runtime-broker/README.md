@@ -3,8 +3,9 @@
 This Java 21 module defines the state and embeddable orchestration core for a
 Managed Agent Runtime Broker. It contains Runtime binding, Runtime Session,
 and Tool execution records; repository contracts; thread-safe in-memory
-implementations; and a framework-neutral service that composes authoritative
-scope resolution, Runtime provisioning, and Runtime transport adapters.
+and JDBC implementations; and a framework-neutral service that composes
+authoritative scope resolution, Runtime provisioning, and Runtime transport
+adapters.
 
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
@@ -29,10 +30,12 @@ mvn checkstyle:check
 
 ## JDBC persistence
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the three private
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
 Broker tables. The JDBC implementations use only `javax.sql.DataSource`; the
-embedding service owns the connection pool and schema lifecycle. This module
-intentionally does not persist Tool executions or wire a Spring/HTTP adapter.
+embedding service owns the connection pool and schema lifecycle. Tool
+execution rows preserve idempotency identity, dispatch ownership and lease,
+cancellation intent, `UNKNOWN` recovery state, and the final result. This
+module intentionally does not wire a Spring service or dispatch Tool calls.
 
 Run the optional real-MySQL contract with:
 
