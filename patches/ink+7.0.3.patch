@@ -204,7 +204,7 @@ index 0000000..745a4ba
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
 diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
-index c4386e4..753a9b4 100644
+index c4386e4..891d1a0 100644
 --- a/node_modules/ink/build/hooks/use-box-metrics.js
 +++ b/node_modules/ink/build/hooks/use-box-metrics.js
 @@ -1,4 +1,4 @@
@@ -375,7 +375,7 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..1beca9b 100644
+index ef659f3..bcb9ddc 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
 @@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
@@ -386,7 +386,15 @@ index ef659f3..1beca9b 100644
  import App from './components/App.js';
  import { accessibilityContext as AccessibilityContext } from './components/AccessibilityContext.js';
  import { resolveFlags, } from './kitty-keyboard.js';
-@@ -160,6 +161,7 @@ export default class Ink {
+@@ -145,6 +146,7 @@ export default class Ink {
+     lastOutputToRender;
+     lastOutputHeight;
+     lastTerminalWidth;
++    lastTerminalHeight;
+     container;
+     rootNode;
+     // This variable is used only in debug mode to store full static output
+@@ -160,6 +162,7 @@ export default class Ink {
      kittyProtocolEnabled = false;
      cancelKittyDetection;
      nextRenderCommit;
@@ -394,7 +402,7 @@ index ef659f3..1beca9b 100644
      constructor(options) {
          autoBind(this);
          this.options = options;
-@@ -196,6 +198,12 @@ export default class Ink {
+@@ -196,6 +199,12 @@ export default class Ink {
              this.throttledOnRender = throttled;
          }
          this.rootNode.onImmediateRender = this.onRender;
@@ -407,7 +415,40 @@ index ef659f3..1beca9b 100644
          this.rootNode.onStaticChange = this.handleStaticChange;
          this.log = logUpdate.create(options.stdout, {
              incremental: options.incrementalRendering,
-@@ -317,7 +325,16 @@ export default class Ink {
+@@ -227,6 +236,7 @@ export default class Ink {
+         this.lastOutputToRender = '';
+         this.lastOutputHeight = 0;
+         this.lastTerminalWidth = getWindowSize(this.options.stdout).columns;
++        this.lastTerminalHeight = getWindowSize(this.options.stdout).rows;
+         // This variable is used only in debug mode to store full static output
+         // so that it's rerendered every time, not just new static parts, like in non-debug mode
+         this.fullStaticOutput = '';
+@@ -261,15 +271,22 @@ export default class Ink {
+     }
+     resized = () => {
+         const currentWidth = getWindowSize(this.options.stdout).columns;
+-        if (currentWidth < this.lastTerminalWidth) {
+-            // We clear the screen when decreasing terminal width to prevent duplicate overlapping re-renders.
++        const currentHeight = getWindowSize(this.options.stdout).rows;
++        // We clear the screen when decreasing terminal width to prevent duplicate overlapping re-renders.
++        // Decreasing the height with a cursor shown also drops the frame rows below the cursor,
++        // so erase what is left and render the frame again.
++        if (currentWidth < this.lastTerminalWidth ||
++            (currentHeight < this.lastTerminalHeight &&
++                this.log.getCursorPosition() !== undefined)) {
+             this.log.clear();
+             this.lastOutput = '';
+             this.lastOutputToRender = '';
++            this.lastOutputHeight = 0;
+         }
+         this.calculateLayout();
+         this.onRender();
+         this.lastTerminalWidth = currentWidth;
++        this.lastTerminalHeight = currentHeight;
+     };
+     resolveExitPromise = () => { };
+     rejectExitPromise = () => { };
+@@ -317,7 +334,16 @@ export default class Ink {
              this.nextRenderCommit = undefined;
          }
          const startTime = performance.now();
@@ -425,7 +466,7 @@ index ef659f3..1beca9b 100644
          this.options.onRender?.({ renderTime: performance.now() - startTime });
          // If <Static> output isn't empty, it means new children have been added to it
          const hasStaticOutput = staticOutput && staticOutput !== '\n';
-@@ -642,6 +659,7 @@ export default class Ink {
+@@ -642,6 +668,7 @@ export default class Ink {
          this.alternateScreen = this.resolveAlternateScreenOption(enabled, this.interactive);
          if (this.alternateScreen) {
              this.writeBestEffort(this.options.stdout, ansiEscapes.enterAlternativeScreen);
@@ -433,7 +474,7 @@ index ef659f3..1beca9b 100644
              this.writeBestEffort(this.options.stdout, hideCursorEscape);
          }
      }
-@@ -688,6 +706,7 @@ export default class Ink {
+@@ -688,6 +715,7 @@ export default class Ink {
          return this.nextRenderCommit.promise;
      }
      renderInteractiveFrame(output, outputHeight, staticOutput) {
@@ -441,7 +482,7 @@ index ef659f3..1beca9b 100644
          const hasStaticOutput = staticOutput !== '';
          const isTty = this.options.stdout.isTTY;
          // Detect fullscreen: output fills or exceeds terminal height.
-@@ -707,7 +726,7 @@ export default class Ink {
+@@ -707,7 +735,7 @@ export default class Ink {
              if (sync) {
                  this.options.stdout.write(bsu);
              }
@@ -451,7 +492,7 @@ index ef659f3..1beca9b 100644
              this.lastOutputToRender = outputToRender;
              this.lastOutputHeight = outputHeight;
 diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-update.js
-index cdb5fc4..cd10dc2 100644
+index cdb5fc4..13c9d3a 100644
 --- a/node_modules/ink/build/log-update.js
 +++ b/node_modules/ink/build/log-update.js
 @@ -4,6 +4,10 @@ import { cursorPositionChanged, buildCursorSuffix, buildCursorOnlySequence, buil
@@ -569,7 +610,7 @@ index cdb5fc4..cd10dc2 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -97,9 +130,10 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+@@ -97,9 +130,11 @@ const createStandard = (stream, { showCursor = false } = {}) => {
      render.setCursorPosition = (position) => {
          cursorPosition = position;
          cursorDirty = true;
@@ -577,11 +618,12 @@ index cdb5fc4..cd10dc2 100644
      };
      render.isCursorDirty = () => cursorDirty;
 -    render.willRender = (str) => hasChanges(str, getActiveCursor());
++    render.getCursorPosition = () => (cursorDirty ? snapshotCursorPosition(cursorPosition) : snapshotCursorPosition(previousCursorPosition));
 +    render.willRender = (str) => hasChanges(str, prepareActiveCursor());
      return render;
  };
  const createIncremental = (stream, { showCursor = false } = {}) => {
-@@ -110,7 +144,26 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -110,7 +145,26 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
      let cursorDirty = false;
      let previousCursorPosition;
      let cursorWasShown = false;
@@ -609,7 +651,7 @@ index cdb5fc4..cd10dc2 100644
      const hasChanges = (str, activeCursor) => {
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          return str !== previousOutput || cursorChanged;
-@@ -122,7 +175,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -122,7 +176,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          }
          // Only use cursor if setCursorPosition was called since last render.
          // This ensures stale positions don't persist after component unmount.
@@ -618,7 +660,7 @@ index cdb5fc4..cd10dc2 100644
          cursorDirty = false;
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          if (!hasChanges(str, activeCursor)) {
-@@ -138,6 +191,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -138,6 +192,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
                  previousCursorPosition,
                  visibleLineCount: visibleCount,
                  cursorPosition: activeCursor,
@@ -626,7 +668,7 @@ index cdb5fc4..cd10dc2 100644
              }));
              previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
              cursorWasShown = activeCursor !== undefined;
-@@ -145,7 +199,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -145,7 +200,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          }
          const returnPrefix = buildReturnToBottomPrefix(cursorWasShown, previousLines.length, previousCursorPosition);
          if (str === '\n' || previousOutput.length === 0) {
@@ -635,7 +677,7 @@ index cdb5fc4..cd10dc2 100644
              stream.write(returnPrefix +
                  ansiEscapes.eraseLines(previousLines.length) +
                  str +
-@@ -154,6 +208,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -154,6 +209,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
              previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
              previousOutput = str;
              previousLines = nextLines;
@@ -643,7 +685,7 @@ index cdb5fc4..cd10dc2 100644
              return true;
          }
          const hasTrailingNewline = str.endsWith('\n');
-@@ -187,13 +242,14 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -187,13 +243,14 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
                  // has no trailing newline (fullscreen mode).
                  (isLastLine && !hasTrailingNewline ? '' : '\n'));
          }
@@ -659,7 +701,7 @@ index cdb5fc4..cd10dc2 100644
          return true;
      };
      render.clear = () => {
-@@ -203,12 +259,16 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -203,12 +260,16 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          previousLines = [];
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -676,7 +718,7 @@ index cdb5fc4..cd10dc2 100644
          if (!showCursor) {
              cliCursor.show(stream);
              hasHiddenCursor = false;
-@@ -219,18 +279,21 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -219,18 +280,21 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          previousLines = [];
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -700,7 +742,7 @@ index cdb5fc4..cd10dc2 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -238,9 +301,10 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+@@ -238,9 +302,11 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
      render.setCursorPosition = (position) => {
          cursorPosition = position;
          cursorDirty = true;
@@ -708,6 +750,7 @@ index cdb5fc4..cd10dc2 100644
      };
      render.isCursorDirty = () => cursorDirty;
 -    render.willRender = (str) => hasChanges(str, getActiveCursor());
++    render.getCursorPosition = () => (cursorDirty ? snapshotCursorPosition(cursorPosition) : snapshotCursorPosition(previousCursorPosition));
 +    render.willRender = (str) => hasChanges(str, prepareActiveCursor());
      return render;
  };
