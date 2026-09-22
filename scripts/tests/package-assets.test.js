@@ -1006,6 +1006,7 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.private).not.toBe(true);
     expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
@@ -1030,19 +1031,12 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+  it('falls back to the hoisted sharp when core has no nested copy', () => {
     const rootDir = createFixtureRoot();
-    writeFile(
-      rootDir,
-      'package-lock.json',
-      JSON.stringify({
-        packages: {
-          'node_modules/sharp': {
-            version: '0.35.3',
-          },
-        },
-      }),
-    );
+    rmSync(path.join(rootDir, 'packages/core/node_modules'), {
+      recursive: true,
+      force: true,
+    });
     writeFile(
       rootDir,
       'packages/core/package.json',
@@ -1120,7 +1114,7 @@ describe('package asset scripts', () => {
 
     expect(() =>
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
+    ).toThrow(/installed 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1442,6 +1436,7 @@ describe('package asset scripts', () => {
           name: '@qwen-code/qwen-code',
           version: '0.17.0',
           description: 'Qwen Code',
+          private: true,
           repository: {
             type: 'git',
             url: 'https://github.com/QwenLM/qwen-code.git',
@@ -1461,21 +1456,13 @@ describe('package asset scripts', () => {
 
     writeFile(
       rootDir,
-      'package-lock.json',
-      JSON.stringify(
-        {
-          packages: {
-            'node_modules/sharp': {
-              version: '0.35.3',
-            },
-            'packages/core/node_modules/sharp': {
-              version: '0.35.4',
-            },
-          },
-        },
-        null,
-        2,
-      ),
+      'node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.3' }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.4' }),
     );
 
     writeFile(

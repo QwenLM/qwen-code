@@ -793,6 +793,9 @@ function sanitizeResultPreview(
   if (preview.kind === 'todo_list') {
     return sanitizeTodoPreview(preview, budget, ids);
   }
+  if (preview.kind === 'shell_result') {
+    return { kind: 'text', text: budget.text(preview.result.text) };
+  }
   if (preview.kind === 'text') {
     return { kind: 'text', text: budget.text(preview.text) };
   }
