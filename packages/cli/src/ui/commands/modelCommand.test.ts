@@ -311,6 +311,45 @@ describe('modelCommand', () => {
     expect(recordSessionModel).not.toHaveBeenCalled();
   });
 
+  it('blocks typed selections of discontinued qwen-oauth models', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model coder-model(qwen-oauth)',
+        name: 'model',
+        args: 'coder-model(qwen-oauth)',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'coder-model', label: 'coder-model' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'coder-model(qwen-oauth)',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+    });
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('records the session model in ACP mode after switching', async () => {
     const setValue = vi.fn();
     let currentModel = 'old-model';

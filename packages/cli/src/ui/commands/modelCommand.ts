@@ -1060,6 +1060,19 @@ export const modelCommand: SlashCommand = {
     if (modelName) {
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
+      if (
+        parsed.authType === AuthType.QWEN_OAUTH &&
+        !parsed.modelId.startsWith(`$runtime|${AuthType.QWEN_OAUTH}|`)
+      ) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+          ),
+        };
+      }
+
       const availableModels = config
         .getAvailableModelsForAuthType(targetAuthType)
         .filter((m) => !m.fastOnly && !m.voiceOnly && !m.imageOnly);
