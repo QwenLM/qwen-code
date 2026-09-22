@@ -112,9 +112,9 @@ settled records.
 
 `InMemoryToolExecutionRepository` synchronizes every compound operation. It is
 a reference implementation for one process, not a multi-JVM coordination
-mechanism. A later JDBC adapter must preserve the same identity, idempotency,
-version, lease, transition-legality, and fencing semantics through database
-constraints and row locking.
+mechanism. `JdbcToolExecutionRepository` preserves the same identity,
+idempotency, version, lease, transition-legality, and fencing semantics through
+database constraints and row locking.
 
 ## Security and tenancy
 

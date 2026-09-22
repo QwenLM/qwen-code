@@ -36,6 +36,10 @@ database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 Tool execution rows preserve idempotency identity, dispatch ownership and
 lease, cancellation intent, `UNKNOWN` recovery state, and the final result.
+Tool execution identifiers are globally unique repository keys. The embedding
+service must derive them from authenticated tenant, workspace, and session
+context because this repository interface does not carry separate scope
+arguments.
 This module intentionally does not wire a Spring service or dispatch Tool
 calls.
 

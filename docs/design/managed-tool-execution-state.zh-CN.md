@@ -92,8 +92,8 @@ claim 或续租。租约是否过期由 Repository 的时钟判定；多实例�
 ## 并发边界
 
 `InMemoryToolExecutionRepository` 对所有复合操作进行同步。它是单进程参考实现，
-不是多 JVM 协调机制。后续 JDBC 适配器必须通过数据库约束和行锁保持相同的身份、
-幂等、version、租约、迁移合法性和 fencing 语义。
+不是多 JVM 协调机制。`JdbcToolExecutionRepository` 通过数据库约束和行锁保持
+相同的身份、幂等、version、租约、迁移合法性和 fencing 语义。
 
 ## 安全与租户
 
