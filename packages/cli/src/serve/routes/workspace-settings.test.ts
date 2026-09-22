@@ -112,6 +112,7 @@ function makeApp(
 /** Minimal registry for the workspace-qualified routes: one active, trusted entry. */
 function makeQualifiedApp(
   overrides: {
+    ssh?: boolean;
     invokeWorkspaceCommand?: (
       method: string,
       params: Record<string, unknown>,
@@ -135,6 +136,11 @@ function makeQualifiedApp(
               runtime: {
                 trusted: true,
                 workspaceCwd: '/workspace',
+                routeFileSystemFactory: overrides.ssh
+                  ? {
+                      sshWorkspace: { host: 'host', directory: '/srv/project' },
+                    }
+                  : {},
                 bridge: {
                   invokeWorkspaceCommand,
                   publishWorkspaceEvent,
@@ -1074,5 +1080,31 @@ describe('web-shell settings alias drift', () => {
     expect(aliased.length).toBe(new Set(aliased).size);
     expect(rendered.filter((key) => !aliased.includes(key))).toEqual([]);
     expect(aliased.filter((key) => !rendered.includes(key))).toEqual([]);
+  });
+  it('persists SSH workflow defaults without pushing disabled workflow controls to live sessions', async () => {
+    const {
+      app,
+      persistSetting,
+      invokeWorkspaceCommand,
+      publishWorkspaceEvent,
+    } = makeQualifiedApp({
+      ssh: true,
+      invokeWorkspaceCommand: vi
+        .fn()
+        .mockRejectedValue(new Error('unsupported_operation')),
+    });
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: true,
+      });
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'settings_changed' }),
+    );
   });
 });

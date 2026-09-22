@@ -884,18 +884,11 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
-  it('names the daemon host once above the workspace list', () => {
+  it('marks each remote workspace folder', () => {
     workspace.baseUrl = 'https://remote.example.com';
 
     renderSidebar();
 
-    // The host is named once, while each workspace keeps a compact remote
-    // folder mark like Codex's local/remote source distinction.
-    const indicators = container.querySelectorAll(
-      '[data-testid="remote-workspace-indicator"]',
-    );
-    expect(indicators).toHaveLength(1);
-    expect(indicators[0].textContent).toContain('remote.example.com');
     expect(
       container.querySelectorAll(
         '[data-testid="remote-workspace-folder-icon"]',
@@ -903,14 +896,11 @@ describe('WebShellSidebar workspace removal', () => {
     ).toHaveLength(capabilities.workspaces.length);
   });
 
-  it('leaves the header unmarked for the page origin daemon', () => {
+  it('leaves local workspace folders unmarked', () => {
     workspace.baseUrl = window.location.origin;
 
     renderSidebar();
 
-    expect(
-      container.querySelectorAll('[data-testid="remote-workspace-indicator"]'),
-    ).toHaveLength(0);
     expect(
       container.querySelectorAll(
         '[data-testid="remote-workspace-folder-icon"]',
@@ -3296,49 +3286,79 @@ describe('WebShellSidebar workspace removal', () => {
     );
   });
 
-  it('copies the workspace path and reports a clipboard failure', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    const previousClipboard = Object.getOwnPropertyDescriptor(
-      navigator,
-      'clipboard',
-    );
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    });
-    const onError = vi.fn();
-    try {
-      renderSidebar({ onError });
-      act(() => click(workspaceAction('/tmp/other')!));
-      const copy = () =>
-        Array.from(
-          document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-        ).find((element) => element.textContent === 'Copy path');
-      await act(async () => {
-        click(copy()!);
-        await Promise.resolve();
+  it.each([false, true])(
+    'copies the displayed workspace path and limits local open actions (SSH=%s)',
+    async (remote) => {
+      connection.capabilities = {
+        ...capabilities,
+        features: [
+          ...capabilities.features,
+          'workspace_local_open',
+          'workspace_local_terminal',
+        ],
+        workspaces: capabilities.workspaces.map((ws) =>
+          ws.cwd === '/tmp/other' && remote
+            ? {
+                ...ws,
+                ssh: { host: 'host', port: 2222, directory: '/srv/project' },
+              }
+            : ws,
+        ),
+      };
+      workspace.capabilities = connection.capabilities;
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const previousClipboard = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
+      );
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
       });
-      expect(writeText).toHaveBeenCalledWith('/tmp/other');
-      expect(onError).not.toHaveBeenCalled();
+      const onError = vi.fn();
+      try {
+        renderSidebar({ onError });
+        act(() =>
+          click(workspaceAction(remote ? 'host:2222:' : '/tmp/other')!),
+        );
+        expect(menuItemLabels().includes('Open folder')).toBe(!remote);
+        expect(menuItemLabels().includes('Open terminal')).toBe(!remote);
+        const copy = () =>
+          Array.from(
+            document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+          ).find((element) => element.textContent === 'Copy path');
+        await act(async () => {
+          click(copy()!);
+          await Promise.resolve();
+        });
+        expect(writeText).toHaveBeenCalledWith(
+          remote ? '/srv/project' : '/tmp/other',
+        );
+        expect(onError).not.toHaveBeenCalled();
 
-      writeText.mockRejectedValueOnce(new Error('denied'));
-      act(() => click(workspaceAction('/tmp/other')!));
-      await act(async () => {
-        click(copy()!);
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0]?.[1]).toBe('Failed to copy workspace path');
-    } finally {
-      // Put the shared jsdom stub back rather than leaving a hole behind.
-      if (previousClipboard) {
-        Object.defineProperty(navigator, 'clipboard', previousClipboard);
-      } else {
-        delete (navigator as { clipboard?: unknown }).clipboard;
+        writeText.mockRejectedValueOnce(new Error('denied'));
+        act(() =>
+          click(workspaceAction(remote ? 'host:2222:' : '/tmp/other')!),
+        );
+        await act(async () => {
+          click(copy()!);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(onError).toHaveBeenCalledTimes(1);
+        expect(onError.mock.calls[0]?.[1]).toBe(
+          'Failed to copy workspace path',
+        );
+      } finally {
+        // Put the shared jsdom stub back rather than leaving a hole behind.
+        if (previousClipboard) {
+          Object.defineProperty(navigator, 'clipboard', previousClipboard);
+        } else {
+          delete (navigator as { clipboard?: unknown }).clipboard;
+        }
       }
-    }
-  });
+    },
+  );
 
   it('keeps the rename dialog open and skips the refresh when the daemon rejects', async () => {
     connection.capabilities = {

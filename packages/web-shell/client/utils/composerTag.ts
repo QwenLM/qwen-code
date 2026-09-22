@@ -206,7 +206,9 @@ export function splitComposerTagContentByAnnotations(
   const segments: ComposerTagContentSegment[] = [];
   let cursor = 0;
   for (const annotation of inputAnnotations) {
-    if (annotation.type !== 'reference') continue;
+    // Annotations cross a trust boundary (persisted JSONL, request `_meta`):
+    // skip non-object entries instead of throwing on `null`.
+    if (!annotation || annotation.type !== 'reference') continue;
     const { start, end, text } = annotation;
     const reference: DaemonInputAnnotation['reference'] | undefined =
       annotation.reference;

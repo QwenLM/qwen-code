@@ -27,6 +27,8 @@ export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
+  /** 当前消息的生成态；历史或静态内容为 false，不取会话全局忙态。 */
+  isStreaming: boolean;
 }
 
 export interface WebShellCodeBlockRenderInfo {
@@ -195,7 +197,8 @@ export type WebShellRightPanelItem =
   | 'review'
   | 'sideTask'
   | 'terminal'
-  | 'webPreview';
+  | 'webPreview'
+  | 'trajectory';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -295,6 +298,23 @@ export interface WebShellAssistantMessageInfo {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
+}
+
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Final visible assistant message when retained in the mounted transcript. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
 }
 
 export interface WebShellAssistantTurnFooterRenderInfo {

@@ -10,6 +10,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parse as parseYaml } from 'yaml';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const nativePrefixes = [
@@ -72,16 +74,14 @@ if (nativeWorkspaces.length > 0) {
   );
 }
 
-const lockfile = JSON.parse(
-  readFileSync(join(root, 'package-lock.json'), 'utf8'),
-);
-const nativeLockfileEntries = Object.keys(lockfile.packages ?? {}).filter(
+const lockfile = parseYaml(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8'));
+const nativeLockfileEntries = Object.keys(lockfile.importers ?? {}).filter(
   isNativeLocation,
 );
 
 if (nativeLockfileEntries.length > 0) {
   reportError(
-    'Root package-lock.json should not contain native package entries.',
+    'Root pnpm-lock.yaml should not contain native package importers.',
     nativeLockfileEntries,
   );
 }

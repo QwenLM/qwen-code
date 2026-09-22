@@ -6,6 +6,7 @@
 
 import type {
   DaemonBackgroundTurn,
+  DaemonSessionArtifactInput,
   DaemonInputAnnotation,
 } from '@qwen-code/sdk/daemon';
 
@@ -130,6 +131,7 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
 }
 
 export interface DaemonAssistantMessage extends DaemonMessageMeta {
+  reportedArtifacts?: DaemonSessionArtifactInput[];
   id: string;
   role: 'assistant';
   content: string;
