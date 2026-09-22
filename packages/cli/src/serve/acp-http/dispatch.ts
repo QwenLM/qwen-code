@@ -46,6 +46,7 @@ import type {
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
+import { workflowRequestErrorStatus } from '../workflow-errors.js';
 import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -739,16 +740,20 @@ export function toRpcError(err: unknown): {
   }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
+  const workflowStatus =
+    isObject(err) && isObject(err['data'])
+      ? workflowRequestErrorStatus(err['data']['errorKind'])
+      : undefined;
   if (
+    workflowStatus !== undefined &&
     isObject(err) &&
     isObject(err['data']) &&
-    err['data']['errorKind'] === 'workflow_invalid_params' &&
     typeof err['message'] === 'string'
   ) {
     return {
       code: RPC.INVALID_PARAMS,
       message: err['message'],
-      data: { errorKind: 'workflow_invalid_params', httpStatus: 400 },
+      data: { errorKind: err['data']['errorKind'], httpStatus: workflowStatus },
     };
   }
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
@@ -5151,6 +5156,11 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/agents/create`: {
+          if ('executionBackend' in params) {
+            throw new AcpParamError(
+              'Daemon agents do not support executionBackend.',
+            );
+          }
           const scope = params['scope'];
           if (scope !== 'workspace' && scope !== 'global') {
             if (id !== undefined)
@@ -5233,6 +5243,11 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/agents/update`: {
+          if ('executionBackend' in params) {
+            throw new AcpParamError(
+              'Daemon agents do not support executionBackend.',
+            );
+          }
           const agentType = String(params['agentType'] ?? '');
           if (!agentType) {
             if (id !== undefined)

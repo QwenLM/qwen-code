@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readReportedArtifacts } from './reported-artifacts.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
@@ -32,6 +33,10 @@ import {
   projectTerminalBackgroundAgentTool,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
+import {
+  parseContextCompressionMeta,
+  type ContextCompressionMeta,
+} from '../utils/contextCompression.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -395,6 +400,78 @@ function getBackgroundNotificationData(
   return getRecord(extended.meta?.['backgroundTask']) ?? undefined;
 }
 
+/**
+ * The `role: 'system'` notice an assistant block renders as, with the payloads
+ * the notice row carries, or `undefined` when the block renders as assistant
+ * text. This is the renderer's own decision, kept in one place because a
+ * `meta.source` list cannot express it: the compression notice is recognised by
+ * payload keys (`meta.contextCompressionNotice` / `meta.contextCompression`)
+ * while its `meta.source` is `slash_command` (#12141).
+ */
+type AssistantSystemNotice =
+  | {
+      source: 'background_notification';
+      data: Record<string, unknown> | undefined;
+    }
+  | { source: 'vision_bridge_notice'; data: unknown }
+  | {
+      source: 'context_compression';
+      notice: ContextCompressionMeta | undefined;
+      noticePayload: unknown;
+      compression: ContextCompressionMeta | undefined;
+      compressionPayload: unknown;
+    };
+
+function classifyAssistantSystemNotice(
+  block: DaemonTextTranscriptBlock,
+): AssistantSystemNotice | undefined {
+  if (isBackgroundNotificationBlock(block)) {
+    return {
+      source: 'background_notification',
+      data: getBackgroundNotificationData(block),
+    };
+  }
+  const meta = getRecord(block.meta);
+  if (meta?.['source'] === 'vision_bridge_notice') {
+    return { source: 'vision_bridge_notice', data: meta['visionBridgeNotice'] };
+  }
+  const noticePayload = meta?.['contextCompressionNotice'];
+  const notice = parseContextCompressionMeta(noticePayload);
+  const compressionPayload = meta?.['contextCompression'];
+  const compression = parseContextCompressionMeta(compressionPayload);
+  // A payload this client cannot read means it and the daemon disagree on the
+  // schema. Take the ordinary path then and let the block's own text through:
+  // rendering only the half that still parses would drop the other half's
+  // sentence, and `content` carries both.
+  const unreadable =
+    (noticePayload !== undefined && notice === undefined) ||
+    (compressionPayload !== undefined && compression === undefined);
+  if (!(notice || compression) || unreadable) return undefined;
+  return {
+    source: 'context_compression',
+    notice,
+    noticePayload,
+    compression,
+    compressionPayload,
+  };
+}
+
+/**
+ * Whether an assistant block renders as a `role: 'system'` notice instead of
+ * assistant text. Consumers that publish a turn's final answer ask the adapter
+ * rather than re-deriving the notice set, so a future notice source is excluded
+ * from them by construction.
+ */
+export function assistantBlockRendersAsSystemNotice(
+  block: DaemonTranscriptBlock,
+): boolean {
+  return (
+    block.kind === 'assistant' &&
+    classifyAssistantSystemNotice(block as DaemonTextTranscriptBlock) !==
+      undefined
+  );
+}
+
 function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
   return block.text.length === 0;
 }
@@ -645,36 +722,77 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'assistant': {
         const textBlock = block as DaemonTextTranscriptBlock;
-        if (isBackgroundNotificationBlock(textBlock)) {
+        const notice = classifyAssistantSystemNotice(textBlock);
+        if (notice) {
           currentAssistantIdx = null;
           currentThinkingIdx = null;
           needsNewContentMessage = true;
+        }
+        if (notice?.source === 'background_notification') {
           messages.push({
             id: block.id,
             role: 'system',
             content: textBlock.text,
             variant: 'info',
             source: 'background_notification',
-            data: getBackgroundNotificationData(textBlock),
+            data: notice.data,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
           break;
         }
         const meta = getRecord(textBlock.meta);
-        if (meta?.['source'] === 'vision_bridge_notice') {
-          currentAssistantIdx = null;
-          currentThinkingIdx = null;
-          needsNewContentMessage = true;
+        const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
+        if (notice?.source === 'vision_bridge_notice') {
           messages.push({
             id: block.id,
             role: 'system',
             content: textBlock.text,
             variant: 'info',
             source: 'vision_bridge_notice',
-            ...(meta['visionBridgeNotice'] !== undefined
-              ? { data: meta['visionBridgeNotice'] }
-              : {}),
+            ...(notice.data !== undefined ? { data: notice.data } : {}),
+            timestamp: blockTime,
+          });
+          break;
+        }
+        if (notice?.source === 'context_compression') {
+          // The invocation note keeps its own `_meta` key, so folding the turn
+          // into one block cannot overwrite it; it renders as the row ahead of
+          // the compression it belongs to.
+          if (notice.notice) {
+            messages.push({
+              id: `${block.id}-notice`,
+              role: 'system',
+              content: textBlock.text,
+              variant: 'info',
+              source: 'context_compression',
+              data: notice.noticePayload,
+              timestamp: blockTime,
+            });
+          }
+          const compression = notice.compression;
+          if (!compression) break;
+          // One block carries the whole compression: the progress frame creates
+          // it and the result merges into the same id, flipping `phase` to
+          // 'done', so the row is replaced in place rather than doubled. A block
+          // that stopped streaming without a result is a failed or cancelled
+          // run — its turn reports that itself, and a stale "compressing" row
+          // would only contradict it.
+          if (
+            compression.phase === 'progress' &&
+            textBlock.streaming !== true
+          ) {
+            break;
+          }
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'context_compression',
+            // The raw payload, not the parsed view: SystemMessage falls back to
+            // `content` when it meets a payload this client cannot read.
+            data: notice.compressionPayload,
             timestamp: blockTime,
           });
           break;
@@ -689,7 +807,10 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        const insightSegments = splitInsightSegments(textBlock.text);
+        const insightSegments =
+          reportedArtifacts.length > 0
+            ? null
+            : splitInsightSegments(textBlock.text);
         if (insightSegments) {
           let lastProgress: ParsedInsight | null = null;
           let hasTerminal = false;
@@ -774,6 +895,14 @@ export function transcriptBlocksToDaemonMessages(
           messages[currentAssistantIdx!] = {
             ...target,
             content: target.content + textBlock.text,
+            ...(reportedArtifacts.length
+              ? {
+                  reportedArtifacts: [
+                    ...(target.reportedArtifacts ?? []),
+                    ...reportedArtifacts,
+                  ],
+                }
+              : {}),
             isStreaming: textBlock.streaming,
             sourceBlockIds: unionMessageIds(target.sourceBlockIds, block.id),
             ...(textBlock.branchRecordId
@@ -788,6 +917,7 @@ export function transcriptBlocksToDaemonMessages(
             id: block.id,
             role: 'assistant',
             content: textBlock.text,
+            ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
@@ -1204,7 +1334,10 @@ export function transcriptBlocksToDaemonMessages(
       tool.args = permissionInfo.args;
     }
     if (
-      isSubAgentToolCall(tool) &&
+      (isSubAgentToolCall(tool) ||
+        /^(shell|bash|run_shell_command|execute_command)$/i.test(
+          tool.toolName,
+        )) &&
       isActiveToolStatus(tool.status) &&
       tool.endTime === undefined
     ) {
@@ -1213,8 +1346,39 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   synchronizeToolGroupSourceIdentity(messages);
+  attachTurnPromptIds(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
+}
+
+/**
+ * Copies the daemon-stamped per-turn `promptId` from contributing blocks onto
+ * the messages built from them.
+ *
+ * A block id is only an ordinal within one projection, so it cannot identify a
+ * turn across a reload; `promptId` can. It is attached regardless of
+ * `includeSourceIdentity`, which governs the tool-group record identity that
+ * host source references use, not turn identity.
+ */
+function attachTurnPromptIds(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const promptIdByBlockId = new Map<string, string>();
+  for (const block of blocks) {
+    if (block.promptId) promptIdByBlockId.set(block.id, block.promptId);
+  }
+  if (promptIdByBlockId.size === 0) return;
+  for (const message of messages) {
+    if (message.promptId) continue;
+    for (const id of [message.id, ...(message.sourceBlockIds ?? [])]) {
+      const promptId = promptIdByBlockId.get(id);
+      if (promptId) {
+        message.promptId = promptId;
+        break;
+      }
+    }
+  }
 }
 
 function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {
@@ -1625,6 +1789,18 @@ function getToolRawOutput(
 }
 
 function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
+  // Active shell details can be an input preview, not command output.
+  if (
+    /^(shell|bash|run_shell_command|execute_command)$/i.test(
+      block.toolName ?? '',
+    ) &&
+    ['pending', 'in_progress', 'running'].includes(block.status) &&
+    block.rawInput !== undefined &&
+    block.rawOutput === undefined
+  ) {
+    return undefined;
+  }
+
   if (isAskUserQuestionBlock(block) && block.status === 'failed') {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
@@ -1659,6 +1835,7 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'shell_result') return preview.result;
   if (preview.kind === 'question_answers') {
     return {
       type: 'ask_user_question_answers',
@@ -1969,6 +2146,26 @@ export function splitInsightSegments(text: string): InsightSegment[] | null {
   }
 
   return segments.length > 0 ? segments : null;
+}
+
+/**
+ * The visible assistant text of a block's text, with insight protocol frames
+ * (`insight_progress` / `insight_ready` / `insight_error`) stripped exactly as
+ * `transcriptBlocksToDaemonMessages` strips them. A payload-only block — one
+ * whose only content is such a frame — renders to no assistant text and
+ * therefore yields an empty string, so callers that publish a turn's final
+ * answer can skip it instead of leaking raw protocol JSON.
+ */
+export function assistantVisibleTextOf(text: string): string {
+  const segments = splitInsightSegments(text);
+  if (!segments) return text.trim();
+  return segments
+    .filter(
+      (segment): segment is { kind: 'text'; text: string } =>
+        segment.kind === 'text',
+    )
+    .map((segment) => segment.text)
+    .join(' ');
 }
 
 function inferToolKind(

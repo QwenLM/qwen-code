@@ -114,6 +114,7 @@ export function OpenTuiApprovalModeDialog(props: {
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
     SettingScope.User,
   );
+  const [error, setError] = useState<string | null>(null);
   const current = config?.getApprovalMode?.() ?? ApprovalMode.DEFAULT;
   // ink keeps its own highlighted-mode state and seeds the list index from it,
   // so the remount that follows a scope trip restores the row the arrows last
@@ -143,11 +144,26 @@ export function OpenTuiApprovalModeDialog(props: {
     onHighlight: (mode) => setHighlightedMode(mode),
     onSelect: (mode) => {
       try {
+        // Do not persist a privileged mode that this workspace cannot use;
+        // User scope would make it active in other trusted workspaces.
+        if (
+          config?.isTrustedFolder() === false &&
+          mode !== ApprovalMode.DEFAULT &&
+          mode !== ApprovalMode.PLAN
+        ) {
+          throw new Error(
+            'Cannot enable privileged approval modes in an untrusted folder.',
+          );
+        }
         settings.setValue(selectedScope, 'tools.approvalMode', mode);
-        config?.setApprovalMode?.(settings.merged.tools?.approvalMode ?? mode);
-        onApprovalModeChanged(mode);
-      } catch {
-        /* trust gate */
+        const effectiveMode = settings.merged.tools?.approvalMode ?? mode;
+        config?.setApprovalMode?.(effectiveMode);
+        onApprovalModeChanged(effectiveMode);
+      } catch (e) {
+        // Keep the dialog open and show the refusal: an empty catch here made a
+        // gate rejection indistinguishable from an accepted choice.
+        setError((e as Error).message);
+        return;
       }
       onClose();
     },
@@ -207,6 +223,11 @@ export function OpenTuiApprovalModeDialog(props: {
                   'Workspace approval mode exists and takes priority. User-level change will have no effect.',
                 )}`}
               </text>
+            </box>
+          ) : null}
+          {error ? (
+            <box marginTop={1}>
+              <text fg={C.red}>{error}</text>
             </box>
           ) : null}
         </box>

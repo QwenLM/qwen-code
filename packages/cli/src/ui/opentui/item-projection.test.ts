@@ -197,6 +197,41 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Run /context detail for per-item breakdown.');
     // MCP tools row is skipped at zero.
     expect(text).not.toContain('MCP tools');
+    // Parity with views/ContextUsage (#12033): the three optional rows are
+    // absent from this breakdown, so none of them may render. `totalTokens` is
+    // nonzero on purpose — `Cached prefix` and `Unattributed` are total-gated,
+    // so at 0 they cannot render with or without their own guard, and only the
+    // widened `startupContext` skip would be witnessed. This is also the shape
+    // of an older daemon payload and of the pre-first-turn estimated view.
+    expect(text).not.toContain('Cached prefix');
+    expect(text).not.toContain('Startup context');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('prints the cached prefix, startup context and unattributed rows when present (#12033)', () => {
+    const text = projectContextUsage({
+      modelName: 'qwen3-max',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 3000,
+        freeSpace: 94000,
+        autocompactBuffer: 1000,
+        startupContext: 1200,
+        unattributed: 900,
+        cachedTokens: 30000,
+      },
+      isEstimated: false,
+      showDetails: false,
+    });
+    expect(text).toContain('█ Cached prefix 30.0k tokens (30.0%)');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).toContain('█ Unattributed 900 tokens (0.9%)');
   });
 
   it('shows the no-API-response notice before the first turn', () => {

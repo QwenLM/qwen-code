@@ -177,6 +177,7 @@ describe('OpenTuiApprovalModeDialog', () => {
     let approvalMode = options.current ?? ApprovalMode.DEFAULT;
     const config = {
       getApprovalMode: () => approvalMode,
+      isTrustedFolder: () => true,
       setApprovalMode: (mode: ApprovalMode) => {
         approvalMode = mode;
       },
@@ -274,6 +275,73 @@ describe('OpenTuiApprovalModeDialog', () => {
 
     expect(harness.onClose).toHaveBeenCalledTimes(1);
     expect(harness.setValue).not.toHaveBeenCalled();
+  });
+});
+
+describe('OpenTuiApprovalModeDialog trust gate', () => {
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+  });
+
+  it('applies the effective mode after saving a shadowed user choice', () => {
+    const setApprovalMode = vi.fn();
+    const config = {
+      getApprovalMode: () => ApprovalMode.YOLO,
+      isTrustedFolder: () => true,
+      setApprovalMode,
+    } as unknown as Config;
+    const settings = {
+      merged: { tools: { approvalMode: ApprovalMode.DEFAULT } },
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const onApprovalModeChanged = vi.fn();
+
+    render(
+      <OpenTuiApprovalModeDialog
+        config={config}
+        settings={settings}
+        onClose={vi.fn()}
+        onApprovalModeChanged={onApprovalModeChanged}
+      />,
+    );
+    press('return');
+
+    expect(setApprovalMode.mock.calls).toEqual([[ApprovalMode.DEFAULT]]);
+    expect(onApprovalModeChanged).toHaveBeenCalledWith(ApprovalMode.DEFAULT);
+  });
+
+  it('does not persist a privileged mode in an untrusted folder', () => {
+    const setApprovalMode = vi.fn();
+    const setValue = vi.fn();
+    const config = {
+      getApprovalMode: () => ApprovalMode.YOLO,
+      isTrustedFolder: () => false,
+      setApprovalMode,
+    } as unknown as Config;
+    const settings = {
+      merged: { tools: {} },
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+
+    render(
+      <OpenTuiApprovalModeDialog
+        config={config}
+        settings={settings}
+        onClose={vi.fn()}
+        onApprovalModeChanged={vi.fn()}
+      />,
+    );
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      ),
+    ).not.toBeNull();
   });
 });
 
