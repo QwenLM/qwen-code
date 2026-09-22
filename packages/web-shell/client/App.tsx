@@ -1,4 +1,6 @@
 import './styles/globals.css';
+import { useWebShellNavigation } from './navigation';
+import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
@@ -2452,7 +2454,11 @@ function updateCockpitLocation(open: boolean, replace = false): void {
   } else {
     url.searchParams.delete('view');
   }
-  window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
+  window.history[replace ? 'replaceState' : 'pushState'](
+    window.history.state,
+    '',
+    url,
+  );
 }
 
 function formatError(error: unknown, fallback: string): string {
@@ -3186,6 +3192,9 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  const navigation = useWebShellNavigation();
+  const navigationRef = useRef(navigation);
+  navigationRef.current = navigation;
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -8995,8 +9004,10 @@ export function App({
         | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
-      showChat();
+      if (navigationRef.current && isWebShellPage(panel)) setMainView('chat');
+      else showChat();
       setActivePanel(panel);
+      if (isWebShellPage(panel)) navigationRef.current?.openPage(panel);
     },
     [showChat],
   );
@@ -9007,8 +9018,9 @@ export function App({
     // deep link — the URL-sync removal branch only fires when the feature is
     // disabled, and a stale deep link would reopen the cockpit on reload or
     // Forward navigation instead of the view actually on screen.
-    showChat();
+    if (!navigationRef.current) showChat();
     setMainView('scheduledTasks');
+    navigationRef.current?.openPage('scheduled-tasks');
   }, [showChat]);
   const openWorkflows = useCallback(() => {
     if (!projectFeaturesAvailable || !workflowsEnabled) return;
@@ -9029,9 +9041,90 @@ export function App({
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
     // See openScheduledTasks: leaving the cockpit must strip its deep link.
-    showChat();
+    if (!navigationRef.current) showChat();
     setMainView('goals');
+    navigationRef.current?.openPage('goals');
   }, [showChat]);
+  const returnToChat = useCallback(() => {
+    if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
+      navigationRef.current.returnToChat();
+    } else {
+      closePanel();
+      showChat();
+    }
+  }, [closePanel, showChat]);
+  const navigationAppliedRef = useRef<number | undefined>(undefined);
+  const navigationExpectedPageRef = useRef<WebShellPage | undefined>(undefined);
+  const navigationSettledRef = useRef(false);
+  const visibleNavigationPage: WebShellPage | undefined =
+    activePanel && isWebShellPage(activePanel)
+      ? activePanel
+      : mainView === 'scheduledTasks'
+        ? 'scheduled-tasks'
+        : mainView === 'goals'
+          ? 'goals'
+          : undefined;
+  useEffect(() => {
+    if (!navigation || !workspaceCapabilitiesReady) return;
+    const page = navigation.route.page;
+    if (page === 'chat' && navigation.revision === 0) {
+      navigationAppliedRef.current = navigation.revision;
+      navigationSettledRef.current = true;
+      return;
+    }
+    const primaryItem = page === 'scheduled-tasks' ? 'scheduledTasks' : page;
+    const allowed =
+      page === 'chat' ||
+      (projectFeaturesAvailable &&
+        (page === 'settings'
+          ? sidebarOptions.footer !== false &&
+            (sidebarOptions.footer?.items?.includes('settings') ?? true)
+          : (sidebarOptions.primaryNav?.items?.some(
+              (item) => item === primaryItem,
+            ) ?? true)));
+    if (navigationAppliedRef.current === navigation.revision && allowed) return;
+    navigationAppliedRef.current = navigation.revision;
+    navigationSettledRef.current = false;
+    const nextPage = allowed && page !== 'chat' ? page : undefined;
+    navigationExpectedPageRef.current = nextPage;
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(
+      nextPage === 'plugins' ||
+        nextPage === 'channels' ||
+        nextPage === 'settings'
+        ? nextPage
+        : null,
+    );
+    setMainView(
+      nextPage === 'scheduled-tasks'
+        ? 'scheduledTasks'
+        : nextPage === 'goals'
+          ? 'goals'
+          : 'chat',
+    );
+    if (nextPage === 'settings') setSettingsInitialCategory(undefined);
+    if (!allowed) navigation.reconcilePage(undefined);
+  }, [
+    navigation,
+    projectFeaturesAvailable,
+    sidebarOptions.footer,
+    sidebarOptions.primaryNav?.items,
+    workspaceCapabilitiesReady,
+  ]);
+  useEffect(() => {
+    if (
+      !navigation ||
+      !workspaceCapabilitiesReady ||
+      navigationAppliedRef.current !== navigation.revision
+    )
+      return;
+    if (!navigationSettledRef.current) {
+      if (visibleNavigationPage !== navigationExpectedPageRef.current) return;
+      navigationSettledRef.current = true;
+      return;
+    }
+    navigation.reconcilePage(visibleNavigationPage);
+  }, [navigation, visibleNavigationPage, workspaceCapabilitiesReady]);
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
     splitClassificationGenerationRef.current += 1;
@@ -9321,7 +9414,7 @@ export function App({
     if (ids.length > 0) {
       const url = new URL(window.location.href);
       url.searchParams.delete('split');
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
       if (!externalSplitControlled) {
         openSplitView(ids);
       }
@@ -13151,6 +13244,8 @@ export function App({
       const targetWorkspaceCwd =
         nextContext?.kind === 'workspace' ? nextContext.cwd : undefined;
       const previousPendingContext = pendingSessionContextRef.current;
+      if (!opts?.keepView && !opts?.keepPanel)
+        navigationRef.current?.beginSessionNavigation();
       setPendingSessionContext(nextContext);
       setSidebarSwitchingSessionId(null);
       composerSourceVersionRef.current += 1;
@@ -13185,6 +13280,13 @@ export function App({
         ).clearSession();
         focusRequest = scheduleComposerFocus();
         await clearPromise;
+        if (
+          sessionOpenInvocationRef.current === invocation &&
+          !opts?.keepView &&
+          !opts?.keepPanel
+        ) {
+          navigationRef.current?.finishNewChat(nextContext);
+        }
         // Clear after successful clearSession — if it rejects, the old
         // session's worktree/branch state is preserved.
         setSessionWorktree(undefined);
@@ -13195,6 +13297,7 @@ export function App({
           sessionOpenInvocationRef.current === invocation &&
           pendingSessionContextRef.current === nextContext
         ) {
+          navigationRef.current?.cancelSessionNavigation();
           setPendingSessionContext(previousPendingContext);
         }
         if (composerFocusRequestRef.current === focusRequest) {
@@ -13968,6 +14071,16 @@ export function App({
             ? ({ kind: 'live' } as const)
             : ({ kind: 'workspace', cwd: workspaceCwd } as const)
           : undefined);
+      const selectedWorkspace = workspacesRef.current.find(
+        (entry) => entry.cwd === workspaceCwd,
+      );
+      navigationRef.current?.beginSessionNavigation(
+        sessionId,
+        selectedWorkspace && !selectedWorkspace.primary
+          ? selectedWorkspace.id
+          : undefined,
+        targetContext,
+      );
       const previousSelectedWorkspaceCwd = selectedWorkspaceCwdRef.current;
       if (targetContext?.kind !== 'workspace') {
         selectedWorkspaceCwdRef.current = undefined;
@@ -14005,6 +14118,7 @@ export function App({
           pendingSessionContextRef.current === targetContext
         ) {
           setSidebarSwitchingSessionId(null);
+          navigationRef.current?.cancelSessionNavigation();
           setPendingSessionContext(previousPendingContext);
           if (targetContext?.kind !== 'workspace') {
             selectedWorkspaceCwdRef.current = previousSelectedWorkspaceCwd;
@@ -14653,6 +14767,8 @@ export function App({
     if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
   }, [activePanel, approvalOverlayActive, mainView]);
   useEffect(() => {
+    if (navigationRef.current && navigationRef.current.route.page !== 'chat')
+      return;
     if (!sessionWorkflowEnabled) {
       if (mainView !== 'cockpit') return;
       if (cockpitViewRequested()) {
@@ -14674,11 +14790,14 @@ export function App({
   }, [
     approvalOverlayActive,
     mainView,
+    navigation?.revision,
     sessionWorkflowEnabled,
     sessionWorkflowSettingsResolved,
   ]);
   useEffect(() => {
     const handlePopState = () => {
+      if (navigationRef.current && navigationRef.current.route.page !== 'chat')
+        return;
       if (cockpitViewRequested()) {
         if (sessionWorkflowEnabled && !approvalOverlayActive) {
           setMainView('cockpit');
@@ -14703,6 +14822,8 @@ export function App({
     sessionWorkflowSettingsResolved,
   ]);
   useEffect(() => {
+    if (navigationRef.current && navigationRef.current.route.page !== 'chat')
+      return;
     if (
       mainView === 'cockpit' &&
       sessionWorkflowEnabled &&
@@ -16986,7 +17107,7 @@ export function App({
     pendingApproval,
     interactionBlocked,
     activePanel,
-    closePanel,
+    returnToChat,
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
@@ -16997,7 +17118,7 @@ export function App({
     pendingApproval,
     interactionBlocked,
     activePanel,
-    closePanel,
+    returnToChat,
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
@@ -17066,7 +17187,7 @@ export function App({
         const target = e.target as HTMLElement | null;
         if (!target?.closest('[data-sidebar-shell]')) {
           e.preventDefault();
-          live.closePanel();
+          live.returnToChat();
         }
         return;
       }
@@ -18978,8 +19099,7 @@ export function App({
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
-                    showChat();
-                    closePanel();
+                    returnToChat();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
                   onSessionsDeleted={closeUsageTabs}
@@ -19341,7 +19461,7 @@ export function App({
                       data-testid="panel-back"
                       onClick={() => {
                         if (activePanel !== 'sessions') {
-                          closePanel();
+                          returnToChat();
                           return;
                         }
                         if (!workspaceContextActive) {
@@ -19542,13 +19662,13 @@ export function App({
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
-                        onClose={closePanel}
+                        onClose={returnToChat}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
-                        onClose={closePanel}
+                        onClose={returnToChat}
                         initialFocusRef={panelHeadingRef}
                       />
                     ) : activePanel === 'workspaces' ? (
@@ -19633,7 +19753,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={showChat}
+                      onClick={returnToChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -19735,7 +19855,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={showChat}
+                      onClick={returnToChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -19791,7 +19911,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={showChat}
+                      onClick={returnToChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >

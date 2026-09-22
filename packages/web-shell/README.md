@@ -696,3 +696,22 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
 | `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
+
+### URL 导航（可选）
+
+`WebShellWithProviders` 支持 `urlNavigation={{ basePath: '/agentic-code' }}`。
+独立入口默认启用同一实现，并推断既有部署基础路径（默认根路径）。嵌入组件默认不启用，原有受控
+`sessionId`、`workspaceId`、`workspaceCwd` 和 `sessionContext` 接入保持兼容。
+启用后，显式初始会话目标 props 优先于 URL，后续目标 props 变化 replace 地址；
+宿主必须停止自行写 history，避免双重控制。`lockWorkspaceCwd` 仍是宿主约束。
+
+基础路径下支持 `/session/<id>`、`/plugins`、`/channels`、`/scheduled-tasks`、
+`/goals` 和 `/settings`。会话保留原有 `workspace` / `context` 协议，页面仅定位
+页面，设置不持久化分类或作用域。无关参数（包括宿主的实例参数）和 fragment 保留。
+主动导航新增历史，重复点击不新增；浏览器前进后退恢复页面和会话。页面来源保存在
+history.state，直接打开或复制到新标签页的页面没有来源时返回空白聊天，不创建会话。
+
+宿主部署必须把基础路径和上述深层路径的文档请求返回宿主 HTML，并保留 API 路由。
+`basePath` 只配置客户端，不创建服务端 rewrite。Qwen daemon 自带五个页面的文档
+GET/HEAD 入口，JSON 请求、子路径和写请求仍走原有鉴权/API。
+详见[导航协议设计](../../docs/design/web-shell-url-navigation.zh-CN.md)。
