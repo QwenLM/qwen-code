@@ -812,10 +812,24 @@ export function createServeApp(
   deps: ServeAppDeps = {},
 ): Application {
   if (
-    opts.childHeapMode === 'admit' &&
-    deps.managedChildProcesses?.policy.snapshot().mode !== 'admit'
+    (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== opts.childHeapMode
   ) {
     throw new TypeError('ACP admission requires managed child process wiring.');
+  }
+  if (
+    opts.childHeapMode === 'enforce' &&
+    ((deps.bridge && !deps.managedChildProcesses?.ownsBridge?.(deps.bridge)) ||
+      deps.workspaceRegistry
+        ?.listManaged()
+        .some(
+          (runtime) =>
+            !deps.managedChildProcesses?.ownsBridge?.(runtime.bridge),
+        ))
+  ) {
+    throw new TypeError(
+      'ACP heap enforcement requires managed bridge ownership.',
+    );
   }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
@@ -2361,7 +2375,8 @@ export function createServeApp(
       ? () => deps.managedChildProcesses!.registry.committedProcessCount
       : undefined,
     childAdmissionEnforced:
-      deps.managedChildProcesses?.policy.snapshot().mode === 'admit',
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit' ||
+      deps.managedChildProcesses?.policy.snapshot().mode === 'enforce',
   });
 
   if (conversationRuntimeManager) {

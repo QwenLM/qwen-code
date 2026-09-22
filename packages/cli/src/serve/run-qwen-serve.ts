@@ -3831,21 +3831,23 @@ async function runQwenServeImpl(
       `At most ${opts.maxRegisteredWorkspaces} --workspace values may be registered.`,
     );
   }
-  // Resolve one budget for journal growth and optional child-count admission.
-  // Child heap arguments continue to use the legacy policy.
+  // Resolve one budget for journal growth and the fixed child partition.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
-  if (opts.childHeapMode === 'admit' && deps.bridge) {
+  if (
+    (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
+    deps.bridge
+  ) {
     throw new TypeError(
       'ACP admission cannot be combined with an injected bridge.',
     );
   }
   const admissionPolicy =
-    opts.childHeapMode === 'admit'
+    opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce'
       ? createChildHeapPolicy({
           budget: opts.daemonMemoryBudget,
-          mode: 'admit',
+          mode: opts.childHeapMode,
         })
       : undefined;
   if (

@@ -809,17 +809,20 @@ describe('serve fast path argument parsing', () => {
     ).toEqual({ kind: 'fallback' });
   });
 
-  it('parses opt-in child count admission in both flag forms', () => {
-    for (const args of [
-      ['--child-heap-mode', 'admit'],
-      ['--child-heap-mode=admit'],
-    ]) {
-      expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
-        kind: 'serve',
-        options: { childHeapMode: 'admit' },
-      });
-    }
-  });
+  it.each(['admit', 'enforce'])(
+    'parses opt-in child heap mode %s in both flag forms',
+    (mode) => {
+      for (const args of [
+        ['--child-heap-mode', mode],
+        [`--child-heap-mode=${mode}`],
+      ]) {
+        expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+          kind: 'serve',
+          options: { childHeapMode: mode },
+        });
+      }
+    },
+  );
 
   it('parses --child-heap-mode and falls back on an unknown value', () => {
     for (const argv of [
@@ -831,10 +834,8 @@ describe('serve fast path argument parsing', () => {
         options: { childHeapMode: 'off' },
       });
     }
-    // `enforce` is deliberately not a value yet, so it is the sample worth
-    // pinning: the fast path must defer to yargs rather than smuggle it in.
     expect(
-      parseServeFastPathArgs(['serve', '--child-heap-mode', 'enforce']),
+      parseServeFastPathArgs(['serve', '--child-heap-mode', 'unknown']),
     ).toEqual({ kind: 'fallback' });
   });
 

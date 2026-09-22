@@ -824,7 +824,7 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
-  it.each(['off', 'admit'])(
+  it.each(['off', 'admit', 'enforce'])(
     'passes --child-heap-mode %s to runQwenServe',
     async (mode) => {
       mockRunQwenServe.mockResolvedValueOnce({
@@ -840,7 +840,7 @@ describe('serve rate limit env parsing', () => {
     },
   );
 
-  it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
+  it('defaults the child heap mode to observe, and rejects an unknown mode', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
       webShellMounted: false,
@@ -851,9 +851,7 @@ describe('serve rate limit env parsing', () => {
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ childHeapMode: 'observe' }),
     );
-    // `enforce` is not a value yet, and boot must say so rather than accept
-    // it: applying the partition needs an observation this daemon cannot make.
-    expect(() => buildParser().parseSync('--child-heap-mode enforce')).toThrow(
+    expect(() => buildParser().parseSync('--child-heap-mode unknown')).toThrow(
       /Invalid values/,
     );
   });

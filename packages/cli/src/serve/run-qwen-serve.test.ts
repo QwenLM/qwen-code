@@ -13,6 +13,7 @@ import * as https from 'node:https';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import * as tls from 'node:tls';
+import type { ChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   describe,
   it,
@@ -5070,7 +5071,7 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
-  it('adds, advertises, and hot-removes a dynamic workspace runtime', async () => {
+  it.each(['admit', 'enforce'] as const)('hot-add (%s)', async (mode) => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
     const reclaim = vi.fn();
     const originalCreateServeApp = serverModule.createServeApp;
@@ -5138,7 +5139,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
-        childHeapMode: 'admit',
+        childHeapMode: mode,
         workspace: primary,
         token: 'hot-remove-token',
         sessionRestoreTimeoutMs: 90_000,
@@ -5183,7 +5184,15 @@ describe('runQwenServe telemetry validation', () => {
           signal,
         );
       }
+      const initialFactory = mockCreateSpawnChannelFactoryOptions[0];
+      expect(initialFactory['processRegistry']).toBeDefined();
+      const policy = initialFactory['childHeapPolicy'] as ChildHeapPolicy;
+      expect(policy.snapshot().mode).toBe(mode);
       for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['processRegistry']).toBe(
+          initialFactory['processRegistry'],
+        );
+        expect(options['childHeapPolicy']).toBe(policy);
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,
           maxQueuedMessages: 256,
@@ -5475,8 +5484,10 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
-  it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
+  it.each(['admit', 'enforce'] as const)('shared policy (%s)', async (mode) => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    mockTotalMemBytes.value = 8 * 1024 * 1024 * 1024;
+    vi.spyOn(process, 'constrainedMemory').mockReturnValue(0);
     const reclaim = vi.fn();
     const originalCreateServeApp = serverModule.createServeApp;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
@@ -5545,7 +5556,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
-        childHeapMode: 'admit',
+        childHeapMode: mode,
         workspace: [primary, secondary],
         maxSessions: 1,
         eventRingSize: 1234,
@@ -5578,13 +5589,31 @@ describe('runQwenServe telemetry validation', () => {
           signal,
         );
       }
+      const initialFactory = mockCreateSpawnChannelFactoryOptions[0];
+      expect(initialFactory['processRegistry']).toBeDefined();
+      const policy = initialFactory['childHeapPolicy'] as ChildHeapPolicy;
+      expect(policy.snapshot().mode).toBe(mode);
       for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['processRegistry']).toBe(
+          initialFactory['processRegistry'],
+        );
+        expect(options['childHeapPolicy']).toBe(policy);
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,
           maxQueuedMessages: 256,
           maxQueuedBytes: 64 * 1024 * 1024,
         });
       }
+      const status = await (await fetch(`${handle.url}/daemon/status`)).json();
+      expect(status.limits.memory).toMatchObject({
+        enforced: mode === 'enforce',
+        childHeap: {
+          mode,
+          admissionEnforced: true,
+          maxConcurrentChildren: 7,
+          perChildCeilingMb: 526,
+        },
+      });
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
@@ -5954,7 +5983,6 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
 /**
  * The budget is resolved at boot and reported. Whether it also sizes a child
  * depends on `childHeapMode`, which defaults to `observe` and sizes nothing.
- * The only boot-time behavior is rejecting an out-of-range flag value.
  */
 describe('runQwenServe memory budget', () => {
   let tmpDirs: string[] = [];
@@ -7239,6 +7267,56 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it.each(['admit', 'enforce'] as const)(
+    'rejects %s with an injected bridge before listening or preheat',
+    async (mode) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-child-mode-')),
+      );
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      const bridge = makeRuntimeBridge();
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            childHeapMode: mode,
+          },
+          { bridge },
+        ),
+      ).rejects.toThrow('cannot be combined with an injected bridge');
+      expect(listen).not.toHaveBeenCalled();
+      expect(bridge.preheat).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['admit', 'enforce'] as const)(
+    'rejects a zero-slot %s partition before listening or creating children',
+    async (mode) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-child-zero-')),
+      );
+      mockTotalMemBytes.value = 768 * 1024 * 1024;
+      vi.spyOn(process, 'constrainedMemory').mockReturnValue(0);
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          childHeapMode: mode,
+          memoryBudgetMb: 1024,
+        }),
+      ).rejects.toThrow('models at least one child');
+      expect(listen).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ['maxSessions', Number.NaN, /maxSessions/],
