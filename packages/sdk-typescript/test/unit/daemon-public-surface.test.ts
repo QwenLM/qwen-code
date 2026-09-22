@@ -106,6 +106,11 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionCatalogVersion,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionLiveState,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
@@ -606,6 +611,46 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSection>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
+  });
+
+  it('exposes batched session catalogs at the public entry', () => {
+    expect(typeof Public.DaemonClient.prototype.listSessionsCatalog).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonSessionCatalogWorkspace>().toEqualTypeOf<{
+      workspace: string;
+      cursor?: string;
+    }>();
+    expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
+      workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      includeGroups?: boolean;
+    }>();
+    expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
+      sessions: Public.DaemonSessionSummary[];
+      nextCursor?: string;
+      liveMergeFailed?: boolean;
+      truncated?: boolean;
+      workspace: string;
+      workspaceId: string;
+      cwd: string;
+      groups?: Public.DaemonSessionGroupCatalog;
+    }>();
+    expectTypeOf<DaemonSessionCatalogError>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId?: string;
+      cwd?: string;
+      error: { code: string; message: string; status: number };
+    }>();
+    expectTypeOf<DaemonSessionCatalogResult>().toEqualTypeOf<{
+      workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
+    }>();
+    expectTypeOf<DaemonClient['listSessionsCatalog']>().toEqualTypeOf<
+      (
+        request: DaemonSessionCatalogRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonSessionCatalogResult>
+    >();
   });
 
   it('parses every kind of background turn a daemon emits', () => {

@@ -39285,6 +39285,34 @@ describe('App /goal command', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
+  // The macOS overlay titlebar inset lives on `.contextShell`'s padding-top;
+  // it reaches the absolutely positioned `.fullPage` views only because they
+  // mount inside the chat pane, which carries the `chatPaneShowingPage`
+  // positioning context (position: relative) whenever a full-page view is
+  // shown. If the views ever move out of the padded shell, the desktop drag
+  // strip overlaps their header controls — pin the ancestor chain.
+  it('keeps full-page views inside the positioned chat pane under the padded shell', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const page = container.querySelector('[data-testid="goals-page"]');
+    expect(page).not.toBeNull();
+    const chatPane = page!.closest('[data-testid="chat-pane-container"]');
+    expect(chatPane).not.toBeNull();
+    expect(chatPane!.className).toContain('chatPaneShowingPage');
+    const contextBody = chatPane!.closest('[data-testid="context-body"]');
+    expect(contextBody).not.toBeNull();
+    let shell: Element | null = contextBody!;
+    while (shell && !shell.className.includes('contextShell')) {
+      shell = shell.parentElement;
+    }
+    expect(shell).not.toBeNull();
+  });
+
   it('opens the Goals page for a bare /goal even while a turn is running', async () => {
     const { container, rerender } = renderApp();
     await flush();

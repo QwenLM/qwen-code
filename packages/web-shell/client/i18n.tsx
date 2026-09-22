@@ -7686,7 +7686,7 @@ const ZH: Messages = {
     '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
   'settings.label.general.cleanupPeriodDays': '清理周期（天）',
   'settings.description.general.cleanupPeriodDays':
-    '~/.qwen/file-history/ 中用于 /rewind 的会话备份保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
+    '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
   'settings.label.general.gitCoAuthor.commit': '归因：commit',
   'settings.description.general.gitCoAuthor.commit':
     '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',
