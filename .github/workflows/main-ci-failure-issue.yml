@@ -114,7 +114,7 @@ jobs:
           # so its output is reproducible under test.
           WORKFLOW_RUN_AT: '${{ github.event.workflow_run.updated_at }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
-          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+          AUTOFIX_BOT: 'qwen-code-dev-bot'
         run: |-
           shopt -s nullglob
           logs=("${RUNNER_TEMP}/failed-logs/"*.log)
@@ -142,27 +142,30 @@ jobs:
           # no identifiable test this is the per-commit marker instead.
           existing_issue=''
           while read -r marker; do
-            candidate="$(
+            while read -r candidate; do
+              [[ -z "${candidate}" ]] && continue
+              candidate_body="${RUNNER_TEMP}/candidate-${candidate}.md"
+              if ! gh issue view "${candidate}" \
+                --repo "${REPO}" \
+                --json body \
+                --jq '.body' > "${candidate_body}"; then
+                echo "::warning::Could not read issue #${candidate} while checking ${marker}"
+                continue
+              fi
+              if grep -qF "<!-- ${marker} -->" "${candidate_body}"; then
+                existing_issue="${candidate}"
+                echo "Issue #${existing_issue} already tracks this failure (${marker})."
+                break 2
+              fi
+              echo "Issue #${candidate} did not carry ${marker}; continuing search."
+            done < <(
               gh issue list \
                 --repo "${REPO}" \
                 --state open \
                 --search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc" \
                 --json number \
-                --jq '.[0].number // ""'
-            )"
-            if [[ -n "${candidate}" ]]; then
-              candidate_body="$(
-                gh issue view "${candidate}" \
-                  --repo "${REPO}" \
-                  --json body \
-                  --jq '.body'
-              )"
-              if grep -qF "<!-- ${marker} -->" <<< "${candidate_body}"; then
-                existing_issue="${candidate}"
-                echo "Issue #${existing_issue} already tracks this failure (${marker})."
-                break
-              fi
-            fi
+                --jq '.[].number'
+            )
           done < <(jq -r '.searchMarkers[]' "${plan}")
 
           # Re-plan against the existing body so recorded recurrences, extra
@@ -209,7 +212,7 @@ jobs:
           EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'
           ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
           ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
-          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+          AUTOFIX_BOT: 'qwen-code-dev-bot'
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'

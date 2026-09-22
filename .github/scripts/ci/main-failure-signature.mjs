@@ -20,10 +20,11 @@ export const TEST_MARKER_PREFIX = 'qwen-main-ci-failure-test:';
 /** Pre-dedupe marker, still used for runs whose failing tests are unknown. */
 export const LEGACY_MARKER_PREFIX = 'qwen-main-ci-failure:';
 export const SIGNATURE_MARKER_PREFIX = 'qwen-main-ci-failure-sig:';
-/** Workflow-scoped bridge marker: the last search marker in both arms, so a
- * search reaches a failure issue of the same workflow (GitHub's relevance
- * order, not recency) even when the per-test and per-commit marker classes
- * are disjoint (#12133). */
+/** Workflow-scoped bridge marker: the last search marker in both arms, so the
+ * workflow fallback search reaches the newest matching issue when the
+ * per-test and per-commit marker classes are disjoint (#12133). The workflow
+ * pins `sort:created-desc`, so this marker is deliberately the extra query
+ * after the per-test budget rather than a replacement for a test marker. */
 export const WORKFLOW_MARKER_PREFIX = 'qwen-main-ci-failure-workflow:';
 /** Derive the opaque, space-free bridge-marker payload from the workflow
  * name, so the emitted search token is a single colon-bearing term (#12133
@@ -167,7 +168,7 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
     markers: tests.map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
     searchMarkers: [
       ...tests
-        .slice(0, MAX_SEARCH_MARKERS - 1)
+        .slice(0, MAX_SEARCH_MARKERS)
         .map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
       workflowBridgeMarker(workflowName),
     ],
@@ -290,7 +291,12 @@ function parsePerCommitHeaderBlock(block) {
   if (!workflow) return null;
 
   const failedJobLines = [];
-  if (lines[cursor] === '- Failed jobs:') {
+  let failedJobRunId;
+  const failedJobsHeading = lines[cursor]?.match(
+    /^- Failed jobs(?: \(last reported for run (\S+)\))?:$/,
+  );
+  if (failedJobsHeading) {
+    failedJobRunId = failedJobsHeading[1];
     cursor += 1;
     while (lines[cursor]?.startsWith('  - ')) {
       failedJobLines.push(lines[cursor]);
@@ -301,8 +307,19 @@ function parsePerCommitHeaderBlock(block) {
   const runUrl = lines[cursor++]?.match(/^- Run: (\S+)$/)?.[1];
   const runId = lines[cursor++]?.match(/^- Run ID: (\S+)$/)?.[1];
   const sha = lines[cursor++]?.match(/^- Commit: (\S+)$/)?.[1];
-  if (!runUrl || !runId || !sha || cursor !== lines.length) return null;
-  return { workflow, runUrl, runId, sha, failedJobLines };
+  if (!runUrl || !runId || !sha) return null;
+  return {
+    workflow,
+    runUrl,
+    runId,
+    sha,
+    failedJobLines,
+    failedJobRunId,
+    // Lines after the required identity fields are human-authored prose. They
+    // are carried out of the machine block by replacePerCommitHeader so a
+    // maintainer note cannot make an otherwise valid stub unadoptable.
+    remainder: lines.slice(cursor),
+  };
 }
 
 function extractPerCommitHeader(head) {
@@ -324,10 +341,10 @@ function extractPerCommitHeader(head) {
     }
   }
 
-  // Existing issues created before the delimiters are still adopted, but only
-  // when the complete canonical intro/header/footer shape is present. A note
-  // inserted into this range makes the parser fail closed and leaves the body
-  // untouched instead of treating human text as machine state.
+  // Existing issues created before the delimiters are still adopted when the
+  // required identity fields are present in their canonical order. Trailing
+  // notes are returned as remainder and preserved outside the replacement
+  // range instead of making the machine state unadoptable.
   const legacyStart = head.indexOf(`${PER_COMMIT_INTRO}\n\n`);
   if (legacyStart === -1) return null;
   const contentStart = legacyStart + PER_COMMIT_INTRO.length + 2;
@@ -339,20 +356,33 @@ function extractPerCommitHeader(head) {
     : null;
 }
 
-function renderPerCommitHeader({ analysis, occurrence, failedJobLines: prior = [] }) {
+function renderPerCommitHeader({
+  analysis,
+  occurrence,
+  failedJobLines: prior = [],
+  priorRunId,
+  priorFailedJobRunId,
+}) {
   const jobs = analysis.failedJobs.length
     ? failedJobLines(analysis.failedJobs)
     : prior;
+  const failedJobsHeading = jobs.length
+    ? analysis.failedJobs.length
+      ? '- Failed jobs:'
+      : `- Failed jobs (last reported for run ${
+          priorFailedJobRunId ?? priorRunId ?? 'unknown'
+        }):`
+    : null;
   return [
     `- Workflow: ${analysis.workflow}`,
-    ...(jobs.length ? ['- Failed jobs:', ...jobs] : []),
+    ...(failedJobsHeading ? [failedJobsHeading, ...jobs] : []),
     `- Run: ${occurrence.runUrl}`,
     `- Run ID: ${occurrence.runId}`,
     `- Commit: ${occurrence.sha}`,
   ].join('\n');
 }
 
-function replacePerCommitHeader(head, headerBlock) {
+function replacePerCommitHeader(head, headerBlock, remainder = []) {
   const header = extractPerCommitHeader(head);
   if (!header) return head;
   const replacement = [
@@ -360,7 +390,10 @@ function replacePerCommitHeader(head, headerBlock) {
     headerBlock,
     PER_COMMIT_HEADER_END,
   ].join('\n');
-  return `${head.slice(0, header.replaceStart)}${replacement}${head.slice(
+  const preservedRemainder = remainder.length
+    ? `\n${remainder.join('\n')}`
+    : '';
+  return `${head.slice(0, header.replaceStart)}${replacement}${preservedRemainder}${head.slice(
     header.replaceEnd,
   )}`;
 }
@@ -375,10 +408,18 @@ function replacePerCommitHeader(head, headerBlock) {
  * instead of filing its own, inverting the module's own dedupe contract
  * (#12133: two different failing tests still get separate issues).
  */
-function renderPerTestHead({ analysis, bodyMarkers, testLines }) {
+function renderPerTestHead({
+  analysis,
+  bodyMarkers,
+  testLines,
+  additionalMarkers = [],
+  preservedFailedJobLines = [],
+  preservedRemainder = [],
+}) {
   return [
     `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
     ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
+    ...additionalMarkers.map((marker) => `<!-- ${marker} -->`),
     '',
     `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
     '',
@@ -386,6 +427,11 @@ function renderPerTestHead({ analysis, bodyMarkers, testLines }) {
     '',
     ...testLines,
     '',
+    ...(preservedFailedJobLines.length
+      ? ['## Previous failed jobs', '', ...preservedFailedJobLines, '']
+      : []),
+    ...preservedRemainder,
+    ...(preservedRemainder.length ? [''] : []),
     'This issue is labeled for autofix so the existing agent can create a repair PR.',
     'It is deduped by failing test, so every later commit that hits the same',
     'failure is appended below instead of opening another issue.',
@@ -473,8 +519,18 @@ export function renderIssueBody({
       analysis,
       occurrence,
       failedJobLines: existingHeader?.failedJobLines,
+      priorRunId: existingHeader?.runId,
+      priorFailedJobRunId: existingHeader?.failedJobRunId,
     });
-    const refreshed = replacePerCommitHeader(withoutHeading, headerBlock);
+    const ownsHeader =
+      !existingHeader || existingHeader.workflow === analysis.workflow;
+    const refreshed = ownsHeader
+      ? replacePerCommitHeader(
+          withoutHeading,
+          headerBlock,
+          existingHeader?.remainder,
+        )
+      : withoutHeading;
     // R1-8: the bridge funnels every unidentifiable failure of a workflow
     // onto one open issue, and every landing used to add one sha marker to
     // the head permanently — past GitHub's 65,536-character body limit,
@@ -517,9 +573,7 @@ export function renderIssueBody({
       existingHeader?.workflow === analysis.workflow;
     const mergedHead = [
       ...shaMarkers.map((marker) => `<!-- ${marker} -->`),
-      ...(canAdoptBridge
-        ? [`<!-- ${workflowMarker} -->`]
-        : []),
+      ...(canAdoptBridge ? [`<!-- ${workflowMarker} -->`] : []),
       '',
       prose,
     ].join('\n');
@@ -576,11 +630,36 @@ export function renderIssueBody({
   const adoptsStub =
     head.includes(`<!-- ${LEGACY_MARKER_PREFIX}`) &&
     !head.includes(`<!-- ${TEST_MARKER_PREFIX}`);
+  const stubHeader = adoptsStub ? extractPerCommitHeader(head) : null;
+  const legacyMarkers = adoptsStub
+    ? [
+        ...head.matchAll(
+          new RegExp(`<!-- (${LEGACY_MARKER_PREFIX}\\S+) -->`, 'g'),
+        ),
+      ].map((match) => match[1])
+    : [];
   const headProse = adoptsStub
-    ? renderPerTestHead({ analysis, bodyMarkers, testLines })
+    ? stubHeader
+      ? renderPerTestHead({
+          analysis,
+          bodyMarkers,
+          testLines,
+          additionalMarkers: legacyMarkers,
+          preservedFailedJobLines: stubHeader.failedJobLines,
+          preservedRemainder: stubHeader.remainder,
+        })
+      : [
+          renderPerTestHead({ analysis, bodyMarkers, testLines }),
+          // A malformed machine block is retained verbatim below the new
+          // per-test head. Losing it would silently discard the stub's run,
+          // commit and bridge markers merely because a human edited its tail.
+          withoutHeading,
+        ].join('\n\n')
     : withoutHeading;
   const adoptLines = adoptsStub
-    ? stubHeaderBullet(extractPerCommitHeader(head), lines, occurrence)
+    ? stubHeader
+      ? stubHeaderBullet(stubHeader, lines, occurrence)
+      : lines
     : lines;
   const prose = tail ? `${headProse}\n\n${tail}` : headProse;
 

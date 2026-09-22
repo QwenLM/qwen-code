@@ -62,9 +62,7 @@ describe('main CI failure issue workflow', () => {
   it('creates an issue that the existing autofix worker can pick up', () => {
     expect(workflow).toContain("issues: 'write'");
     expect(workflow).toContain('CI_DEV_BOT_PAT');
-    expect(workflow).toContain(
-      'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
-    );
+    expect(workflow).toContain("AUTOFIX_BOT: 'qwen-code-dev-bot'");
     expect(workflow).toContain("BUG_LABEL: 'type/bug'");
     expect(workflow).toContain(
       "READY_FOR_AGENT_LABEL: 'status/ready-for-agent'",
@@ -240,11 +238,19 @@ describe('main CI failure issue workflow', () => {
     // before overwriting any body with machine output.
     const planStep = jobs.analyze.steps.find((step) => step.id === 'plan');
     const plan = oneLine(planStep.run);
-    expect(planStep.env.AUTOFIX_BOT).toContain('vars.AUTOFIX_BOT_LOGIN');
+    expect(planStep.env.AUTOFIX_BOT).toBe('qwen-code-dev-bot');
     expect(plan).toContain(
       '--search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc"',
     );
-    const verify = plan.indexOf('grep -qF "<!-- ${marker} -->"');
+    expect(plan).toContain("--jq '.[].number'");
+    expect(plan).not.toContain('--jq \'.[0].number // ""\'');
+    expect(plan).toContain(
+      'echo "Issue #${candidate} did not carry ${marker}; continuing search."',
+    );
+    expect(plan).toContain('break 2');
+    const verify = plan.indexOf(
+      'grep -qF "<!-- ${marker} -->" "${candidate_body}"',
+    );
     const emit = plan.indexOf('issue_number=${existing_issue}');
     expect(verify).toBeGreaterThanOrEqual(0);
     expect(emit).toBeGreaterThan(verify);
