@@ -14,6 +14,79 @@ describe('normalizeSessionData', () => {
     getToolRegistry: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 
+  it.each(['', '(empty)', 'Error: literal stdout\n😀'])(
+    'preserves structured shell output and metadata during export: %j',
+    (output) => {
+      const resultDisplay = {
+        type: 'shell_result' as const,
+        version: 1 as const,
+        text: output || 'No output',
+        output,
+        directory: '/workspace',
+        exitCode: 0,
+        signal: null,
+        pid: 42,
+        error: null,
+        outcome: 'completed' as const,
+        notices: ['Saved output'],
+        truncated: true,
+        outputFiles: ['/tmp/output.log'],
+      };
+      const record: ChatRecord = {
+        uuid: 'shell-result',
+        parentUuid: null,
+        sessionId: 'session-1',
+        timestamp: '2025-01-01T00:00:00.000Z',
+        type: 'tool_result',
+        cwd: '/workspace',
+        version: '1.0.0',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'shell-1',
+                name: 'run_shell_command',
+                response: { output: 'Legacy model-facing text' },
+              },
+            },
+          ],
+        },
+        toolCallResult: { callId: 'shell-1', resultDisplay },
+      };
+      const normalized = normalizeSessionData(
+        {
+          sessionId: 'session-1',
+          startTime: record.timestamp,
+          messages: [
+            {
+              uuid: 'shell-start',
+              timestamp: record.timestamp,
+              type: 'tool_call',
+              toolCall: {
+                toolCallId: 'shell-1',
+                kind: 'execute',
+                title: 'Shell',
+                status: 'pending',
+                rawInput: { command: 'printf test' },
+              },
+            },
+          ],
+        },
+        [record],
+        config,
+      );
+      expect(normalized.messages).toHaveLength(1);
+      expect(normalized.messages[0].uuid).toBe('shell-start');
+      expect(normalized.messages[0].toolCall).toMatchObject({
+        toolCallId: 'shell-1',
+        status: 'completed',
+        rawOutput: resultDisplay,
+      });
+      expect(normalized.messages[0].toolCall?.rawOutput).toEqual(resultDisplay);
+    },
+  );
+
   it('does not export truncated saved-session previews as full diffs', () => {
     const record: ChatRecord = {
       uuid: 'tool-1',

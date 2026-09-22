@@ -39,9 +39,16 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        // jsdom drops unknown props, so the colour-bearing opentui attributes
+        // are surfaced as data-* for assertions to pin.
+        const dom: Record<string, unknown> = key === undefined ? {} : { key };
+        const source = (config ?? {}) as Record<string, unknown>;
+        for (const name of ['fg', 'bg', 'borderColor', 'attributes']) {
+          if (source[name] !== undefined) dom[`data-${name}`] = source[name];
+        }
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          dom,
           children,
         );
       }
@@ -99,6 +106,11 @@ import {
 } from '../constants.js';
 import { WITTY_LOADING_PHRASES } from '../hooks/usePhraseCycler.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
+import { C } from './theme.js';
+
+function renderedSpans(container: HTMLElement): HTMLElement[] {
+  return [...container.querySelectorAll('span')];
+}
 
 /** The indicator's first text cell is the spinner's own 2-column box. */
 function spinnerCell(container: HTMLElement): string {
@@ -108,7 +120,7 @@ function spinnerCell(container: HTMLElement): string {
 function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {
     getTargetDir: () => '/home/user/projects/qwen-code',
-    getModel: () => 'qwen3-coder-plus',
+    getModelDisplayName: () => 'qwen3-coder-plus',
     getContentGeneratorConfig: () => ({ contextWindowSize: 1_000_000 }),
     ...overrides,
   } as unknown as Config;
@@ -312,6 +324,34 @@ describe('OpenTuiFooter', () => {
     expect(text).toContain('git:(main)');
   });
 
+  it("carries the reasoning effort on the model segment, as ink's preset does", () => {
+    const withEffort = fakeConfig({
+      getContentGeneratorConfig: () =>
+        ({
+          contextWindowSize: 1_000_000,
+          reasoning: { effort: 'high' },
+        }) as unknown as ReturnType<Config['getContentGeneratorConfig']>,
+    });
+    const { container } = render(
+      <OpenTuiFooter config={withEffort} streaming={false} />,
+    );
+    expect(container.textContent).toContain('qwen3-coder-plus high');
+
+    const thinkingOff = fakeConfig({
+      getContentGeneratorConfig: () =>
+        ({
+          contextWindowSize: 1_000_000,
+          reasoning: false,
+        }) as unknown as ReturnType<Config['getContentGeneratorConfig']>,
+    });
+    const off = render(
+      <OpenTuiFooter config={thinkingOff} streaming={false} />,
+    );
+    expect(off.container.textContent).toContain(
+      'qwen3-coder-plus reasoning off',
+    );
+  });
+
   it('omits the git segment outside a repository', () => {
     mocks.state.gitBranch = undefined;
     const { container } = render(
@@ -354,6 +394,43 @@ describe('OpenTuiFooter', () => {
     );
     expect(container.textContent).toContain('YOLO mode');
   });
+
+  it('paints the status row with the accent colour ink’s Footer uses', () => {
+    const { container } = render(
+      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+    );
+    const status = renderedSpans(container).filter((row) =>
+      (row.textContent ?? '').includes('qwen3-coder-plus'),
+    );
+    expect(status).toHaveLength(1);
+    expect(status[0].getAttribute('data-fg')).toBe(C.accent);
+  });
+
+  it.each([
+    [ApprovalMode.PLAN, 'plan mode', C.green],
+    [ApprovalMode.AUTO_EDIT, 'auto-accept edits', C.yellow],
+    [ApprovalMode.AUTO, 'Auto mode', C.purple],
+    [ApprovalMode.YOLO, 'YOLO mode', C.red],
+    [ApprovalMode.DEFAULT, '⏸ Ask permissions', C.dim],
+  ] as const)(
+    'colours the %s label with ink’s indicator colour and keeps the shortcut secondary',
+    (mode, label, color) => {
+      const { container } = render(
+        <OpenTuiFooter
+          config={fakeConfig()}
+          streaming={false}
+          approvalMode={mode}
+        />,
+      );
+      const shortcut = renderedSpans(container).find((row) =>
+        (row.textContent ?? '').includes('to cycle'),
+      );
+      expect(shortcut?.getAttribute('data-fg')).toBe(C.dim);
+      const modeLabel = shortcut?.previousElementSibling as HTMLElement;
+      expect(modeLabel.textContent).toBe(label);
+      expect(modeLabel.getAttribute('data-fg')).toBe(color);
+    },
+  );
 
   it('prefixes the default mode with ink’s pause glyph', () => {
     const { container } = render(
@@ -402,6 +479,27 @@ describe('OpenTuiFooter', () => {
     expect(container.textContent).toContain(
       `Enter to steer · Ctrl+Q to queue · Auto mode (${process.platform === 'win32' ? 'tab' : 'shift + tab'} to cycle) ⏳ 2 queued`,
     );
+  });
+
+  it('truncates the hint row part by part inside one line', () => {
+    mocks.state.dimensions = { width: 44, height: 40 };
+    const { container } = render(
+      <OpenTuiFooter
+        config={fakeConfig()}
+        streaming
+        queueLength={2}
+        approvalMode={ApprovalMode.AUTO}
+      />,
+    );
+    // The hint row is the nested row box; the status line is a sibling span.
+    const hint = container.querySelector('div > div > div')?.textContent ?? '';
+    expect(hint).toContain('Enter to steer');
+    // The coloured mode label survives narrowing instead of being dropped
+    // whole, but the budget is spent: nothing after it is rendered.
+    expect(hint).toContain('Auto');
+    expect(hint).not.toContain('shift + tab');
+    expect(hint).not.toContain('queued');
+    expect(hint.length).toBeLessThanOrEqual(40);
   });
 
   it('gives shell mode the hint slot ink’s ShellModeIndicator holds', () => {
