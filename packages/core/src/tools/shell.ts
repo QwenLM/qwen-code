@@ -4213,6 +4213,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Deliberately independent of the `gitCoAuthor.commit` attribution
    * toggle: that setting governs whether AI credit is written into the
    * commit, not whether the agent may amend its own work.
+   *
+   * Deliberately has no multi-commit guard, unlike
+   * {@link attachCommitAttribution}, which refuses when one command
+   * produced several commits. The invariants differ: attribution has to
+   * *partition* per-file AI contribution across those commits and cannot,
+   * so it bails; registration only has to answer "is HEAD a commit this
+   * session's agent produced". In a `commit a && commit b` chain HEAD is
+   * `b`, which the agent's own command created, so registering it is
+   * sound — and `a` stays unregistered, so amending `a` is still blocked.
+   * Adding a `rev-list` here would cost a subprocess to give up an
+   * exemption that is already fail-closed.
    */
   private async trackSessionCommit(
     cwd: string,
