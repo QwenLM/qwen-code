@@ -327,20 +327,32 @@ describe('runBaseTree', () => {
     }
   };
 
-  /** Run `fn` with `dir` as both HOME and git's explicit GLOBAL config. */
+  /**
+   * Run `fn` with `dir` as HOME — the way a throwaway GLOBAL git config
+   * reaches the spawns under test: `GIT_CONFIG_GLOBAL` would not survive
+   * `sanitizedGitEnv`, by design.
+   *
+   * That is the production side. An ambient `GIT_CONFIG_GLOBAL` — the release
+   * workspace exports one pointing at an empty file — still outranks
+   * `$HOME/.gitconfig` for the ordinary spawns these cases make themselves, so
+   * the driver they set up here never runs and their own premise goes red. It
+   * is therefore dropped for the duration and put back afterwards; what the
+   * measurement reads is unchanged, `sanitizedGitEnv` strips it either way.
+   */
   const withHome = <T>(dir: string, fn: () => T): T => {
-    const savedHome = process.env['HOME'];
-    const savedGlobalConfig = process.env['GIT_CONFIG_GLOBAL'];
+    const saved = process.env['HOME'];
+    const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
     process.env['HOME'] = dir;
-    process.env['GIT_CONFIG_GLOBAL'] = join(dir, '.gitconfig');
+    delete process.env['GIT_CONFIG_GLOBAL'];
     try {
       return fn();
     } finally {
-      if (savedHome === undefined) delete process.env['HOME'];
-      else process.env['HOME'] = savedHome;
-      if (savedGlobalConfig === undefined)
+      process.env['HOME'] = saved;
+      if (savedGlobal === undefined) {
         delete process.env['GIT_CONFIG_GLOBAL'];
-      else process.env['GIT_CONFIG_GLOBAL'] = savedGlobalConfig;
+      } else {
+        process.env['GIT_CONFIG_GLOBAL'] = savedGlobal;
+      }
     }
   };
 
@@ -2517,6 +2529,35 @@ describe('runBaseTree', () => {
     },
     15_000,
   );
+
+  it('drops an ambient GIT_CONFIG_GLOBAL inside withHome, and puts it back', () => {
+    // The two GLOBAL-config cases above only go red where the runner exports an
+    // ambient `GIT_CONFIG_GLOBAL`: the release workspace points one at an empty
+    // file, and that outranks `$HOME/.gitconfig` for the ordinary spawns the
+    // cases make themselves. Pin the helper's own contract so it holds in every
+    // environment — inside `withHome` the throwaway HOME is the global config.
+    const home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+    writeFileSync(join(home, '.gitconfig'), '[user]\n\tname = throwaway\n');
+    const ambient = join(home, 'ambient-gitconfig');
+    writeFileSync(ambient, '');
+    const saved = process.env['GIT_CONFIG_GLOBAL'];
+    process.env['GIT_CONFIG_GLOBAL'] = ambient;
+    try {
+      withHome(home, () => {
+        expect(process.env['GIT_CONFIG_GLOBAL']).toBeUndefined();
+        expect(git(home, 'config', '--global', '--get', 'user.name')).toBe(
+          'throwaway',
+        );
+      });
+      expect(process.env['GIT_CONFIG_GLOBAL']).toBe(ambient);
+    } finally {
+      if (saved === undefined) {
+        delete process.env['GIT_CONFIG_GLOBAL'];
+      } else {
+        process.env['GIT_CONFIG_GLOBAL'] = saved;
+      }
+    }
+  });
 
   itWhereContainmentExists(
     'does not refuse over a dangling include git itself skips (R5-6)',

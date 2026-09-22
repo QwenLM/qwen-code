@@ -297,6 +297,7 @@ const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
     tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE],
   },
   { prefix: '- **Background Processes:**', tools: [ToolNames.SHELL] },
+  { prefix: '- **Monitor Processes:**', tools: [ToolNames.MONITOR] },
   { prefix: '- **Interactive Commands:**', tools: [ToolNames.SHELL] },
   { prefix: '- **Subagent Delegation:**', tools: [ToolNames.AGENT] },
   {
@@ -473,6 +474,7 @@ ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when re
 ${taskManagementToolGuidance}- **Parallel Tool Calls:** Call independent tools in parallel; run dependent calls sequentially, using earlier results to supply later arguments.
 - **File Paths:** Always use absolute paths when referring to files with tools like '${ToolNames.READ_FILE}' or '${ToolNames.WRITE_FILE}'. Relative paths are not supported.
 - **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
+- **Monitor Processes:** Use the '${ToolNames.MONITOR}' tool with \`command: "tail -f log.txt"\` when a long-running command's output should stream back to you as events, e.g. a log file or a \`--watch\` build. Keep using \`is_background: true\` instead when the command produces no output, or when you only need its result at the end.
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
 - **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself. A background subagent's result arrives as a task notification in a later turn; while waiting, do not read its transcript, predict its findings, or launch a replacement for the same task.
 - **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than using '${ToolNames.GREP}' or '${ToolNames.GLOB}' directly, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.
