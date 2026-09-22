@@ -27,7 +27,6 @@ import { SubAgentPanel } from './tools/SubAgentPanel';
 import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
-export { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { ShellToolOutput } from './tools/ShellToolOutput';
 import {
   extractTodosFromToolCall,
