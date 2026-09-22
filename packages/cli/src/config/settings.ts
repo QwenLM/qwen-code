@@ -37,7 +37,10 @@ import {
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
 import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
-import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
+import {
+  stripBom,
+  updateSettingsFilePreservingFormat,
+} from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
   V1_TO_V2_MIGRATION_MAP,
@@ -787,7 +790,7 @@ export class LoadedSettings {
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      const parsed = JSON.parse(stripJsonComments(stripBom(content)));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
@@ -1018,7 +1021,7 @@ export function loadSettings(
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
-          rawSettings = JSON.parse(stripJsonComments(content));
+          rawSettings = JSON.parse(stripJsonComments(stripBom(content)));
         } catch (parseError: unknown) {
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →

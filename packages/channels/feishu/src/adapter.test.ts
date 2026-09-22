@@ -725,6 +725,9 @@ describe('FeishuChannel', () => {
   it('dispatches both media and ordinary text', async () => {
     const bridge = createMockBridge();
     const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      getTenantAccessToken: vi.fn().mockResolvedValue(undefined),
+    });
     const onMessage = getPrivateMethod<(data: unknown) => void>(
       channel,
       'onMessage',

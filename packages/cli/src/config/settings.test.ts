@@ -2186,6 +2186,66 @@ describe('Settings Loading and Merging', () => {
       vi.restoreAllMocks();
     });
 
+    it('should load a settings.json that starts with a UTF-8 BOM instead of treating it as corrupted', () => {
+      // Windows editors (e.g. older Notepad, PowerShell 5.1) write a UTF-8 BOM.
+      // A BOM-prefixed file contains valid JSON and must not trigger the
+      // corruption-recovery path that resets the file to '{}'.
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (pathStr.endsWith('.orig')) return false;
+        return true;
+      });
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return '\uFEFF{"model":{"name":"x"}}';
+          }
+          return '{}';
+        },
+      );
+
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+      expect(result.user?.settings).toMatchObject({ model: { name: 'x' } });
+      expect(result.corruptedPath).toBeUndefined();
+      expect(result.wasRecovered).toBeFalsy();
+
+      // The original file must not be copied to .corrupted or reset to '{}'
+      const corruptedCopies = (fs.copyFileSync as Mock).mock.calls.filter(
+        (call: unknown[]) =>
+          call[0] === USER_SETTINGS_PATH &&
+          String(call[1]).includes('.corrupted'),
+      );
+      expect(corruptedCopies).toHaveLength(0);
+      const resetWrites = (fs.writeFileSync as Mock).mock.calls.filter(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      );
+      expect(resetWrites).toHaveLength(0);
+    });
+
+    it('should strip only the leading BOM and keep a BOM inside a JSON string value', () => {
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (pathStr.endsWith('.orig')) return false;
+        return true;
+      });
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return '{"model":{"name":"a\uFEFFb"}}';
+          }
+          return '{}';
+        },
+      );
+
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result.user?.settings).toMatchObject({
+        model: { name: 'a\uFEFFb' },
+      });
+    });
+
     it('should ignore a stale .orig backup and reset to empty when settings.json is corrupted', () => {
       // `.orig` is no longer used for recovery — writeWithBackupSync removes it
       // on success, so any leftover is stale and must not be restored from.
@@ -4539,6 +4599,28 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('reloadScopeFromDisk', () => {
+    it('reloads a settings file that starts with a UTF-8 BOM', () => {
+      let userSettingsContent = JSON.stringify({ ui: { theme: 'dark' } });
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return userSettingsContent;
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      userSettingsContent =
+        '\uFEFF' + JSON.stringify({ ui: { theme: 'light' } });
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+      expect(settings.user.settings.ui?.theme).toBe('light');
+      expect(settings.user.rawJson).toBe(userSettingsContent);
+    });
+
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(
         path.dirname(USER_SETTINGS_PATH),
