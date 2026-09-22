@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
@@ -1634,6 +1636,7 @@ export async function loadCliConfig(
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
+  const sshWorkspace = readSshWorkspace(cwd);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -1774,7 +1777,10 @@ export async function loadCliConfig(
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
-    !provisionalWorkspace && !bareMode && argv.experimentalLsp === true;
+    !sshWorkspace &&
+    !provisionalWorkspace &&
+    !bareMode &&
+    argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -2327,6 +2333,16 @@ export async function loadCliConfig(
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
+  // `undefined` is the meaningful third state here: it defers to core's
+  // `shouldDefaultToNodePty()`, so only an explicit one-shot prompt gets the
+  // pipe default while interactive and protocol-driven modes keep PTY.
+  const isExplicitOneShotPrompt =
+    !interactive &&
+    hasPrompt &&
+    !isAcpMode &&
+    !(argv.inputFile ?? settings.dualOutput?.inputFile) &&
+    inputFormat !== InputFormat.STREAM_JSON;
+
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
@@ -2597,7 +2613,9 @@ export async function loadCliConfig(
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
-    shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    shouldUseNodePtyShell:
+      settings.tools?.shell?.enableInteractiveShell ??
+      (isExplicitOneShotPrompt ? false : undefined),
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
@@ -2713,6 +2731,36 @@ export async function loadCliConfig(
     agentExecutionBackend: agentExecutionBackend(),
     executionEnvironmentFactory: agentExecutionFactory(),
   };
+
+  if (sshWorkspace) {
+    configParams.executionEnvironment = new SshExecutionEnvironment(
+      sshWorkspace,
+      cwd,
+      {
+        outputThreshold: configParams.truncateToolOutputThreshold,
+        shellDefaultTimeoutMs: configParams.shellDefaultTimeoutMs,
+        customIgnoreFiles: configParams.fileFiltering?.customIgnoreFiles,
+      },
+    );
+    configParams.codeModeOnly = false;
+    configParams.disableAllHooks = true;
+    configParams.mcpServers = {};
+    configParams.overrideExtensions = [];
+    configParams.workflowsEnabled = false;
+    configParams.enableManagedAutoMemory = false;
+    configParams.enableManagedAutoDream = false;
+    configParams.enableTeamMemory = false;
+    configParams.enableTeamMemorySync = false;
+    configParams.enableAutoSkill = false;
+    configParams.fileCheckpointingEnabled = false;
+    configParams.artifactEnabled = false;
+    configParams.appendSystemPrompt = [
+      argv.appendSystemPrompt,
+      `This is an SSH workspace on ${sshWorkspace.host}. The project directory is ${sshWorkspace.directory}. All file, search and shell tools operate on that remote project. The local directory ${cwd} is only for session storage; it is not the project. Use remote absolute paths or paths relative to the remote project. Read QWEN.md and AGENTS.md at the remote project root before working if they exist. Remote hooks, skills, MCP, LSP, subagents, workflows and worktree management are unavailable in this session.`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
 
   const config = new Config(configParams);
 

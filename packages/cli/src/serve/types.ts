@@ -461,6 +461,7 @@ export interface CapabilitiesEnvelope {
     id: string;
     cwd: string;
     displayName?: string;
+    ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
     workflowsEnabled?: boolean;

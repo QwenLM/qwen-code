@@ -958,6 +958,7 @@ export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  executionEnvironment?: ExecutionEnvironment;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
@@ -2920,6 +2921,7 @@ export class Config {
   private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly agentExecutionBackend?: 'container';
   private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  private readonly executionEnvironment?: ExecutionEnvironment;
   private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
   private readonly executionShutdown = new AbortController();
   private executionCleanupPromise?: Promise<void>;
@@ -3053,6 +3055,12 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.executionEnvironment = params.executionEnvironment;
+    if (params.executionEnvironment) {
+      this.executionEnvironments = new Set([
+        Promise.resolve(params.executionEnvironment),
+      ]);
+    }
     this.agentExecutionBackend = params.agentExecutionBackend;
     const executionFactory = params.executionEnvironmentFactory;
     this.executionEnvironmentFactory = executionFactory
@@ -3646,6 +3654,15 @@ export class Config {
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
+    if (this.executionEnvironment) {
+      options = {
+        ...options,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      };
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot be initialized');
     }
@@ -3838,12 +3855,14 @@ export class Config {
         );
     recordStartupEvent('config_initialize_extensions_initial_start');
     if (
+      !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       !this.getBareMode()
     ) {
       await this.extensionManager.refreshCache();
     } else if (
+      !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       explicitExtensionNames.length > 0
@@ -4281,6 +4300,7 @@ export class Config {
 
     recordStartupEvent('config_initialize_extensions_final_start');
     if (
+      !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.getBareMode() &&
       !this.isSafeMode()
@@ -4767,6 +4787,7 @@ export class Config {
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.executionEnvironment) return;
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
@@ -7525,7 +7546,7 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    if (this.shellExecutionSandbox) return {};
+    if (this.executionEnvironment || this.shellExecutionSandbox) return {};
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -9304,7 +9325,7 @@ export class Config {
   }
 
   getExecutionEnvironment(): ExecutionEnvironment | undefined {
-    return undefined;
+    return this.executionEnvironment;
   }
 
   shutdownExecutionEnvironments(): Promise<void> {
@@ -11198,35 +11219,6 @@ export class Config {
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
 
-    const environment = this.getExecutionEnvironment();
-    if (environment) {
-      if (this.getCodeModeOnly()) {
-        throw new Error(
-          'Container execution cannot be combined with tools.codeModeOnly.',
-        );
-      }
-      const [{ createExecutionTools }, { wrapExecutionTool }] =
-        await Promise.all([
-          import('../services/local-execution-environment.js'),
-          import('../tools/execution-tool.js'),
-        ]);
-      for (const [name, tool] of createExecutionTools(this)) {
-        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
-        await registerLazy(name as ToolName, async () =>
-          wrapExecutionTool(tool, environment, this),
-        );
-      }
-      await registerLazy(ToolNames.TOOL_CALL, async () => {
-        const { ToolCallTool } = await import('../tools/tool-call.js');
-        return new ToolCallTool(registry);
-      });
-      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
-        const { ToolSearchTool } = await import('../tools/tool-search.js');
-        return new ToolSearchTool(this);
-      });
-      return registry;
-    }
-
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
     // branch and the regular branch — without it the model can't finish
@@ -11288,6 +11280,89 @@ export class Config {
         return new ExecTool(this);
       });
     };
+
+    const registerHostSessionTools = async (): Promise<void> => {
+      if (this.isTodoWriteEnabled()) {
+        await registerLazy(ToolNames.TODO_WRITE, async () => {
+          const { TodoWriteTool } = await import('../tools/todoWrite.js');
+          return new TodoWriteTool(this);
+        });
+      }
+      await registerLazy(ToolNames.WEB_FETCH, async () => {
+        const { WebFetchTool } = await import('../tools/web-fetch.js');
+        return new WebFetchTool(this);
+      });
+      // WebSearch is opt-out: it registers whenever the gate can resolve a
+      // usable backend — either configured explicitly, or derived from the
+      // provider the main model runs on. `enabled: false` turns it off without
+      // importing anything. A gate failure surfaces a one-time startup notice
+      // only when the tool was actually asked for; a provider with no search
+      // backend fails silently (`gate.silent`), since warning about a feature
+      // the user never configured is noise.
+      const hasExplicitWebSearchBackend =
+        !!this.webSearchSettings?.model?.trim() ||
+        !!this.webSearchSettings?.baseUrl;
+      if (
+        !this.getBareMode() &&
+        !this.isSafeMode() &&
+        this.webSearchSettings?.enabled !== false &&
+        (this.webSearchSettings?.enabled === true ||
+          !hasExplicitWebSearchBackend)
+      ) {
+        const { evaluateWebSearchGate } = await import(
+          '../tools/web-search.js'
+        );
+        const gate = evaluateWebSearchGate(this);
+        if (gate.ok) {
+          await registerLazy(ToolNames.WEB_SEARCH, async () => {
+            const { WebSearchTool } = await import('../tools/web-search.js');
+            return new WebSearchTool(this);
+          });
+        } else if (
+          !gate.silent &&
+          !this.webSearchNoticeEmitted &&
+          !options?.forSubAgent
+        ) {
+          this.webSearchNoticeEmitted = true;
+          this.warnings.push(gate.notice);
+        }
+      }
+    };
+
+    const environment = this.getExecutionEnvironment();
+    if (environment) {
+      if (this.getCodeModeOnly()) {
+        throw new Error(
+          'Container execution cannot be combined with tools.codeModeOnly.',
+        );
+      }
+      const [{ createExecutionTools }, { wrapExecutionTool }] =
+        await Promise.all([
+          import('../services/local-execution-environment.js'),
+          import('../tools/execution-tool.js'),
+        ]);
+      for (const [name, tool] of createExecutionTools(this)) {
+        if (environment.toolNames && !environment.toolNames.has(name)) continue;
+        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
+        await registerLazy(name as ToolName, async () =>
+          wrapExecutionTool(tool, environment, this),
+        );
+      }
+      await registerLazy(ToolNames.TOOL_CALL, async () => {
+        const { ToolCallTool } = await import('../tools/tool-call.js');
+        return new ToolCallTool(registry);
+      });
+      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+        const { ToolSearchTool } = await import('../tools/tool-search.js');
+        return new ToolSearchTool(this);
+      });
+      if (this.executionEnvironment && !options?.forSubAgent) {
+        await registerStructuredOutputIfRequested();
+        await registerGoalWorkerTools();
+        if (!this.getBareMode()) await registerHostSessionTools();
+      }
+      return registry;
+    }
 
     if (this.shellExecutionSandbox) {
       await registerLazy(ToolNames.SHELL, async () => {
@@ -11366,6 +11441,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_CALL, async () => {
@@ -11479,12 +11555,6 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    if (this.isTodoWriteEnabled()) {
-      await registerLazy(ToolNames.TODO_WRITE, async () => {
-        const { TodoWriteTool } = await import('../tools/todoWrite.js');
-        return new TodoWriteTool(this);
-      });
-    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'
@@ -11520,10 +11590,6 @@ export class Config {
       const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
       return new ExitWorktreeTool(this);
     });
-    await registerLazy(ToolNames.WEB_FETCH, async () => {
-      const { WebFetchTool } = await import('../tools/web-fetch.js');
-      return new WebFetchTool(this);
-    });
     if (
       resolveInteractionMode(this) === 'interactive' &&
       !this.sdkMode &&
@@ -11534,38 +11600,6 @@ export class Config {
         const { DisplayImageTool } = await import('../tools/display-image.js');
         return new DisplayImageTool(this);
       });
-    }
-    // WebSearch is opt-out: it registers whenever the gate can resolve a
-    // usable backend — either configured explicitly, or derived from the
-    // provider the main model runs on. `enabled: false` turns it off without
-    // importing anything. A gate failure surfaces a one-time startup notice
-    // only when the tool was actually asked for; a provider with no search
-    // backend fails silently (`gate.silent`), since warning about a feature
-    // the user never configured is noise.
-    const hasExplicitWebSearchBackend =
-      !!this.webSearchSettings?.model?.trim() ||
-      !!this.webSearchSettings?.baseUrl;
-    if (
-      !this.getBareMode() &&
-      !this.isSafeMode() &&
-      this.webSearchSettings?.enabled !== false &&
-      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
-    ) {
-      const { evaluateWebSearchGate } = await import('../tools/web-search.js');
-      const gate = evaluateWebSearchGate(this);
-      if (gate.ok) {
-        await registerLazy(ToolNames.WEB_SEARCH, async () => {
-          const { WebSearchTool } = await import('../tools/web-search.js');
-          return new WebSearchTool(this);
-        });
-      } else if (
-        !gate.silent &&
-        !this.webSearchNoticeEmitted &&
-        !options?.forSubAgent
-      ) {
-        this.webSearchNoticeEmitted = true;
-        this.warnings.push(gate.notice);
-      }
     }
     await this.registerImageGenerationTool(registry);
     if (this.isArtifactEnabled()) {

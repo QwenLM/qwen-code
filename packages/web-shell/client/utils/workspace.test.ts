@@ -51,6 +51,19 @@ describe('workspaceBasename', () => {
 });
 
 describe('workspaceLabel', () => {
+  it('distinguishes SSH connections with different ports', () => {
+    const ssh = { host: 'alice@build-box', directory: '/srv/project' };
+    expect(workspaceLabel({ cwd: '/anchor', ssh })).toBe(
+      'alice@build-box:/srv/project',
+    );
+    expect(
+      workspaceLabel({ cwd: '/anchor', ssh: { ...ssh, port: 2222 } }),
+    ).toBe('alice@build-box:2222:/srv/project');
+    expect(
+      workspaceLabel({ cwd: '/anchor', ssh, displayName: 'Production' }),
+    ).toBe('Production');
+  });
+
   it('prefers a display name and falls back to the cwd basename', () => {
     expect(
       workspaceLabel({ cwd: '/work/payments', displayName: 'Payments API' }),

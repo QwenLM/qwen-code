@@ -130,7 +130,7 @@
           "minimum": 1
         },
         "cleanupPeriodDays": {
-          "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
+          "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind, background subagent transcripts under <projectDir>/subagents/, and session debug logs under the runtime debug/ directory. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
           "type": "number",
           "default": 30,
           "minimum": 0
@@ -1372,9 +1372,8 @@
           "type": "object",
           "properties": {
             "enableInteractiveShell": {
-              "description": "Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.",
-              "type": "boolean",
-              "default": true
+              "description": "Use node-pty for an interactive shell experience. Explicit one-shot prompts default to child_process when this setting is unset; interactive and input-driven modes default to PTY.",
+              "type": "boolean"
             },
             "pager": {
               "description": "The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.",

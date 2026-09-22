@@ -507,6 +507,9 @@ export class LlmClient {
   }
 
   private async seedAgentReminderDedupFromCurrent(): Promise<void> {
+    if (this.config.getExecutionEnvironment?.()) {
+      return;
+    }
     try {
       const agents = await this.config.getSubagentManager().listSubagents();
       this.announcedAgentReminderNames = new Set(
@@ -1625,7 +1628,10 @@ export class LlmClient {
   }
 
   private getCachedGitStatus(): string | null {
-    if (this.config.getShellExecutionSandbox?.()) {
+    if (
+      this.config.getExecutionEnvironment?.() ||
+      this.config.getShellExecutionSandbox?.()
+    ) {
       // Even git status can execute repository-configured filters on the host.
       return null;
     }
