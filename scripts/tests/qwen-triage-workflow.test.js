@@ -33,6 +33,10 @@ const prSkill = readFileSync(
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
+const androidRef = readFileSync(
+  '.qwen/skills/verify-pr/references/android.md',
+  'utf8',
+);
 const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
 
@@ -4777,6 +4781,8 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('upgrade arm');
     expect(flat).toContain('every store the old version wrote');
     expect(flat).toContain("Scan in the store's own encoding");
+    expect(flat).toContain('never the secret value');
+    expect(flat).toContain('captures of scan output');
 
     // #12121: the native Retry screen only existed before the daemon's
     // service worker was installed. After one successful load, the worker
@@ -4790,6 +4796,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'A test that can skip is coverage only where it executes',
     );
+    expect(flat).toContain("workflow's `on:` path/branch filters");
+    expect(flat).toContain('lane never ran');
+    expect(flat).toContain('label a static gate evaluation as inferred');
 
     // #12121: a surviving editor-check mutant, driven through the real UI,
     // sent one daemon's token to another daemon. Reading the code would
@@ -4797,19 +4806,61 @@ describe('qwen-triage verify hardening round 2', () => {
     // labelled as inferred.
     expect(flat).toContain('Adjudicate a survivor by running its build');
     expect(flat).toContain('label what you only inferred');
+    const testOnly = flat.slice(
+      flat.indexOf('**Test-only PRs**'),
+      flat.indexOf('**Third-party actions and dependencies**'),
+    );
+    expect(testOnly).toContain('out of reach within budget');
+    expect(testOnly).toContain('label the classification as inferred');
+    expect(testOnly).toContain('Adjudicate a survivor by running its build');
 
     // #12121: a relay on another port fails the daemon's Host allowlist,
     // and the rate-limited access log is not a request ledger.
     expect(flat).toContain('behind a port mapping and never rewrite headers');
+    expect(flat).toContain('For an emulator client of a real `qwen serve`');
+    expect(flat).toContain(
+      'WebSocket `upgrade` handshake and bidirectional tunnel',
+    );
+    expect(flat).toContain("preserve the client's original `Host`");
 
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');
-    expect(
-      existsSync(
-        join('.qwen', 'skills', 'verify-pr', 'references', 'android.md'),
-      ),
-    ).toBe(true);
+    const androidFlat = androidRef.replace(/\s+/g, ' ');
+    expect(androidFlat).toContain(
+      'sdkmanager "system-images;android-35;google_apis;arm64-v8a"',
+    );
+    expect(androidFlat).toContain('avdmanager create avd');
+    expect(androidFlat).toContain('emulator -list-avds');
+    expect(androidFlat).toContain('.github/workflows/mobile-shell.yml');
+    expect(androidFlat).toContain(
+      'read its `api-level:`, `arch:` and `require-profiles:` entries',
+    );
+    expect(androidFlat).toContain('window_animation_scale');
+    expect(androidFlat).toContain('transition_animation_scale');
+    expect(androidFlat).toContain('animator_duration_scale');
+    expect(androidFlat).toContain(
+      'only on an image whose WebView reports both',
+    );
+    expect(androidFlat).toContain('On other images omit it');
+    expect(androidFlat).toContain(
+      'a red pristine control is not a mutant kill',
+    );
+    expect(androidFlat).toContain(
+      'Read the per-test status codes, not the summary line',
+    );
+    expect(androidFlat).toContain(
+      '`0` pass, `-2` failure, `-4` assumption skip',
+    );
+    expect(androidFlat).toContain(
+      '| `MULTI_PROFILE` | `DELETE_BROWSING_DATA` |',
+    );
+    expect(androidFlat).toContain('UTF-16LE');
+    expect(androidFlat).toContain('adb reverse');
+    expect(androidFlat).toContain('never the secret value');
+    expect(androidFlat).toContain('captures of scan output');
+    expect(androidFlat).toContain('Migration and persisted-state PRs');
+    expect(flat).toContain('**Migration and persisted-state PRs**');
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all

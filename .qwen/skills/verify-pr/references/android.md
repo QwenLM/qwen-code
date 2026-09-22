@@ -1,7 +1,8 @@
 # Native Android (`packages/mobile-shell/`) verification recipe
 
-Read this before scoping a PR that touches `packages/mobile-shell/`. Every
-fact below was measured in maintainer rounds on #12121, #12129 and #12130.
+Read this before scoping a PR that touches `packages/mobile-shell/`. The
+measured observations below come from maintainer rounds on #12121, #12129
+and #12130.
 Re-measure anything your round depends on, because image contents and tool
 versions drift.
 
@@ -14,6 +15,10 @@ versions drift.
   `command -v java`, `ls /dev/kvm` and `uname -m`. At best the lane can build
   the package and run the JVM tests. Device and WebView claims go under
   _Not covered_.
+- **Android device-test CI.** This is a separate job from the verify lane:
+  `.github/workflows/mobile-shell.yml` owns the `device-tests` matrix and its
+  trigger filters. Read that workflow in the reviewed checkout before making
+  a claim about current CI coverage.
 - **Building runs PR code.** Gradle executes `settings.gradle.kts`,
   `build.gradle.kts`, `gradle.properties` and the wrapper's distribution
   URL, and the PR can edit all of them. The skill's local-invocation
@@ -36,8 +41,9 @@ versions drift.
 
 ## Build
 
-JDK 17 (`JAVA_HOME`), plus `ANDROID_HOME` pointing at an SDK that has
-`platform-tools`, `emulator`, `platforms;android-34` and
+JDK 17 (`JAVA_HOME`), plus `ANDROID_HOME` pointing at an SDK with command-line
+tools (`sdkmanager` and `avdmanager`), `platform-tools`, `emulator`,
+`platforms;android-34` and
 `build-tools;34.0.0`. Verify the wrapper jar against its committed
 `gradle-wrapper.jar.sha256` first, as the workflow does. Then, from
 `packages/mobile-shell/`:
@@ -55,6 +61,23 @@ retry that one package.
 
 ## Pick emulator images by WebView capability
 
+Install each required system image, then create a uniquely named AVD. For
+example, with the SDK command-line tools on a macOS arm64 host:
+
+```bash
+sdkmanager "system-images;android-35;google_apis;arm64-v8a"
+avdmanager create avd -n verify-api35 -k "system-images;android-35;google_apis;arm64-v8a"
+emulator -list-avds
+```
+
+Review and accept the SDK license prompts (or use `sdkmanager --licenses`)
+and answer the AVD hardware-profile prompt. Repeat with API 26 and API 36
+and distinct names for the three-image rig. Use the created name, or an
+existing name from `emulator -list-avds`, as `<name>` below. Choose an ABI
+supported by your host; this arm64 example does not describe CI's x86/x86_64
+images. Command syntax: [sdkmanager](https://developer.android.com/tools/sdkmanager)
+and [avdmanager](https://developer.android.com/tools/avdmanager).
+
 The shell's guards depend on WebView features, not on the API level. On
 Google APIs images the WebView version is fixed at image build time, with no
 Play Store updates. Measured on `google_apis;arm64-v8a` images; read the
@@ -69,8 +92,12 @@ version with `adb shell dumpsys webviewupdate`:
 The feature columns come from which capability-gated device tests ran and
 which were skipped. API 26 sits below the shell's WebView 111 floor, so it
 exercises the update-guidance path whatever its features are. The API 35 row is the only one where the "profiles
-supported, clearing not supported" branch executes. CI's matrix (API 26 and
-API 36) never reaches it.
+supported, clearing not supported" branch executed in that round. For current
+CI coverage, use the `device-tests` matrix in `.github/workflows/mobile-shell.yml`:
+read its `api-level:`, `arch:` and `require-profiles:` entries, then confirm
+the actual WebView capabilities and per-test statuses in each executed lane.
+An API level alone does not establish coverage, including for a newly added
+matrix row. Without run evidence, label the coverage assessment as inferred.
 
 ## Isolate the rig from concurrent sessions
 
@@ -79,11 +106,19 @@ API 36) never reaches it.
   not pick up your device by default:
   `ANDROID_ADB_SERVER_PORT=<p> emulator -avd <name> -port <even-port> -no-snapshot -no-audio -no-boot-anim -gpu swiftshader_indirect -no-window`.
   Wrap `adb -P <p> -s emulator-<port>` in a small script. Wait for
-  `getprop sys.boot_completed`, then set the three `*_animation_scale`
-  global settings to 0. Stop the emulator with `adb emu kill` or by its PID,
+  `getprop sys.boot_completed`, then set `window_animation_scale`,
+  `transition_animation_scale` and `animator_duration_scale` to 0 with
+  `adb shell settings put global <setting> 0`. The device-test CI action
+  already does this through `disable-animations: true`.
+  Stop the emulator with `adb emu kill` or by its PID,
   never by pattern.
 - Run device tests with `adb install -r -t` (app APK and test APK), then
-  `adb shell am instrument -w -r [-e requireProfileIsolation true] com.qwen.mobileshell.test/androidx.test.runner.AndroidJUnitRunner`.
+  `adb shell am instrument -w -r com.qwen.mobileshell.test/androidx.test.runner.AndroidJUnitRunner`.
+  Add `-e requireProfileIsolation true` before the runner component only on
+  an image whose WebView reports both `MULTI_PROFILE` and `DELETE_BROWSING_DATA`.
+  In the measured table this is API 36 only. On other images omit it: the
+  literal string `true` converts capability skips into hard assertion failures.
+  Re-read the workflow's `require-profiles:` mapping when reproducing CI.
   Do not use Gradle `connected*`: it installs on every visible device and
   uninstalls the app afterwards.
 - Read the per-test status codes, not the summary line: `0` pass, `-2`
@@ -108,7 +143,10 @@ API 36) never reaches it.
   `run-as … tar -cf - app_webview` pulls all WebView storage. The default
   profile is `app_webview/Default`, and named profiles appear as
   `Profile <n>`. Scan for secrets in UTF-16LE as well as ASCII (see the
-  persisted-state rule in SKILL.md).
+  **Migration and persisted-state PRs** rule in SKILL.md). Report the store,
+  key, encoding and match offset, never the secret value. Apply this to report
+  prose and captures of scan output; redact before capture and do not publish
+  raw storage dumps.
 - **Upgrade arm.** Install the base APK, seed its state (for example write
   the legacy `shared_prefs` file with `run-as … cp` and launch once), then
   `adb install -r` the head APK over it. `-r` keeps the app data.
@@ -118,9 +156,14 @@ API 36) never reaches it.
 Apply each mutant to a clean copy of the sources, and assert that the file
 actually changed. Rebuild with `--no-daemon`, then run the JVM suite and
 `am instrument` on every image in parallel. Include a pristine control row.
+Keep the capability argument appropriate to each image; a red pristine control
+is not a mutant kill. If `requireProfileIsolation` fails in the control too,
+correct the rig before interpreting mutation results.
 Cleaning up with `./gradlew --stop` would stop every daemon of that Gradle
 version for the user, including other sessions' builds. One cycle (build,
 JVM tests, three emulators) took 30–50 seconds on an M1 Max, because the
 build directory rebuilds incrementally. The whole ten-row matrix, control
-included, took under seven minutes. Record which image killed each mutant: a
-kill that only happens on API 35 is a survivor as far as CI is concerned.
+included, took under seven minutes. Record which image killed each mutant.
+Compare with the current workflow and executed capability gates above before
+calling a kill outside those environments a survivor for CI; the historical
+API 35-only kill does not establish today's coverage.

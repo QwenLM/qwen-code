@@ -541,15 +541,19 @@ least one test that imports it.
 **A test that can skip is coverage only where it executes.** A test gated on
 a capability (`assumeTrue`, `it.skipIf`, a platform filter) passes vacuously
 wherever that capability is missing. A CI matrix chosen for other reasons can
-leave the gated test skipped in every lane. So establish, for each CI lane,
-whether the gate lets the test run: read the lane's skipped list when you
-have its log (a local round), otherwise evaluate the gate against the lane's
+leave the gated test skipped in every lane. First check whether the lane ran
+at all, including the workflow's `on:` path/branch filters and job conditions.
+An unmatched trigger leaves no check run: say _lane never ran_, not _test
+skipped in CI_. Without run evidence, label a static gate evaluation as inferred.
+Then establish, for each CI lane, whether the gate lets the test run: read
+the lane's skipped list when you have its log (a local round), otherwise
+evaluate the gate against the lane's
 environment as the workflow matrix defines it. When a mutant is killed only
 in an environment CI does not run, report it as a survivor for CI and name
 the environment that kills it. Measured example: the test pinning an
 Android shell's fail-closed branch only runs on a WebView that has
 multi-profile support but lacks complete browsing-data deletion (WebView 124
-on API 35). The CI matrix ran
+on API 35). In that round, the CI matrix ran
 API 26 and API 36, and the log listed the test as `SKIPPED` in both lanes. A
 mutant restoring the old fail-open behaviour stayed green on the JVM suite,
 API 26 and API 36, and only a local API 35 emulator killed it. The guard the
@@ -713,14 +717,18 @@ inconclusive.
 - Assert **both sides of the wire** where a protocol is involved: what the
   peer actually received (method, path, headers, exact body, request count)
   and what the caller observed — plus that stderr stayed clean.
-  To record what a client sends to a real `qwen serve`, put the recording
+  For an emulator client of a real `qwen serve`, put the recording
   relay **behind a port mapping and never rewrite headers**. The daemon's
   loopback Host allowlist includes its own port, so a client pointed at a
   relay on another port gets `403`. Keep the client addressing the daemon's
-  port and move the relay under it: for an emulator,
+  port and move the relay under it with
   `adb reverse tcp:<daemon-port> tcp:<relay-port>`, with the relay forwarding
-  to the daemon. Do not use the daemon's access log as a ledger. It is
-  rate-limited to a 60-line burst refilled at 2 lines per second.
+  to the daemon. Use a TCP-level relay, or explicitly proxy the
+  WebSocket `upgrade` handshake and bidirectional tunnel; preserve the
+  client's original `Host` on both HTTP and WebSocket paths. A request-only
+  relay can pass HTTP while dropping ACP connections. Do not use the daemon's
+  access log as a ledger. It is rate-limited to a 60-line burst refilled at
+  2 lines per second.
 - **When the oracle is an instrument, corroborate it with a mechanism that
   does not use that instrument.** A tool's _report_ about the system is not
   the system: a cursor query, a profiler number, a coverage percentage can
@@ -795,7 +803,9 @@ since the merge-base, say so and re-measure there.
   the one the commit says it strengthened, not an unrelated test that
   happened to go red. Finally, **adjudicate every survivor** — for each, say
   whether it is a coverage gap or a real defect, and prove which
-  independently rather than by reading the code. Confirm the unmutated
+  independently rather than by reading the code. Where driving the build is
+  out of reach within budget, label the classification as inferred (see
+  **Adjudicate a survivor by running its build**). Confirm the unmutated
   control is green, or the kills mean nothing.
 - **Third-party actions and dependencies**: verify what they do from **their
   own manifest**, never from the PR's description of them. A change asserted
@@ -825,6 +835,9 @@ since the merge-base, say so and re-measure there.
   own encoding**: the same WebView kept a token as UTF-16LE in its Session
   Storage LevelDB log while its Local Storage held an ASCII marker as plain
   bytes, so an ASCII `grep` for a token can report a false absence.
+  Report the store, key, encoding and match offset, never the secret value.
+  This applies to report prose and captures of scan output; redact values
+  before capturing evidence and do not publish raw storage dumps.
   Measured example: an Android shell moved its plaintext development token
   into a Keystore-encrypted vault, deleted the old preferences file, and
   passed every migration test. But the base build had
