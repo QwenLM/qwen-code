@@ -157,7 +157,7 @@ const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('clipboardUtils', () => {
-  let clipboardHasImage: () => Promise<boolean>;
+  let clipboardHasImage: (onUnavailable?: () => void) => Promise<boolean>;
   let saveClipboardImage: (dir?: string) => Promise<string | null>;
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
@@ -262,6 +262,81 @@ describe('clipboardUtils', () => {
 
       const result = await clipboardHasImage();
       expect(result).toBe(false);
+    });
+  });
+
+  // ─── Linux clipboard unavailability must not be silent (#12488) ──
+
+  describe('clipboardHasImage onUnavailable on Linux', () => {
+    it('notifies when there is no display server to reach a tool through', async () => {
+      // getLinuxClipboardTool() exit (a): not a Wayland session, no
+      // XDG_SESSION_TYPE and no DISPLAY, so it returns null without ever
+      // probing for wl-paste/xclip.
+      vi.stubEnv('WAYLAND_DISPLAY', undefined as unknown as string);
+      vi.stubEnv('XDG_SESSION_TYPE', undefined as unknown as string);
+      vi.stubEnv('DISPLAY', undefined as unknown as string);
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+      expect(mockExecSync).not.toHaveBeenCalled();
+    });
+
+    it('notifies when the tool probe fails on X11', async () => {
+      // getLinuxClipboardTool() exit (b): display env is present so xclip is
+      // selected, but `command -v xclip` throws because it is not installed.
+      setupX11Env();
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the tool probe fails on Wayland', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('stays quiet when the clipboard holds an image', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('image/png\n', 0));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(true);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet when the clipboard holds only text', async () => {
+      // "no image on the clipboard" is benign and must not nag the user.
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('text/plain\n', 0));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('still notifies on the non-Linux native module path', async () => {
+      clipboardMockState.failLoad = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+
+      const onUnavailable = vi.fn();
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
     });
   });
 
