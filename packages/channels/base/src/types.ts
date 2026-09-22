@@ -205,10 +205,14 @@ export interface ChannelPromptOwner {
 }
 
 export type UserInputPresentationResult =
-  { kind: 'presented' } | { kind: 'handled' } | { kind: 'unsupported' };
+  | { kind: 'presented' }
+  | { kind: 'handled' }
+  | { kind: 'unsupported' };
 
 export type UserInputSettlementReason =
-  'resolved_outside_presenter' | 'cancelled' | 'run_cancelled';
+  | 'resolved_outside_presenter'
+  | 'cancelled'
+  | 'run_cancelled';
 
 export type ChannelUserInputResponse = RequestPermissionResponse & {
   answers?: Record<string, string>;
@@ -434,7 +438,8 @@ interface ChannelConfigFieldDescriptorBase {
   description?: string;
 }
 
-export interface ChannelConfigValueFieldDescriptor extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
@@ -443,7 +448,8 @@ export interface ChannelConfigValueFieldDescriptor extends ChannelConfigFieldDes
   properties?: never;
 }
 
-export interface ChannelConfigPlainValueFieldDescriptor extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigPlainValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
@@ -451,7 +457,8 @@ export interface ChannelConfigPlainValueFieldDescriptor extends ChannelConfigFie
   properties?: never;
 }
 
-export interface ChannelConfigEnumFieldDescriptor extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigEnumFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
@@ -460,7 +467,8 @@ export interface ChannelConfigEnumFieldDescriptor extends ChannelConfigFieldDesc
   properties?: never;
 }
 
-export interface ChannelConfigNumberFieldDescriptor extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigNumberFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
@@ -469,7 +477,8 @@ export interface ChannelConfigNumberFieldDescriptor extends ChannelConfigFieldDe
   properties?: never;
 }
 
-export interface ChannelConfigObjectFieldDescriptor extends ChannelConfigFieldDescriptorBase {
+export interface ChannelConfigObjectFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
   kind: 'object';
   required?: false;
   envResolvable?: never;

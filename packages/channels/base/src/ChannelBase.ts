@@ -209,7 +209,11 @@ interface ChannelMemoryRecallCacheEntry {
 
 export type ChannelMemoryRecallCacheStatus = 'hit' | 'miss' | 'bypass';
 export type ChannelMemoryRecallResult =
-  'selected' | 'empty' | 'stale' | 'read_error' | 'revision_unstable';
+  | 'selected'
+  | 'empty'
+  | 'stale'
+  | 'read_error'
+  | 'revision_unstable';
 
 export interface ChannelMemoryRecallObservation {
   durationMs: number;
@@ -3508,7 +3512,8 @@ export abstract class ChannelBase {
 
   private denialResponse(pending: PendingPermission): {
     outcome:
-      { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' };
+      | { outcome: 'selected'; optionId: string }
+      | { outcome: 'cancelled' };
   } {
     const option = this.denialOption(pending);
     if (option) {
@@ -5847,6 +5852,11 @@ export abstract class ChannelBase {
   }): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
     const authorized = this.config.allowedUsers;
+    // A decoupled group axis admits members no allowlist vouches for, so an
+    // empty list must not mean "unrestricted" for group targets.
+    if (target.isGroup && this.groupSenderGate && authorized.length === 0) {
+      return false;
+    }
     return authorized.length === 0 || authorized.includes(target.senderId);
   }
 
@@ -6266,7 +6276,9 @@ export abstract class ChannelBase {
             return false;
           });
       }
-      this.logPreflightRejected('sender_denied');
+      this.logPreflightRejected(
+        senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+      );
       return false;
     }
 
@@ -6416,7 +6428,8 @@ export abstract class ChannelBase {
    * not reverted to raw IDs by the next initial write.
    */
   protected persistedObservedContacts():
-    ObservedChannelContactGraph | undefined {
+    | ObservedChannelContactGraph
+    | undefined {
     const list = this.observedContacts?.list;
     if (!list) return undefined;
     try {

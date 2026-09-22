@@ -121,6 +121,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `Envelope`           | Normalized inbound message format                                        |
 | `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
 | `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
+| `GroupSenderPolicy`  | `'inherit' \| 'open' \| 'allowlist'` — never `pairing`                   |
 | `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
 | `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
 | `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
@@ -283,6 +284,13 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 | `open`      | Everyone allowed                                                                                          |
 | `allowlist` | Only `allowedUsers` allowed                                                                               |
 | `pairing`   | Check allowlist, then approved pairings, then generate a pairing code (8-char, 1hr expiry, max 3 pending) |
+
+**Two axes:** `ChannelBase` may hold a second `SenderGate` for group traffic
+(when `groupSenderPolicy` is `open` or `allowlist`). Any sender check an
+adapter makes itself must go through `this.senderGateFor(envelope.isGroup)`
+rather than `this.gate`, or the group axis is silently ignored on that lane.
+The group gate never carries `pairing`: an approval there would also unlock
+direct messages.
 
 ### GroupGate
 

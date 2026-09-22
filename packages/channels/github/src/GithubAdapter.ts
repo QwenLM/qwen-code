@@ -313,7 +313,11 @@ interface PendingFinalDelivery {
 }
 
 type InboundTaskState =
-  'accepted' | 'running' | 'reply_pending' | 'failed' | 'cancelled';
+  | 'accepted'
+  | 'running'
+  | 'reply_pending'
+  | 'failed'
+  | 'cancelled';
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
 
@@ -618,6 +622,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     this.gate.replaceAllowedUsers(allowed);
+    // The decoupled group axis is matched against the same lowercased login.
+    if (this.config.allowedGroupUsers) {
+      const allowedGroup = this.config.allowedGroupUsers.map((u) =>
+        u.toLowerCase(),
+      );
+      this.config.allowedGroupUsers = allowedGroup;
+      this.groupSenderGate?.replaceAllowedUsers(allowedGroup);
+    }
     this.migrateLegacyPublicationState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;

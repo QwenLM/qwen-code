@@ -37,7 +37,8 @@ export interface ChannelSettingsMutationOptions {
   expectedRevision: string;
 }
 
-export interface ChannelSettingsUpsertOptions extends ChannelSettingsMutationOptions {
+export interface ChannelSettingsUpsertOptions
+  extends ChannelSettingsMutationOptions {
   config: Record<string, unknown> & { type: string };
   secrets?: Record<string, ChannelSecretUpdate>;
 }
@@ -635,7 +636,11 @@ export class WorkspaceChannelSettingsStore {
       multiSession: nextConfig['multiSession'] === true,
       sessionScope:
         (nextConfig['sessionScope'] as
-          'user' | 'thread' | 'chat_thread' | 'single' | undefined) ??
+          | 'user'
+          | 'thread'
+          | 'chat_thread'
+          | 'single'
+          | undefined) ??
         plugin.defaultSessionScope ??
         'user',
       groupHistoryLimit: nextConfig['groupHistoryLimit'],

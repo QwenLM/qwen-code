@@ -231,6 +231,25 @@ describe('GitlabChannel', () => {
       ch.disconnect();
     });
 
+    it('normalizes allowedGroupUsers to lowercase for the group sender gate', async () => {
+      const config = makeConfig({
+        groupSenderPolicy: 'allowlist',
+        allowedGroupUsers: ['Alice'],
+      });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+
+      const groupGate = (
+        ch as unknown as {
+          groupSenderGate?: { isAllowed: (senderId: string) => boolean };
+        }
+      ).groupSenderGate;
+      expect(groupGate?.isAllowed('alice')).toBe(true);
+      expect(groupGate?.isAllowed('bob')).toBe(false);
+      expect(ch.config.allowedGroupUsers).toEqual(['alice']);
+      ch.disconnect();
+    });
+
     it('does not warn about groupPolicy when pairing is configured', async () => {
       const stderr = vi
         .spyOn(process.stderr, 'write')

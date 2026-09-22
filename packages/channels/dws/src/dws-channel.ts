@@ -673,10 +673,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
               conversationId.trim().length > 0 &&
               group.requireMention === false,
           )
-          .map(([conversationId]): DwsImSource => ({
-            kind: 'group',
-            conversationId,
-          }));
+          .map(
+            ([conversationId]): DwsImSource => ({
+              kind: 'group',
+              conversationId,
+            }),
+          );
     const imSources: DwsImSource[] =
       config.groupPolicy === 'disabled'
         ? []
