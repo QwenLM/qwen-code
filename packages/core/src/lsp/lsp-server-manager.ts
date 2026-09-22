@@ -390,6 +390,7 @@ export class LspServerManager {
         `LSP server ${name} requires trusted workspace, skipping startup`,
       );
       handle.status = 'FAILED';
+      handle.error = new Error('workspace is not trusted');
       this.serverConfigHashes.delete(name);
       return;
     }
@@ -405,6 +406,7 @@ export class LspServerManager {
         `Workspace trust check failed, not starting LSP server ${name}`,
       );
       handle.status = 'FAILED';
+      handle.error = new Error('workspace trust check failed');
       this.serverConfigHashes.delete(name);
       return;
     }
@@ -421,6 +423,9 @@ export class LspServerManager {
           `LSP server ${name} command path is unsafe: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
+        handle.error = new Error(
+          `command path is unsafe: ${handle.config.command}`,
+        );
         this.serverConfigHashes.delete(name);
         return;
       }
@@ -436,6 +441,7 @@ export class LspServerManager {
           `LSP server ${name} command not found: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
+        handle.error = new Error(`command not found: ${handle.config.command}`);
         this.serverConfigHashes.delete(name);
         return;
       }
@@ -632,6 +638,9 @@ export class LspServerManager {
           `LSP server ${name} exited but restartOnCrash is disabled`,
         );
         handle.status = 'FAILED';
+        handle.error = new Error(
+          'process exited unexpectedly and restartOnCrash is disabled',
+        );
         this.serverConfigHashes.delete(name);
         return;
       }
@@ -641,6 +650,9 @@ export class LspServerManager {
           `LSP server ${name} exited but maxRestarts is ${maxRestarts}`,
         );
         handle.status = 'FAILED';
+        handle.error = new Error(
+          `process exited unexpectedly and maxRestarts is ${maxRestarts}`,
+        );
         this.serverConfigHashes.delete(name);
         return;
       }
@@ -650,6 +662,9 @@ export class LspServerManager {
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
         handle.status = 'FAILED';
+        handle.error = new Error(
+          `reached the max restart attempts (${maxRestarts})`,
+        );
         this.serverConfigHashes.delete(name);
         return;
       }
