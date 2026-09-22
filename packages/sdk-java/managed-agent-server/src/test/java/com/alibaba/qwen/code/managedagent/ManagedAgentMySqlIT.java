@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
@@ -14,7 +15,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWr
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
@@ -22,21 +25,25 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ManagedAgentMySqlIT {
     @Test
+    @Order(1)
     void upgradesAndExercisesStoresOnMySql() {
-        DriverManagerDataSource dataSource = new DriverManagerDataSource(
-                required("mysql.url"), required("mysql.user"),
-                System.getProperty("mysql.password", ""));
+        DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
                 .target(MigrationVersion.fromVersion("1")).load().migrate();
@@ -175,7 +182,8 @@ class ManagedAgentMySqlIT {
                         sessionId, "MYSQL-RESOURCE", tokenA)))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                "managed_session_not_found"));
+                                ManagedSessionStoreModels
+                                        .ERROR_RESOURCE_NOT_FOUND));
 
         inTransaction(transactions, () -> firstInstance.sealWriter(
                 storeTenant, sessionId, tokenA,
@@ -208,6 +216,120 @@ class ManagedAgentMySqlIT {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 "managed_session_writer_conflict"));
+    }
+
+    @Test
+    @Order(2)
+    void independentProcessesRecoverACommittedSessionAfterOwnerLoss()
+            throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        cleanupProcessFixture(jdbc);
+
+        Process crashed = startStoreProcess("commit-and-crash");
+        assertProcess(crashed, 23, null);
+        awaitLeaseExpiry(jdbc);
+        assertProcess(startStoreProcess("takeover"), 0,
+                "D1_PROCESS_TAKEOVER_OK");
+        assertProcess(startStoreProcess("replay"), 0,
+                "D1_PROCESS_REPLAY_OK");
+        assertProcess(startStoreProcess("stale-write"), 0,
+                "D1_PROCESS_STALE_WRITER_OK");
+        assertProcess(startStoreProcess("restore"), 0,
+                "D1_PROCESS_RESTORE_OK");
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Integer.class,
+                ManagedSessionStoreProcessFixtureMain.TENANT,
+                ManagedSessionStoreProcessFixtureMain.SESSION))
+                .isEqualTo(1);
+    }
+
+    private static void cleanupProcessFixture(JdbcTemplate jdbc) {
+        Object[] scope = {
+            ManagedSessionStoreProcessFixtureMain.TENANT,
+            ManagedSessionStoreProcessFixtureMain.SESSION
+        };
+        jdbc.update("DELETE FROM qwen_managed_session_resource_ref"
+                + " WHERE tenant_id = ? AND session_id = ?", scope);
+        jdbc.update("DELETE FROM qwen_managed_session_resource"
+                + " WHERE tenant_id = ? AND session_id = ?", scope);
+        jdbc.update("DELETE FROM qwen_managed_session_journal_tx"
+                + " WHERE tenant_id = ? AND session_id = ?", scope);
+        jdbc.update("DELETE FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ?", scope);
+    }
+
+    private static void awaitLeaseExpiry(JdbcTemplate jdbc)
+            throws InterruptedException {
+        long deadline = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            Boolean expired = jdbc.queryForObject(
+                    "SELECT writer_lease_until < CURRENT_TIMESTAMP(6)"
+                            + " FROM qwen_managed_session_journal_head"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    Boolean.class,
+                    ManagedSessionStoreProcessFixtureMain.TENANT,
+                    ManagedSessionStoreProcessFixtureMain.SESSION);
+            if (Boolean.TRUE.equals(expired)) {
+                return;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("the crashed writer lease did not expire");
+    }
+
+    private static Process startStoreProcess(String action)
+            throws IOException {
+        String java = Path.of(System.getProperty("java.home"), "bin",
+                isWindows() ? "java.exe" : "java").toString();
+        String classpath = System.getProperty("surefire.test.class.path");
+        if (classpath == null || classpath.isBlank()) {
+            classpath = System.getProperty("java.class.path");
+        }
+        ProcessBuilder builder = new ProcessBuilder(java, "-cp", classpath,
+                ManagedSessionStoreProcessFixtureMain.class.getName())
+                .redirectErrorStream(true);
+        builder.environment().put("D1_MYSQL_URL", required("mysql.url"));
+        builder.environment().put("D1_MYSQL_USER", required("mysql.user"));
+        builder.environment().put("D1_MYSQL_PASSWORD",
+                System.getProperty("mysql.password", ""));
+        builder.environment().put("D1_PROCESS_ACTION", action);
+        return builder.start();
+    }
+
+    private static void assertProcess(Process process, int exitCode,
+            String marker) throws Exception {
+        boolean finished = process.waitFor(30, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+        }
+        String output = new String(process.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8);
+        assertThat(finished).as("Store process timed out:\n%s", output)
+                .isTrue();
+        assertThat(process.exitValue()).as("Store process failed:\n%s",
+                output).isEqualTo(exitCode);
+        if (marker != null) {
+            assertThat(output).contains(marker);
+        }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase()
+                .contains("win");
+    }
+
+    private static DriverManagerDataSource dataSource() {
+        return new DriverManagerDataSource(required("mysql.url"),
+                required("mysql.user"),
+                System.getProperty("mysql.password", ""));
     }
 
     private static <T> T inTransaction(TransactionTemplate transactions,

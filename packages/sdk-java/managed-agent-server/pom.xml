@@ -21,6 +21,7 @@
         <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
         <runtime-broker.version>0.1.2-alpha</runtime-broker.version>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
+        <maven-failsafe-plugin.version>3.5.6</maven-failsafe-plugin.version>
     </properties>
 
     <dependencies>
@@ -98,4 +99,27 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>mysql-integration</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <version>${maven-failsafe-plugin.version}</version>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

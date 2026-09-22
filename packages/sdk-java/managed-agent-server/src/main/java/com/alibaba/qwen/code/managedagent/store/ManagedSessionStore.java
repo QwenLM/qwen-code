@@ -44,7 +44,9 @@ public class ManagedSessionStore {
     private static final int MAX_TEXT_BYTES = 4096;
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
     private static final Pattern WRITER_TOKEN = Pattern.compile(
-            "^[A-Za-z0-9_-]{32,512}$");
+            "^[A-Za-z0-9_-]{"
+                    + ManagedSessionStoreModels.MIN_WRITER_TOKEN_LENGTH + ","
+                    + ManagedSessionStoreModels.MAX_WRITER_TOKEN_LENGTH + "}$");
     private static final Set<String> HEAD_STATES = Set.of(
             "ACTIVE", "SEALED", "DELETING", "DELETED");
     private static final Set<String> RECOVERY_STATES = Set.of(
@@ -388,7 +390,7 @@ public class ManagedSessionStore {
         ResourceRow resource = findResource(scopeKey, resourceId);
         if (resource == null) {
             throw new ApiException(HttpStatus.NOT_FOUND,
-                    "managed_session_resource_not_found",
+                    ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
                     "The Managed Session resource does not exist.");
         }
         requireResourceScope(resource, tenantId, workspaceId, sessionId,
@@ -417,7 +419,8 @@ public class ManagedSessionStore {
                     resource.resourceId());
             if (existing == null) {
                 if (input.bytes() == null) {
-                    throw conflict("managed_session_resource_missing",
+                    throw conflict(
+                            ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                             "A referenced Managed Session resource is"
                                     + " missing.");
                 }
@@ -526,7 +529,8 @@ public class ManagedSessionStore {
         long inlineBytes = 0;
         List<CommitResource> requestedResources = request.resources() == null
                 ? List.of() : request.resources();
-        if (requestedResources.size() > 1024) {
+        if (requestedResources.size()
+                > ManagedSessionStoreModels.MAX_RESOURCES_PER_TRANSACTION) {
             throw invalid("resources exceeds its item limit.");
         }
         for (CommitResource resource : requestedResources) {
@@ -542,7 +546,7 @@ public class ManagedSessionStore {
             if (resource.byteLength()
                     > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES) {
                 throw new ApiException(HttpStatus.NOT_IMPLEMENTED,
-                        "managed_session_oss_disabled",
+                        ManagedSessionStoreModels.ERROR_OSS_DISABLED,
                         "Resources larger than 64 KiB require the disabled"
                                 + " OSS storage path.");
             }
@@ -641,7 +645,8 @@ public class ManagedSessionStore {
                         request.latestCheckpointResourceId())
                 || !Objects.equals(existing.commitDigest(),
                         request.commitDigest())) {
-            throw conflict("managed_session_idempotency_conflict",
+            throw conflict(
+                    ManagedSessionStoreModels.ERROR_IDEMPOTENCY_CONFLICT,
                     "The command key was reused with different content.");
         }
         return new CommitReceipt(existing.journalRevision(),
@@ -883,8 +888,9 @@ public class ManagedSessionStore {
     }
 
     private static void validateLeaseMillis(Long leaseMillis) {
-        if (leaseMillis == null || leaseMillis < 1_000
-                || leaseMillis > 300_000) {
+        if (leaseMillis == null
+                || leaseMillis < ManagedSessionStoreModels.MIN_LEASE_MILLIS
+                || leaseMillis > ManagedSessionStoreModels.MAX_LEASE_MILLIS) {
             throw invalid("leaseMillis is outside its bound.");
         }
     }
@@ -981,7 +987,7 @@ public class ManagedSessionStore {
             String workspaceId) {
         if (!workspaceId.equals(row.workspaceId())) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
-                    "managed_session_journal_corrupt",
+                    ManagedSessionStoreModels.ERROR_JOURNAL_CORRUPT,
                     "The Managed Session transaction scope is corrupt.");
         }
     }
@@ -1031,30 +1037,30 @@ public class ManagedSessionStore {
     }
 
     private static ApiException writerConflict() {
-        return conflict("managed_session_writer_conflict",
+        return conflict(ManagedSessionStoreModels.ERROR_WRITER_CONFLICT,
                 "The Managed Session writer grant is stale or unavailable.");
     }
 
     private static ApiException journalCorrupt() {
         return new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
-                "managed_session_journal_corrupt",
+                ManagedSessionStoreModels.ERROR_JOURNAL_CORRUPT,
                 "The Managed Session transaction failed verification.");
     }
 
     private static ApiException headCorrupt() {
         return new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
-                "managed_session_head_corrupt",
+                ManagedSessionStoreModels.ERROR_HEAD_CORRUPT,
                 "The Managed Session head failed verification.");
     }
 
     private static ApiException invalid(String message) {
         return new ApiException(HttpStatus.BAD_REQUEST,
-                "invalid_managed_session_store_request", message);
+                ManagedSessionStoreModels.ERROR_INVALID_REQUEST, message);
     }
 
     private static ApiException payloadTooLarge(String message) {
         return new ApiException(HttpStatus.PAYLOAD_TOO_LARGE,
-                "managed_session_payload_too_large", message);
+                ManagedSessionStoreModels.ERROR_PAYLOAD_TOO_LARGE, message);
     }
 
     private static ApiException conflict(String code, String message) {

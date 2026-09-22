@@ -2,7 +2,7 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
-状态：当前 feature 分支工作树已实现 D0、D1a Java Store、D1b TypeScript HTTP adapter、面向新建 Hosted Session 和 inline 资源的 D2a 路由、Hosted 冷加载链路，以及第一阶段公共 Session 生命周期。共享 golden fixture、独立进程故障切换证明、OSS 资源、物理删除/保留策略和 D3 恢复门禁仍待完成。日期：2026-09-22。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
+状态：当前 feature 分支工作树已实现 D0、D1a 和 D1b，包括 TypeScript/Java 共享 golden contract，以及基于真实 MySQL 的独立 JVM 崩溃/接管证明。面向新建 Hosted Session 和 inline 资源的 D2a 路由、Hosted 冷加载链路，以及第一阶段公共 Session 生命周期也已实现。OSS 资源、物理删除/保留策略、真实 Hosted Harness 进程恢复、已准入在途 Turn 对账及其余 D3 生产门禁仍待完成。日期：2026-09-23。本文细化[Managed Agent 存储、事件与 Session 恢复](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md)中的长期恢复工作。首版只覆盖新建的 Hosted Managed Session；既有本地 Session 导入不在首版范围内。
 
 ## 1. 决策
 
@@ -289,22 +289,22 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 
 ### D1：Java 长期 Store 与契约客户端
 
-状态：D1a 与 D1b 的 TypeScript adapter 部分已实现。
+状态：D1a 与 D1b 均已实现。
 
 - D1a 已实现：Flyway V4 四张私有表；Spring 内部 API；基于数据库时间的 lease/generation fencing；head CAS 与 checkpoint 指针原子推进；幂等回执；精确 record bytes 存储与校验；分页恢复读取；以及 OSS fail-closed 的事务化 `MYSQL_INLINE` 资源。
-- D1b 已实现：配套 TypeScript HTTP journal/resource adapter、scoped writer 获取/续租/seal、精确事务重建与校验、结构化 Java 错误、inline 资源暂存，以及不使用本地 transcript 的关闭/重开测试。
-- D1b 待实现：双方共享的精确字节/摘要/错误码/限额 golden fixture，以及两个独立 Java 进程共享 MySQL 的故障测试。D1a 已在真实 MySQL 上以两个独立 Store 对象覆盖旧 writer 拒绝与响应丢失重放，但这不等价于进程崩溃证明。
+- D1b 已实现：配套 TypeScript HTTP journal/resource adapter、scoped writer 获取/续租/seal、精确事务重建与校验、结构化 Java 错误、inline 资源暂存，以及不使用本地 transcript 的关闭/重开测试。共享 fixture 现在跨两种语言固定 header、限额、UTF-8/JSONL 精确字节、SHA-256 摘要、请求元数据和 Java 错误分类。
+- 独立进程证明会让多个子 JVM 连接一个临时真实 MySQL schema：writer A 提交后在返回 ACK 前直接退出；数据库时间 lease 过期后，writer B 取得 generation 2 并恢复已提交事务和 inline 资源。A 对同一 command 的重试会得到原回执，而其新写入会被 fencing。至此 D1 Store 边界退出条件已满足；这仍不等价于 D3 的“杀死真实 Hosted Harness 与 Java owner 后完成下一轮 Turn”。
 - D2a 已为新建私有 Hosted Harness Session 选择该 backend。Java 下发 tenant、workspace、writer 身份、endpoint 和 lease 时长，Harness 自己生成 writer secret；普通 daemon 路由和不可信 ACP parent 都会拒绝该描述。
 
 退出条件：两个共享 MySQL 的 Java 实例能拒绝旧 writer，并在提交响应丢失后返回同一回执。
 
 ### D2：OSS 资源与 Hosted 路由
 
-- 状态：新 Session 路由和 Hosted 冷加载已支持 inline 资源；OSS 与完整故障注入证明仍待完成。
+- 状态：新 Session 路由和 Hosted 冷加载已支持 inline 资源，Store 边界独立 JVM 证明已完成；OSS 与完整 Hosted Harness/Runtime 故障注入证明仍待完成。
 - 为超过 64 KiB 的资源实现 `OSS_OBJECT` 路径：allocate/upload/finalize/read、scoped signed URL、摘要校验、加密和孤儿盘点。
 - 仅新建 Hosted Managed Session 选择远端后端；既有本地 Session 继续本地运行，不迁移、不双写。
 - Hosted `loadSession` 会下发与 create 相同作用域的 Store 描述。ACP 子进程重新获取 durable writer，校验 journal 与 resource 闭包，投影 reader-facing records，并且不读取本地 transcript 就构建 runtime restore state。
-- 当前测试已证明 HTTP 契约、route/ACP 接线，以及不使用本地 transcript 的内存 close/reopen 流程；尚未完成“杀掉一个真实 Harness 进程和 Java 实例、保留共享 MySQL Store、再由另一进程完成新 Turn”的故障实验。
+- 当前测试已证明 TypeScript/Java 共享 Store 契约、route/ACP 接线、不使用本地 transcript 的内存 close/reopen 流程，以及基于真实 MySQL 的 Store 边界进程崩溃接管；尚未完成“杀掉一个真实 Harness 进程和 Java owner、保留共享 MySQL Store、再由另一进程完成新 Turn”的故障实验。
 - 已准入在途 Turn 的自动恢复仍受门禁约束：在 event epoch 与 Runtime 副作用对账能够证明原操作结果前，Java 会拒绝 submission attempted 之后的 Harness generation 切换。空闲或尚未准入的恢复不会放宽该 fence。
 
 退出条件：删除原 Harness Pod 及其文件系统后，另一个 Harness 能恢复同一 Session 和 checkpoint，历史无缺失。

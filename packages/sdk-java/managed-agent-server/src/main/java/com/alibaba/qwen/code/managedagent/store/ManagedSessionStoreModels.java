@@ -14,9 +14,32 @@ public final class ManagedSessionStoreModels {
     public static final String WRITER_TOKEN_HEADER =
             "X-Qwen-Managed-Writer-Token";
     public static final int MAX_INLINE_RESOURCE_BYTES = 64 * 1024;
+    public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
+    public static final int MIN_WRITER_TOKEN_LENGTH = 32;
+    public static final int MAX_WRITER_TOKEN_LENGTH = 512;
+    public static final long MIN_LEASE_MILLIS = 1_000;
+    public static final long MAX_LEASE_MILLIS = 300_000;
     public static final long MAX_SAFE_COUNTER = 9_007_199_254_740_990L;
+    public static final String ERROR_WRITER_CONFLICT =
+            "managed_session_writer_conflict";
+    public static final String ERROR_IDEMPOTENCY_CONFLICT =
+            "managed_session_idempotency_conflict";
+    public static final String ERROR_RESOURCE_MISSING =
+            "managed_session_resource_missing";
+    public static final String ERROR_RESOURCE_NOT_FOUND =
+            "managed_session_resource_not_found";
+    public static final String ERROR_OSS_DISABLED =
+            "managed_session_oss_disabled";
+    public static final String ERROR_INVALID_REQUEST =
+            "invalid_managed_session_store_request";
+    public static final String ERROR_PAYLOAD_TOO_LARGE =
+            "managed_session_payload_too_large";
+    public static final String ERROR_JOURNAL_CORRUPT =
+            "managed_session_journal_corrupt";
+    public static final String ERROR_HEAD_CORRUPT =
+            "managed_session_head_corrupt";
     private static final String DIGEST_PATTERN = "^[0-9a-f]{64}$";
 
     private ManagedSessionStoreModels() {
@@ -25,14 +48,16 @@ public final class ManagedSessionStoreModels {
     public record AcquireWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
             @NotBlank @Size(max = 512) String writerId,
-            @NotNull @Min(1_000) @Max(300_000) Long leaseMillis) {
+            @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
+                    Long leaseMillis) {
     }
 
     public record RenewWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
             @NotBlank @Size(max = 512) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
-            @NotNull @Min(1_000) @Max(300_000) Long leaseMillis) {
+            @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
+                    Long leaseMillis) {
     }
 
     public record SealWriterRequest(
@@ -84,7 +109,8 @@ public final class ManagedSessionStoreModels {
             @NotBlank @Size(max = 11_184_820) String recordBytesBase64,
             @NotBlank @Pattern(regexp = DIGEST_PATTERN)
                     String recordDigest,
-            @Size(max = 1024) List<@Valid CommitResource> resources) {
+            @Size(max = MAX_RESOURCES_PER_TRANSACTION)
+                    List<@Valid CommitResource> resources) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

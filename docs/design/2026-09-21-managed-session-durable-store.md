@@ -2,7 +2,7 @@
 
 [English](2026-09-21-managed-session-durable-store.md) | [简体中文](2026-09-21-managed-session-durable-store.zh-CN.md)
 
-Status: D0, the D1a Java store, the D1b TypeScript HTTP adapters, D2a routing for newly created Hosted Sessions with inline resources, the cold Hosted load path, and the first public Session lifecycle slice are implemented in the current feature-branch working tree. Shared golden fixtures, independent-process failover proof, OSS resources, physical deletion/retention, and D3 recovery gates remain. Date: 2026-09-22. This design refines the durable-recovery work in [Managed Agent Storage, Events, and Session Recovery](2026-09-20-managed-agent-storage-event-architecture.md). It covers new Hosted Managed Sessions only; importing existing local Sessions is out of scope for the first release.
+Status: D0, D1a, and D1b are implemented in the current feature-branch working tree, including the shared TypeScript/Java golden contract and the independent-JVM failure/takeover proof against real MySQL. D2a routing for newly created Hosted Sessions with inline resources, the cold Hosted load path, and the first public Session lifecycle slice are also implemented. OSS resources, physical deletion/retention, real Hosted Harness process recovery, admitted in-flight Turn reconciliation, and the remaining D3 production gates remain. Date: 2026-09-23. This design refines the durable-recovery work in [Managed Agent Storage, Events, and Session Recovery](2026-09-20-managed-agent-storage-event-architecture.md). It covers new Hosted Managed Sessions only; importing existing local Sessions is out of scope for the first release.
 
 ## 1. Decision
 
@@ -289,22 +289,22 @@ Exit condition: standalone behavior and bytes are unchanged; no Java or OSS depe
 
 ### D1: Durable Java store and contract client
 
-Status: D1a and the TypeScript adapter portion of D1b are implemented.
+Status: D1a and D1b are implemented.
 
 - Implemented in D1a: four Flyway V4 private tables; the Spring internal API; database-time lease/generation fencing; head CAS and atomic checkpoint-pointer advance; idempotent receipts; exact record-byte storage and verification; paged restore reads; and transactional `MYSQL_INLINE` resources with OSS fail-closed.
-- Implemented in D1b: the paired TypeScript HTTP journal/resource adapters, scoped writer acquire/renew/seal, exact transaction reconstruction and verification, structured Java errors, inline resource staging, and close/reopen tests that use no local transcript.
-- Remaining in D1b: a shared golden contract fixture for exact bytes/digests/errors/limits and an independent-process two-Java-instance MySQL fault test. D1a already exercises two separate store objects against real MySQL, including stale-writer rejection and lost-response replay, but that is not a process-crash proof.
+- Implemented in D1b: the paired TypeScript HTTP journal/resource adapters, scoped writer acquire/renew/seal, exact transaction reconstruction and verification, structured Java errors, inline resource staging, and close/reopen tests that use no local transcript. A shared fixture now pins headers, limits, exact UTF-8/JSONL bytes, SHA-256 digests, request metadata, and Java error classifications across both languages.
+- The independent-process proof starts separate child JVMs against a disposable real-MySQL schema. Writer A commits and halts before returning an acknowledgement; after its database-time lease expires, writer B acquires generation 2 and restores the committed transaction and inline resource. Retrying A's identical command returns the original receipt, while a new write from A is fenced. This completes the D1 Store-boundary proof; it is not yet the D3 proof that kills a real Hosted Harness plus Java owner and resumes a new Turn.
 - D2a now selects this backend for new private Hosted Harness Sessions. Java supplies tenant, workspace, writer identity, endpoint, and lease duration; the Harness generates the writer secret. The descriptor is rejected by ordinary daemon routes and untrusted ACP parents.
 
 Exit condition: two Java instances sharing MySQL reject stale writers and return the same receipt after a lost response.
 
 ### D2: OSS resources and Hosted routing
 
-- Status: new-Session routing and cold Hosted load are implemented for inline resources. OSS and the full failure-injection proof remain.
+- Status: new-Session routing and cold Hosted load are implemented for inline resources. The Store-level independent-JVM proof is complete; OSS and the full Hosted Harness/Runtime failure-injection proof remain.
 - Implement the `OSS_OBJECT` path for resources larger than 64 KiB: allocate/upload/finalize/read, scoped signed URLs, digest verification, encryption, and orphan inventory.
 - The remote backend is selected only for newly created Hosted Managed Sessions. Existing local Sessions remain local; there is no migration or dual write.
 - The Hosted `loadSession` path supplies the same scoped Store descriptor used at create time. The ACP child reacquires the durable writer, validates the journal and resource closure, projects reader-facing records, and builds the runtime restore state without consulting a local transcript.
-- The current tests prove the HTTP contracts, route/ACP wiring, and an in-memory close/reopen flow with no local transcript. They do not yet kill one real Harness process and Java instance, preserve a shared MySQL store, and complete a new Turn on another process.
+- The current tests prove the shared TypeScript/Java Store contract, route/ACP wiring, an in-memory close/reopen flow with no local transcript, and process-loss takeover at the Store boundary against real MySQL. They do not yet kill one real Harness process and Java owner, preserve a shared MySQL store, and complete a new Turn on another process.
 - Automatic recovery of an already admitted in-flight Turn remains gated: Java refuses a Harness generation change after submission has been attempted until event-epoch and Runtime-side-effect reconciliation can prove the original operation's outcome. Idle or not-yet-admitted recovery does not relax that fence.
 
 Exit condition: delete the original Harness Pod and its filesystem, then restore the same Session and checkpoint on another Harness without losing history.

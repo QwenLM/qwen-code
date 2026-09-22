@@ -150,9 +150,10 @@ has an explicit ID, startup rejects a mismatch.
 
 This activates the durable create and cold-load paths for newly created Hosted
 Sessions. The load path rebuilds the Harness state from the scoped Store and
-does not require a Pod-local transcript. Do not advertise automatic cross-Pod
-recovery yet: the independent-process failure test and admitted in-flight Turn
-reconciliation are still pending. Resources larger than 64 KiB fail with
+does not require a Pod-local transcript. The Store boundary has an
+independent-JVM crash/takeover proof against real MySQL. Do not advertise
+automatic cross-Pod recovery yet: real Hosted Harness owner failover and
+admitted in-flight Turn reconciliation are still pending. Resources larger than 64 KiB fail with
 `managed_session_oss_disabled` until the immutable OSS path is implemented.
 Production deployments must add mTLS or equivalent service authentication;
 the tenant and writer headers are scope and fencing inputs, not a substitute
@@ -236,6 +237,24 @@ docker build -f packages/sdk-java/managed-agent-server/Dockerfile .
 The stock image contains the Java control plane only. Use the static Runtime
 provisioner, or provide a derived image/mount with Node.js and the Qwen worker
 artifacts, before enabling the local-process provisioner in a container.
+
+## Managed Session Store verification
+
+Unit and H2 contract tests run with the normal Maven test phase. The optional
+real-MySQL profile also verifies schema upgrade, exact bytes, public
+Item/Snapshot projection, and the independent-JVM Managed Session Store
+crash/takeover path:
+
+```bash
+mvn -Pmysql-integration \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_agent_test' \
+  -Dmysql.user=root \
+  -Dmysql.password= \
+  verify
+```
+
+Use a disposable database: the integration test creates and deletes fixture
+rows within the selected schema.
 
 ## Real-model end-to-end check
 

@@ -31,10 +31,20 @@ import {
   type ManagedSessionResourceStore,
 } from './managed-session-storage.js';
 
-const TENANT_HEADER = 'X-Qwen-Tenant-Id';
-const WRITER_TOKEN_HEADER = 'X-Qwen-Managed-Writer-Token';
-const MAX_INLINE_RESOURCE_BYTES = 64 * 1024;
-const MAX_RESOURCE_COUNT = 1024;
+export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
+  tenantHeader: 'X-Qwen-Tenant-Id',
+  writerTokenHeader: 'X-Qwen-Managed-Writer-Token',
+  maxInlineResourceBytes: 64 * 1024,
+  maxResourcesPerTransaction: 1024,
+  minimumWriterTokenLength: 32,
+  maximumWriterTokenLength: 512,
+  minimumLeaseDurationMs: 1_000,
+  maximumLeaseDurationMs: 300_000,
+} as const;
+
+const WRITER_TOKEN = new RegExp(
+  `^[A-Za-z0-9_-]{${HTTP_MANAGED_SESSION_STORE_CONTRACT.minimumWriterTokenLength},${HTTP_MANAGED_SESSION_STORE_CONTRACT.maximumWriterTokenLength}}$`,
+);
 const DEFAULT_LEASE_DURATION_MS = 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -154,9 +164,12 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     source: Buffer,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
-    if (source.byteLength > MAX_INLINE_RESOURCE_BYTES) {
+    if (
+      source.byteLength >
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+    ) {
       throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${MAX_INLINE_RESOURCE_BYTES}-byte inline limit; OSS storage is not enabled.`,
+        `resource bytes exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline limit; OSS storage is not enabled.`,
       );
     }
     const bytes = Buffer.from(source);
@@ -190,9 +203,12 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   }
 
   commitResources(refs: readonly ManagedSessionDurableRef[]): CommitResource[] {
-    if (refs.length > MAX_RESOURCE_COUNT) {
+    if (
+      refs.length >
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction
+    ) {
       throw new ManagedSessionRecordError(
-        `a Managed Session transaction references more than ${MAX_RESOURCE_COUNT} resources.`,
+        `a Managed Session transaction references more than ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction} resources.`,
       );
     }
     return refs.map((ref) => {
@@ -289,7 +305,7 @@ class ManagedSessionStoreHttpClient {
     this.writerId = assertManagedSessionStableId(options.writerId, 'writerId');
     this.writerToken =
       options.writerToken ?? randomBytes(32).toString('base64url');
-    if (!/^[A-Za-z0-9_-]{32,512}$/.test(this.writerToken)) {
+    if (!WRITER_TOKEN.test(this.writerToken)) {
       throw new ManagedSessionRecordError(
         'writerToken must be a 32-512 character Base64URL secret.',
       );
@@ -297,8 +313,10 @@ class ManagedSessionStoreHttpClient {
     this.leaseDurationMs = options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
     if (
       !Number.isInteger(this.leaseDurationMs) ||
-      this.leaseDurationMs < 1_000 ||
-      this.leaseDurationMs > 300_000
+      this.leaseDurationMs <
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.minimumLeaseDurationMs ||
+      this.leaseDurationMs >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maximumLeaseDurationMs
     ) {
       throw new ManagedSessionRecordError(
         'leaseDurationMs must be an integer from 1000 through 300000.',
@@ -646,8 +664,10 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: 'application/json',
-          [TENANT_HEADER]: this.sessionKey.tenantId,
-          [WRITER_TOKEN_HEADER]: this.writerToken,
+          [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
+            this.sessionKey.tenantId,
+          [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
+            this.writerToken,
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),

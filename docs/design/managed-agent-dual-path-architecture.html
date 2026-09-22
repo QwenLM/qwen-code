@@ -1154,10 +1154,10 @@
                 </tr>
                 <tr>
                   <td>稳定 Item / Snapshot 物化</td>
-                  <td>后续</td>
+                  <td>已有 P1 切片</td>
                   <td>
-                    补稳定 itemId/contentPartId、批次日志/Outbox、物化进度与
-                    Snapshot；当前逐事件 SQL 行不能作为最终容量形态。
+                    稳定 itemId/contentPartId、用户输入 Item 和 Snapshot
+                    已落地；批次日志/Outbox、跨实例唤醒以及容量与清理门禁仍待完成。
                   </td>
                 </tr>
               </tbody>
@@ -3049,10 +3049,10 @@ interface AgentBundle {
           <div class="callout">
             当前独立 Spring 服务已经提供 Session 创建/列表/查询、输入/取消以及按
             eventSequence 查询或 SSE 订阅的阶段性接口；这些仍是实验实现。稳定
-            Item、
-            Snapshot、Artifact、AgentDefinition、完整历史物化和生产兼容承诺继续属于
-            D。 D
-            对外开放前还必须完成源事件键、公共版本、源进度、原子提交以及重放/重建规则的验收。
+            Item/Part ID、用户输入 Item 和 Snapshot
+            已有阶段性物化实现；Artifact、
+            AgentDefinition、完整历史重建、容量清理和生产兼容承诺继续属于 D。D
+            对外开放前还必须完成公共版本、跨实例通知、保留策略以及重放/重建规则的验收。
           </div>
           <h3 style="margin-top: 28px">当前阶段性 Session/Event 接口</h3>
           <pre>
@@ -3369,8 +3369,8 @@ reconnect / history → SessionReplayService
                     itemId/contentPartId、用户输入 Item 和 Snapshot。
                   </td>
                   <td>
-                    当前只完成前半；重连不重文、终态不越序、Snapshot 与 tail
-                    可一致拼接。
+                    当前切片已完成；重连不重文、终态不越序、Snapshot 与 tail
+                    可一致拼接。跨实例通知与容量清理继续在 P2 验收。
                   </td>
                 </tr>
                 <tr>
@@ -3419,7 +3419,7 @@ reconnect / history → SessionReplayService
             >。
           </p>
           <div class="callout" style="margin-top: 18px">
-            <strong>2026-09-22 私有 Session 存储进度：</strong>D0 与 D1a
+            <strong>2026-09-23 私有 Session 存储进度：</strong>D0、D1a 与 D1b
             已落地。Core 现在通过 <code>ManagedSessionJournalStore</code> /
             <code>ManagedSessionJournalHandle</code> 和
             <code>ManagedSessionResourceStore</code> 工作；<code
@@ -3435,31 +3435,36 @@ reconnect / history → SessionReplayService
             已实现基于数据库时间的 writer lease/generation、head CAS、checkpoint
             指针原子推进、幂等回执、分页读取，以及不超过 64 KiB 的事务化
             <code>MYSQL_INLINE</code>
-            资源；当前未过期 writer secret
+            资源；TypeScript HTTP journal/resource adapter 已接入新建 Hosted
+            Session 与冷加载链路，不创建本地权威 transcript。共享 golden fixture
+            跨 Java/TypeScript 固定 header、限额、精确 JSONL
+            字节、摘要、请求元数据和错误分类； 多个独立子 JVM 连接真实 MySQL
+            的测试已证明“提交后 ACK 前崩溃”、租约接管、 幂等回放、旧 writer
+            fencing 和资源恢复。当前未过期 writer secret
             同时保护恢复、分页和资源读取。私有路由默认关闭，仅在受信服务网络显式设置
             <code>qwen.managed-agent.session-store.enabled=true</code> 后开放。
           </div>
           <div class="callout warning">
-            <strong>尚未完成：</strong>D1a Java Store 尚未进入 Hosted Harness
-            活跃链路，因此当前 Hosted Session 仍未长期化。D1b 还需 TypeScript
-            HTTP journal/resource adapter、共享 golden contract fixture
-            和两个独立 Java 进程的 MySQL 故障验证；D2 才为新建 Hosted Session
-            选择远端 backend，并接入大于 64 KiB 的 OSS 不可变资源；D3 完成跨
-            Harness/Runtime/Workspace 恢复门禁与生产故障验证。详细方案见
+            <strong>尚未完成：</strong>大于 64 KiB 的 OSS 不可变资源、物理删除与
+            保留回收尚未实现；还没有杀死真实 Hosted Harness 与 Java owner 后，
+            在另一实例完成下一轮 Turn 的端到端证明。已准入在途 Turn、Runtime
+            副作用和 Workspace 状态的对账仍由 D3 门禁保护，不能据此宣称生产级 跨
+            Pod 自动恢复。详细方案见
             <a
               href="https://github.com/doudouOUC/qwen-code/blob/feature/managed-agents-p0-p8/docs/design/2026-09-21-managed-session-durable-store.zh-CN.md"
               >《Managed Session 长期权威存储》</a
             >。
           </div>
           <div class="callout danger">
-            <strong>当前验证边界：</strong>D1a 以 Spring MockMvc 与 H2 MySQL
+            <strong>当前验证边界：</strong>D1 以 Spring MockMvc 与 H2 MySQL
             兼容模式证明 64 KiB inline 资源及 writer/commit/read HTTP
-            契约，并以真实 MySQL 上的两个独立 Store 对象证明 schema
-            升级、精确字节、幂等回执、generation 接管和旧 writer
-            拒绝；它尚不是两个独立 Java 进程的崩溃/网络故障证据。 P0/P1
-            事件切片仍以 <code>c818c21910</code> 的 H2
-            测试为证，尚不代表跨节点通知已经完成。 P3 Runtime 恢复切片已增加真实
-            MySQL 下两个独立 JVM 的单物理资源/单次执行证明，并覆盖 local-process
+            契约，并以共享 golden fixture 约束 Java/TypeScript 协议。真实 MySQL
+            测试覆盖 schema 升级、精确字节、幂等回执，并由多个独立 JVM 证明
+            generation 接管、旧 writer 拒绝和崩溃后的资源恢复；它尚不是杀死真实
+            Hosted Harness、Java owner 与 Runtime 后完成新 Turn 的端到端证据。
+            P0/P1 事件、Item 与 Snapshot 切片已有 H2 和真实 MySQL 模块级验证，
+            尚不代表跨节点通知已经完成。P3 Runtime 恢复切片已增加真实 MySQL
+            下两个独立 JVM 的单物理资源/单次执行证明，并覆盖 local-process
             接管、UID 条件删除、身份冲突、私有 attestation、有界退避、in-flight
             调用超时 和超时后续接。 Kubernetes release 使用持久 UID 作为删除
             precondition； resourceVersion
@@ -3661,7 +3666,9 @@ reconnect / history → SessionReplayService
                 </li>
                 <li>
                   私有 Managed Session Store 的 Flyway V4、Spring 内部 API、
-                  writer fencing、精确事务字节、幂等 CAS 与 64 KiB inline 资源。
+                  writer fencing、精确事务字节、幂等 CAS、64 KiB inline 资源、
+                  TypeScript adapter、共享 golden contract 与独立 JVM/MySQL
+                  接管证明。
                 </li>
               </ul>
             </article>
@@ -3673,7 +3680,7 @@ reconnect / history → SessionReplayService
                 </li>
                 <li>完整 Public Agent API 与 AgentDefinition Repository。</li>
                 <li>
-                  稳定 itemId/contentPartId、Item/Snapshot 物化与输入消息版本。
+                  公共 Item/Snapshot 的完整历史重建、容量、清理和兼容门禁。
                 </li>
                 <li>
                   SQL 批次日志/Outbox、EventTransport、跨实例唤醒和保留清理。
@@ -3681,8 +3688,8 @@ reconnect / history → SessionReplayService
                 <li>AgentBundle/Manifest 版本一致性。</li>
                 <li>Artifact Store 和 RuntimeTemplate。</li>
                 <li>
-                  Harness 私有 journal 的 D0 接缝和 D1a Java Store 已完成；D1b
-                  TypeScript adapter、D2 Hosted backend 选择/OSS 资源闭包及 D3
+                  Harness 私有 journal 的 D0、D1a、D1b 和 D2a inline Hosted
+                  路由已完成；OSS 资源闭包、物理保留/删除和 D3
                   恢复门禁尚待实现。
                 </li>
                 <li>
