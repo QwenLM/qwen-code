@@ -68,11 +68,12 @@ class ProfileAccessibilityDeviceTest {
 
     @Test fun validationIsPoliteAndTheUserCanCorrectTheAddress() {
         ActivityScenario.launch(MainActivity::class.java).use {
+            it.onActivity { activity -> activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
             openFirstEditor()
             val address = find { it.isEditable && it.hintText?.toString() == context.getString(R.string.daemon_address) }
             setText(address, "invalid-origin")
             clickText(R.string.save)
-            val error = find { it.text?.toString() == context.getString(R.string.changed_origin_credential) }
+            val error = find { it.isVisibleToUser && it.text?.toString() == context.getString(R.string.changed_origin_credential) }
             assertEquals(View.ACCESSIBILITY_LIVE_REGION_POLITE, error.liveRegion)
             setText(find { it.isEditable && it.hintText?.toString() == context.getString(R.string.daemon_address) }, alpha.origin)
             clickText(R.string.save)

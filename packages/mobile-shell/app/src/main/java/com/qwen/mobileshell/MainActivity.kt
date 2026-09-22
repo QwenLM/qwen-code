@@ -3,6 +3,7 @@ package com.qwen.mobileshell
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
@@ -159,6 +160,10 @@ class MainActivity : AppCompatActivity() {
         form.label(getString(R.string.credential_hint))
         val error = TextView(this).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
             .also { form.addView(it) }
+        fun showError(message: CharSequence?) {
+            error.text = message
+            error.post { error.requestRectangleOnScreen(Rect(0, 0, error.width, error.height), false) }
+        }
         val dialog = AlertDialog.Builder(this)
             .setTitle(if (previous == null) R.string.add_profile else R.string.edit_profile)
             .setView(ScrollView(this).apply { addView(form) })
@@ -178,8 +183,8 @@ class MainActivity : AppCompatActivity() {
                     state = store!!.vault.upsert(state, profile)
                     dialog.dismiss()
                     showProfiles()
-                } catch (invalid: IllegalArgumentException) { error.text = invalid.message }
-                catch (_: Exception) { error.setText(R.string.save_failed) }
+                } catch (invalid: IllegalArgumentException) { showError(invalid.message) }
+                catch (_: Exception) { showError(getString(R.string.save_failed)) }
             }
         }
         dialog.show()
