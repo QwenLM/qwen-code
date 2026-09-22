@@ -54,10 +54,21 @@ describe('parseUnifiedDiff', () => {
     expect(buildUnifiedDiff('old', '')).toBe('-old');
   });
 
-  it('omits oversized diffs before constructing their full output', () => {
-    expect(buildUnifiedDiff('line\n'.repeat(1_000), '')).toContain(
-      'Diff omitted because it is too large to display safely.',
+  it('falls back to a coarse remove/add strip when the LCS table would allocate too much memory', () => {
+    // 1000 unique deletions vs 1000 unique additions ⇒ n*m = 1_000_000
+    // which exceeds MAX_DIFF_PRODUCT, so the LCS is skipped and the output
+    // is a simple concatenation of `-old…` then `+new…`. Total lines and
+    // char budgets are the caller's concern (approval cards gate on those).
+    const oldText = Array.from({ length: 1_000 }, (_, i) => `old-${i}`).join(
+      '\n',
     );
+    const newText = Array.from({ length: 1_000 }, (_, i) => `new-${i}`).join(
+      '\n',
+    );
+    const result = buildUnifiedDiff(oldText, newText);
+    expect(result.startsWith('-old-0\n')).toBe(true);
+    expect(result).toContain('\n+new-0\n');
+    expect(result.endsWith('+new-999')).toBe(true);
   });
 
   it('keeps supporting headerless generated diffs', () => {

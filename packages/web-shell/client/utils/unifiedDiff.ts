@@ -1,7 +1,9 @@
+// Cap the LCS table's memory: `dp` allocates (n+1) * (m+1) numbers, so an
+// asymmetric edit (small n+m but large n*m) can still balloon into an
+// enormous 2D array here. Callers that need a size gate on the raw payload
+// (chars / total lines) apply their own before calling in — this only guards
+// the LCS itself from allocating unbounded memory.
 const MAX_DIFF_PRODUCT = 250_000;
-const MAX_DIFF_LINES = 1_000;
-const MAX_DIFF_CHARS = 100_000;
-const OMITTED_DIFF = ' Diff omitted because it is too large to display safely.';
 
 function splitLines(text: string): string[] {
   return text ? text.split('\n') : [];
@@ -13,13 +15,6 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
 
   const n = oldLines.length;
   const m = newLines.length;
-
-  if (
-    oldText.length + newText.length > MAX_DIFF_CHARS ||
-    n + m > MAX_DIFF_LINES
-  ) {
-    return OMITTED_DIFF;
-  }
 
   if (n * m > MAX_DIFF_PRODUCT) {
     const removed = oldLines.map((l) => (l ? `-${l}` : '-'));

@@ -226,6 +226,116 @@ describe('ToolApproval accessibility', () => {
     },
   );
 
+  it('rejects on Escape even when focus is inside the edit diff', () => {
+    // The approval panel documents "Escape rejects" and the diff region is
+    // focusable so users can inspect the change before answering. Regression
+    // guard: a blanket stopPropagation on DiffView used to swallow Escape too,
+    // silently breaking the fastest way to decline.
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-esc',
+        kind: 'permission',
+        requestId: 'request-edit-esc',
+        sessionId: 'session-edit-esc',
+        title: 'Edit: /outside/example.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/example.txt',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    const diffRegion = container!.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    diffRegion.focus();
+    pressKey(diffRegion, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-edit-esc',
+      'reject',
+    );
+  });
+
+  it('omits oversized edit diffs at the approval boundary', () => {
+    // The approval card renders synchronously into an [role=alertdialog], so
+    // an outsized edit would freeze the panel and drown the accessible
+    // description — surface a short notice instead. The transcript
+    // completed-edit path stays coarse but visible; the cap belongs to the
+    // approval boundary, not to buildUnifiedDiff itself.
+    const bigOld = 'line\n'.repeat(2_000);
+    const bigNew = 'line\n'.repeat(2_000) + 'extra';
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-big',
+        kind: 'permission',
+        requestId: 'request-edit-big',
+        sessionId: 'session-edit-big',
+        title: 'Edit: /outside/big.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/big.txt',
+              oldText: bigOld,
+              newText: bigNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('line\nline\nline\nline');
+  });
+
   it('renders generic parameter content even when it equals the title', () => {
     const adapted = extractPendingPermission([
       {

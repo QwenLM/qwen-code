@@ -17,12 +17,7 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
         {additions > 0 && <span className={styles.statAdd}>+{additions}</span>}
         {deletions > 0 && <span className={styles.statDel}>-{deletions}</span>}
       </div>
-      <div
-        className={styles.lines}
-        tabIndex={0}
-        aria-label="File diff"
-        onKeyDown={(event) => event.stopPropagation()}
-      >
+      <div className={styles.lines} tabIndex={0} aria-label="File diff">
         {lines.map((line, i) => (
           <div
             key={i}
