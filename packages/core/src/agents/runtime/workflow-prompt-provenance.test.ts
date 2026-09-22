@@ -24,17 +24,21 @@ function configWith(options: {
   turns?: Array<{ role: string; parts: unknown[] }>;
   historyThrows?: boolean;
   noClient?: boolean;
+  legacyClient?: boolean;
 }): Config {
   return {
     isWorkflowPromptProvenanceOn: () => options.on ?? true,
     getGeminiClient: () => {
       if (options.noClient) return undefined;
-      return {
-        getHistory: () => {
-          if (options.historyThrows) throw new Error('no chat yet');
-          return options.turns ?? [];
-        },
+      const read = () => {
+        if (options.historyThrows) throw new Error('no chat yet');
+        return options.turns ?? [];
       };
+      // The shallow read is what production prefers; `legacyClient` covers
+      // the fallback for a client that predates it.
+      return options.legacyClient
+        ? { getHistory: read }
+        : { getHistoryShallow: read };
     },
   } as unknown as Config;
 }
@@ -232,6 +236,15 @@ describe('resolveWorkflowPromptProvenance', () => {
         { sessionOwned: false },
       ),
     ).toEqual({ kind: 'relay', userText: atLimit });
+  });
+
+  it('reads a client that has only the deep history accessor', () => {
+    expect(
+      resolveWorkflowPromptProvenance(
+        configWith({ legacyClient: true, turns: [userTurn('audit the db')] }),
+        { sessionOwned: false },
+      ),
+    ).toEqual({ kind: 'relay', userText: 'audit the db' });
   });
 
   it('frames the task alone when there is no request to relay', () => {
