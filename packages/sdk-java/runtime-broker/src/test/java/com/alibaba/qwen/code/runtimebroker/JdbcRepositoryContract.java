@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -265,6 +266,13 @@ final class JdbcRepositoryContract {
         assertEquals(ownerA.getDispatchGeneration(),
                 reclaimedA.getDispatchGeneration());
         assertEquals(ownerA.getVersion(), reclaimedA.getVersion());
+        assertNull(second.claimDispatch(executionId,
+                prefix + "-dispatcher-b", Duration.ofMinutes(30)));
+        ToolExecutionRecord stillOwnedByA = second.findByExecutionCallId(
+                executionId);
+        assertEquals(ToolExecutionRecord.State.DISPATCHING,
+                stillOwnedByA.getState());
+        assertEquals(ownerA.getVersion(), stillOwnedByA.getVersion());
         ToolExecutionRecord renewedA = first.renewDispatch(executionId,
                 prefix + "-dispatcher-a", ownerA.getDispatchGeneration(),
                 Duration.ofMinutes(30));
@@ -376,6 +384,19 @@ final class JdbcRepositoryContract {
         typedReference.put("argsDigest", prefix + "-types-digest");
         typedReference.put("attempt", 1L);
         typedReference.put("note", null);
+        typedReference.put("schema", Map.of("$ref", "$"));
+        Map<String, Object> jsonLdReference = new LinkedHashMap<>();
+        jsonLdReference.put("@type", List.of("Product", "Thing"));
+        jsonLdReference.put("name", "widget");
+        typedReference.put("jsonLd", jsonLdReference);
+        Map<String, Object> untypedReference = new LinkedHashMap<>();
+        untypedReference.put("@type", null);
+        untypedReference.put("name", "widget");
+        typedReference.put("untyped", untypedReference);
+        typedReference.put("scale",
+                new BigDecimal("1.2345678901234567890123E+30"));
+        typedReference.put("ratio", 162544.13f);
+        typedReference.put("weight", -1363683.0538119469d);
         for (Number nonFinite : List.of(Double.NaN,
                 Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
                 Float.NaN, Float.POSITIVE_INFINITY,
@@ -419,6 +440,12 @@ final class JdbcRepositoryContract {
         Map<String, Object> typedResult = new LinkedHashMap<>();
         typedResult.put("executionStatus", "success");
         typedResult.put("durationMs", 12L);
+        typedResult.put("copied", Map.of("$ref", "$.executionStatus"));
+        typedResult.put("external", Map.of("$ref",
+                "./common.yaml#/components/schemas/Error"));
+        typedResult.put("jsonLd", jsonLdReference);
+        typedResult.put("untyped", untypedReference);
+        typedResult.put("limit", new BigDecimal("1E+400"));
         ToolExecutionRecord typedSettled = rereader.compareAndSet(typedClaim,
                 typedClaim.withResult(typedResult, 1, START),
                 prefix + "-dispatcher-a",

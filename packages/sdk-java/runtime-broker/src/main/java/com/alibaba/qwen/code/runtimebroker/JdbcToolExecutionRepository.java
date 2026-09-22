@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
-import com.alibaba.fastjson2.TypeReference;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -25,10 +25,6 @@ public final class JdbcToolExecutionRepository
             "last_sequence", "cancel_requested", "dispatch_owner",
             "dispatch_lease_until", "dispatch_generation", "record_version",
             "settled_at");
-    private static final TypeReference<Map<String, Object>> MAP_TYPE =
-            new TypeReference<>() {
-            };
-
     private final DataSource dataSource;
 
     public JdbcToolExecutionRepository(DataSource dataSource) {
@@ -439,11 +435,13 @@ public final class JdbcToolExecutionRepository
 
     private static String toJson(Map<String, Object> value) {
         return value == null ? null
-                : JSON.toJSONString(value, JSONWriter.Feature.WriteNulls);
+                : JSON.toJSONString(value, JSONWriter.Feature.WriteNulls,
+                        JSONWriter.Feature.WriteBigDecimalAsPlain);
     }
 
     private static Map<String, Object> fromJson(String value) {
-        return value == null ? null : JSON.parseObject(value, MAP_TYPE);
+        return value == null ? null : JSON.parseObject(value,
+                JSONReader.Feature.DisableReferenceDetect);
     }
 
     private static void requireCandidate(ToolExecutionRecord candidate) {
