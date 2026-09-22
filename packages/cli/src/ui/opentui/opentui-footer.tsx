@@ -25,6 +25,7 @@ import {
   uiTelemetryService,
   type Config,
 } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
   SPINNER_FRAMES,
@@ -160,6 +161,7 @@ export function OpenTuiLoadingIndicator({
 
 export interface OpenTuiFooterProps {
   config: Config;
+  settings: LoadedSettings;
   streaming: boolean;
   queueLength?: number;
   sessionName?: string | null;
@@ -174,6 +176,7 @@ export interface OpenTuiFooterProps {
 /** The status line (ink `Footer` parity). */
 export function OpenTuiFooter({
   config,
+  settings,
   streaming,
   queueLength = 0,
   sessionName = null,
@@ -182,6 +185,7 @@ export function OpenTuiFooter({
   exitHint = null,
 }: OpenTuiFooterProps) {
   const { width } = useTerminalDimensions();
+  const hideStatusBar = settings.merged.ui?.hideStatusBar ?? false;
   const targetDir = config.getTargetDir();
   const gitBranch = useGitBranchName(targetDir) ?? '';
   const footerModel = config.getModel();
@@ -246,6 +250,9 @@ export function OpenTuiFooter({
   // its status line off while the warning is up, so the warning reads directly
   // under the composer with nothing above it. The queued-message segment sits
   // beside the warning rather than inside the hint it replaces, so it stays.
+  if (hideStatusBar) {
+    return null;
+  }
   if (exitHint) {
     const warningLine = [exitHint, queuedHint]
       .filter((segment): segment is string => segment !== null)

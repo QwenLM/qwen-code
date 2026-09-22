@@ -1313,6 +1313,15 @@ const SETTINGS_SCHEMA = {
         description: 'Hide the startup ASCII banner and info panel.',
         showInDialog: true,
       },
+      hideStatusBar: {
+        type: 'boolean',
+        label: 'Hide Status Bar',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description: 'Hide the status bar at the bottom of the terminal.',
+        showInDialog: true,
+      },
       customBannerTitle: {
         type: 'string',
         label: 'Custom Banner Title',
