@@ -3880,11 +3880,6 @@ const EN: Messages = {
     'Image-capable model used as the vision bridge. Leave empty to auto-select.',
 
   // --- Additional settings labels & descriptions (previously untranslated) ---
-  'settings.category.IDE': 'IDE',
-  'settings.category.Memory': 'Memory',
-  'settings.category.MCP': 'MCP',
-  'settings.category.Security': 'Security',
-  'settings.category.Generation Configuration': 'Generation Configuration',
 
   'settings.label.review.attribution': 'Attribution: review',
   'settings.label.review.sandbox': 'Sandbox the reviewed code: review',
@@ -7684,42 +7679,38 @@ const ZH: Messages = {
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
 
   // --- 补全缺失的设置项中文翻译 ---
-  'settings.category.IDE': 'IDE',
-  'settings.category.Memory': '记忆',
-  'settings.category.MCP': 'MCP',
-  'settings.category.Security': '安全',
-  'settings.category.Generation Configuration': '生成配置',
 
   'settings.label.review.attribution': '署名：审查',
   'settings.description.review.attribution':
-    '在发布到 GitHub 的审查正文和内联评论中附加署名信息（模型名称和 CLI 版本）。',
+    '在发布到 GitHub 的审查正文和内联评论中附加署名信息（模型名称和 CLI 版本）。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.label.review.sandbox': '沙箱运行审查代码：审查',
-  'settings.description.review.sandbox': '在沙箱环境中运行被审查的代码。',
+  'settings.description.review.sandbox':
+    '在沙箱环境中运行被审查的代码。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.option.review.sandbox.off': '关闭（直接运行被审查的代码）',
   'settings.option.review.sandbox.auto': '自动（有可用容器时使用容器）',
   'settings.option.review.sandbox.required': '必需（绝不不加沙箱地运行）',
   'settings.label.review.effort': '默认审查力度：审查',
   'settings.description.review.effort':
-    '当未指定 --effort 且无项目记忆级别时，/review 的默认审查力度。',
+    '当未指定 --effort 且无项目记忆级别时，/review 的默认审查力度。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.option.review.effort.auto': '自动（PR 用 high，本地用 medium）',
   'settings.option.review.effort.low': '低',
   'settings.option.review.effort.medium': '中',
   'settings.option.review.effort.high': '高',
   'settings.label.review.comment': '默认发布评论：审查',
   'settings.description.review.comment':
-    '将每次 PR /review 视为传入了 --comment：审查发现会自动发布到拉取请求上。',
+    '将每次 PR /review 视为传入了 --comment：审查发现会自动发布到拉取请求上。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.label.review.severityFloor': '发布严重度下限：审查',
   'settings.description.review.severityFloor':
-    '未指定 --severity-floor 时，PR /review 发布的最低严重级别。',
+    '未指定 --severity-floor 时，PR /review 发布的最低严重级别。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.option.review.severityFloor.auto': '自动（第 6 轮起仅 Critical）',
   'settings.option.review.severityFloor.critical': '仅 Critical（每轮）',
   'settings.option.review.severityFloor.suggestion': 'Suggestion 与 Critical',
   'settings.label.review.reverseAuditRounds': '反向审计轮次上限：审查',
   'settings.description.review.reverseAuditRounds':
-    '降低 /review 的反向审计轮次上限。',
+    '降低 /review 的反向审计轮次上限。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.label.review.approachRounds': '方案信号轮次阈值：审查',
   'settings.description.review.approachRounds':
-    '拉取请求需达到多少轮后，审查可添加一段关于变更方案的建议性段落。',
+    '拉取请求需达到多少轮后，审查可添加一段关于变更方案的建议性段落。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
 
   'settings.label.output.showTimestamps': '显示时间戳',
   'settings.description.output.showTimestamps':
@@ -7744,10 +7735,10 @@ const ZH: Messages = {
 
   'settings.label.tools.codeModeOnly': '仅代码模式（实验性）',
   'settings.description.tools.codeModeOnly':
-    '仅通过隔离的 exec JavaScript 工具向模型暴露普通工具。',
+    '仅通过隔离的 exec JavaScript 工具向模型暴露普通工具。直接控制类工具仍然可用；在 safe 和 bare 模式下此设置会被忽略。',
   'settings.label.tools.webSearch.enabled': '启用网络搜索',
   'settings.description.tools.webSearch.enabled':
-    '设为 false 以禁用内置的 web_search 工具。',
+    '设为 false 以禁用内置的 web_search 工具。仅在配置了网络搜索后端时生效。',
   'settings.label.tools.webSearch.model': '搜索模型',
   'settings.description.tools.webSearch.model': '显式搜索路径的模型选择器。',
   'settings.label.tools.webSearch.webExtractor': '打开结果页面',
@@ -7755,13 +7746,13 @@ const ZH: Messages = {
     '允许搜索代理打开并阅读结果页面，以获得更有依据的回答。',
   'settings.label.tools.webSearch.timeoutMs': '搜索超时（毫秒）',
   'settings.description.tools.webSearch.timeoutMs':
-    '单次 web_search 调用的总时间预算（毫秒）。',
+    '单次 web_search 调用的总时间预算（毫秒）。超出范围的值会被忽略并回退到默认值。',
   'settings.label.tools.webSearch.maxPerSession': '每会话最大搜索次数',
   'settings.description.tools.webSearch.maxPerSession':
-    '单个会话中最大的 web_search 调用次数。',
+    '单个会话中最大的 web_search 调用次数。超出范围的值会被忽略并回退到默认值。',
   'settings.label.tools.toolSearch.threshold': '延迟工具预加载阈值（%）',
   'settings.description.tools.toolSearch.threshold':
-    '以上下文窗口百分比作为会话启动时预加载延迟工具的预算。',
+    '以上下文窗口百分比作为会话启动时预加载延迟工具的预算。设为 0 可始终延迟加载。',
   'settings.label.tools.listDirectory.enabled': '启用目录列表',
   'settings.description.tools.listDirectory.enabled':
     '启用内置的 list_directory 工具。',
@@ -7783,7 +7774,7 @@ const ZH: Messages = {
     '不限制（无指导）',
   'settings.label.tools.workflowNameOnly': '仅命名工作流',
   'settings.description.tools.workflowNameOnly':
-    '限制模型只能运行已命名的工作流。',
+    '限制模型只能运行已命名的工作流。工作区范围可设为 true，但不可设为 false。',
 
   'settings.label.goals.modelProposed': '模型提议目标',
   'settings.description.goals.modelProposed':
@@ -7796,13 +7787,13 @@ const ZH: Messages = {
     '启用会话内 cron/loop 工具，用于创建周期性提示。',
   'settings.label.experimental.sessionWriterLease': '启用 ACP 会话写入锁',
   'settings.description.experimental.sessionWriterLease':
-    '为持久化 ACP 和 daemon 会话启用跨进程写入围栏。',
+    '为持久化 ACP 和 daemon 会话启用跨进程写入围栏。生效值在进程启动时冻结；所有并发的 ACP/daemon 写入方都必须启用，围栏才会生效。',
   'settings.label.experimental.agentTeam': '启用智能体团队',
   'settings.description.experimental.agentTeam':
     '启用智能体团队协作工具（实验性）。',
   'settings.label.omni.enabled': '启用全模态媒体传输',
   'settings.description.omni.enabled':
-    '启用全模态媒体管道，处理通过 @ 引用的媒体文件。',
+    '启用全模态媒体管道，处理通过 @ 引用的媒体文件。仅对 DashScope 兼容端点生效。',
   'settings.label.experimental.artifact': '启用制品',
   'settings.description.experimental.artifact':
     '启用制品工具，用于发布交互式 HTML 页面。',
@@ -7882,6 +7873,14 @@ export function getTranslator(language: WebShellLanguage) {
     const message = messages[key] ?? EN[key] ?? key;
     return typeof message === 'function' ? message(vars) : message;
   };
+}
+
+export function hasMessage(language: WebShellLanguage, key: string): boolean {
+  return MESSAGES[language][key] !== undefined;
+}
+
+export function messageKeys(language: WebShellLanguage): string[] {
+  return Object.keys(MESSAGES[language]);
 }
 
 export function I18nProvider({
