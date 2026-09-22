@@ -23,7 +23,7 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 - 将 Broker 暴露为 HTTP 服务或定义公开 Agent resource。
 - 实现本地进程、容器、Kubernetes 或远程 Runtime provisioner。
 - Broker 进程重启后接管或协调 Runtime。
-- 使用 JDBC 持久化 Tool execution 状态。
+- 将服务核心接入 JDBC Tool execution Repository。
 - 排空空闲 Runtime binding 或释放物理 Runtime 进程。
 - 实现 Hosted Harness 回调或 Qwen CLI 集成。
 
@@ -94,4 +94,4 @@ Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding r
 
 ## 后续工作
 
-在启用重启恢复前增加显式进程接管和 reconciliation；增加 JDBC Tool execution 持久化以支持多实例 dispatch 收敛；随后通过私有 HTTP adapter 暴露本服务核心。物理 Runtime drain、Hosted Harness 集成和 Qwen 侧 Broker client 继续作为独立可评审切片。
+在启用重启恢复前增加显式进程接管和 reconciliation。JDBC Tool execution 持久化层已经具备；在通过私有 HTTP adapter 暴露本服务核心前，将服务核心接入该持久化层以支持多实例 dispatch 收敛。物理 Runtime drain、Hosted Harness 集成和 Qwen 侧 Broker client 继续作为独立可评审切片。

@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -258,19 +259,23 @@ final class JdbcRepositoryContract {
                         prefix + "-dispatcher-a", Duration.ofNanos(1)));
 
         ToolExecutionRecord ownerA = first.claimDispatch(executionId,
-                prefix + "-dispatcher-a", Duration.ofMinutes(30));
+                prefix + "-dispatcher-a", Duration.ofMinutes(1));
         assertEquals(1, ownerA.getDispatchGeneration());
         ToolExecutionRecord reclaimedA = first.claimDispatch(executionId,
                 prefix + "-dispatcher-a", Duration.ofMinutes(30));
         assertEquals(ownerA.getDispatchGeneration(),
                 reclaimedA.getDispatchGeneration());
         assertEquals(ownerA.getVersion(), reclaimedA.getVersion());
+        assertNull(second.claimDispatch(executionId,
+                prefix + "-dispatcher-b", Duration.ofMinutes(30)));
         ToolExecutionRecord renewedA = first.renewDispatch(executionId,
                 prefix + "-dispatcher-a", ownerA.getDispatchGeneration(),
                 Duration.ofMinutes(30));
         assertEquals(ownerA.getDispatchGeneration(),
                 renewedA.getDispatchGeneration());
         assertEquals(ownerA.getVersion() + 1, renewedA.getVersion());
+        assertTrue(renewedA.getDispatchLeaseUntil()
+                .isAfter(ownerA.getDispatchLeaseUntil()));
         ToolExecutionRecord executing = first.compareAndSet(renewedA,
                 renewedA.withState(ToolExecutionRecord.State.EXECUTING,
                         false),
@@ -400,6 +405,8 @@ final class JdbcRepositoryContract {
         assertTrue(BrokerValues.sameJsonMap(typedResult,
                 typedRestored.getResult()));
         assertTrue(typedRestored.sameRequest(typedCandidate));
+        assertEquals(1, typedRestored.getLastSequence());
+        verifyBigDecimalRoundTrip(dataSource, prefix, first);
 
         String takeoverKey = prefix + "-takeover-idempotency";
         ToolExecutionRecord takeoverCreated = first.findOrCreate(execution(
@@ -411,6 +418,9 @@ final class JdbcRepositoryContract {
         expire(dataSource, "qwen_tool_execution",
                 "dispatch_lease_until", "execution_call_id",
                 takeoverCreated.getExecutionCallId());
+        assertNull(first.renewDispatch(takeoverCreated.getExecutionCallId(),
+                prefix + "-dispatcher-a", firstClaim.getDispatchGeneration(),
+                Duration.ofMinutes(30)));
         // A snapshot carrying the same (expired) lease as the stored row
         // passes sameDispatch, so only the live-lease fence rejects it.
         ToolExecutionRecord expiredSnapshot = firstClaim.withDispatch(
@@ -444,6 +454,13 @@ final class JdbcRepositoryContract {
                 prefix + "-dispatcher-b",
                 secondClaim.getDispatchGeneration());
         assertEquals("success", takeoverSettled.getExecutionStatus());
+        assertNull(first.compareAndSet(takeoverSettled,
+                takeoverSettled.withState(
+                        ToolExecutionRecord.State.EXECUTING, false),
+                prefix + "-dispatcher-b",
+                takeoverSettled.getDispatchGeneration()));
+        assertNull(first.requestCancel(takeoverSettled.getExecutionCallId(),
+                takeoverSettled.getVersion()));
 
         String executingKey = prefix + "-executing-idempotency";
         ToolExecutionRecord executingCreated = first.findOrCreate(execution(
@@ -505,6 +522,10 @@ final class JdbcRepositoryContract {
         ToolExecutionRecord stickyFlagged = first.requestCancel(
                 sticky.getExecutionCallId(), stickyClaim.getVersion());
         assertTrue(stickyFlagged.isCancelRequested());
+        ToolExecutionRecord stickyRepeated = first.requestCancel(
+                sticky.getExecutionCallId(), stickyFlagged.getVersion());
+        assertEquals(stickyFlagged.getState(), stickyRepeated.getState());
+        assertEquals(stickyFlagged.getVersion(), stickyRepeated.getVersion());
         ToolExecutionRecord stickyForged = stickyFlagged.withState(
                 ToolExecutionRecord.State.DISPATCHING, false);
         assertThrows(IllegalArgumentException.class,
@@ -525,6 +546,173 @@ final class JdbcRepositoryContract {
         }
         assertFalse(first.hasActiveByRuntimeSession(
                 prefix + "-collision-runtime-session"));
+        IllegalStateException sessionHashFailure = assertThrows(
+                IllegalStateException.class,
+                () -> first.findByExecutionCallId(
+                        sticky.getExecutionCallId()));
+        assertEquals("Tool Runtime Session hash is invalid",
+                sessionHashFailure.getMessage());
+
+        verifyConcurrentDispatchClaim(dataSource, prefix, first, second);
+        verifyDispatchGenerationFence(dataSource, prefix, first);
+        verifyUnknownCancellationFence(dataSource, prefix, first, second);
+        verifyIdempotencyHashGuards(dataSource, prefix, first);
+    }
+
+    private static void verifyBigDecimalRoundTrip(DataSource dataSource,
+            String prefix, JdbcToolExecutionRepository repository) {
+        List<BigDecimal> values = List.of(
+                new BigDecimal("1.234567890123456789012345E+30"),
+                new BigDecimal("1E+400"));
+        for (int index = 0; index < values.size(); index++) {
+            BigDecimal value = values.get(index);
+            String decimalPrefix = prefix + "-decimal-" + index;
+            String key = decimalPrefix + "-idempotency";
+            Map<String, Object> reference = new LinkedHashMap<>();
+            reference.put("sessionId", decimalPrefix + "-runtime-session");
+            reference.put("promptId", decimalPrefix + "-turn");
+            reference.put("callId", decimalPrefix + "-tool");
+            reference.put("argsDigest", decimalPrefix + "-digest");
+            reference.put("amount", value);
+            ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
+                    decimalPrefix + "-execution", key,
+                    decimalPrefix + "-binding", 1,
+                    decimalPrefix + "-harness",
+                    decimalPrefix + "-runtime-session",
+                    decimalPrefix + "-turn", decimalPrefix + "-tool",
+                    decimalPrefix + "-digest", reference);
+            repository.findOrCreate(candidate);
+            ToolExecutionRecord reread = new JdbcToolExecutionRepository(
+                    dataSource).findByIdempotencyKey(key);
+            assertTrue(reread.sameRequest(candidate));
+            assertEquals(0, value.compareTo(new BigDecimal(
+                    reread.getReference().get("amount").toString())));
+        }
+    }
+
+    private static void verifyConcurrentDispatchClaim(DataSource dataSource,
+            String prefix, JdbcToolExecutionRepository first,
+            JdbcToolExecutionRepository second) throws Exception {
+        ToolExecutionRecord created = first.findOrCreate(execution(
+                prefix + "-claim-race-execution",
+                prefix + "-claim-race-idempotency",
+                prefix + "-claim-race-digest"));
+        ToolExecutionRecord initial = first.claimDispatch(
+                created.getExecutionCallId(), prefix + "-claim-race-initial",
+                Duration.ofMinutes(30));
+        expire(dataSource, "qwen_tool_execution", "dispatch_lease_until",
+                "execution_call_id", created.getExecutionCallId());
+        List<ToolExecutionRecord> claims = invokeConcurrently(2,
+                index -> (index == 0 ? first : second).claimDispatch(
+                        created.getExecutionCallId(),
+                        prefix + "-claim-race-" + index,
+                        Duration.ofMinutes(30)));
+        assertEquals(1, claims.stream().filter(record -> record != null)
+                .count());
+        assertEquals(initial.getDispatchGeneration() + 1,
+                claims.stream().filter(record -> record != null).findFirst()
+                        .orElseThrow().getDispatchGeneration());
+    }
+
+    private static void verifyDispatchGenerationFence(DataSource dataSource,
+            String prefix, JdbcToolExecutionRepository repository)
+            throws SQLException {
+        String owner = prefix + "-generation-owner";
+        ToolExecutionRecord created = repository.findOrCreate(execution(
+                prefix + "-generation-execution",
+                prefix + "-generation-idempotency",
+                prefix + "-generation-digest"));
+        ToolExecutionRecord firstClaim = repository.claimDispatch(
+                created.getExecutionCallId(), owner, Duration.ofMinutes(30));
+        expire(dataSource, "qwen_tool_execution", "dispatch_lease_until",
+                "execution_call_id", created.getExecutionCallId());
+        ToolExecutionRecord secondClaim = repository.claimDispatch(
+                created.getExecutionCallId(), owner, Duration.ofMinutes(30));
+        assertEquals(firstClaim.getDispatchGeneration() + 1,
+                secondClaim.getDispatchGeneration());
+        assertNull(repository.compareAndSet(secondClaim,
+                secondClaim.withState(ToolExecutionRecord.State.EXECUTING,
+                        false),
+                owner, firstClaim.getDispatchGeneration()));
+    }
+
+    private static void verifyUnknownCancellationFence(DataSource dataSource,
+            String prefix, JdbcToolExecutionRepository first,
+            JdbcToolExecutionRepository second) throws SQLException {
+        ToolExecutionRecord created = first.findOrCreate(execution(
+                prefix + "-unknown-cancel-execution",
+                prefix + "-unknown-cancel-idempotency",
+                prefix + "-unknown-cancel-digest"));
+        ToolExecutionRecord claim = first.claimDispatch(
+                created.getExecutionCallId(), prefix + "-unknown-owner",
+                Duration.ofMinutes(30));
+        ToolExecutionRecord executing = first.compareAndSet(claim,
+                claim.withState(ToolExecutionRecord.State.EXECUTING, false),
+                prefix + "-unknown-owner", claim.getDispatchGeneration());
+        expire(dataSource, "qwen_tool_execution", "dispatch_lease_until",
+                "execution_call_id", created.getExecutionCallId());
+        assertNull(second.claimDispatch(created.getExecutionCallId(),
+                prefix + "-unknown-takeover", Duration.ofMinutes(30)));
+        ToolExecutionRecord unknown = second.findByExecutionCallId(
+                created.getExecutionCallId());
+        assertEquals(executing.getVersion() + 1, unknown.getVersion());
+        ToolExecutionRecord cancelRequested = second.requestCancel(
+                unknown.getExecutionCallId(), unknown.getVersion());
+        assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                cancelRequested.getState());
+        assertTrue(cancelRequested.isCancelRequested());
+        assertEquals(unknown.getVersion() + 1,
+                cancelRequested.getVersion());
+        assertNull(second.resolveUnknown(unknown, result("cancelled"), START));
+        assertNotNull(second.resolveUnknown(cancelRequested,
+                result("cancelled"), START));
+    }
+
+    private static void verifyIdempotencyHashGuards(DataSource dataSource,
+            String prefix, JdbcToolExecutionRepository repository)
+            throws SQLException {
+        ToolExecutionRecord invalidHash = repository.findOrCreate(execution(
+                prefix + "-invalid-hash-execution",
+                prefix + "-invalid-hash-idempotency",
+                prefix + "-invalid-hash-digest"));
+        updateExecutionColumn(dataSource, "idempotency_key_hash",
+                JdbcRepositorySupport.valueKey(
+                        prefix + "-other-idempotency"),
+                invalidHash.getExecutionCallId());
+        IllegalStateException invalidHashFailure = assertThrows(
+                IllegalStateException.class,
+                () -> repository.findByExecutionCallId(
+                        invalidHash.getExecutionCallId()));
+        assertEquals("Tool idempotency hash is invalid",
+                invalidHashFailure.getMessage());
+
+        ToolExecutionRecord collision = repository.findOrCreate(execution(
+                prefix + "-hash-collision-execution",
+                prefix + "-hash-collision-idempotency",
+                prefix + "-hash-collision-digest"));
+        updateExecutionColumn(dataSource, "idempotency_key",
+                prefix + "-forged-idempotency",
+                collision.getExecutionCallId());
+        IllegalStateException collisionFailure = assertThrows(
+                IllegalStateException.class,
+                () -> repository.findByIdempotencyKey(
+                        prefix + "-hash-collision-idempotency"));
+        assertEquals("Tool idempotency hash collision",
+                collisionFailure.getMessage());
+    }
+
+    private static void updateExecutionColumn(DataSource dataSource,
+            String column, String value, String executionCallId)
+            throws SQLException {
+        String sql = "UPDATE qwen_tool_execution SET " + column
+                + " = ? WHERE execution_call_id = ?";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        sql)) {
+            statement.setString(1, value);
+            statement.setString(2, executionCallId);
+            assertEquals(1, statement.executeUpdate());
+        }
     }
 
     private static ToolExecutionRecord execution(String executionCallId,

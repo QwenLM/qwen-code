@@ -45,7 +45,7 @@ Scope 身份使用确定性哈希表示，并始终与完整的租户级身份�
 
 创建 Session 时依赖数据库唯一约束，并在并发插入后重新读取胜出的记录。Session 的 CAS 更新会锁定当前行，校验预期 version 和 Binding generation，并拒绝把终态 Session 重新激活。SQL 失败会回滚事务并向调用方传播；不会静默回退到进程内状态。
 
-创建 Tool Execution 时使用唯一 SHA-256 key 保持数据库索引长度可控，同时保留并校验完整 idempotency key。每次变更都会锁定 execution 行、校验不可变身份和 version，并在需要时应用 dispatch owner 与 generation fencing。租约判断使用数据库时钟。过期的 `DISPATCHING` claim 可以重新发放，因为物理执行尚未开始；过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 会进入 `UNKNOWN`，在显式对账结果完成它之前不得再次 dispatch。
+创建 Tool Execution 时使用唯一 SHA-256 key 保持数据库索引长度可控，同时保留并校验完整 idempotency key。重复的 idempotency key 会返回已存储的行，调用方在 dispatch 前比较不可变请求。所有变更都会锁定 execution 行。`compareAndSet` 和 `resolveUnknown` 校验不可变身份与乐观锁 version；claim 和续租操作按各自契约校验 dispatch owner、generation 与租约状态；`requestCancel` 使用预期 version，但不要求 dispatch claim。租约判断使用数据库时钟。过期的 `DISPATCHING` claim 可以重新发放，因为物理执行尚未开始；过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 会进入 `UNKNOWN`，在显式对账结果完成它之前不得再次 dispatch。
 
 ## Schema 生命周期
 

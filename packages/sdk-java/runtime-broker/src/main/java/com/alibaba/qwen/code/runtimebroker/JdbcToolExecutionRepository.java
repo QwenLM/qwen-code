@@ -91,11 +91,11 @@ public final class JdbcToolExecutionRepository
                     if (!result.next()) {
                         return null;
                     }
-                    ToolExecutionRecord record = mapExecution(result);
-                    if (!key.equals(record.getIdempotencyKey())) {
+                    if (!key.equals(result.getString("idempotency_key"))) {
                         throw new IllegalStateException(
                                 "Tool idempotency hash collision");
                     }
+                    ToolExecutionRecord record = mapExecution(result);
                     return record;
                 }
             }
@@ -420,7 +420,8 @@ public final class JdbcToolExecutionRepository
 
     private static String toJson(Map<String, Object> value) {
         return value == null ? null
-                : JSON.toJSONString(value, JSONWriter.Feature.WriteNulls);
+                : JSON.toJSONString(value, JSONWriter.Feature.WriteNulls,
+                        JSONWriter.Feature.WriteBigDecimalAsPlain);
     }
 
     private static Map<String, Object> fromJson(String value) {

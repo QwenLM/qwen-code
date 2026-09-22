@@ -23,7 +23,7 @@ The Runtime Broker repositories define durable identities, lifecycle states, com
 - Exposing the Broker as an HTTP service or defining public Agent resources.
 - Implementing a local process, container, Kubernetes, or remote Runtime provisioner.
 - Adopting or reconciling a Runtime after Broker process restart.
-- Persisting Tool execution state in JDBC.
+- Wiring the service core to the JDBC Tool execution repository.
 - Draining idle Runtime bindings or releasing physical Runtime processes.
 - Implementing Hosted Harness callbacks or the Qwen CLI integration.
 
@@ -94,4 +94,4 @@ Runtime tokens stay inside `RuntimeLease`. The service passes a lease to the bin
 
 ## Follow-up work
 
-Add explicit process adoption and reconciliation before enabling restart recovery, add JDBC Tool execution persistence for multi-instance dispatch convergence, and then expose this core through a private HTTP adapter. Physical Runtime draining, Hosted Harness integration, and the Qwen-side Broker client remain separate reviewable slices.
+Add explicit process adoption and reconciliation before enabling restart recovery. The JDBC Tool execution persistence layer is available; wire the service core to it for multi-instance dispatch convergence before exposing this core through a private HTTP adapter. Physical Runtime draining, Hosted Harness integration, and the Qwen-side Broker client remain separate reviewable slices.
