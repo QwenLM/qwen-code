@@ -1,0 +1,4494 @@
+// Force strict mode and setup for ESM
+"use strict";
+import {
+  getLanguageSettingsOptions
+} from "./chunk-5EJZE3FP.js";
+import {
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS
+} from "./chunk-7MEBNX4M.js";
+import {
+  DEFAULT_MAX_SUBAGENT_DEPTH,
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+  DEFAULT_STOP_HOOK_BLOCK_CAP,
+  DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
+  DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP
+} from "./chunk-MRTRBONQ.js";
+import {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES
+} from "./chunk-IITTKFWM.js";
+import {
+  REASONING_EFFORT_TIERS
+} from "./chunk-KUON6Z6R.js";
+import {
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+} from "./chunk-B3XJFEEH.js";
+import {
+  init_esbuild_shims
+} from "./chunk-5O2XNYP6.js";
+import {
+  __name
+} from "./chunk-J2S4EL5Y.js";
+
+// packages/cli/src/utils/deepMerge.ts
+init_esbuild_shims();
+function isPlainObject(item) {
+  return !!item && typeof item === "object" && !Array.isArray(item);
+}
+__name(isPlainObject, "isPlainObject");
+function mergeRecursively(target, source, getMergeStrategyForPath, path = []) {
+  for (const key of Object.keys(source)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      continue;
+    }
+    const newPath = [...path, key];
+    const srcValue = source[key];
+    const objValue = target[key];
+    const mergeStrategy = getMergeStrategyForPath(newPath);
+    if (mergeStrategy === "shallow_merge" /* SHALLOW_MERGE */ && objValue && srcValue) {
+      const obj1 = typeof objValue === "object" && objValue !== null ? objValue : {};
+      const obj2 = typeof srcValue === "object" && srcValue !== null ? srcValue : {};
+      target[key] = { ...obj1, ...obj2 };
+      continue;
+    }
+    if (Array.isArray(objValue)) {
+      const srcArray = Array.isArray(srcValue) ? srcValue : [srcValue];
+      if (mergeStrategy === "concat" /* CONCAT */) {
+        target[key] = objValue.concat(srcArray);
+        continue;
+      }
+      if (mergeStrategy === "union" /* UNION */) {
+        target[key] = [...new Set(objValue.concat(srcArray))];
+        continue;
+      }
+    }
+    if (isPlainObject(objValue) && isPlainObject(srcValue)) {
+      mergeRecursively(objValue, srcValue, getMergeStrategyForPath, newPath);
+    } else if (isPlainObject(srcValue)) {
+      target[key] = {};
+      mergeRecursively(
+        target[key],
+        srcValue,
+        getMergeStrategyForPath,
+        newPath
+      );
+    } else {
+      target[key] = srcValue;
+    }
+  }
+  return target;
+}
+__name(mergeRecursively, "mergeRecursively");
+function customDeepMerge(getMergeStrategyForPath, ...sources) {
+  const result = {};
+  for (const source of sources) {
+    if (source) {
+      mergeRecursively(result, source, getMergeStrategyForPath);
+    }
+  }
+  return result;
+}
+__name(customDeepMerge, "customDeepMerge");
+
+// packages/cli/src/config/settingsSchema.ts
+init_esbuild_shims();
+var DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
+var TOGGLE_TYPES = /* @__PURE__ */ new Set([
+  "boolean",
+  "enum"
+]);
+function isNumericSettingType(type) {
+  return type === "number" || type === "integer";
+}
+__name(isNumericSettingType, "isNumericSettingType");
+var HOOK_DEFINITION_ITEMS = {
+  type: "object",
+  description: "A hook definition with an optional matcher and a list of hook configurations.",
+  properties: {
+    matcher: {
+      type: "string",
+      description: "An optional matcher pattern to filter when this hook definition applies."
+    },
+    sequential: {
+      type: "boolean",
+      description: "Whether the hooks should be executed sequentially instead of in parallel."
+    },
+    hooks: {
+      type: "array",
+      description: "The list of hook configurations to execute.",
+      required: true,
+      items: {
+        type: "object",
+        description: "A hook configuration entry that defines a hook to execute.",
+        properties: {
+          type: {
+            type: "string",
+            description: 'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
+            enum: ["command", "http", "prompt"],
+            required: true
+          },
+          command: {
+            type: "string",
+            description: 'The command to execute when the hook is triggered. Required for "command" type.'
+          },
+          url: {
+            type: "string",
+            description: 'The URL to send the POST request to. Required for "http" type.'
+          },
+          prompt: {
+            type: "string",
+            description: 'The prompt to send to the model. Required for "prompt" type.'
+          },
+          model: {
+            type: "string",
+            description: 'The optional model to use for a "prompt" hook.'
+          },
+          headers: {
+            type: "object",
+            description: "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+            additionalProperties: { type: "string" }
+          },
+          allowedEnvVars: {
+            type: "array",
+            description: "List of environment variables allowed for interpolation in headers and URL.",
+            items: { type: "string" }
+          },
+          name: {
+            type: "string",
+            description: "An optional name for the hook."
+          },
+          description: {
+            type: "string",
+            description: "An optional description of what the hook does."
+          },
+          timeout: {
+            type: "number",
+            description: "Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds."
+          },
+          env: {
+            type: "object",
+            description: "Environment variables to set when executing the hook command.",
+            additionalProperties: { type: "string" }
+          },
+          async: {
+            type: "boolean",
+            description: 'Whether to execute the hook asynchronously (non-blocking, for "command" type only).'
+          },
+          once: {
+            type: "boolean",
+            description: 'Whether to execute the hook only once per session (for "http" type).'
+          },
+          statusMessage: {
+            type: "string",
+            description: "A message to display while the hook is executing."
+          },
+          shell: {
+            type: "string",
+            description: "The shell to use for command execution.",
+            enum: ["bash", "powershell"]
+          }
+        }
+      }
+    }
+  }
+};
+var SETTINGS_SCHEMA = {
+  // Maintained for compatibility/criticality
+  mcpServers: {
+    type: "object",
+    label: "MCP Servers",
+    category: "Advanced",
+    // Hot-reloadable (sub-task 3): a runtime edit is reconciled live by the
+    // SettingsWatcher → reinitializeMcpServers path. Marking it
+    // restart-required would make the watcher suppress MCP-only edits, so the
+    // listener that drives the reconcile would never fire.
+    requiresRestart: false,
+    default: {},
+    description: "Configuration for MCP servers.",
+    showInDialog: false,
+    mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */
+  },
+  // Channels configuration (Telegram, Discord, etc.)
+  channels: {
+    type: "object",
+    label: "Channels",
+    category: "Advanced",
+    requiresRestart: true,
+    default: {},
+    description: "Configuration for messaging channels.",
+    showInDialog: false,
+    mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */
+  },
+  serve: {
+    type: "object",
+    label: "Serve",
+    category: "Advanced",
+    requiresRestart: true,
+    default: {},
+    description: "Persistent qwen serve settings.",
+    showInDialog: false,
+    mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */,
+    properties: {
+      channels: {
+        type: "array",
+        label: "Startup Channels",
+        category: "Advanced",
+        requiresRestart: true,
+        default: [],
+        description: "Messaging channels to start automatically when the daemon boots.",
+        showInDialog: false,
+        items: { type: "string" }
+      },
+      maxConcurrentSubSessionsPerCaller: {
+        type: "integer",
+        label: "Max Concurrent Sub-Sessions Per Caller",
+        category: "Advanced",
+        requiresRestart: true,
+        default: 16,
+        minimum: 1,
+        description: "Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.",
+        showInDialog: false
+      },
+      maxConcurrentSubSessionsTotal: {
+        type: "integer",
+        label: "Max Concurrent Sub-Sessions Total",
+        category: "Advanced",
+        requiresRestart: true,
+        default: 24,
+        minimum: 1,
+        maximum: 1024,
+        description: "Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.",
+        showInDialog: false
+      }
+    }
+  },
+  // Model providers configuration grouped by provider id
+  modelProviders: {
+    type: "object",
+    label: "Model Providers",
+    category: "Model",
+    requiresRestart: false,
+    default: {},
+    description: 'Model providers configuration keyed by provider id (a built-in provider protocol such as "openai" or "gemini", or a custom id mapped via providerProtocol). Each entry is an array of model configurations. OpenAI-compatible models can select wireApi: "chat-completions" or "responses"; omitting wireApi keeps the declared protocol (Chat Completions under openai). Released openai-responses declarations remain readable; new setup writes openai plus wireApi.',
+    showInDialog: false,
+    mergeStrategy: "replace" /* REPLACE */
+  },
+  // Maps a custom modelProviders provider id to its SDK protocol (AuthType).
+  providerProtocol: {
+    type: "object",
+    label: "Provider Protocols",
+    category: "Model",
+    requiresRestart: true,
+    default: {},
+    description: 'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry. New OpenAI configurations map to openai and select wireApi per model; released openai-responses mappings remain readable.',
+    showInDialog: false,
+    mergeStrategy: "replace" /* REPLACE */
+  },
+  plansDirectory: {
+    type: "string",
+    label: "Plans Directory",
+    category: "Advanced",
+    requiresRestart: true,
+    default: void 0,
+    description: "Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.",
+    showInDialog: false
+  },
+  // Environment variables fallback
+  env: {
+    type: "object",
+    label: "Environment Variables",
+    category: "Advanced",
+    requiresRestart: true,
+    default: {},
+    description: "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
+    showInDialog: false,
+    mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */
+  },
+  proxy: {
+    type: "string",
+    label: "Proxy",
+    category: "Advanced",
+    requiresRestart: true,
+    default: void 0,
+    description: "Proxy URL for CLI HTTP requests. Takes precedence over proxy environment variables when --proxy is not provided.",
+    showInDialog: false
+  },
+  general: {
+    type: "object",
+    label: "General",
+    category: "General",
+    requiresRestart: false,
+    default: {},
+    description: "General application settings.",
+    showInDialog: false,
+    properties: {
+      preferredEditor: {
+        type: "string",
+        label: "Preferred Editor",
+        category: "General",
+        requiresRestart: false,
+        default: void 0,
+        description: "The preferred editor to open files in.",
+        showInDialog: true
+      },
+      outputStyle: {
+        type: "string",
+        label: "Output Style",
+        category: "General",
+        // Generic settings edits do not rebuild the running system instruction;
+        // `/output-style` owns the separate live-update path.
+        requiresRestart: true,
+        default: void 0,
+        description: 'Name of the output style that shapes how responses are written: a built-in such as "Concise" or "Explanatory", or a custom style\'s name \u2014 its frontmatter `name`, defaulting to the file name without ".md" \u2014 from ~/.qwen/output-styles or .qwen/output-styles. Leave unset for the default style. Change it with /output-style. Only the built-ins are available in --bare and --safe-mode.',
+        // The style list includes user/project-defined entries; the dedicated
+        // /output-style picker owns selection rather than a static enum here.
+        showInDialog: false
+      },
+      vimMode: {
+        type: "boolean",
+        label: "Vim Mode",
+        category: "General",
+        requiresRestart: false,
+        default: false,
+        description: "Enable Vim keybindings",
+        showInDialog: true
+      },
+      voice: {
+        type: "object",
+        label: "Voice Dictation",
+        category: "General",
+        requiresRestart: false,
+        default: {},
+        description: "Voice dictation settings.",
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: "boolean",
+            label: "Voice Dictation",
+            category: "General",
+            requiresRestart: false,
+            default: false,
+            description: "Enable voice dictation in the prompt input.",
+            showInDialog: false
+          },
+          mode: {
+            type: "enum",
+            label: "Voice Dictation Mode",
+            category: "General",
+            requiresRestart: false,
+            default: "hold",
+            description: 'How push-to-talk behaves: "hold" to talk while held, or "tap" to start and tap (or pause) to stop and submit.',
+            showInDialog: false,
+            options: [
+              { value: "hold", label: "Hold to talk" },
+              { value: "tap", label: "Tap to toggle" }
+            ]
+          },
+          language: {
+            type: "string",
+            label: "Voice Dictation Language",
+            category: "General",
+            requiresRestart: false,
+            default: "",
+            description: 'Preferred spoken language for voice transcription (e.g. "english", "chinese"). Leave empty to auto-detect.',
+            showInDialog: false
+          },
+          keytermsFile: {
+            type: "string",
+            label: "Voice Dictation Keyterms File",
+            category: "General",
+            requiresRestart: false,
+            default: "",
+            description: 'Path to a custom keyterms file (one term per line, "#" for comments) that biases voice transcription toward domain-specific terms. Relative paths resolve from the workspace root; defaults to ".qwen/voice-keyterms.txt" when present. The file contents are sent to the ASR provider and it is read only in trusted workspaces. Only applies to Qwen ASR models (qwen3-asr-*).',
+            showInDialog: false
+          },
+          refineTranscript: {
+            type: "boolean",
+            label: "Refine Voice Transcript",
+            category: "General",
+            requiresRestart: false,
+            default: true,
+            description: "Clean up voice transcripts with the fast model before inserting them \u2014 removes filler words and fixes recognition errors while preserving meaning. Falls back to the raw transcript on failure, and is skipped when no fast model is configured.",
+            showInDialog: false
+          }
+        }
+      },
+      enableAutoUpdate: {
+        type: "boolean",
+        label: "Enable Auto Update",
+        category: "General",
+        requiresRestart: false,
+        default: true,
+        description: "Enable automatic update checks and installations on startup.",
+        showInDialog: true
+      },
+      showSessionRecap: {
+        type: "boolean",
+        label: "Show Session Recap",
+        category: "General",
+        requiresRestart: false,
+        // Off by default — an ambient background LLM call isn't something
+        // users should be opted into silently, especially when `fastModel`
+        // is unset and the call would land on the main coding model.
+        // Manual `/recap` works regardless.
+        default: false,
+        description: 'Auto-show a one-line "where you left off" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.',
+        showInDialog: true
+      },
+      sessionRecapAwayThresholdMinutes: {
+        type: "number",
+        label: "Session Recap Away Threshold (minutes)",
+        category: "General",
+        requiresRestart: false,
+        default: 5,
+        minimum: 1,
+        description: "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
+        showInDialog: true
+      },
+      cleanupPeriodDays: {
+        type: "number",
+        label: "Cleanup Period (days)",
+        category: "General",
+        // LoadedSettings._merged is cached without verified setValue→recompute
+        // paths in all UI flows. Mark restart-required so users aren't
+        // surprised when a mid-session edit doesn't take effect immediately.
+        requiresRestart: true,
+        default: 30,
+        minimum: 0,
+        description: "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) \u2014 protects sessions touched in the last hour, plus the currently active session.",
+        showInDialog: true
+      },
+      gitCoAuthor: {
+        type: "object",
+        label: "Attribution",
+        category: "General",
+        requiresRestart: false,
+        // Match `normalizeGitCoAuthor`'s runtime defaults so the IDE
+        // schema publishes the same "enabled by default" hint users see
+        // at runtime. The empty-object form here would silently lose
+        // editor-surfaced defaults.
+        default: { commit: true, pr: true },
+        description: "Attribution added to git commits and pull requests created through Qwen Code.",
+        showInDialog: false,
+        // Pre-V4 settings stored this as a single boolean. The V3→V4
+        // migration rewrites those on first launch, but the IDE schema
+        // validator runs before that — accept the boolean shape so users
+        // editing settings.json in VS Code don't see a spurious warning
+        // until they run qwen once. Config.normalizeGitCoAuthor handles
+        // the boolean at runtime.
+        legacyTypes: ["boolean"],
+        properties: {
+          commit: {
+            type: "boolean",
+            label: "Attribution: commit",
+            category: "General",
+            requiresRestart: false,
+            default: true,
+            description: "Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.",
+            showInDialog: true
+          },
+          pr: {
+            type: "boolean",
+            label: "Attribution: PR",
+            category: "General",
+            requiresRestart: false,
+            default: true,
+            description: "Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.",
+            showInDialog: true
+          }
+        }
+      },
+      debugKeystrokeLogging: {
+        type: "boolean",
+        label: "Debug Keystroke Logging",
+        category: "General",
+        requiresRestart: false,
+        default: false,
+        description: "Enable debug logging of keystrokes to the console.",
+        showInDialog: false
+      },
+      language: {
+        type: "enum",
+        label: "Language: UI",
+        category: "General",
+        requiresRestart: true,
+        default: "auto",
+        description: 'The language for the user interface. Use "auto" to detect from system settings. You can also use custom language codes (e.g., "es", "fr") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js).',
+        showInDialog: true,
+        options: []
+      },
+      outputLanguage: {
+        type: "string",
+        label: "Language: Model",
+        category: "General",
+        requiresRestart: true,
+        default: "auto",
+        description: 'The language for LLM output. Use "auto" to follow the user input language, or set a specific language.',
+        showInDialog: true
+      },
+      terminalBell: {
+        type: "boolean",
+        label: "Terminal Bell Notification",
+        category: "General",
+        requiresRestart: false,
+        default: true,
+        description: "Play terminal bell sound when response completes or needs approval.",
+        showInDialog: true
+      },
+      notificationMode: {
+        type: "enum",
+        label: "Notification Mode",
+        category: "General",
+        requiresRestart: false,
+        default: "all",
+        description: 'Which unfocused-terminal events fire a bell/OS notification. "all" fires on every tool approval prompt AND on task completion (current behavior). "task-complete" suppresses the per-approval notification and only fires when a long task returns to idle. Requires `terminalBell` to be enabled; otherwise no notifications fire regardless of mode.',
+        showInDialog: true,
+        options: [
+          { value: "all", label: "All (approvals + task completion)" },
+          { value: "task-complete", label: "Task completion only" }
+        ]
+      },
+      preventSystemSleep: {
+        type: "boolean",
+        label: "Prevent System Sleep While Running",
+        category: "General",
+        // Read once at startup via Config.preventSystemSleep (a readonly field
+        // captured in loadCliConfig), so a runtime toggle only takes effect
+        // after restart.
+        requiresRestart: true,
+        default: true,
+        description: "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
+        showInDialog: true
+      },
+      chatRecording: {
+        type: "boolean",
+        label: "Chat Recording",
+        category: "General",
+        requiresRestart: true,
+        default: true,
+        description: "Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.",
+        showInDialog: false
+      },
+      defaultFileEncoding: {
+        type: "enum",
+        label: "Default File Encoding",
+        category: "General",
+        requiresRestart: false,
+        default: "utf-8",
+        description: 'Default encoding for new files. Use "utf-8" (default) for UTF-8 without BOM, or "utf-8-bom" for UTF-8 with BOM. Only change this if your project specifically requires BOM.',
+        showInDialog: false,
+        options: [
+          { value: "utf-8", label: "UTF-8 (without BOM)" },
+          { value: "utf-8-bom", label: "UTF-8 with BOM" }
+        ]
+      }
+    }
+  },
+  review: {
+    type: "object",
+    label: "Review",
+    category: "General",
+    requiresRestart: false,
+    default: {},
+    description: "Settings for the /review skill.",
+    showInDialog: false,
+    properties: {
+      attribution: {
+        type: "boolean",
+        label: "Attribution: review",
+        category: "General",
+        requiresRestart: false,
+        default: true,
+        description: `Append the attribution footer naming the model and CLI version (e.g. "_\u2014 qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without VISIBLE AI attribution: no footer, and no "**[Critical]**"/"**[Suggestion]**" severity markers on posted comments and body lists. Unattributed posts stay identifiable in the raw source: each posted comment carries an invisible severity marker ("<!-- qwen-review critical -->") and the review body carries a ledger marker ("<!-- qwen-review-ledger ... -->") \u2014 anything reading comment bodies (GitHub API automation, the workflows this setting couples to) still recognizes a /review artifact, and presubmit duplicate detection recognizes the reviewing account's earlier posts by the severity marker, though unattributed posts from other accounts escape it. Another consequence: qwen-autofix's Critical-only mode (engaged after round 5, or earlier when a counting window's diff-growth budget trips) no longer recognizes the posted findings as Critical and defers them. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.`,
+        showInDialog: true
+      },
+      sandbox: {
+        type: "enum",
+        label: "Sandbox the reviewed code: review",
+        category: "General",
+        requiresRestart: false,
+        default: "off",
+        description: 'Run the REVIEWED repository\'s own commands \u2014 `npm ci` with its install scripts, the build, the test suite, and every mutation probe \u2014 inside a container instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process\'s whole environment (on CI that includes the model and GitHub credentials). "auto" uses a container when docker or podman answers and runs directly when neither does; "required" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`) unavailable for that run rather than ending the review; "off" is today\'s behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it.',
+        showInDialog: true,
+        options: [
+          { value: "off", label: "Off (run the reviewed code directly)" },
+          { value: "auto", label: "Auto (container when one is available)" },
+          { value: "required", label: "Required (never run it unsandboxed)" }
+        ]
+      },
+      effort: {
+        type: "enum",
+        label: "Default effort: review",
+        category: "General",
+        requiresRestart: false,
+        default: "auto",
+        description: 'Default effort for /review when neither --effort nor a project-remembered explicitly typed level applies. "auto" keeps the built-in rule (high for PRs, medium for local changes). An explicit or remembered level wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+        options: [
+          { value: "auto", label: "Auto (high for PRs, medium for local)" },
+          { value: "low", label: "Low" },
+          { value: "medium", label: "Medium" },
+          { value: "high", label: "High" }
+        ]
+      },
+      comment: {
+        type: "boolean",
+        label: "Comment by default: review",
+        category: "General",
+        requiresRestart: false,
+        default: false,
+        description: "Treat every PR /review as if --comment was passed: findings are posted to the pull request without the flag. The post still binds to the PR named in the invocation. Enable only if you always want reviews published. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
+        showInDialog: true
+      },
+      severityFloor: {
+        type: "enum",
+        label: "Posting floor: review",
+        category: "General",
+        requiresRestart: false,
+        default: "auto",
+        description: 'The lowest severity a PR /review posts when --severity-floor is not given. "auto" keeps the round-adaptive default: Suggestions post through round 5, and from round 6 only Criticals post while otherwise-postable high-confidence Suggestions are recorded and deferred (low-confidence and Nice-to-have findings stay terminal-only as ever); under "auto", rounds 2-5 additionally defer new Suggestions on code unchanged since the previous round \u2014 the same discipline that stops review rounds from ballooning a PR. "critical" applies that posture from round 1; "suggestion" keeps Suggestions posting at every round. Non-PR targets have no rounds and ignore this. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+        options: [
+          { value: "auto", label: "Auto (Critical-only from round 6)" },
+          { value: "critical", label: "Critical-only (every round)" },
+          { value: "suggestion", label: "Suggestions and Criticals" }
+        ]
+      },
+      reverseAuditRounds: {
+        type: "number",
+        label: "Reverse-audit round ceiling: review",
+        category: "General",
+        requiresRestart: false,
+        default: 0,
+        description: `Lower the reverse-audit loop's round cap for every high-effort review. The cap is normally chosen from the diff topology (10 small / 5 chunked; a huge diff is 3 when the run has a review deadline and 5 when it does not, because that reduction answers a CI ceiling and applies only where one exists) because a round costs one agent on a small diff and ~90 minutes on a huge one; this setting can only LOWER whichever tier applies, never raise it \u2014 a value that is not a whole number above zero, or that is out of range (below 3, or above the plan's own tier), is ignored and leaves the tier alone \u2014 JSON Schema has no integer type here, so a fraction validates in an editor and is then discarded at runtime. Understand what it buys before enabling: the loop ends on two consecutive dry rounds, so cutting the cap does not make reviews converge sooner, it makes them stop before converging more often \u2014 and every such stop is disclosed as unreviewed scope and caps the verdict at Comment, so a cheaper review is also one that can no longer Approve. To spend LESS on reviews generally, prefer "effort". Nothing here makes a loop run LONGER: a review deadline bounds a run rather than extending it, and on a huge diff setting one lowers the cap from 5 to 3 rather than raising it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.`,
+        showInDialog: true
+      },
+      approachRounds: {
+        type: "number",
+        label: "Approach-signal round threshold: review",
+        category: "General",
+        requiresRestart: false,
+        default: 0,
+        description: "How many rounds a pull request must reach before the review may add one advisory paragraph saying the shape of the change, rather than the current patch, looks like the open question. It appears only when the diff has also grown several times over since the review first measured it, and never on an Approve. It is disclosure only: it adds no finding, changes no verdict, and blocks nothing \u2014 it exists because every finding is anchored to a line in the current diff, so the review can report where an approach leaks but never that a different approach would retire all of the leaks at once. Leave at 0 to keep the built-in threshold of 5 rounds; raise it to make the paragraph appear later, and set it very high to silence it. A value that is not a whole number above zero is ignored. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
+        showInDialog: true
+      }
+    }
+  },
+  output: {
+    type: "object",
+    label: "Output",
+    category: "General",
+    requiresRestart: false,
+    default: {},
+    description: "Settings for the CLI output.",
+    showInDialog: false,
+    properties: {
+      format: {
+        type: "enum",
+        label: "Output Format",
+        category: "General",
+        requiresRestart: false,
+        default: "text",
+        description: "The format of the CLI output. With `stream-json`, runs started with a prompt behave as non-interactive (headless), matching `--output-format stream-json`. Flags validated at argv parse time (`--include-partial-messages`, `--input-format stream-json`) still require the explicit `--output-format stream-json` flag.",
+        showInDialog: false,
+        // The values are the runtime's `OutputFormat` enum members, and the
+        // settingsSchema test pins these options against
+        // `Object.values(OutputFormat)`, so a format added in core fails
+        // that test until this list and the regenerated JSON follow.
+        options: [
+          { value: "text" /* TEXT */, label: "Text" },
+          { value: "json" /* JSON */, label: "JSON" },
+          { value: "stream-json" /* STREAM_JSON */, label: "Stream JSON" }
+        ]
+      },
+      showTimestamps: {
+        type: "boolean",
+        label: "Show Timestamps",
+        category: "General",
+        requiresRestart: false,
+        default: false,
+        description: "Show [HH:MM:SS] timestamp before each assistant response.",
+        showInDialog: true
+      }
+    }
+  },
+  dualOutput: {
+    type: "object",
+    label: "Dual Output",
+    category: "Advanced",
+    requiresRestart: true,
+    default: {},
+    description: "Dual-output sidecar mode: emit structured JSON events to a second channel while the TUI renders normally on stdout. See docs/users/features/dual-output.md. CLI flags take precedence over these settings.",
+    showInDialog: false,
+    properties: {
+      jsonFile: {
+        type: "string",
+        label: "JSON Event File",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: "File path for structured JSON event output. Equivalent to --json-file. Ignored if --json-fd or --json-file is also set.",
+        showInDialog: false
+      },
+      inputFile: {
+        type: "string",
+        label: "Remote Input File",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: "File path for remote input commands (JSONL). Equivalent to --input-file. Ignored if --input-file is also set.",
+        showInDialog: false
+      }
+    }
+  },
+  ui: {
+    type: "object",
+    label: "UI",
+    category: "UI",
+    requiresRestart: false,
+    default: {},
+    description: "User interface settings.",
+    showInDialog: false,
+    properties: {
+      theme: {
+        type: "string",
+        label: "Theme",
+        category: "UI",
+        requiresRestart: false,
+        default: "Qwen Dark",
+        description: "The color theme for the UI.",
+        showInDialog: true
+      },
+      brand: {
+        type: "object",
+        label: "Web Shell Brand",
+        category: "UI",
+        requiresRestart: false,
+        default: {},
+        description: "Product name and logo the Web Shell presents. Read from operator scopes only (System Defaults, User, System) \u2014 a workspace settings file cannot rebrand the shell, because it commonly comes from a repository the person opening the shell did not write. Not editable from the in-browser Settings page; edit settings.json directly.",
+        showInDialog: false,
+        properties: {
+          name: {
+            type: "string",
+            label: "Web Shell Brand Name",
+            category: "UI",
+            requiresRestart: false,
+            default: "",
+            description: "Product name shown in the Web Shell sidebar, welcome header, About panel and browser tab title. Sanitized to a single line; capped at 80 characters. A placeholder value that substitution would change ($VAR/${VAR} with the variable set) is refused with a warning on the daemon's stderr, because the substitution source is process-wide and a workspace could supply it; an unresolvable placeholder is kept verbatim. Leave empty to use the built-in name. The terminal banner has its own separate setting, `ui.customBannerTitle`.",
+            showInDialog: false
+          },
+          logoPath: {
+            type: "string",
+            label: "Web Shell Brand Logo Path",
+            category: "UI",
+            requiresRestart: false,
+            default: "",
+            description: 'Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading "~" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file \u2014 not a symlink, and not reachable through more than one hard link \u2014 at most 32 KiB both on disk and once UTF-8-decoded, and its root element must be a namespaced <svg> \u2014 a default xmlns, or an xmlns:svg binding on a prefix-bound root, is what makes it renderable as an image. Environment variable placeholders that would resolve are refused, as with the brand name. Leave empty to use the built-in logo.',
+            showInDialog: false
+          }
+        }
+      },
+      autoModeAcknowledged: {
+        type: "boolean",
+        label: "Auto Mode Acknowledged",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: "True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.",
+        showInDialog: false
+      },
+      statusLine: {
+        type: "object",
+        label: "Status Line",
+        category: "UI",
+        requiresRestart: false,
+        default: void 0,
+        description: 'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (project name, git branch, model, context usage) is shown automatically; set to `null` to explicitly disable the status line.',
+        showInDialog: false
+      },
+      customThemes: {
+        type: "object",
+        label: "Custom Themes",
+        category: "UI",
+        requiresRestart: false,
+        default: {},
+        description: "Custom theme definitions.",
+        showInDialog: false
+      },
+      hideBuiltinWorktreeIndicator: {
+        type: "boolean",
+        label: "Hide Built-in Worktree Indicator",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: "When true, the built-in `\u2387 worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself \u2014 otherwise an active worktree silently has no UI affordance.",
+        showInDialog: false
+      },
+      hideWindowTitle: {
+        type: "boolean",
+        label: "Hide Window Title",
+        category: "UI",
+        requiresRestart: true,
+        default: false,
+        description: "Hide the window title bar",
+        showInDialog: false
+      },
+      disableWorkflowKeywordTrigger: {
+        type: "boolean",
+        label: "Disable Workflow Keyword Trigger",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
+        showInDialog: true
+      },
+      showStatusInTitle: {
+        type: "boolean",
+        label: "Show Status in Title",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: "Show Qwen Code session name and status in the terminal window title",
+        showInDialog: true
+      },
+      hideTips: {
+        type: "boolean",
+        label: "Hide Tips",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: "Hide helpful tips in the UI",
+        showInDialog: true
+      },
+      history: {
+        type: "object",
+        label: "History",
+        category: "UI",
+        requiresRestart: false,
+        default: {},
+        description: "History display settings.",
+        showInDialog: false,
+        properties: {
+          collapseOnResume: {
+            type: "boolean",
+            label: "Collapse On Resume",
+            category: "UI",
+            requiresRestart: false,
+            default: false,
+            description: "Whether to collapse history by default when resuming a session.",
+            showInDialog: false
+          },
+          collapsePreviewCount: {
+            type: "number",
+            label: "Collapse Preview Count",
+            category: "UI",
+            requiresRestart: false,
+            default: 0,
+            description: "Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.",
+            showInDialog: false
+          }
+        }
+      },
+      showLineNumbers: {
+        type: "boolean",
+        label: "Show Line Numbers in Code",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: "Show line numbers in the code output.",
+        showInDialog: true
+      },
+      renderMode: {
+        type: "enum",
+        label: "Markdown Render Mode",
+        category: "UI",
+        requiresRestart: false,
+        default: "render",
+        description: 'Default Markdown display mode. Use "render" for rich visual previews, or "raw" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M; on macOS the terminal must send Option as Meta.',
+        showInDialog: true,
+        options: [
+          { value: "render", label: "Render visual previews" },
+          { value: "raw", label: "Show raw source" }
+        ]
+      },
+      showCitations: {
+        type: "boolean",
+        label: "Show Citations",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: "Show citations for generated text in the chat.",
+        showInDialog: false
+      },
+      customWittyPhrases: {
+        type: "array",
+        label: "Custom Witty Phrases",
+        category: "UI",
+        requiresRestart: false,
+        default: [],
+        description: "Custom witty phrases to display during loading.",
+        showInDialog: false
+      },
+      showResponseTokensPerSecond: {
+        type: "boolean",
+        label: "Show Response Tokens Per Second",
+        category: "UI",
+        requiresRestart: true,
+        default: false,
+        description: "Show a live tokens/sec estimate next to the response token counter while the model is streaming. Takes effect in the next session.",
+        showInDialog: true
+      },
+      enableWelcomeBack: {
+        type: "boolean",
+        label: "Show Welcome Back Dialog",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: 'Show welcome back dialog when returning to a project with conversation history. Choosing "Start new chat session" suppresses the dialog for that project until the project summary changes.',
+        showInDialog: true
+      },
+      enableUserFeedback: {
+        type: "boolean",
+        label: "Enable User Feedback",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: "Show optional feedback dialog after conversations to help improve Qwen performance.",
+        showInDialog: true
+      },
+      enableFollowupSuggestions: {
+        type: "boolean",
+        label: "Enable Follow-up Suggestions",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: "Show context-aware follow-up suggestions after task completion. Press Tab, Right Arrow, or Enter to accept into the input buffer.",
+        showInDialog: true
+      },
+      enableCacheSharing: {
+        type: "boolean",
+        label: "Enable Cache Sharing for Suggestions",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: "Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).",
+        showInDialog: false
+      },
+      enableSpeculation: {
+        type: "boolean",
+        label: "Enable Speculative Execution",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: "Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).",
+        showInDialog: false
+      },
+      accessibility: {
+        type: "object",
+        label: "Accessibility",
+        category: "UI",
+        requiresRestart: true,
+        default: {},
+        description: "Accessibility settings.",
+        showInDialog: false,
+        properties: {
+          enableLoadingPhrases: {
+            type: "boolean",
+            label: "Enable Loading Phrases",
+            category: "UI",
+            requiresRestart: true,
+            default: true,
+            description: "Enable loading phrases (disable for accessibility)",
+            showInDialog: true
+          },
+          screenReader: {
+            type: "boolean",
+            label: "Screen Reader Mode",
+            category: "UI",
+            requiresRestart: true,
+            default: false,
+            description: "Render output in plain-text to be more screen reader accessible",
+            showInDialog: false
+          }
+        }
+      },
+      feedbackLastShownTimestamp: {
+        type: "number",
+        label: "Feedback Last Shown Timestamp",
+        category: "UI",
+        requiresRestart: false,
+        default: 0,
+        description: "The last time the feedback dialog was shown.",
+        showInDialog: false
+      },
+      compactMode: {
+        type: "boolean",
+        label: "Compact Mode",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        // Retired everywhere: compact tool output is always on in the TUI
+        // (Ctrl+O opens the transcript there), and the web shell now fixes
+        // its compact view on too. Kept schema-registered (mirrors
+        // `voiceModel`) so settings files that still carry the key load
+        // without warnings; nothing reads the value anymore.
+        description: "Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.",
+        showInDialog: false
+      },
+      useTerminalBuffer: {
+        type: "boolean",
+        label: "Virtualized History (reduces flicker on long sessions)",
+        category: "UI",
+        requiresRestart: true,
+        default: true,
+        description: "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+\u2191/\u2193 (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal\u2019s own selection instead, hold Shift (or Option on macOS) while dragging. A single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu. These mouse interactions are controlled by ui.mouseTracking; disable that setting to hand the mouse fully back to the terminal.",
+        showInDialog: true
+      },
+      showScrollbar: {
+        type: "boolean",
+        label: "Show Scrollbar (Virtualized History)",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: "Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.",
+        showInDialog: true
+      },
+      mouseTracking: {
+        type: "boolean",
+        label: "Mouse Tracking",
+        category: "UI",
+        requiresRestart: true,
+        default: true,
+        description: "Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript \u2014 use Shift+\u2191/\u2193, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).",
+        showInDialog: true
+      },
+      showToolCallDetails: {
+        type: "boolean",
+        label: "Show Tool Call Details",
+        category: "UI",
+        requiresRestart: false,
+        default: true,
+        description: "Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; click a summary in Virtualized History or press Ctrl+O to expand its details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.",
+        showInDialog: true
+      },
+      showToolCallArgs: {
+        type: "boolean",
+        label: "Show Tool Call Arguments",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: 'Render tool calls on their own line with their raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into "Read 3 files". Useful when debugging MCP integrations or tool schemas. Applies wherever the arguments are available: live, resumed, agent-view and speculated turns. The row is capped at 2 wrapped lines (and never more than 1000 characters) and truncated with a `+N chars` marker; press Ctrl+O for the complete payload. Groups of running parallel subagents keep their compact roster, and daemon-attached sessions carry no arguments, so both keep the compact view \u2014 press Ctrl+O there. Does not change result-output truncation.',
+        showInDialog: true
+      },
+      shellOutputMaxLines: {
+        type: "number",
+        label: "Shell Output Max Lines",
+        category: "UI",
+        requiresRestart: false,
+        default: 5,
+        description: "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
+        showInDialog: true
+      },
+      hideBanner: {
+        type: "boolean",
+        label: "Hide Banner",
+        category: "UI",
+        requiresRestart: false,
+        default: false,
+        description: "Hide the startup ASCII banner and info panel.",
+        showInDialog: true
+      },
+      customBannerTitle: {
+        type: "string",
+        label: "Custom Banner Title",
+        category: "UI",
+        requiresRestart: false,
+        default: "",
+        description: 'Replace the default ">_ Qwen Code" title shown in the banner info panel. The version suffix is always appended.',
+        showInDialog: false
+      },
+      customBannerSubtitle: {
+        type: "string",
+        label: "Custom Banner Subtitle",
+        category: "UI",
+        requiresRestart: false,
+        default: "",
+        description: "Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.",
+        showInDialog: false
+      },
+      customAsciiArt: {
+        type: "object",
+        label: "Custom ASCII Art",
+        category: "UI",
+        requiresRestart: false,
+        default: void 0,
+        description: 'Replace the default QWEN ASCII art. Accepts an inline string, {"path": "..."}, or {"small": ..., "large": ...} for width-aware selection.',
+        showInDialog: false,
+        // The runtime accepts three shapes (inline string, {path}, or
+        // {small,large} where each tier is itself string-or-{path}). The
+        // SettingDefinition `type: 'object'` keeps the in-app dialog out of
+        // the way (we don't want a multi-line ASCII editor in the TUI), but
+        // the JSON Schema needs a real union so VS Code stops flagging the
+        // documented bare-string form.
+        // The `oneOf` here uses three *mutually exclusive* branches rather
+        // than one permissive object branch, so VS Code rejects nonsense
+        // like `{ path, small, large }` (which the runtime would also
+        // reject — see `normalizeTiers` in `customBanner.ts`).
+        jsonSchemaOverride: {
+          oneOf: [
+            { type: "string" },
+            // Bare `{path}` — no tier keys allowed.
+            {
+              type: "object",
+              properties: { path: { type: "string" } },
+              required: ["path"],
+              additionalProperties: false
+            },
+            // Width-aware `{small?, large?}` — `path` not allowed at this
+            // level; each tier is itself string-or-`{path}`.
+            {
+              type: "object",
+              properties: {
+                small: {
+                  oneOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      properties: { path: { type: "string" } },
+                      required: ["path"],
+                      additionalProperties: false
+                    }
+                  ]
+                },
+                large: {
+                  oneOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      properties: { path: { type: "string" } },
+                      required: ["path"],
+                      additionalProperties: false
+                    }
+                  ]
+                }
+              },
+              additionalProperties: false
+            }
+          ]
+        }
+      }
+    }
+  },
+  ide: {
+    type: "object",
+    label: "IDE",
+    category: "IDE",
+    requiresRestart: true,
+    default: {},
+    description: "IDE integration settings.",
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: "boolean",
+        label: "Auto-connect to IDE",
+        category: "IDE",
+        requiresRestart: true,
+        default: false,
+        description: "Enable IDE integration mode",
+        showInDialog: true
+      },
+      hasSeenNudge: {
+        type: "boolean",
+        label: "Has Seen IDE Integration Nudge",
+        category: "IDE",
+        requiresRestart: false,
+        default: false,
+        description: "Whether the user has seen the IDE integration nudge.",
+        showInDialog: false
+      }
+    }
+  },
+  privacy: {
+    type: "object",
+    label: "Privacy",
+    category: "Privacy",
+    requiresRestart: true,
+    default: {},
+    description: "Privacy-related settings.",
+    showInDialog: false,
+    properties: {
+      usageStatisticsEnabled: {
+        type: "boolean",
+        label: "Enable Usage Statistics",
+        category: "Privacy",
+        requiresRestart: true,
+        default: true,
+        description: "Enable collection of usage statistics",
+        showInDialog: true
+      }
+    }
+  },
+  telemetry: {
+    type: "object",
+    label: "Telemetry",
+    category: "Advanced",
+    requiresRestart: true,
+    default: void 0,
+    description: "Telemetry configuration.",
+    showInDialog: false,
+    jsonSchemaOverride: {
+      type: "object",
+      properties: {
+        userId: {
+          description: "Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.",
+          type: "string"
+        },
+        includeSensitiveSpanAttributes: {
+          description: "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
+          type: "boolean",
+          default: false
+        },
+        sensitiveSpanAttributeMaxLength: {
+          description: "Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.",
+          type: "integer",
+          minimum: 1,
+          maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+          default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH
+        },
+        resourceAttributes: {
+          description: "Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile \u2014 they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.",
+          type: "object",
+          additionalProperties: { type: "string" },
+          default: {}
+        },
+        metrics: {
+          description: "Per-signal cardinality controls for exported metrics.",
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            includeSessionId: {
+              description: "Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging \u2014 spans and logs still carry session.id.",
+              type: "boolean",
+              default: false
+            }
+          }
+        }
+      },
+      additionalProperties: true
+    }
+  },
+  outboundCorrelation: {
+    type: "object",
+    label: "Outbound Correlation",
+    category: "Advanced",
+    requiresRestart: true,
+    default: void 0,
+    description: "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) \u2014 separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope).",
+    showInDialog: false,
+    jsonSchemaOverride: {
+      type: "object",
+      properties: {
+        propagateTraceContext: {
+          description: "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false \u2014 trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
+          type: "boolean",
+          default: false
+        },
+        allowDynamicHeaderValues: {
+          description: "SECURITY-RELEVANT. Allow `modelProviders[].generationConfig.customHeaders` values to contain runtime placeholders \u2014 currently `${session_id}` \u2014 expanded per request instead of frozen at client construction. Default false: a value containing a placeholder is dropped rather than sent. Enable when a gateway requires a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session`). Which hosts receive the value and what the header is called are decided by the provider entry you attach the header to; this switch only decides whether `${session_id}` may be expanded from live session state and does not identify which settings source supplied the header.",
+          type: "boolean",
+          default: false
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  fastModel: {
+    type: "string",
+    label: "Fast Model",
+    category: "Model",
+    requiresRestart: false,
+    default: "",
+    description: "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
+    showInDialog: true
+  },
+  advisorModel: {
+    type: "string",
+    label: "Advisor Model",
+    category: "Model",
+    requiresRestart: false,
+    default: "",
+    description: "Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.",
+    showInDialog: true
+  },
+  visionModel: {
+    type: "string",
+    label: "Vision Model",
+    category: "Model",
+    requiresRestart: false,
+    default: "",
+    description: "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
+    showInDialog: true
+  },
+  compactionModel: {
+    type: "string",
+    label: "Compaction Model",
+    category: "Model",
+    requiresRestart: false,
+    default: "",
+    description: "Model used for chat compression (auto-compaction). Set with /model --compaction. Leave empty to fall back to the main model. A smaller/faster model reduces compression latency and cost.",
+    showInDialog: false
+  },
+  imageModel: {
+    type: "string",
+    label: "Image Model",
+    category: "Model",
+    requiresRestart: false,
+    default: "",
+    description: "Model used by the built-in image_gen tool. Set with /model --image. The selected route must set supportsImageGeneration: true (or legacy imageOnly: true) in modelProviders.",
+    showInDialog: false
+  },
+  visionBridgeTimeoutMs: {
+    type: "integer",
+    label: "Vision Bridge Timeout (ms)",
+    category: "Model",
+    // Read once in the Config constructor with no setter, so a mid-session
+    // change only takes effect on restart.
+    requiresRestart: true,
+    default: void 0,
+    minimum: 1,
+    maximum: 2147483647,
+    description: "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
+    showInDialog: false
+  },
+  modelFallbacks: {
+    type: "string",
+    label: "Model Fallbacks",
+    category: "Model",
+    requiresRestart: true,
+    default: "",
+    description: 'Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: "qwen-plus,qwen-turbo". Set via CLI with --fallback-model.',
+    showInDialog: true
+  },
+  voiceModel: {
+    type: "string",
+    label: "Voice Model",
+    category: "Model",
+    requiresRestart: false,
+    default: "",
+    description: "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
+    showInDialog: false
+  },
+  model: {
+    type: "object",
+    label: "Model",
+    category: "Model",
+    requiresRestart: false,
+    default: {},
+    description: "Settings related to the generative model.",
+    showInDialog: false,
+    properties: {
+      name: {
+        type: "string",
+        label: "Model",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: "The model to use for conversations.",
+        showInDialog: false
+      },
+      baseUrl: {
+        type: "string",
+        label: "Model Base URL",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
+        showInDialog: false
+      },
+      reasoningEffort: {
+        type: "enum",
+        label: "Reasoning Effort",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: 'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at "high"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
+        showInDialog: true,
+        options: [
+          { value: "low", label: "Low" },
+          { value: "medium", label: "Medium" },
+          { value: "high", label: "High" },
+          { value: "xhigh", label: "Extra High" },
+          { value: "max", label: "Max" }
+        ],
+        // WebShell persists none; the TUI keeps its existing tier-only control.
+        jsonSchemaOverride: {
+          type: "string",
+          enum: ["none", ...REASONING_EFFORT_TIERS]
+        }
+      },
+      maxSessionTurns: {
+        type: "integer",
+        label: "Max Session Turns",
+        category: "Model",
+        requiresRestart: false,
+        default: -1,
+        description: "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
+        showInDialog: false
+      },
+      maxWallTimeSeconds: {
+        type: "number",
+        label: "Max Wall-Clock Time (seconds)",
+        category: "Model",
+        requiresRestart: false,
+        default: -1,
+        description: "Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).",
+        showInDialog: false
+      },
+      goalTokenBudget: {
+        type: "integer",
+        label: "Goal Token Budget",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: "Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over Goal-turn model calls, direct foreground subagents, and Goal verifier/checkpoint checks; nested/background agents, other side queries, cron and notification turns are excluded). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.",
+        showInDialog: false
+      },
+      goalMaxTurns: {
+        type: "integer",
+        label: "Goal Max Turns",
+        category: "Model",
+        requiresRestart: true,
+        default: void 0,
+        description: "Goal-turn window armed on each new Goal. Every finished Goal turn counts, including user-driven turns; user turns are still admitted at the ceiling, but they can make the next autonomous continuation a wind-down. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window on top of the turns already finished. Unset runs Goals with no turn ceiling, and -1 says so explicitly -- but the opt-out only takes a ceiling off a Goal that has already spent it, on the resume or edit that follows; a Goal still under its ceiling keeps it. A ceiling is armed only on a Goal created after the change, so bounding a Goal already on the record means replacing it with /goal set, which starts a new Goal at revision 1 with its meters reset and its earlier evidence no longer citable, or clearing it and starting again. Zero, values above 10,000, other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.",
+        showInDialog: false,
+        minimum: -1,
+        maximum: GOAL_MAX_TURNS_CAP,
+        excludedValues: [0]
+      },
+      goalMaxActiveMinutes: {
+        type: "integer",
+        label: "Goal Max Active Minutes",
+        category: "Model",
+        requiresRestart: true,
+        default: void 0,
+        description: "Active-time window armed on each new Goal, in minutes of wall time while the Goal remains active, including waits and idle time between turns. Paused, blocked or stopped time does not count, nor does downtime across a restart; a suspended process is still charged. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window. The ceiling is read between turns, not by a timer, so a Goal can run well past it before it stops. Active time is measured between recorded transitions, so time in a turn that a restart interrupted is not charged. Unset runs Goals with no time ceiling, and -1 says so explicitly -- but the opt-out only takes a ceiling off a Goal that has already spent it, on the resume or edit that follows. A ceiling is armed only on a Goal created after the change, so bounding a Goal already on the record means replacing it with /goal set, which starts a new Goal at revision 1 with its meters reset and its earlier evidence no longer citable, or clearing it and starting again. Zero, values above 10,080 (one week), other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.",
+        showInDialog: false,
+        minimum: -1,
+        maximum: GOAL_MAX_ACTIVE_MINUTES_CAP,
+        excludedValues: [0]
+      },
+      goalCheckpointTimeoutSeconds: {
+        type: "integer",
+        label: "Goal Checkpoint Timeout (seconds, deprecated)",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        minimum: 1,
+        maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        description: "Deprecated. Goals no longer run evidence-checkpoint model calls, because the verifier reads the transcript directly, so this value has no effect. It is still accepted and validated as an integer between 1 and 900 so that existing settings files keep loading.",
+        showInDialog: false
+      },
+      maxToolCalls: {
+        type: "number",
+        label: "Max Tool Calls",
+        category: "Model",
+        requiresRestart: false,
+        default: -1,
+        description: 'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
+        showInDialog: false
+      },
+      maxSubagentDepth: {
+        type: "number",
+        label: "Max Sub-agent Nesting Depth",
+        category: "Model",
+        requiresRestart: false,
+        default: DEFAULT_MAX_SUBAGENT_DEPTH,
+        description: "Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.",
+        showInDialog: false
+      },
+      chatCompression: {
+        type: "object",
+        label: "Chat Compression",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: "Chat compression settings.",
+        showInDialog: false
+      },
+      sessionTokenLimit: {
+        type: "number",
+        label: "Session Token Limit",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: "The maximum number of tokens allowed in a session.",
+        showInDialog: false
+      },
+      skipNextSpeakerCheck: {
+        type: "boolean",
+        label: "Skip Next Speaker Check",
+        category: "Model",
+        requiresRestart: false,
+        default: true,
+        description: "Skip the next speaker check.",
+        showInDialog: false
+      },
+      skipWorkflowUsageWarning: {
+        type: "boolean",
+        label: "Skip Workflow Usage Warning",
+        category: "Model",
+        requiresRestart: false,
+        default: false,
+        description: "Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.",
+        showInDialog: false
+      },
+      skipLoopDetection: {
+        type: "boolean",
+        label: "Skip Loop Detection",
+        category: "Model",
+        requiresRestart: false,
+        default: true,
+        description: "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard.",
+        showInDialog: false
+      },
+      maxToolCallsPerTurn: {
+        type: "integer",
+        label: "Max Tool Calls Per Turn",
+        category: "Model",
+        requiresRestart: false,
+        default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        description: "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+        showInDialog: false
+      },
+      skipStartupContext: {
+        type: "boolean",
+        label: "Skip Startup Context",
+        category: "Model",
+        requiresRestart: true,
+        default: false,
+        description: "Avoid sending the workspace startup context at the beginning of each session.",
+        showInDialog: false
+      },
+      enableOpenAILogging: {
+        type: "boolean",
+        label: "Enable OpenAI Logging",
+        category: "Model",
+        requiresRestart: false,
+        default: false,
+        description: "Enable OpenAI logging.",
+        showInDialog: false
+      },
+      openAILoggingDir: {
+        type: "string",
+        label: "OpenAI Logging Directory",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: "Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.",
+        showInDialog: false
+      },
+      openAILogRetentionDays: {
+        type: "number",
+        label: "OpenAI Log Retention (days)",
+        category: "Model",
+        // LoadedSettings._merged is cached without verified setValue→recompute
+        // paths in all UI flows (same rationale as general.cleanupPeriodDays).
+        requiresRestart: true,
+        default: DEFAULT_OPENAI_LOG_RETENTION_DAYS,
+        minimum: 0,
+        description: "Number of days to retain OpenAI API log files written when enableOpenAILogging is on. Completed background housekeeping passes run at most once per day in interactive, headless, stream-json SDK, and ACP sessions. Short-lived non-interactive processes make best-effort progress, while persistent processes scan to completion. Set to 0 for minimum retention (~1 hour). For a custom openAILoggingDir, configure this at user or system scope; workspace-scoped retention is skipped because one directory can be shared by multiple workspaces.",
+        showInDialog: false
+      },
+      generationConfig: {
+        type: "object",
+        label: "Generation Configuration",
+        category: "Model",
+        requiresRestart: false,
+        default: void 0,
+        description: "Generation configuration settings.",
+        showInDialog: false,
+        properties: {
+          timeout: {
+            type: "number",
+            label: "Timeout",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Request timeout in milliseconds.",
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          streamIdleTimeoutMs: {
+            type: "integer",
+            label: "Stream Idle Timeout",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
+            minimum: 0,
+            maximum: 2147483647,
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          maxRetries: {
+            type: "number",
+            label: "Max Retries",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Maximum number of retries for failed requests.",
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          retryInitialDelayMs: {
+            type: "number",
+            label: "Retry Initial Delay",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Initial delay in milliseconds for stream rate-limit retries.",
+            minimum: 1,
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          retryMaxDelayMs: {
+            type: "number",
+            label: "Retry Max Delay",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Maximum delay in milliseconds for stream rate-limit retries.",
+            minimum: 1,
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          enableCacheControl: {
+            type: "boolean",
+            label: "Enable Cache Control",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: true,
+            description: "Enable provider prompt-cache controls.",
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          forceGlobalCacheScope: {
+            type: "boolean",
+            label: "Force Global Cache Scope",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: false,
+            description: "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          cacheRetention: {
+            type: "enum",
+            label: "Anthropic Cache Retention",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Default Anthropic cache_control retention. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
+            parentKey: "generationConfig",
+            showInDialog: false,
+            options: [
+              { value: "ephemeral", label: "Ephemeral (5m, Default)" },
+              { value: "1h", label: "Extended (1h)" }
+            ]
+          },
+          cacheRetentionByBlock: {
+            type: "object",
+            label: "Anthropic Cache Retention By Block",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Optional per-anchor override for Anthropic cache retention. Keys (system, tool, user.last) override generationConfig.cacheRetention when present. Resolution is normalized so retention is monotonically non-increasing in wire order (tool -> system -> user.last, per Anthropic's 'longer TTL must precede shorter TTL' rule): setting one anchor to '1h' promotes every anchor before it on the wire to '1h' as well, so any combination here is valid.",
+            parentKey: "generationConfig",
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: "object",
+              properties: {
+                system: { type: "string", enum: ["ephemeral", "1h"] },
+                tool: { type: "string", enum: ["ephemeral", "1h"] },
+                "user.last": { type: "string", enum: ["ephemeral", "1h"] }
+              },
+              additionalProperties: false
+            }
+          },
+          splitToolMedia: {
+            type: "boolean",
+            label: "Split Tool Result Media",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: true,
+            description: 'When true, media (images / audio / video / files) returned by tool calls \u2014 including the built-in read_file and MCP tools \u2014 is split into a follow-up user message instead of being embedded in the `role: "tool"` message. The OpenAI Chat Completions spec only permits text on tool messages, so strict OpenAI-compatible servers (e.g., doubao / new-api / LM Studio) silently drop or reject embedded media and the model never sees an image read via read_file (QwenLM/qwen-code#4876, #3616). Default true is spec-compliant and safe for permissive providers; set false only to restore the legacy embed-in-tool-message behavior.',
+            parentKey: "generationConfig",
+            showInDialog: false
+          },
+          toolResultContentFormat: {
+            type: "enum",
+            label: "Tool Result Content Format",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: "parts",
+            description: 'Controls how text-only tool results are serialized in OpenAI-compatible requests. Use "parts" for the default content-part array shape. Use "string" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia.',
+            parentKey: "generationConfig",
+            showInDialog: false,
+            options: [
+              { value: "parts", label: "Content Parts (Default)" },
+              { value: "string", label: "String" }
+            ]
+          },
+          schemaCompliance: {
+            type: "enum",
+            label: "Tool Schema Compliance",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: "auto",
+            description: 'The compliance mode for tool schemas sent to the model. Use "openapi_30" for strict OpenAPI 3.0 compatibility (e.g., for Gemini).',
+            parentKey: "generationConfig",
+            showInDialog: false,
+            options: [
+              { value: "auto", label: "Auto (Default)" },
+              { value: "openapi_30", label: "OpenAPI 3.0 Strict" }
+            ]
+          },
+          contextWindowSize: {
+            type: "number",
+            label: "Context Window Size",
+            category: "Generation Configuration",
+            requiresRestart: false,
+            default: void 0,
+            description: "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
+            parentKey: "generationConfig",
+            showInDialog: false
+          }
+        }
+      }
+    }
+  },
+  modelPricing: {
+    type: "object",
+    label: "Model Pricing",
+    category: "Model",
+    requiresRestart: false,
+    default: void 0,
+    description: 'Optional per-model pricing for cost estimation in /stats model. Example: {"qwen3-coder": {"inputPerMillionTokens": 0.30, "outputPerMillionTokens": 1.20}}',
+    showInDialog: false
+  },
+  context: {
+    type: "object",
+    label: "Context",
+    category: "Context",
+    requiresRestart: false,
+    default: {},
+    description: "Settings for managing context provided to the model.",
+    showInDialog: false,
+    properties: {
+      fileName: {
+        type: "object",
+        label: "Context File Name",
+        category: "Context",
+        requiresRestart: false,
+        default: void 0,
+        description: "The name of the context file or files.",
+        showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } }
+          ]
+        }
+      },
+      importFormat: {
+        type: "enum",
+        label: "Memory Import Format",
+        category: "Context",
+        requiresRestart: false,
+        default: void 0,
+        description: "The format to use when importing memory.",
+        showInDialog: false,
+        options: [
+          { value: "tree", label: "Tree" },
+          { value: "flat", label: "Flat" }
+        ]
+      },
+      includeDirectories: {
+        type: "array",
+        label: "Include Directories",
+        category: "Context",
+        requiresRestart: false,
+        default: [],
+        description: "Additional directories to include in the workspace context. Missing directories will be skipped with a warning.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */
+      },
+      loadFromIncludeDirectories: {
+        type: "boolean",
+        label: "Load Memory From Include Directories",
+        category: "Context",
+        requiresRestart: false,
+        default: false,
+        description: "Whether to load memory files from include directories.",
+        showInDialog: false
+      },
+      clearContextOnIdle: {
+        type: "object",
+        label: "Clear Context On Idle",
+        category: "Context",
+        requiresRestart: false,
+        default: {},
+        description: "Settings for clearing stale or oversized tool result context. Use -1 to disable a threshold.",
+        showInDialog: false,
+        properties: {
+          toolResultsThresholdMinutes: {
+            type: "number",
+            label: "Tool Results Idle Threshold (minutes)",
+            category: "Context",
+            requiresRestart: false,
+            default: 60,
+            description: "Minutes of inactivity before clearing old tool result content. Use -1 to disable.",
+            showInDialog: false
+          },
+          toolResultsNumToKeep: {
+            type: "number",
+            label: "Tool Results Number To Keep",
+            category: "Context",
+            requiresRestart: false,
+            default: 5,
+            description: "Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.",
+            jsonSchemaOverride: {
+              type: "integer",
+              default: 5,
+              description: "Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1."
+            },
+            showInDialog: false
+          },
+          toolResultsTotalCharsThreshold: {
+            type: "number",
+            label: "Tool Results Total Chars Threshold",
+            category: "Context",
+            requiresRestart: false,
+            default: DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
+            description: "Total compactable tool result output characters allowed in history before clearing oldest results. When exceeded, oldest results are cleared down to half this threshold (best effort) to preserve the provider prompt cache on later turns. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
+            showInDialog: false
+          }
+        }
+      },
+      fileFiltering: {
+        type: "object",
+        label: "File Filtering",
+        category: "Context",
+        requiresRestart: true,
+        default: {},
+        description: "Settings for git-aware file filtering.",
+        showInDialog: false,
+        properties: {
+          respectGitIgnore: {
+            type: "boolean",
+            label: "Respect .gitignore",
+            category: "Context",
+            requiresRestart: true,
+            default: true,
+            description: "Respect .gitignore files when searching",
+            showInDialog: true
+          },
+          respectQwenIgnore: {
+            type: "boolean",
+            label: "Respect .qwenignore",
+            category: "Context",
+            requiresRestart: true,
+            default: true,
+            description: "Respect .qwenignore and configured custom ignore files when searching",
+            showInDialog: true
+          },
+          customIgnoreFiles: {
+            type: "array",
+            label: "Custom Ignore Files",
+            category: "Context",
+            requiresRestart: true,
+            default: [...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES],
+            description: "Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.",
+            showInDialog: false,
+            items: { type: "string" }
+          },
+          enableRecursiveFileSearch: {
+            type: "boolean",
+            label: "Enable Recursive File Search",
+            category: "Context",
+            requiresRestart: true,
+            default: true,
+            description: "Enable recursive file search functionality",
+            showInDialog: false
+          },
+          enableFuzzySearch: {
+            type: "boolean",
+            label: "Enable Fuzzy Search",
+            category: "Context",
+            requiresRestart: true,
+            default: true,
+            description: "Enable fuzzy search when searching for files.",
+            showInDialog: true
+          }
+        }
+      },
+      autoCompactThreshold: {
+        type: "number",
+        label: "Auto-Compact Threshold",
+        category: "Context",
+        requiresRestart: false,
+        default: void 0,
+        description: "Target fraction of the context window at which auto-compaction triggers (greater than 0, up to 1). Acts as a ceiling on the trigger: on large windows this is the effective trigger (~85%); on smaller windows compaction may fire earlier to leave room to summarize. Default is 0.85 (85%).",
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: "number",
+          minimum: 0.01,
+          maximum: 1
+        }
+      }
+    }
+  },
+  memory: {
+    type: "object",
+    label: "Memory",
+    category: "Memory",
+    requiresRestart: false,
+    default: {},
+    description: "Settings for managed auto-memory.",
+    showInDialog: false,
+    properties: {
+      enableManagedAutoMemory: {
+        type: "boolean",
+        label: "Enable Managed Auto-Memory",
+        category: "Memory",
+        requiresRestart: false,
+        default: true,
+        description: "Enable background extraction of memories from conversations.",
+        showInDialog: false
+      },
+      enableManagedAutoDream: {
+        type: "boolean",
+        label: "Enable Managed Auto-Dream",
+        category: "Memory",
+        requiresRestart: false,
+        default: true,
+        description: "Enable automatic consolidation (dream) of collected memories.",
+        showInDialog: false
+      },
+      enableAutoSkill: {
+        type: "boolean",
+        label: "Enable Auto Skill",
+        category: "Memory",
+        requiresRestart: false,
+        default: false,
+        description: "Enable background review for reusable project skills after tool-heavy sessions.",
+        showInDialog: false
+      },
+      autoSkillConfirm: {
+        type: "boolean",
+        label: "Confirm Auto Skills Before Saving",
+        category: "Memory",
+        requiresRestart: false,
+        default: true,
+        description: "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
+        showInDialog: false
+      },
+      agentTimeoutMinutes: {
+        type: "number",
+        label: "Memory Agent Timeout (minutes)",
+        category: "Memory",
+        requiresRestart: true,
+        default: void 0,
+        minimum: 0,
+        description: "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2\u20135 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+        showInDialog: false
+      },
+      agentMaxTurns: {
+        type: "number",
+        label: "Memory Agent Max Turns",
+        category: "Memory",
+        requiresRestart: true,
+        default: void 0,
+        minimum: 0,
+        description: "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5\u20138); 0 disables the turn limit.",
+        showInDialog: false
+      },
+      enableTeamMemory: {
+        type: "boolean",
+        label: "Enable Team Memory",
+        category: "Memory",
+        requiresRestart: false,
+        default: false,
+        description: "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",
+        showInDialog: false
+      },
+      enableTeamMemorySync: {
+        type: "boolean",
+        label: "Enable Team Memory Git Sync",
+        category: "Memory",
+        requiresRestart: false,
+        default: false,
+        description: "When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.",
+        showInDialog: false
+      }
+    }
+  },
+  slashCommands: {
+    type: "object",
+    label: "Slash Commands",
+    category: "Advanced",
+    requiresRestart: true,
+    default: {},
+    description: "Configuration for slash commands exposed by the CLI. Useful for locking down the command surface in multi-tenant or enterprise deployments.",
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: "array",
+        label: "Disabled Slash Commands",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: 'Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. "myext.deploy"), except that a skill command is gated under either spelling \u2014 its registered name (rust:pdf) or the name its SKILL.md authors (pdf) \u2014 so an entry written before that prefix existed still gates it. Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.',
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      }
+    }
+  },
+  skills: {
+    type: "object",
+    label: "Skills",
+    category: "Advanced",
+    requiresRestart: false,
+    default: {},
+    description: "Configuration for skills (SKILL.md-based capabilities) exposed to the model.",
+    showInDialog: false,
+    properties: {
+      disabledLevels: {
+        type: "array",
+        label: "Disabled Skill Levels",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: "Skill discovery levels to skip entirely. Supported levels are project, user, extension, and bundled. UNION-merged across settings scopes.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */,
+        items: {
+          type: "string",
+          enum: ["project", "user", "extension", "bundled"]
+        }
+      },
+      disabled: {
+        type: "array",
+        label: "Disabled Skills",
+        category: "Advanced",
+        requiresRestart: false,
+        default: void 0,
+        description: "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. An extension skill matches under either its registered name (rust:pdf) or the name its SKILL.md authors (pdf), so an entry written before that prefix existed still blocks it. UNION-merged across systemDefaults/user/workspace/system scopes \u2014 workspace cannot remove entries defined in higher scopes.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      defaultDisabled: {
+        type: "array",
+        label: "Default Disabled Skills",
+        category: "Advanced",
+        requiresRestart: false,
+        default: void 0,
+        description: "Skill names disabled by default unless explicitly enabled through skills.enabled. Matched case-insensitively and UNION-merged across settings scopes. An extension skill is disabled under either its registered name (rust:pdf) or the name its SKILL.md authors (pdf). skills.disabled always wins; skills.enabled cancels an entry here only when the two lists spell the name the same way.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      enabled: {
+        type: "array",
+        label: "Enabled Skills",
+        category: "Advanced",
+        requiresRestart: false,
+        default: void 0,
+        description: "Explicit opt-ins, matched against the skill name as registered \u2014 an extension skill is rust:pdf there. An entry spelled as the registered name overrides a matching skills.defaultDisabled entry and, for an extension skill, both the default the owning extension declares and the enablement stored for this workspace. A bare pdf entry never matches as a grant; it only cancels an identically-spelled skills.defaultDisabled entry, and once cancelled the enablement stored for this workspace decides, else the default the owning extension declares. Matched case-insensitively and UNION-merged across settings scopes. Cannot override skills.disabled or re-enable skills from a skills.disabledLevels-excluded level.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      directories: {
+        type: "array",
+        label: "Skill Directories",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: "Additional directories to scan for skills (SKILL.md files). Entries should be absolute paths or ~-prefixed; relative paths resolve against the working directory. Each directory is scanned one level deep for subdirectories containing a SKILL.md file. Skills from these directories are loaded at user level, after the default user skill directories; a custom skill with the same name as one in the default user directories will not override it. Only point this at trusted locations, since skills can define hooks and commands.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      }
+    }
+  },
+  permissions: {
+    type: "object",
+    label: "Permissions",
+    category: "Tools",
+    requiresRestart: true,
+    default: {},
+    description: "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
+    showInDialog: false,
+    properties: {
+      allow: {
+        type: "array",
+        label: "Allow Rules",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: 'Tools or commands that are auto-approved without confirmation. Examples: "ShellTool", "Bash(git *)", "ReadFileTool".',
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      ask: {
+        type: "array",
+        label: "Ask Rules",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Tools or commands that always require user confirmation. Takes precedence over allow rules.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      deny: {
+        type: "array",
+        label: "Deny Rules",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: 'Tools or commands that are always blocked. Highest priority rule. Examples: "ShellTool", "Bash(rm -rf *)".',
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      autoMode: {
+        type: "object",
+        label: "Auto Mode",
+        category: "Tools",
+        requiresRestart: true,
+        default: {},
+        description: "Settings consumed by the AUTO approval mode classifier.",
+        showInDialog: false,
+        properties: {
+          classifier: {
+            type: "object",
+            label: "Auto Mode Classifier",
+            category: "Tools",
+            requiresRestart: true,
+            default: {},
+            description: "Runtime controls for the AUTO approval mode classifier.",
+            showInDialog: false,
+            properties: {
+              timeouts: {
+                type: "object",
+                label: "Auto Mode Classifier Timeouts",
+                category: "Tools",
+                requiresRestart: true,
+                default: {},
+                description: "Timeouts for the two AUTO classifier stages, in milliseconds.",
+                showInDialog: false,
+                properties: {
+                  stage1Ms: {
+                    type: "number",
+                    label: "Auto Mode Stage 1 Timeout",
+                    category: "Tools",
+                    requiresRestart: true,
+                    default: void 0,
+                    description: "Timeout in milliseconds for the fast stage-1 AUTO classifier.",
+                    showInDialog: false
+                  },
+                  stage2Ms: {
+                    type: "number",
+                    label: "Auto Mode Stage 2 Timeout",
+                    category: "Tools",
+                    requiresRestart: true,
+                    default: void 0,
+                    description: "Timeout in milliseconds for the stage-2 AUTO classifier review.",
+                    showInDialog: false
+                  }
+                }
+              },
+              thinking: {
+                type: "object",
+                label: "Auto Mode Classifier Thinking",
+                category: "Tools",
+                requiresRestart: true,
+                default: {},
+                description: "Provider/API-level thinking controls for the AUTO classifier.",
+                showInDialog: false,
+                properties: {
+                  stage2Enabled: {
+                    type: "boolean",
+                    label: "Auto Mode Stage 2 Thinking",
+                    category: "Tools",
+                    requiresRestart: true,
+                    default: false,
+                    description: "Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.",
+                    showInDialog: false
+                  }
+                }
+              }
+            }
+          },
+          hints: {
+            type: "object",
+            label: "Classifier Hints",
+            category: "Tools",
+            requiresRestart: true,
+            default: {},
+            description: "Natural-language hints injected into the classifier system prompt.",
+            showInDialog: false,
+            properties: {
+              allow: {
+                type: "array",
+                label: "Auto Mode Allow Hints",
+                category: "Tools",
+                requiresRestart: true,
+                default: void 0,
+                description: "Natural-language descriptions of actions AUTO mode should allow.",
+                showInDialog: false,
+                mergeStrategy: "union" /* UNION */
+              },
+              softDeny: {
+                type: "array",
+                label: "Auto Mode Soft-Deny Hints",
+                category: "Tools",
+                requiresRestart: true,
+                default: void 0,
+                description: "Natural-language descriptions of destructive / irreversible actions AUTO mode should block unless the user explicitly authorised that exact action and scope.",
+                showInDialog: false,
+                mergeStrategy: "union" /* UNION */
+              },
+              hardDeny: {
+                type: "array",
+                label: "Auto Mode Hard-Deny Hints",
+                category: "Tools",
+                requiresRestart: true,
+                default: void 0,
+                description: "Natural-language descriptions of security-boundary actions the AUTO classifier must block even when an autoMode allow hint or recent user request would normally authorise them. Does not override permissions.allow; use permissions.deny for deterministic hard permission rules.",
+                showInDialog: false,
+                mergeStrategy: "union" /* UNION */
+              },
+              deny: {
+                type: "array",
+                label: "Auto Mode Deny Hints (legacy)",
+                category: "Tools",
+                requiresRestart: true,
+                default: void 0,
+                description: "Deprecated alias for `softDeny`. Entries here are merged into the SOFT BLOCK user section so existing settings keep working; new configurations should use `softDeny` or `hardDeny` instead.",
+                showInDialog: false,
+                mergeStrategy: "union" /* UNION */
+              }
+            }
+          },
+          environment: {
+            type: "array",
+            label: "Auto Mode Environment",
+            category: "Tools",
+            requiresRestart: true,
+            default: void 0,
+            description: "Environment / context lines injected into the classifier system prompt.",
+            showInDialog: false,
+            mergeStrategy: "union" /* UNION */
+          },
+          classifyAllShell: {
+            type: "boolean",
+            label: "Classify All Shell Commands",
+            category: "Tools",
+            requiresRestart: true,
+            default: false,
+            description: "Route ALL shell commands through the auto-mode classifier, including read-only commands that would otherwise be auto-approved. Provides defense-in-depth for production environments.",
+            showInDialog: false
+          },
+          mcp: {
+            type: "object",
+            label: "Auto Mode MCP Tools",
+            category: "Tools",
+            requiresRestart: true,
+            default: {},
+            description: "AUTO classifier controls for third-party MCP tools.",
+            showInDialog: false,
+            properties: {
+              forwardArguments: {
+                type: "boolean",
+                label: "Forward MCP Arguments To Classifier",
+                category: "Tools",
+                requiresRestart: true,
+                default: true,
+                description: "Forward MCP tool arguments (bounded and truncated) to the AUTO classifier so it can judge what the agent is about to send to the server. When false the classifier sees only the tool name, which usually results in a conservative block.",
+                showInDialog: false
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  tools: {
+    type: "object",
+    label: "Tools",
+    category: "Tools",
+    requiresRestart: true,
+    default: {},
+    description: "Settings for built-in and custom tools.",
+    showInDialog: false,
+    properties: {
+      codeModeOnly: {
+        type: "boolean",
+        label: "Code Mode Only (Experimental)",
+        category: "Tools",
+        requiresRestart: true,
+        default: false,
+        description: "Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.",
+        showInDialog: true
+      },
+      sandbox: {
+        type: "object",
+        label: "Sandbox",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Sandbox execution environment (can be a boolean or a path string).",
+        showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [{ type: "boolean" }, { type: "string" }]
+        }
+      },
+      sandboxImage: {
+        type: "string",
+        label: "Sandbox Image",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
+        showInDialog: false
+      },
+      webSearch: {
+        type: "object",
+        label: "Web Search",
+        category: "Tools",
+        requiresRestart: true,
+        default: {},
+        description: "Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: "boolean",
+            label: "Enable WebSearch",
+            category: "Tools",
+            requiresRestart: true,
+            default: void 0,
+            description: "Set false to disable the built-in web_search tool. Automatic startup activation requires leaving enabled, model, and the env-only backend unset. Setting true permits automatic derivation only when the env-only backend is also unset; otherwise a model is required. Env override: ENABLE_WEB_SEARCH.",
+            showInDialog: true
+          },
+          model: {
+            type: "string",
+            label: "Search Model",
+            category: "Tools",
+            requiresRestart: true,
+            default: void 0,
+            description: 'Model selector for the explicit search path ("modelId" or "authType:modelId"). With WEB_SEARCH_BASE_URL it is the plain model id for that endpoint; otherwise it must match a DashScope-compatible modelProviders entry with an envKey. The automatic path uses qwen3.8-flash. Env override: WEB_SEARCH_MODEL.',
+            showInDialog: true
+          },
+          webExtractor: {
+            type: "boolean",
+            label: "Open Result Pages",
+            category: "Tools",
+            requiresRestart: true,
+            default: true,
+            description: "Let the search agent open and read result pages (DashScope web_extractor) for better-grounded answers. Billed separately by DashScope. Env override: WEB_SEARCH_EXTRACTOR.",
+            showInDialog: true
+          },
+          timeoutMs: {
+            type: "integer",
+            label: "Search Timeout (ms)",
+            category: "Tools",
+            requiresRestart: true,
+            default: void 0,
+            minimum: 1,
+            maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
+            description: `Total time budget for one web_search call, in milliseconds (default ${DEFAULT_WEB_SEARCH_TIMEOUT_MS}, max ${MAX_WEB_SEARCH_TIMEOUT_MS}; other values fall back to the default). The search agent runs several queries and may open result pages; a search that exceeds the budget returns whatever arrived as a partial result once at least one search call has completed \u2014 if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. A per-tool execution cap (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) below this budget fires first and discards the partial result; keep it above timeoutMs. Env override: WEB_SEARCH_TIMEOUT_MS.`,
+            showInDialog: true
+          },
+          maxPerSession: {
+            type: "integer",
+            label: "Max Searches per Session",
+            category: "Tools",
+            requiresRestart: true,
+            default: void 0,
+            minimum: 1,
+            maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
+            description: `Maximum web_search calls in one session (default ${DEFAULT_WEB_SEARCH_MAX_PER_SESSION}, max ${MAX_WEB_SEARCH_MAX_PER_SESSION}; other values fall back to the default). The count is shared with subagents and resets when the session changes (/clear, /resume, branching). Once it is reached, further searches are skipped and the model is told to continue with what it has gathered. Env override: WEB_SEARCH_MAX_PER_SESSION.`,
+            showInDialog: true
+          }
+        }
+      },
+      toolSearch: {
+        type: "object",
+        label: "Tool Search",
+        category: "Tools",
+        requiresRestart: true,
+        default: {},
+        description: "Settings for the ToolSearch discovery mechanism.",
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: "boolean",
+            label: "Enable ToolSearch",
+            category: "Tools",
+            requiresRestart: true,
+            default: true,
+            description: "When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.",
+            showInDialog: true
+          },
+          threshold: {
+            type: "number",
+            label: "Deferred Tool Preload Threshold (%)",
+            category: "Tools",
+            requiresRestart: true,
+            default: 10,
+            description: "Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.",
+            showInDialog: true,
+            // A percentage of the context window: values above 100 would set a
+            // budget larger than the window and unconditionally preload every
+            // deferred tool, defeating the point of the threshold. Bound it the
+            // way autoCompactThreshold bounds its fraction.
+            jsonSchemaOverride: {
+              type: "number",
+              minimum: 0,
+              maximum: 100,
+              default: 10
+            }
+          }
+        }
+      },
+      listDirectory: {
+        type: "object",
+        label: "List Directory",
+        category: "Tools",
+        requiresRestart: true,
+        default: {},
+        description: "Settings for the built-in list_directory tool. Opt-in: the tool is disabled by default because glob covers directory listing in most cases.",
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: "boolean",
+            label: "Enable ListDirectory",
+            category: "Tools",
+            requiresRestart: true,
+            default: false,
+            description: "Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).",
+            showInDialog: true
+          }
+        }
+      },
+      todoWrite: {
+        type: "object",
+        label: "Todo Write",
+        category: "Tools",
+        requiresRestart: true,
+        default: {},
+        description: "Settings for the built-in todo_write tool. Opt-in: the tool is disabled by default.",
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: "boolean",
+            label: "Enable Todo Write",
+            category: "Tools",
+            requiresRestart: true,
+            default: false,
+            description: "Enable the built-in todo_write tool and its system-prompt guidance.",
+            showInDialog: true
+          }
+        }
+      },
+      shell: {
+        type: "object",
+        label: "Shell",
+        category: "Tools",
+        requiresRestart: false,
+        default: {},
+        description: "Settings for shell execution.",
+        showInDialog: false,
+        properties: {
+          enableInteractiveShell: {
+            type: "boolean",
+            label: "Interactive Shell (PTY)",
+            category: "Tools",
+            requiresRestart: true,
+            default: true,
+            description: "Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.",
+            showInDialog: true
+          },
+          pager: {
+            type: "string",
+            label: "Pager",
+            category: "Tools",
+            requiresRestart: false,
+            default: void 0,
+            description: "The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.",
+            showInDialog: false
+          },
+          showColor: {
+            type: "boolean",
+            label: "Show Color",
+            category: "Tools",
+            requiresRestart: false,
+            default: false,
+            description: "Show color in shell output.",
+            showInDialog: false
+          },
+          defaultTimeoutMs: {
+            type: "integer",
+            minimum: 0,
+            maximum: 6e5,
+            label: "Default Command Timeout (ms)",
+            category: "Tools",
+            requiresRestart: true,
+            default: void 0,
+            description: "Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.",
+            showInDialog: false
+          },
+          heartbeatIntervalMs: {
+            type: "integer",
+            minimum: 0,
+            maximum: 6e5,
+            label: "Silent Command Heartbeat Interval (ms)",
+            category: "Tools",
+            requiresRestart: true,
+            default: void 0,
+            description: "Interval, in milliseconds, between liveness heartbeats emitted while a foreground shell command produces no output. Heartbeats are forwarded to ACP clients and stream-json consumers so they can tell a silent command from a dead session. When unset, heartbeats fire every 10000 ms (10 seconds). Set to 0 to disable heartbeats.",
+            showInDialog: false
+          }
+        }
+      },
+      // Legacy tool permission fields – kept for backward compatibility.
+      core: {
+        type: "array",
+        label: "Core Tools (deprecated)",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Deprecated. permissions.allow cannot reproduce this registration restriction because it only auto-approves calls. Use tools.eager to defer unlisted eager-by-default tools or permissions.deny to remove tools. An empty list is treated as unset and disables nothing.",
+        showInDialog: false
+      },
+      allowed: {
+        type: "array",
+        label: "Allowed Tools (deprecated)",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: "Deprecated. Use permissions.allow instead.",
+        showInDialog: false
+      },
+      exclude: {
+        type: "array",
+        label: "Exclude Tools (deprecated)",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Deprecated. Use permissions.deny instead.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      disabled: {
+        type: "array",
+        label: "Disabled Tools",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      visible: {
+        type: "array",
+        label: "Visible Deferred Tools",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      eager: {
+        type: "array",
+        label: "Eager Tool Schemas",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.",
+        showInDialog: false
+      },
+      approvalMode: {
+        type: "enum",
+        label: "Tool Approval Mode",
+        category: "Tools",
+        requiresRestart: false,
+        default: "auto" /* AUTO */,
+        description: "Approval mode for tool usage. Controls how tools are approved before execution.",
+        showInDialog: true,
+        options: [
+          { value: "plan" /* PLAN */, label: "Plan" },
+          { value: "default" /* DEFAULT */, label: "Ask permissions" },
+          { value: "auto-edit" /* AUTO_EDIT */, label: "Auto Edit" },
+          { value: "auto" /* AUTO */, label: "Auto" },
+          { value: "yolo" /* YOLO */, label: "YOLO" }
+        ]
+      },
+      autoAccept: {
+        type: "boolean",
+        label: "Auto Accept",
+        category: "Tools",
+        requiresRestart: false,
+        default: false,
+        description: "Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.",
+        showInDialog: false
+      },
+      discoveryCommand: {
+        type: "string",
+        label: "Tool Discovery Command",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Command to run for tool discovery.",
+        showInDialog: false
+      },
+      callCommand: {
+        type: "string",
+        label: "Tool Call Command",
+        category: "Tools",
+        requiresRestart: true,
+        default: void 0,
+        description: "Command to run for tool calls.",
+        showInDialog: false
+      },
+      useRipgrep: {
+        type: "boolean",
+        label: "Use Ripgrep",
+        category: "Tools",
+        requiresRestart: false,
+        default: true,
+        description: "Use ripgrep for file content search instead of the fallback implementation. Provides faster search performance.",
+        showInDialog: false
+      },
+      useBuiltinRipgrep: {
+        type: "boolean",
+        label: "Use Builtin Ripgrep",
+        category: "Tools",
+        requiresRestart: false,
+        default: true,
+        description: 'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
+        showInDialog: false
+      },
+      workflowsEnabled: {
+        type: "boolean",
+        label: "Dynamic Workflows",
+        category: "Tools",
+        // The Workflow tool is registered once while building the tool
+        // registry and /workflows is gated when commands load. Keyword
+        // steering reads the same startup-built Config on each submission,
+        // so changing the settings file mid-session cannot update any of the
+        // three surfaces until the next launch.
+        requiresRestart: true,
+        default: false,
+        description: 'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
+        showInDialog: true
+      },
+      workflowSizeGuideline: {
+        type: "enum",
+        label: "Dynamic Workflow Size",
+        category: "Tools",
+        // Read on the next prompt: the change is announced to the model then,
+        // and runs started afterwards use the new agent threshold.
+        requiresRestart: false,
+        default: "medium",
+        description: 'Advisory size guideline for the dynamic workflows the model writes: "small" aims for fewer than 5 agents, "medium" (the default) fewer than 15, "large" fewer than 50, and "unrestricted" sends no guideline. It is a guideline, not an enforced limit. It also sets the agent count at which a running workflow is flagged as large (QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS overrides that threshold). A change takes effect from your next message.',
+        showInDialog: true,
+        options: [
+          { value: "small", label: "Small (under 5 agents)" },
+          { value: "medium", label: "Medium (under 15 agents)" },
+          { value: "large", label: "Large (under 50 agents)" },
+          { value: "unrestricted", label: "Unrestricted (no guideline)" }
+        ]
+      },
+      workflowNameOnly: {
+        type: "boolean",
+        label: "Named Workflows Only",
+        category: "Tools",
+        // The Workflow tool builds its description and parameter schema from
+        // this once, while the tool registry is built.
+        requiresRestart: true,
+        default: false,
+        description: "Restrict the model to running named workflows: saved workflows and the workflows extensions ship, called by name. The model cannot run an inline script or a script path, and a running script cannot nest one by path, so every run the model starts can be matched by a Workflow(name:...) permission rule. It does not replace an approval policy: the model can still save a new workflow file and run it by name, which an approval rule scoped to specific names or script digests will ask about. Runs a host starts over ACP (run-saved, run-script, retry, rerun) are not restricted. QWEN_CODE_WORKFLOW_NAME_ONLY=1 turns it on too. A workspace may set this to true only.",
+        showInDialog: true
+      },
+      truncateToolOutputThreshold: {
+        type: "number",
+        label: "Tool Output Truncation Threshold",
+        category: "General",
+        requiresRestart: true,
+        default: DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+        description: "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
+        showInDialog: false
+      },
+      truncateToolOutputLines: {
+        type: "number",
+        label: "Tool Output Truncation Lines",
+        category: "General",
+        requiresRestart: true,
+        default: DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        description: "The number of lines to keep when truncating tool output.",
+        showInDialog: false
+      },
+      toolOutputBatchBudget: {
+        type: "number",
+        label: "Tool Output Batch Budget",
+        category: "General",
+        requiresRestart: true,
+        default: DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
+        description: "Per-message character budget for the combined text output of one batch of tool calls. Oversized batches are reduced deterministically and recoverable output is persisted when possible. Set to -1 to disable.",
+        showInDialog: false
+      }
+    }
+  },
+  policy: {
+    type: "object",
+    label: "Daemon Policy",
+    category: "Daemon",
+    requiresRestart: true,
+    default: {},
+    description: "Daemon multi-client coordination policies. Tool-level allow/deny rules live under `permissions`; this section is for runtime mediation behavior between concurrent HTTP clients sharing one `qwen serve` daemon.",
+    showInDialog: false,
+    properties: {
+      permissionStrategy: {
+        type: "enum",
+        label: "Permission Mediation Policy",
+        category: "Daemon",
+        requiresRestart: true,
+        default: "first-responder",
+        description: 'How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token identity is not implemented yet), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 \u2192 quorum=3; M=6 \u2192 quorum=4). For M=2 specifically, split votes resolve only via the configured permission timeout, voter cancellation, or session cancellation. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:"cancelled"}) \u2014 cancel stays cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart \u2014 read once at boot.',
+        showInDialog: true,
+        options: [
+          { value: "first-responder", label: "First Responder" },
+          { value: "designated", label: "Designated Originator" },
+          { value: "consensus", label: "Consensus Quorum" },
+          { value: "local-only", label: "Local Only" }
+        ]
+      },
+      consensusQuorum: {
+        type: "number",
+        label: "Consensus Quorum Override",
+        category: "Daemon",
+        requiresRestart: true,
+        default: void 0,
+        description: "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart \u2014 read once at boot.",
+        showInDialog: false,
+        // run-qwen-serve.ts validates `Number.isInteger(n) && n >= 1` and
+        // refuses to boot otherwise. Override the generated schema so IDE
+        // (VSCode, JetBrains via JSON Schema) flags `0`, `-1`, `1.5`
+        // BEFORE the user restarts the daemon. The bare `type:'number'`
+        // mapping accepts all of these.
+        jsonSchemaOverride: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart \u2014 read once at boot."
+        }
+      }
+    }
+  },
+  mcp: {
+    type: "object",
+    label: "MCP",
+    category: "MCP",
+    requiresRestart: true,
+    default: {},
+    description: "Settings for Model Context Protocol (MCP) servers.",
+    showInDialog: false,
+    properties: {
+      serverCommand: {
+        type: "string",
+        label: "MCP Server Command",
+        category: "MCP",
+        requiresRestart: true,
+        default: void 0,
+        description: "Command to start an MCP server.",
+        showInDialog: false
+      },
+      allowed: {
+        type: "array",
+        label: "Allow MCP Servers",
+        category: "MCP",
+        // Hot-reloadable (sub-task 3): read by mcpGatingEqual and re-applied
+        // live during reconcile. See mcpServers above for why this must not be
+        // restart-required.
+        requiresRestart: false,
+        default: void 0,
+        description: 'A list of MCP servers to allow. Supports glob patterns (e.g. "*puppeteer*").',
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */
+      },
+      excluded: {
+        type: "array",
+        label: "Exclude MCP Servers",
+        category: "MCP",
+        // Hot-reloadable (sub-task 3): read by mcpGatingEqual and re-applied
+        // live during reconcile. See mcpServers above for why this must not be
+        // restart-required.
+        requiresRestart: false,
+        default: void 0,
+        description: 'A list of MCP servers to exclude. Supports glob patterns (e.g. "*puppeteer*"). Takes precedence over mcp.allowed.',
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */
+      },
+      toolIdleTimeoutMs: {
+        type: "number",
+        label: "MCP Tool Idle Timeout (ms)",
+        category: "MCP",
+        requiresRestart: false,
+        default: 3e5,
+        minimum: 1e4,
+        maximum: 36e5,
+        description: "Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.",
+        showInDialog: false
+      }
+    }
+  },
+  security: {
+    type: "object",
+    label: "Security",
+    category: "Security",
+    requiresRestart: true,
+    default: {},
+    description: "Security-related settings.",
+    showInDialog: false,
+    properties: {
+      folderTrust: {
+        type: "object",
+        label: "Folder Trust",
+        category: "Security",
+        requiresRestart: false,
+        default: {},
+        description: "Settings for folder trust.",
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: "boolean",
+            label: "Folder Trust",
+            category: "Security",
+            requiresRestart: true,
+            default: false,
+            description: "Setting to track whether Folder trust is enabled.",
+            showInDialog: false
+          }
+        }
+      },
+      auth: {
+        type: "object",
+        label: "Authentication",
+        category: "Security",
+        requiresRestart: true,
+        default: {},
+        description: "Authentication settings.",
+        showInDialog: false,
+        properties: {
+          selectedType: {
+            type: "string",
+            label: "Selected Auth Type",
+            category: "Security",
+            requiresRestart: true,
+            default: void 0,
+            description: "The currently selected authentication type.",
+            showInDialog: false
+          },
+          enforcedType: {
+            type: "string",
+            label: "Enforced Auth Type",
+            category: "Advanced",
+            requiresRestart: true,
+            default: void 0,
+            description: "The required auth type. If this does not match the selected auth type, the user will be prompted to re-authenticate.",
+            showInDialog: false
+          },
+          useExternal: {
+            type: "boolean",
+            label: "Use External Auth",
+            category: "Security",
+            requiresRestart: true,
+            default: false,
+            description: "Whether to use an external authentication flow.",
+            showInDialog: false
+          },
+          apiKey: {
+            type: "string",
+            label: "API Key",
+            category: "Security",
+            requiresRestart: true,
+            default: void 0,
+            description: "API key for OpenAI compatible authentication.",
+            showInDialog: false
+          },
+          baseUrl: {
+            type: "string",
+            label: "Base URL",
+            category: "Security",
+            requiresRestart: true,
+            default: void 0,
+            description: "Base URL for OpenAI compatible API.",
+            showInDialog: false
+          }
+        }
+      },
+      allowedHttpHookUrls: {
+        type: "array",
+        label: "Allowed HTTP Hook URLs",
+        category: "Security",
+        requiresRestart: false,
+        default: [],
+        description: "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). A value in Workspace settings is honored only when no User, System, or SystemDefaults scope sets one, so a cloned repository can narrow but never replace your whitelist.",
+        showInDialog: false,
+        items: {
+          type: "string",
+          description: "URL pattern (supports * wildcard)"
+        }
+      },
+      allowPrivateNetworkHooks: {
+        type: "boolean",
+        label: "Allow Private Network Hooks",
+        category: "Security",
+        requiresRestart: false,
+        default: false,
+        description: "When true, HTTP hooks may target private/link-local IP ranges (the SSRF IP-range checks are skipped). Cloud metadata hostnames (e.g. 169.254.169.254, metadata.google.internal) remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot self-grant this bypass. Enable only in trusted, managed environments, and pair with security.allowedHttpHookUrls.",
+        showInDialog: false
+      },
+      allowedInsecureVoiceBaseUrls: {
+        type: "array",
+        label: "Allowed Insecure Voice Base URLs",
+        category: "Security",
+        requiresRestart: false,
+        default: [],
+        description: "Complete voice base URLs that may use HTTP or private-network addresses. Entries must include an explicit http:// or https:// scheme and the full provider path; only URL serialization and trailing slashes are normalized. Wildcards are not supported; metadata, link-local, local-use NAT64, 6to4, and Teredo addresses remain blocked even when listed, as do hostnames that resolve to loopback; IPv4-mapped, IPv4-compatible, and well-known NAT64 (64:ff9b::/96) literals are classified by their embedded IPv4 address. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. Enable only for trusted endpoints in managed private networks. Cleartext HTTP also exposes the provider API key transmitted in the Authorization header. An allowlisted hostname is only as trustworthy as its DNS; prefer IP-literal entries when the gateway address is stable.",
+        showInDialog: false,
+        items: {
+          type: "string",
+          description: "Complete voice provider base URL with explicit scheme and full path (no wildcards)"
+        }
+      }
+    }
+  },
+  advanced: {
+    type: "object",
+    label: "Advanced",
+    category: "Advanced",
+    requiresRestart: true,
+    default: {},
+    description: "Advanced settings for power users.",
+    showInDialog: false,
+    properties: {
+      autoConfigureMemory: {
+        type: "boolean",
+        label: "Auto Configure Max Old Space Size",
+        category: "Advanced",
+        requiresRestart: true,
+        default: false,
+        description: "Automatically configure Node.js memory limits",
+        showInDialog: false
+      },
+      dnsResolutionOrder: {
+        type: "enum",
+        label: "DNS Resolution Order",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: "The DNS resolution order.",
+        showInDialog: false,
+        options: [
+          { value: "ipv4first", label: "IPv4 First" },
+          { value: "verbatim", label: "Verbatim" }
+        ]
+      },
+      excludedEnvVars: {
+        type: "array",
+        label: "Excluded Project Environment Variables",
+        category: "Advanced",
+        requiresRestart: false,
+        default: ["DEBUG", "DEBUG_MODE"],
+        description: "Environment variables to exclude from project context.",
+        showInDialog: false,
+        mergeStrategy: "union" /* UNION */
+      },
+      bugCommand: {
+        type: "object",
+        label: "Bug Command",
+        category: "Advanced",
+        requiresRestart: false,
+        default: void 0,
+        description: "Configuration for the bug report command.",
+        showInDialog: false
+      },
+      runtimeOutputDir: {
+        type: "string",
+        label: "Runtime Output Directory",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.",
+        showInDialog: false
+      }
+    }
+  },
+  goals: {
+    type: "object",
+    label: "Goals",
+    category: "Advanced",
+    requiresRestart: true,
+    default: {},
+    description: "Settings for session Goals (/goal).",
+    showInDialog: false,
+    properties: {
+      modelProposed: {
+        type: "enum",
+        label: "Model-Proposed Goals",
+        category: "Advanced",
+        requiresRestart: true,
+        default: "alwaysAsk",
+        description: 'Controls the propose_goal tool, which lets the model propose a session Goal for you to approve. "alwaysAsk" (default) shows every proposal in an approval dialog and nothing is set until you accept it; "disabled" removes the tool. A typed /goal is unaffected. Consent-affecting, so this setting is only honored from User, System, or SystemDefaults scope; workspace values are ignored.',
+        showInDialog: true,
+        options: [
+          { value: "alwaysAsk", label: "Always ask" },
+          { value: "disabled", label: "Disabled" }
+        ]
+      }
+    }
+  },
+  agents: {
+    type: "object",
+    label: "Agents",
+    category: "Advanced",
+    requiresRestart: false,
+    default: {},
+    description: "Settings for built-in agents and multi-agent collaboration features (Arena, Team, Swarm).",
+    showInDialog: false,
+    properties: {
+      builtin: {
+        type: "object",
+        label: "Built-in Agents",
+        category: "Advanced",
+        requiresRestart: true,
+        default: {},
+        description: "Settings for built-in subagents.",
+        showInDialog: false,
+        properties: {
+          exploreModel: {
+            type: "string",
+            label: "Explore Model",
+            category: "Model",
+            requiresRestart: true,
+            default: "inherit",
+            description: 'Model selector for the built-in Explore subagent. Use "inherit" for the main session model, "fast" for fastModel, a model ID, or an authType:model-id selector. Custom same-name agents are unaffected.',
+            showInDialog: false
+          }
+        }
+      },
+      crossSessionMessaging: {
+        type: "boolean",
+        label: "Cross-Session Messaging",
+        category: "Advanced",
+        requiresRestart: true,
+        default: true,
+        description: `Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session's own review class, which nothing authenticates. Set to false to keep this session invisible and unreachable.`,
+        showInDialog: false
+      },
+      crossSessionInbound: {
+        type: "enum",
+        label: "Inbound Cross-Session Messages",
+        category: "Advanced",
+        requiresRestart: false,
+        default: void 0,
+        description: `What happens to inbound cross-session messages. "accept" delivers them; "hold" parks them for your review without letting the model act; "refuse" opts this session out. Unset means user-minted controllers and this session's own child processes auto-deliver, while other sessions use review-class parity: both must review every action, or both must declare a mode that can apply actions without per-action review. Other messages are held for you to review.`,
+        showInDialog: false,
+        options: [
+          { value: "accept", label: "Accept" },
+          { value: "hold", label: "Hold for review" },
+          { value: "refuse", label: "Refuse" }
+        ]
+      },
+      crossSessionHeldExpiry: {
+        type: "enum",
+        label: "Held Message Expiry",
+        category: "Advanced",
+        requiresRestart: false,
+        default: "5m",
+        description: 'How long a message held for your review waits before it expires and the sending session is told nobody answered. "never" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival.',
+        showInDialog: false,
+        options: [
+          { value: "1m", label: "1 minute" },
+          { value: "5m", label: "5 minutes" },
+          { value: "10m", label: "10 minutes" },
+          { value: "never", label: "Never" }
+        ]
+      },
+      modelGrades: {
+        type: "object",
+        label: "Model Grades",
+        category: "Model",
+        requiresRestart: true,
+        default: void 0,
+        description: "Maps semantic model grade names exposed to the Agent tool to concrete model selectors.",
+        showInDialog: false,
+        mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */,
+        jsonSchemaOverride: {
+          type: "object",
+          additionalProperties: { type: "string" }
+        }
+      },
+      allowedGrades: {
+        type: "array",
+        label: "Allowed Model Grades",
+        category: "Model",
+        requiresRestart: true,
+        default: void 0,
+        description: "Optional whitelist of model grade names the Agent tool may use.",
+        showInDialog: false,
+        items: { type: "string" }
+      },
+      maxParallelAgents: {
+        type: "number",
+        label: "Max Parallel Agents",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        minimum: 1,
+        description: "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit.",
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: "integer",
+          minimum: 1
+        }
+      },
+      maxParallelAgentsByModel: {
+        type: "object",
+        label: "Max Parallel Agents Per Model",
+        category: "Advanced",
+        requiresRestart: true,
+        default: void 0,
+        description: 'Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { "qwen3-max": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit.',
+        showInDialog: false,
+        mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */,
+        jsonSchemaOverride: {
+          type: "object",
+          additionalProperties: {
+            type: "integer",
+            minimum: 1
+          }
+        }
+      },
+      displayMode: {
+        type: "enum",
+        label: "Display Mode",
+        category: "Advanced",
+        requiresRestart: false,
+        default: void 0,
+        description: 'Display mode for multi-agent sessions. Currently only "in-process" is supported.',
+        showInDialog: false,
+        options: [
+          { value: "in-process", label: "In-process" }
+          // { value: 'tmux', label: 'tmux' },
+          // { value: 'iterm2', label: 'iTerm2' },
+        ]
+      },
+      arena: {
+        type: "object",
+        label: "Arena",
+        category: "Advanced",
+        requiresRestart: false,
+        default: {},
+        description: "Settings for Arena (multi-model competitive execution).",
+        showInDialog: false,
+        properties: {
+          worktreeBaseDir: {
+            type: "string",
+            label: "Worktree Base Directory",
+            category: "Advanced",
+            requiresRestart: true,
+            default: void 0,
+            description: "Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.",
+            showInDialog: false
+          },
+          preserveArtifacts: {
+            type: "boolean",
+            label: "Preserve Arena Artifacts",
+            category: "Advanced",
+            requiresRestart: false,
+            default: false,
+            description: "When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.",
+            showInDialog: true
+          },
+          maxRoundsPerAgent: {
+            type: "number",
+            label: "Max Rounds Per Agent",
+            category: "Advanced",
+            requiresRestart: false,
+            default: void 0,
+            description: "Maximum number of rounds (turns) each agent can execute. No limit if unset.",
+            showInDialog: false
+          },
+          timeoutSeconds: {
+            type: "number",
+            label: "Timeout (seconds)",
+            category: "Advanced",
+            requiresRestart: false,
+            default: void 0,
+            description: "Total timeout in seconds for the Arena session. No limit if unset.",
+            showInDialog: false
+          }
+        }
+      },
+      team: {
+        type: "object",
+        label: "Team",
+        category: "Advanced",
+        requiresRestart: false,
+        default: {},
+        description: "Settings for Agent Team (role-based collaborative execution). Reserved for future use.",
+        showInDialog: false
+      },
+      swarm: {
+        type: "object",
+        label: "Swarm",
+        category: "Advanced",
+        requiresRestart: false,
+        default: {},
+        description: "Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.",
+        showInDialog: false
+      }
+    }
+  },
+  disableAllHooks: {
+    type: "boolean",
+    label: "Disable All Hooks",
+    category: "Advanced",
+    requiresRestart: true,
+    // Future enhancement: consider supporting mid-session toggle for better UX
+    default: false,
+    description: "Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).",
+    showInDialog: false
+  },
+  stopHookBlockingCap: {
+    type: "number",
+    label: "Stop Hook Blocking Cap",
+    category: "Advanced",
+    requiresRestart: true,
+    default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    description: "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
+    // This is an advanced safety valve for runaway hook loops, not a common
+    // interactive preference.
+    showInDialog: false,
+    jsonSchemaOverride: {
+      type: "integer",
+      minimum: 1,
+      default: DEFAULT_STOP_HOOK_BLOCK_CAP
+    }
+  },
+  hooks: {
+    type: "object",
+    label: "Hooks",
+    category: "Advanced",
+    requiresRestart: false,
+    default: {},
+    description: "Hook event configurations for extending CLI behavior at various lifecycle points.",
+    showInDialog: false,
+    properties: {
+      UserPromptSubmit: {
+        type: "array",
+        label: "Before Agent Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute before agent processing. Can modify prompts or inject context.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      UserPromptExpansion: {
+        type: "array",
+        label: "Prompt Expansion Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a slash command expands into a prompt.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      Stop: {
+        type: "array",
+        label: "After Agent Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute after agent processing. Can post-process responses or log interactions.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      StopFailure: {
+        type: "array",
+        label: "After Agent Failure Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a turn ends due to an API error or loop detection, instead of the normal Stop hooks. Receives error type and details.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      MessageDisplay: {
+        type: "array",
+        label: "Message Display Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute repeatedly as the assistant reply streams, before the After Agent (Stop) hooks fire.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      Notification: {
+        type: "array",
+        label: "Notification Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when notifications are sent.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PreToolUse: {
+        type: "array",
+        label: "Pre Tool Use Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute before tool execution.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PostToolUse: {
+        type: "array",
+        label: "Post Tool Use Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute after successful tool execution.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PostToolUseFailure: {
+        type: "array",
+        label: "Post Tool Use Failure Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when tool execution fails. ",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PostToolBatch: {
+        type: "array",
+        label: "Post Tool Batch Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute once after all tool calls in a batch resolve.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      SessionStart: {
+        type: "array",
+        label: "Session Start Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a new session starts or resumes.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      SessionEnd: {
+        type: "array",
+        label: "Session End Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a session ends.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      SessionDelete: {
+        type: "array",
+        label: "Session Delete Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute after an explicitly selected session is deleted.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PreCompact: {
+        type: "array",
+        label: "Pre Compact Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute before conversation compaction.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      SubagentStart: {
+        type: "array",
+        label: "Subagent Start Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a subagent (Task tool call) is started.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      SubagentStop: {
+        type: "array",
+        label: "Subagent Stop Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute right before a subagent (Task tool call) concludes its response.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PermissionRequest: {
+        type: "array",
+        label: "Permission Request Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a permission dialog is displayed.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PostCompact: {
+        type: "array",
+        label: "Post Compact Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute after conversation compaction completes.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      PermissionDenied: {
+        type: "array",
+        label: "Permission Denied Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when AUTO-mode classification denies a tool call.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      TodoCreated: {
+        type: "array",
+        label: "Todo Created Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a new todo item is created. They can block creation during validation.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      TodoCompleted: {
+        type: "array",
+        label: "Todo Completed Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when a todo item is marked as completed. They can block completion during validation.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      },
+      InstructionsLoaded: {
+        type: "array",
+        label: "Instructions Loaded Hooks",
+        category: "Advanced",
+        requiresRestart: false,
+        default: [],
+        description: "Hooks that execute when an instruction file such as QWEN.md is loaded into context.",
+        showInDialog: false,
+        mergeStrategy: "concat" /* CONCAT */,
+        items: HOOK_DEFINITION_ITEMS
+      }
+    }
+  },
+  experimental: {
+    type: "object",
+    label: "Experimental",
+    category: "Experimental",
+    requiresRestart: true,
+    default: {},
+    description: "Settings to enable experimental features.",
+    showInDialog: false,
+    properties: {
+      liveVoice: {
+        type: "object",
+        label: "Live Voice",
+        category: "Experimental",
+        requiresRestart: false,
+        default: {},
+        description: "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: "boolean",
+            label: "Live Voice",
+            category: "Experimental",
+            requiresRestart: false,
+            default: false,
+            description: "Enable experimental realtime voice conversations on macOS WebShell.",
+            showInDialog: false
+          },
+          apiKey: {
+            type: "string",
+            label: "DashScope Realtime API Key",
+            category: "Experimental",
+            requiresRestart: false,
+            default: "",
+            description: "Dedicated DashScope API key for qwen3.5-omni-plus-realtime.",
+            showInDialog: false
+          },
+          model: {
+            type: "string",
+            label: "Live Voice Model",
+            category: "Experimental",
+            requiresRestart: false,
+            default: "qwen3.5-omni-plus-realtime",
+            description: "Upstream Realtime model used for Live Voice.",
+            showInDialog: false
+          },
+          endpoint: {
+            type: "string",
+            label: "Live Voice Endpoint",
+            category: "Experimental",
+            requiresRestart: false,
+            default: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+            description: "Advanced override for the DashScope Realtime WebSocket endpoint.",
+            showInDialog: false
+          },
+          voice: {
+            type: "string",
+            label: "Live Voice Output Voice",
+            category: "Experimental",
+            requiresRestart: false,
+            default: "Tina",
+            description: "Voice used for Realtime model audio output.",
+            showInDialog: false
+          },
+          shortcut: {
+            type: "string",
+            label: "Live Voice Global Shortcut",
+            category: "Experimental",
+            requiresRestart: false,
+            default: "Command+E",
+            description: "Electron accelerator registered globally by Qwen Live Host.",
+            showInDialog: false
+          }
+        }
+      },
+      sessionWorkflow: {
+        type: "boolean",
+        label: "Session Workflow Plan & Review",
+        category: "Experimental",
+        requiresRestart: false,
+        default: false,
+        description: "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default; Workflow markers, approval gates, and visualization stay off until enabled. Todo updates preserve omitted active dependencies in every mode.",
+        showInDialog: true
+      },
+      cron: {
+        type: "boolean",
+        label: "Enable Cron/Loop Tools",
+        category: "Experimental",
+        requiresRestart: true,
+        default: true,
+        description: "Enable in-session cron/loop tools. When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can be disabled via QWEN_CODE_DISABLE_CRON=1 environment variable.",
+        showInDialog: true
+      },
+      todoStopGuard: {
+        type: "boolean",
+        label: "Enable Daemon Todo Stop Guard",
+        category: "Experimental",
+        requiresRestart: true,
+        default: false,
+        description: "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Requires tools.todoWrite.enabled. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+        showInDialog: false
+      },
+      sessionWriterLease: {
+        type: "boolean",
+        label: "Enable ACP Session Writer Lease",
+        category: "Experimental",
+        requiresRestart: true,
+        default: false,
+        description: "Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.",
+        showInDialog: true
+      },
+      cronRecurringMaxAgeDays: {
+        type: "number",
+        label: "Recurring Cron Max Age (Days)",
+        category: "Experimental",
+        requiresRestart: true,
+        default: 7,
+        description: "Days a recurring cron/loop job lives before auto-expiring (it fires one final time, then is deleted). Set to 0 to disable expiry so jobs run until deleted \u2014 useful for long-running daemon deployments. Can be overridden via the QWEN_CODE_CRON_MAX_AGE_DAYS environment variable.",
+        // A deployment-time knob (cloud daemons, containers), not a common
+        // interactive preference.
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: "number",
+          minimum: 0,
+          default: 7
+        }
+      },
+      agentTeam: {
+        type: "boolean",
+        label: "Enable Agent Team",
+        category: "Experimental",
+        requiresRestart: true,
+        default: false,
+        description: "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
+        showInDialog: true
+      },
+      artifact: {
+        type: "boolean",
+        label: "Enable Artifacts",
+        category: "Experimental",
+        requiresRestart: true,
+        default: true,
+        description: "Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.",
+        showInDialog: true
+      },
+      emitToolUseSummaries: {
+        type: "boolean",
+        label: "Tool Use Summaries",
+        category: "Experimental",
+        requiresRestart: false,
+        default: true,
+        description: "Generate a short LLM-based label after each tool batch completes. For a completed tool group the label replaces the generic `Tool \xD7 N` header; when the group is force-expanded it appears as a dim `\u25CF <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only \u2014 SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
+        showInDialog: true
+      }
+    }
+  },
+  artifact: {
+    type: "object",
+    label: "Artifacts",
+    category: "Experimental",
+    requiresRestart: true,
+    default: {},
+    description: "Configuration for artifact publishing. Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
+    showInDialog: false,
+    properties: {
+      autoOpen: {
+        type: "boolean",
+        label: "Auto-open Artifacts",
+        category: "Experimental",
+        requiresRestart: true,
+        default: true,
+        description: "Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.",
+        showInDialog: false
+      },
+      publisher: {
+        type: "enum",
+        label: "Artifact Publisher",
+        category: "Experimental",
+        requiresRestart: true,
+        default: "local",
+        description: "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload).",
+        showInDialog: false,
+        options: [
+          { value: "local", label: "Local (file://)" },
+          { value: "host", label: "Host (shareable link)" },
+          { value: "oss", label: "Aliyun OSS" }
+        ]
+      },
+      host: {
+        type: "object",
+        label: "Artifact Host",
+        category: "Experimental",
+        requiresRestart: true,
+        default: {},
+        description: 'Host-backend config, used when artifact.publisher is "host".',
+        showInDialog: false,
+        properties: {
+          uploadCommand: {
+            type: "string",
+            label: "Upload Command",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "",
+            description: 'Command that uploads the artifact, run with execFile (no shell). {file} = local HTML path, {key} = remote object key. e.g. "aws s3 cp {file} s3://bucket/{key} --content-type text/html".',
+            showInDialog: false
+          },
+          urlTemplate: {
+            type: "string",
+            label: "URL Template",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "",
+            description: 'Shareable URL template; {key} is substituted. e.g. "https://bucket.example.com/{key}".',
+            showInDialog: false
+          },
+          keyPrefix: {
+            type: "string",
+            label: "Key Prefix",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "artifacts",
+            description: 'Remote key prefix; the object key is "{prefix}/{id}/index.html".',
+            showInDialog: false
+          }
+        }
+      },
+      oss: {
+        type: "object",
+        label: "Artifact OSS",
+        category: "Experimental",
+        requiresRestart: true,
+        default: {},
+        description: 'Native Aliyun OSS backend, used when artifact.publisher is "oss". Credentials are read from OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET (or ALIBABA_CLOUD_*), never from settings.',
+        showInDialog: false,
+        properties: {
+          bucket: {
+            type: "string",
+            label: "OSS Bucket",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "",
+            description: "OSS bucket name.",
+            showInDialog: false
+          },
+          endpoint: {
+            type: "string",
+            label: "OSS Endpoint",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "",
+            description: 'OSS endpoint host, e.g. "oss-cn-hangzhou.aliyuncs.com".',
+            showInDialog: false
+          },
+          keyPrefix: {
+            type: "string",
+            label: "Key Prefix",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "artifacts",
+            description: 'Remote key prefix; the object key is "{prefix}/{id}/index.html".',
+            showInDialog: false
+          },
+          acl: {
+            type: "string",
+            label: "Object ACL",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "public-read",
+            description: 'Object ACL applied on upload. "public-read" (default) makes the link shareable.',
+            showInDialog: false
+          },
+          publicBaseUrl: {
+            type: "string",
+            label: "Public Base URL",
+            category: "Experimental",
+            requiresRestart: true,
+            default: "",
+            description: 'Optional CDN / custom-domain base for the returned URL. Upload still goes through endpoint. e.g. "https://cdn.example.com".',
+            showInDialog: false
+          }
+        }
+      }
+    }
+  },
+  worktree: {
+    type: "object",
+    label: "Worktree",
+    category: "Advanced",
+    requiresRestart: false,
+    default: {},
+    description: 'Configuration for general-purpose git worktrees created by the CLI (the `enter_worktree` tool, the `agent isolation: "worktree"` parameter, and the startup `--worktree` flag). Does NOT affect Agent Arena worktrees \u2014 see `agents.arena.worktreeBaseDir` for those.',
+    showInDialog: false,
+    properties: {
+      symlinkDirectories: {
+        type: "array",
+        label: "Symlink Directories Into Worktrees",
+        category: "Advanced",
+        requiresRestart: false,
+        default: void 0,
+        description: "Directories under the main repository to symlink into every general-purpose worktree on creation. Useful for sharing large opt-in dirs like `node_modules` so the model can run tests / builds inside the worktree without a fresh install. Paths must be relative to the repo root; absolute paths, anything containing `..`, and any path inside `.git` or `.qwen` (the CLI-managed metadata tree, which contains the worktrees directory itself) are rejected. Missing source dirs and existing destination paths are silently skipped (no overwrite, no failure).",
+        showInDialog: false
+      }
+    }
+  },
+  omni: {
+    type: "object",
+    label: "Omni Multimodal",
+    category: "Experimental",
+    requiresRestart: true,
+    default: {},
+    description: "Omni multimodal experiment (omni-experiment branch): upload-based media delivery via the DashScope temporary upload channel. Requires ffmpeg/ffprobe on PATH when enabled.",
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: "boolean",
+        label: "Enable Omni Media Delivery",
+        category: "Experimental",
+        requiresRestart: true,
+        default: false,
+        description: "Enable the omni media pipeline. Media files (video, image, audio) referenced with @ \u2014 and media served from @https:// URLs \u2014 are recognized (ffprobe), stored content-addressed under .qwen/omni/objects/, uploaded through the DashScope temporary upload channel, and delivered as oss:// URLs instead of inline base64. Only active for DashScope-compatible endpoints. Can also be enabled via QWEN_CODE_ENABLE_OMNI=1.",
+        showInDialog: true
+      },
+      processing: {
+        type: "object",
+        label: "Omni Processing",
+        category: "Experimental",
+        requiresRestart: true,
+        default: {},
+        description: "Media policy processing: fixed-policy orchestration, transport guard, per-root derivation limits, and policy tool overrides.",
+        showInDialog: false,
+        properties: {
+          limits: {
+            type: "object",
+            label: "Omni Processing Limits",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Per-invocation derivation budgets. Exceeding a budget stops further derivation for that root resource (already committed artifacts stand).",
+            showInDialog: false,
+            properties: {
+              maxConcurrentResources: {
+                type: "number",
+                label: "Max Concurrent Resources",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 1,
+                description: "Number of media resources processed by policies in parallel within one request.",
+                showInDialog: false,
+                jsonSchemaOverride: { type: "number", minimum: 1, default: 1 }
+              },
+              reservedOutputTokens: {
+                type: "number",
+                label: "Reserved Output Tokens",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 8192,
+                description: "Tokens reserved for model output when computing session.availableContextTokens for when-conditions.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "number",
+                  minimum: 0,
+                  default: 8192
+                }
+              },
+              maxLineageDepth: {
+                type: "number",
+                label: "Max Lineage Depth",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 8,
+                description: "Maximum derivation chain length from a root resource.",
+                showInDialog: false,
+                jsonSchemaOverride: { type: "number", minimum: 1, default: 8 }
+              },
+              maxPolicyRunsPerRoot: {
+                type: "number",
+                label: "Max Policy Runs Per Root",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 64,
+                description: "Maximum policy invocations attributable to one root resource within a single orchestrator run.",
+                showInDialog: false,
+                jsonSchemaOverride: { type: "number", minimum: 1, default: 64 }
+              },
+              maxArtifactsPerRoot: {
+                type: "number",
+                label: "Max Artifacts Per Root",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 256,
+                description: "Maximum derived artifacts attributable to one root resource within a single orchestrator run.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "number",
+                  minimum: 1,
+                  default: 256
+                }
+              },
+              maxDerivedBytesPerRoot: {
+                type: "number",
+                label: "Max Derived Bytes Per Root",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 1073741824,
+                description: "Byte budget for derived artifacts per root resource within a single orchestrator run. Defaults to 1 GiB.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "number",
+                  minimum: 1,
+                  default: 1073741824
+                }
+              },
+              maxTransportPasses: {
+                type: "number",
+                label: "Max Transport Passes",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 3,
+                description: "Maximum transport-guard policy passes per resource before the media is removed with an explicit omission note.",
+                showInDialog: false,
+                jsonSchemaOverride: { type: "number", minimum: 1, default: 3 }
+              }
+            }
+          },
+          fixedPolicies: {
+            type: "object",
+            label: "Omni Fixed Policies",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "User fixed policies keyed by policy id. There are no built-in default policies: nothing runs unless configured here. Across settings scopes entries merge by id (whole-entry replacement); a null entry tombstones a policy from a lower-priority scope. Validated and normalized at startup.",
+            showInDialog: false,
+            mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */
+          },
+          transportGuard: {
+            type: "object",
+            label: "Omni Transport Guard",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Delivery-boundary enforcement: hard limits plus mandatory guard policies applied when the final delivery set still exceeds limits. Cannot be disabled.",
+            showInDialog: false,
+            properties: {
+              maxUploadFileBytes: {
+                type: "number",
+                label: "Max Upload File Bytes",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 1073741824,
+                description: "Per-file byte ceiling for omni media uploads. Defaults to 1 GiB, the DashScope temporary-upload per-file cap (values above it are a startup configuration error). Media still above the limit after guard policies fail closed with an explanatory error.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "number",
+                  minimum: 1,
+                  maximum: 1073741824,
+                  default: 1073741824
+                }
+              },
+              maxEstimatedTokens: {
+                type: "number",
+                label: "Max Estimated Tokens",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 0,
+                description: "Estimated-token ceiling for a single omni media input, checked at the delivery boundary using the versioned raw-resource estimator. 0 disables the token guard \u2014 the estimation formula is pending confirmation with the model provider; set a positive threshold to enforce fail-closed rejection.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "number",
+                  minimum: 0,
+                  default: 0
+                }
+              },
+              maxDurationSeconds: {
+                type: "number",
+                label: "Max Duration Seconds",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 0,
+                description: "Duration ceiling in seconds for a single omni media input, checked at the delivery boundary. 0 disables it. Byte and token limits cannot express a provider duration cap: a long film downscaled under the byte ceiling still gets rejected by the API, after paying for the transcode. Set this and the guard omits it honestly instead.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "integer",
+                  minimum: 0,
+                  default: 0
+                }
+              },
+              policies: {
+                type: "object",
+                label: "Omni Transport Guard Policies",
+                category: "Experimental",
+                requiresRestart: true,
+                default: {},
+                description: "Guard policies keyed by policy id, run only when the final delivery set exceeds transport limits. Merged with system defaults by id. The merged set must cover image, video, and audio and must not be empty; every policy output must use source: omit.",
+                showInDialog: false,
+                mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */
+              }
+            }
+          },
+          policyTools: {
+            type: "object",
+            label: "Omni Policy Tools",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Per-tool overrides keyed by policy tool name: settings (default arguments), runtime (timeoutMs), and modelAccess (enabled, defaultArguments, lockedArguments, parameterSchema, output).",
+            showInDialog: false,
+            mergeStrategy: "shallow_merge" /* SHALLOW_MERGE */
+          }
+        }
+      },
+      delivery: {
+        type: "object",
+        label: "Omni Delivery",
+        category: "Experimental",
+        requiresRestart: true,
+        default: {},
+        description: "Model-delivery settings for omni media.",
+        showInDialog: false,
+        properties: {
+          upload: {
+            type: "object",
+            label: "Omni Delivery Upload",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Upload-channel delivery settings.",
+            showInDialog: false,
+            properties: {
+              baseUrl: {
+                type: "string",
+                label: "Upload Base URL",
+                category: "Experimental",
+                requiresRestart: true,
+                default: "",
+                description: "DashScope-compatible endpoint used only for temporary media uploads. Set together with apiKeyEnv and model to separate uploads from inference.",
+                showInDialog: false
+              },
+              apiKeyEnv: {
+                type: "string",
+                label: "Upload API Key Environment Variable",
+                category: "Experimental",
+                requiresRestart: true,
+                default: "",
+                description: "Name of the environment variable containing the DashScope upload API key. The key itself is not stored in settings.",
+                showInDialog: false
+              },
+              model: {
+                type: "string",
+                label: "Upload Model",
+                category: "Experimental",
+                requiresRestart: true,
+                default: "",
+                description: "DashScope model identifier sent to the temporary-upload policy endpoint.",
+                showInDialog: false
+              },
+              urlTtlHours: {
+                type: "number",
+                label: "Upload URL TTL (hours)",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 47,
+                description: "Validity horizon for cached oss:// upload URLs. DashScope temporary uploads live 48h; the default keeps a 1h margin. 0 disables the upload cache (every delivery re-uploads).",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "number",
+                  minimum: 0,
+                  default: 47
+                }
+              }
+            }
+          }
+        }
+      },
+      ingestion: {
+        type: "object",
+        label: "Omni Ingestion",
+        category: "Experimental",
+        requiresRestart: true,
+        default: {},
+        description: "Media input ingestion settings for omni delivery.",
+        showInDialog: false,
+        properties: {
+          localization: {
+            type: "object",
+            label: "Omni Ingestion Localization",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Remote-media localization settings.",
+            showInDialog: false,
+            properties: {
+              url: {
+                type: "object",
+                label: "Omni URL Localization",
+                category: "Experimental",
+                requiresRestart: true,
+                default: {},
+                description: "URL media download settings.",
+                showInDialog: false,
+                properties: {
+                  maxFileBytes: {
+                    type: "number",
+                    label: "Max Download File Bytes",
+                    category: "Experimental",
+                    requiresRestart: true,
+                    default: 0,
+                    description: "Byte ceiling for downloading URL media inputs. 0 or unset follows omni.processing.transportGuard.maxUploadFileBytes (downloading more than the upload channel can deliver is pointless).",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: "number",
+                      minimum: 0,
+                      default: 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      storage: {
+        type: "object",
+        label: "Omni Storage",
+        category: "Experimental",
+        requiresRestart: true,
+        default: {},
+        description: "Managed storage settings under .qwen/omni/.",
+        showInDialog: false,
+        properties: {
+          retentionDays: {
+            type: "integer",
+            label: "Object Retention (days)",
+            category: "Experimental",
+            requiresRestart: true,
+            default: 14,
+            description: "Days an object in .qwen/omni/objects/ that no memory record references survives before garbage collection may remove it. Referenced objects are never removed. Must be at least 1; non-positive values fall back to the default.",
+            showInDialog: false,
+            jsonSchemaOverride: { type: "integer", minimum: 1, default: 14 }
+          },
+          maxTotalBytes: {
+            type: "integer",
+            label: "Object Store Max Bytes",
+            category: "Experimental",
+            requiresRestart: true,
+            default: 21474836480,
+            description: "Soft byte budget for .qwen/omni/objects/. Over budget, garbage collection removes the oldest unreferenced objects regardless of age; if only referenced objects remain it warns and suspends new policy derivations instead of deleting them. Defaults to 20 GiB.",
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: "integer",
+              minimum: 1,
+              default: 21474836480
+            }
+          },
+          quarantine: {
+            type: "object",
+            label: "Omni Quarantine",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Retention for failed policy invocations moved to .qwen/omni/quarantine/ for diagnosis. Quarantined content is never recalled into recognition or delivery.",
+            showInDialog: false,
+            properties: {
+              retentionDays: {
+                type: "number",
+                label: "Quarantine Retention (days)",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 7,
+                description: "Days a quarantined invocation directory is kept before startup recovery removes it. Must be at least 1; non-positive values fall back to the default.",
+                showInDialog: false,
+                jsonSchemaOverride: { type: "number", minimum: 1, default: 7 }
+              },
+              maxBytes: {
+                type: "number",
+                label: "Quarantine Max Bytes",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 5368709120,
+                description: "Total byte budget for the quarantine directory. Startup recovery removes oldest entries first until within budget. Defaults to 5 GiB. Must be at least 1; non-positive values fall back to the default.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "number",
+                  minimum: 1,
+                  default: 5368709120
+                }
+              }
+            }
+          }
+        }
+      },
+      memory: {
+        type: "object",
+        label: "Omni Media Memory",
+        category: "Experimental",
+        requiresRestart: true,
+        default: {},
+        description: "Persistent multimodal media memory (collection of recognized files and policy execution results, plus cross-session recall). Invalid values abort startup.",
+        showInDialog: false,
+        properties: {
+          collection: {
+            type: "object",
+            label: "Omni Memory Collection",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Collection-side budgets.",
+            showInDialog: false,
+            properties: {
+              maxInlineTextBytes: {
+                type: "number",
+                label: "Max Inline Text Bytes",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 65536,
+                description: "Upper bound for inline text persisted on a memory entry (transcripts, OCR). Longer text is truncated on the entry; the stored artifact keeps the full content.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "integer",
+                  minimum: 1,
+                  default: 65536
+                }
+              }
+            }
+          },
+          recall: {
+            type: "object",
+            label: "Omni Memory Recall",
+            category: "Experimental",
+            requiresRestart: true,
+            default: {},
+            description: "Recall-side exposure and budgets.",
+            showInDialog: false,
+            properties: {
+              mode: {
+                type: "string",
+                label: "Recall Mode",
+                category: "Experimental",
+                requiresRestart: true,
+                default: "active",
+                description: 'Mutually exclusive recall exposure: "active" registers the recall tool for the model; "sideQuery" runs a passive selector before the main request instead.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "string",
+                  enum: ["active", "sideQuery"],
+                  default: "active"
+                }
+              },
+              maxEntries: {
+                type: "number",
+                label: "Max Recall Entries",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 12,
+                description: "Maximum entries one recall may return.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "integer",
+                  minimum: 1,
+                  default: 12
+                }
+              },
+              maxTextChars: {
+                type: "number",
+                label: "Max Recall Text Chars",
+                category: "Experimental",
+                requiresRestart: true,
+                default: 24e3,
+                description: "Total character budget across all text in one recall result.",
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: "integer",
+                  minimum: 1,
+                  default: 24e3
+                }
+              },
+              kinds: {
+                type: "array",
+                label: "Recall Entry Kinds",
+                category: "Experimental",
+                requiresRestart: true,
+                default: [
+                  "metadata",
+                  "derived_media",
+                  "policy_result",
+                  "execution"
+                ],
+                description: "Entry kinds recall may surface. Replaces wholesale when set (never element-merged).",
+                showInDialog: false,
+                mergeStrategy: "replace" /* REPLACE */,
+                jsonSchemaOverride: {
+                  type: "array",
+                  items: {
+                    type: "string",
+                    enum: [
+                      "metadata",
+                      "derived_media",
+                      "policy_result",
+                      "execution"
+                    ]
+                  },
+                  minItems: 1
+                }
+              },
+              includeHistoricalVersions: {
+                type: "boolean",
+                label: "Include Historical Versions",
+                category: "Experimental",
+                requiresRestart: true,
+                default: false,
+                description: "Whether recall may surface entries for non-current file versions by default.",
+                showInDialog: false
+              },
+              active: {
+                type: "object",
+                label: "Active Recall",
+                category: "Experimental",
+                requiresRestart: true,
+                default: {},
+                description: "Budgets for the active recall tool.",
+                showInDialog: false,
+                properties: {
+                  maxFilesPerCall: {
+                    type: "number",
+                    label: "Max Files Per Call",
+                    category: "Experimental",
+                    requiresRestart: true,
+                    default: 8,
+                    description: "Maximum distinct files one recall tool call may query.",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: "integer",
+                      minimum: 1,
+                      default: 8
+                    }
+                  }
+                }
+              },
+              sideQuery: {
+                type: "object",
+                label: "Side-Query Recall",
+                category: "Experimental",
+                requiresRestart: true,
+                default: {},
+                description: "Budgets for the passive side-query selector.",
+                showInDialog: false,
+                properties: {
+                  model: {
+                    type: "string",
+                    label: "Selector Model",
+                    category: "Experimental",
+                    requiresRestart: true,
+                    default: void 0,
+                    description: "Model for the passive selector; unset uses the side-query default (the configured fast model, falling back to the session model).",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: ["string", "null"],
+                      default: null
+                    }
+                  },
+                  timeoutMs: {
+                    type: "number",
+                    label: "Selector Timeout (ms)",
+                    category: "Experimental",
+                    requiresRestart: true,
+                    default: 3e4,
+                    description: "Side-query timeout; on timeout the turn proceeds with an empty recall.",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: "integer",
+                      minimum: 1,
+                      default: 3e4
+                    }
+                  },
+                  maxCandidateEntries: {
+                    type: "number",
+                    label: "Max Candidate Entries",
+                    category: "Experimental",
+                    requiresRestart: true,
+                    default: 100,
+                    description: "Maximum candidate entries shown to the selector.",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: "integer",
+                      minimum: 1,
+                      default: 100
+                    }
+                  },
+                  maxSelectedEntries: {
+                    type: "number",
+                    label: "Max Selected Entries",
+                    category: "Experimental",
+                    requiresRestart: true,
+                    default: 12,
+                    description: "Maximum entries the selector may pick. Must not exceed recall.maxEntries.",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: "integer",
+                      minimum: 1,
+                      default: 12
+                    }
+                  },
+                  maxAttempts: {
+                    type: "number",
+                    label: "Max Selector Attempts",
+                    category: "Experimental",
+                    requiresRestart: true,
+                    default: 1,
+                    description: "Attempts allowed for the selector call itself (unparseable or schema-invalid output is retried up to this many times). A selection that parses but names entries outside the manifest is refused without a retry; the turn then proceeds with an empty recall.",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: "integer",
+                      minimum: 1,
+                      default: 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+function getSettingsSchema() {
+  const schema = SETTINGS_SCHEMA;
+  if (schema["general"]?.properties?.["language"]) {
+    schema["general"].properties["language"].options = getLanguageSettingsOptions();
+  }
+  return SETTINGS_SCHEMA;
+}
+__name(getSettingsSchema, "getSettingsSchema");
+
+export {
+  customDeepMerge,
+  DEFAULT_OPENAI_LOG_RETENTION_DAYS,
+  TOGGLE_TYPES,
+  isNumericSettingType,
+  getSettingsSchema
+};
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */

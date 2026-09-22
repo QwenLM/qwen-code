@@ -1,0 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Cache-first for same-origin build assets. Manifest, daemon API requests,
+ * authenticated requests and event streams remain network-only. HTML is
+ * never cached: an unavailable daemon gets a retry page, not a stale session.
+ */var r="0.24.0",s="qwen-code-shell-v1-"+r;self.addEventListener("install",function(n){n.waitUntil(self.skipWaiting())});self.addEventListener("activate",function(n){n.waitUntil(caches.keys().then(function(t){return Promise.all(t.filter(function(e){return e.startsWith("qwen-code-shell-")&&e!==s}).map(function(e){return caches.delete(e)})).then(function(){return self.clients.claim()})}))});async function c(n,t){var e;try{e=await caches.open(s);var i=await e.match(n);if(i)return i}catch{}var a=await fetch(n);return e&&a.status===200&&a.type==="basic"&&t.waitUntil(e.put(n,a.clone()).catch(function(){})),a}self.addEventListener("fetch",function(n){var t=n.request,e=new URL(t.url);if(!(t.method!=="GET"||t.headers.has("Authorization")||(t.headers.get("Accept")||"").includes("text/event-stream")||e.origin!==self.location.origin)){if(e.pathname.startsWith("/assets/")&&/-[a-zA-Z0-9_-]{8,}\.[^/]+$/.test(e.pathname)){n.respondWith(c(t,n));return}t.mode==="navigate"&&(t.destination==="document"||!t.destination)&&n.respondWith(fetch(t).catch(function(){return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Qwen Code unavailable</title><body><h1>Cannot reach Qwen Code / <span lang="zh-CN">无法连接 Qwen Code</span></h1><p>Reconnect to the daemon, then reload this page. / <span lang="zh-CN">请重新连接守护进程，然后重新加载此页面。</span></p><a href="">Try again / <span lang="zh-CN">重试</span></a></body></html>',{status:503,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}})}))}});

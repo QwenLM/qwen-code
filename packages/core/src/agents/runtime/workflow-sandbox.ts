@@ -28,18 +28,6 @@ export function stripExportMeta(source: string): string {
 }
 
 /**
- * Locate the `export const meta = {...}` declaration's bounds in the source.
- *
- * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at file
- * start (no `/m` flag — see T33 comment below); walks the brace block while
- * skipping over comment / regex / string contexts; throws on unbalanced
- * braces rather than returning a truncated string (T9/T17 — silently
- * deleting the script body is the worst-case failure mode).
- *
- * Returns null when no meta declaration is present at the file start —
- * callers treat this as "no meta", not an error.
- */
-/**
  * Walk past leading whitespace and comments in `source` starting at
  * `from`, and return the resulting offset. Used by `findMetaBlockBounds`
  * to position the meta anchor.
@@ -88,13 +76,11 @@ function findMetaBlockBounds(source: string): {
   // non-trivia token of the script. Walk past leading whitespace and
   // comments rather than regex-matching the whole shape — see `skipTrivia`
   // for the rationale. Once we are at the first non-trivia character,
-  // the anchor is an *exact* `startsWith` check with no whitespace
-  // tolerance, so:
+  // the anchor matches `export const meta = {` with whitespace tolerance
+  // (any number of spaces/tabs/newlines between the tokens), so:
   //  - A `{` inside a leading comment cannot be confused with the meta
-  //    `{` (issue #12217 review: `source.indexOf('{', exportIdx)` was
-  //    structurally wrong because `^` anchors always match at index 0,
-  //    so the brace-walker could latch onto a `{` earlier in the
-  //    source — e.g. a JSDoc `// {string}` header).
+  //    `{` (the brace-walker starts at the `=` after `meta`, not at index 0,
+  //    so it never scans characters before `exportIdx`).
   //  - A template literal inside a leading block comment cannot
   //    contribute to a false match: the walk consumes the comment
   //    wholesale, including any `export const meta = {...}` it

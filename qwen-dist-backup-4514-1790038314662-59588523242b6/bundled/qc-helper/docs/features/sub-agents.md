@@ -1,0 +1,887 @@
+# Subagents
+
+Subagents are specialized AI assistants that handle specific types of tasks within Qwen Code. They allow you to delegate focused work to AI agents that are configured with task-specific prompts, tools, and behaviors.
+
+## What are Subagents?
+
+Subagents are independent AI assistants that:
+
+- **Specialize in specific tasks** - Each Subagent is configured with a focused system prompt for particular types of work
+- **Have separate context** - They maintain their own conversation history, separate from your main chat
+- **Use controlled tools** - You can configure which tools each Subagent has access to
+- **Work autonomously** - Once given a task, they work independently until completion or failure
+- **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
+
+## Claude Code and Codex subagents
+
+The built-in `claude-code` and `codex` agents delegate to separately installed native tools. Install and authenticate Claude Code with its `claude-agent-acp` adapter, or Codex with its `codex` executable, and make the executable available on `PATH`. These agents use their native model and authentication settings. Qwen Code does not fall back to its own model when the executable is missing.
+
+Both agents default to foreground execution; set `run_in_background: true` to receive a background completion notification. They require a trusted workspace and are unavailable in safe mode. Both executors support macOS/Linux (including WSL); native Windows launches are rejected before startup with platform guidance.
+
+Claude Code uses the ACP executor and supports continued input while its session is retained. Codex uses an ephemeral app-server thread for a single task and returns the final answer. Codex tasks cannot receive messages or resume; start a new task instead. Native tool progress, token counts, and cost are not reported for Codex. Native sessions cannot be restored after restarting Qwen Code.
+
+For a custom Codex agent, use the existing `executor` frontmatter:
+
+```markdown
+---
+name: codex-review
+description: Review code with Codex
+executor:
+  kind: codex
+  command: codex
+background: false
+---
+
+Review the changes and report verified defects.
+```
+
+Omitting `executor.args` starts `codex app-server --stdio`; supplied arguments replace that default. Use `kind: acp` and `command: claude-agent-acp` for a custom Claude Code agent. Qwen model overrides, tool lists, subagent hooks, `maxTurns`, fork history, teams, and workflows are not supported for external executors. Worktree launches use the existing Agent isolation lifecycle and run the native process in the selected worktree.
+
+Codex runs unattended. Without an agent override, default, plan, and auto sessions use a read-only sandbox; Qwen's AUTO classifier does not inspect native commands. Intermediate Qwen subagent modes do not grant native access during nested delegation. Explicitly select auto-edit in the session or Codex agent definition to allow workspace writes and unattended workspace commands, or yolo for full access. A session already in auto-edit or yolo takes precedence over a stricter agent definition. Other effective approval modes are rejected. Native requests for extra permission or user input are declined. A configured `runConfig.max_time_minutes` bounds execution. The executor waits for process cleanup on cancellation; the shared background cancellation notification can arrive earlier under its five-second fallback.
+
+## Fork Subagent
+
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for a regular subagent's result inline.
+
+## Fork Context with `fork_turns`
+
+Only `subagent_type: "fork"` accepts `fork_turns`:
+
+- Omitting it or using `all` inherits the full parent conversation.
+- A positive integer string such as `"3"` inherits the most recent three real user turns.
+
+Tool responses and pure system reminders do not count as user turns. Regular named subagents and agent-team teammates do not accept `fork_turns`; they keep their separate conversation context.
+
+## Restricting Fork Tool Execution with `fork_tools`
+
+Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but its task prompt identifies the restriction and a call not matched by `fork_tools` is rejected before scheduling or approval.
+
+- Forks never execute `ask_user_question`; when user input is required, they report the blocker to their parent agent.
+- Omitting `fork_tools` allows every other inherited tool.
+- An empty array rejects every tool call.
+- `*` is not accepted; omit `fork_tools` to allow every otherwise-executable inherited tool.
+- Tool names cannot have surrounding whitespace. Wildcards are accepted only as `mcp__*` or as a trailing MCP tool-prefix pattern such as `mcp__github__read_*`.
+- `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.
+- Shell command argument patterns are not supported. Listing `run_shell_command` allows that tool to proceed through its normal permission checks but does not pre-approve any command.
+
+This is a per-invocation restriction supplied by the caller. It narrows a child fork's capabilities but is not an administrator-enforced security sandbox because the caller can omit or expand the list.
+
+## Reusing Fork Restrictions with `fork_profile`
+
+A project can save a named fork restriction in `.qwen/fork-profiles/<name>.md` and select it with `fork_profile`. This is useful when several calls need the same tool boundary and task guidance:
+
+```markdown
+---
+name: ro-research
+tools:
+  - read_file
+  - grep_search
+  - glob
+  - mcp__search__*
+promptHint: |
+  Work read-only. Prefer targeted searches and cite file evidence.
+---
+```
+
+Then launch the fork with:
+
+```text
+agent(description="Research", prompt="Inspect the retry path", subagent_type="fork", fork_profile="ro-research")
+```
+
+- `fork_profile` is valid only for a fork and cannot be combined with `fork_tools` or a named teammate.
+- Profiles are currently project-only. The requested name, filename, and frontmatter `name` must match exactly. The profile must resolve to a regular file inside `.qwen/fork-profiles/` and cannot exceed 64 KiB.
+- `tools` is required and follows the `fork_tools` rules, including empty-array deny-all behavior.
+- `promptHint` is optional and limited to 200 characters. It is escaped and framed as project-supplied guidance after the fork directive and before the authoritative tool restriction; it does not change the inherited system instruction or model-visible tool declarations. Profile files are frontmatter-only, so non-blank Markdown after the closing `---` is rejected instead of silently ignored.
+- The profile is resolved once at launch. A retained fork continues with the resolved tool snapshot even if the project file later changes.
+- Project fork profiles are unavailable in safe mode and bare mode, which disable local customizations.
+
+Like `fork_tools`, a fork profile is a caller-selected restriction rather than an administrator sandbox. Its optional prompt guidance is project-controlled content.
+
+### How Fork Differs from Named Subagents
+
+|               | Named Subagent                                                 | Fork Subagent                                                                                                                                                                                        |
+| ------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                              |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                |
+| Tools         | Configured declaration set without interactive question tools  | Keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` can independently narrow it without changing that declaration |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                                                                                        |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                                                                                         |
+
+### When Fork is Used
+
+The AI automatically uses fork when it needs to:
+
+- Run multiple research tasks in parallel (e.g., "investigate module A, B, and C")
+- Perform background work while continuing the main conversation
+- Delegate tasks that require understanding of the current conversation context
+
+### Prompt Cache Sharing
+
+All forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents.
+
+### Recursive Delegation Prevention
+
+Fork children cannot spawn any further sub-agent. This is enforced at runtime — if a fork calls the Agent tool, it receives an error instructing it to execute tasks directly.
+
+### Current Limitation
+
+- **No worktree isolation**: Forks share the parent's working directory. Concurrent file modifications from multiple forks may conflict.
+
+## Key Benefits
+
+- **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
+- **Context Isolation**: Keep specialized work separate from your main conversation
+- **Context Inheritance**: Fork subagents inherit the full conversation by default and can select a bounded number of recent parent turns
+- **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
+- **Reusability**: Save and reuse agent configurations across projects and sessions
+- **Controlled Access**: Limit which tools each agent can use for security and focus
+- **Progress Visibility**: Monitor agent execution with real-time progress updates
+
+## How Subagents Work
+
+1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it needs the parent conversation context
+3. **Execution**: Subagents work independently, using their configured tools to complete tasks
+4. **Results**: Background runs send a completion notification containing the result to the main conversation; foreground regular subagents return results inline
+5. **Continuation**: The main AI can use `list_agents` to find background agents and `send_message` to continue a running, paused, or completed agent
+
+## Background Agent Continuation
+
+Top-level regular subagents run in the background by default. After a background agent finishes, Qwen Code keeps enough state to continue related work without launching a duplicate agent:
+
+- `list_agents` returns the addressable background agents in the current session, including compatible agents restored with a resumed session. Each entry includes a `task_id`, status, and whether it can receive a message.
+- `send_message` with that `task_id` queues a message for a running agent, resumes a paused agent, or continues a completed agent. Completed agents reuse their resident runtime when available and otherwise revive from their retained transcript.
+- A continued agent reports its next result through another completion notification.
+
+When a session is restored, compatible background agents are added back to the session roster. A task can be visible but not continuable when its retained state is missing or incompatible; `list_agents` reports the reason in that case.
+
+Use continuation for related follow-up work. Launch a new agent when the task is unrelated or the previous agent cannot be resumed.
+
+## Notification Queue
+
+In the interactive TUI and ACP session, completion notifications from background agents, shells, monitors and workflows share a queue that drains into a model turn once the session is idle. These queues hold at most 20 notifications so a noisy producer cannot accumulate an unbounded backlog. The headless CLI's local queue is not capped by this rule.
+
+When a 21st notification arrives, Qwen Code evicts an interim monitor pulse first — the monitor's next poll supersedes it — and otherwise the oldest queued notification. Agent results, workflow results and scheduled prompts are never evicted in the interactive TUI; a notification that would displace one is dropped instead, and so is an arriving pulse when only terminal results are queued.
+
+Discarded notifications are reported rather than dropped quietly. The summary appears before the next notification in the live transcript. ACP also prefixes it to that turn's model input; the TUI keeps it parked for the next Notification batch so cron prompts still pass unchanged through slash, shell and `@` preprocessing. A daemon notification is recorded before it is acknowledged, so after a reload its durable record can precede the later overflow summary. ACP can discard a pending summary if the session is cleared or switched, or if a client cancels or preempts the notification turn. Discarding a notification never stops or deletes its task, and completed tasks retain their results; the summary points at `/tasks` and task output files when there is a task to inspect. A discarded scheduled prompt was never delivered and is not retried. A daemon notification that was recorded but could not be delivered live remains available in the session transcript and is reported separately from lost notifications.
+
+## Agent Working Directory
+
+For a named regular subagent, `working_dir` pins the agent to an existing git worktree of the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git as a linked worktree of this repository.
+
+`working_dir` cannot be combined with `subagent_type: "fork"`. An unnamed caller-owned `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle: an explicit `run_in_background: true` request is rejected, while a configured background default (`background: true` in a subagent definition) is rejected at the top level and downgraded to the foreground when nested. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one. Workflow scripts are deliberately stricter: a workflow `agent()` call that receives both `workingDir` and `isolation` is rejected rather than run with `isolation` ignored.
+
+## Getting Started
+
+### Quick Start
+
+1. **Create your first Subagent**:
+
+   `/agents create`
+
+   Follow the guided wizard to create a specialized agent.
+
+2. **Manage existing agents**:
+
+   `/agents manage`
+
+   View and manage your configured Subagents.
+
+3. **Use Subagents automatically**: Simply ask the main AI to perform tasks that match your Subagents' specializations. The AI will automatically delegate appropriate work.
+
+### Example Usage
+
+```
+User: "Please write comprehensive tests for the authentication module"
+AI: I'll delegate this to your testing specialist Subagents.
+[Delegates to "testing-expert" Subagents]
+[Shows real-time progress of test creation]
+[Returns with completed test files and execution summary]`
+```
+
+## Management
+
+### CLI Commands
+
+Subagents are managed through the `/agents` slash command and its subcommands:
+
+**Usage:**：`/agents create`。Creates a new Subagent through a guided step wizard.
+
+**Usage:**：`/agents manage`。Opens an interactive management dialog for viewing and managing existing Subagents.
+
+### Storage Locations
+
+Subagents are stored as Markdown files in multiple locations:
+
+- **Project-level**: `.qwen/agents/` (highest precedence)
+- **User-level**: `~/.qwen/agents/` (fallback)
+- **Extension-level**: Provided by installed extensions
+
+This allows you to have project-specific agents, personal agents that work across all projects, and extension-provided agents that add specialized capabilities.
+
+### Extension Subagents
+
+Extensions can provide custom subagents that become available when the extension is enabled. These agents are stored in the extension's `agents/` directory and follow the same format as personal and project agents.
+
+Extension subagents:
+
+- Are automatically discovered when the extension is enabled
+- Appear in the `/agents manage` dialog under "Extension Agents" section
+- Cannot be edited directly (edit the extension source instead)
+- Follow the same configuration format as user-defined agents
+
+To see which extensions provide subagents, check the extension's `qwen-extension.json` file for an `agents` field.
+
+### File Format
+
+Subagents are configured using Markdown files with YAML frontmatter. This format is human-readable and easy to edit with any text editor.
+
+#### Basic Structure
+
+```
+---
+name: agent-name
+description: Brief description of when and how to use this agent
+model: inherit # Optional: inherit, fast, modelId, or authType:modelId
+approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo, bubble
+tools:         # Optional: allowlist of tools
+  - tool1
+  - tool2
+disallowedTools: # Optional: blocklist of tools
+  - tool3
+---
+
+System prompt content goes here.
+Multiple paragraphs are supported.
+```
+
+#### Model Selection
+
+Use the optional `model` frontmatter field to control which model a subagent uses:
+
+- `inherit`: Use the same model as the main conversation.
+- Omit the field: Same as `inherit`.
+- `fast`: Use the configured `fastModel`. If no valid fast model is configured,
+  the subagent falls back to `inherit`.
+- `glm-5`: Use that model ID. Qwen Code first checks the main conversation's
+  auth type; if the model is not available there, it can resolve the model from
+  another configured provider.
+- `openai:gpt-4o`: Use an explicit provider and model ID. This is useful when a
+  subagent should run on a model registered under a different auth type from the
+  main conversation.
+
+For example:
+
+```
+---
+name: fast-reviewer
+description: Reviews small diffs with the configured fast model
+model: fast
+tools:
+  - read_file
+  - grep_search
+---
+```
+
+```
+---
+name: openai-researcher
+description: Uses an OpenAI-compatible provider for research tasks
+model: openai:gpt-4o
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+```
+
+The `fast` selector uses the same `fastModel` setting configured in
+`settings.json` or with `/model --fast`. That setting may itself refer to a
+model under another configured auth type, such as `openai:deepseek-v4-flash`.
+When the selector resolves to another auth type, Qwen Code creates a dedicated
+runtime provider for that subagent request and sends the provider only the bare
+model ID.
+
+The built-in Explore agent inherits the main session model by default. To
+select a different model for only that built-in agent, configure
+`agents.builtin.exploreModel` in `settings.json` and restart Qwen Code:
+
+Earlier versions used `fastModel` for Explore by default. To preserve that
+behavior, set `agents.builtin.exploreModel` to `fast`.
+
+```json
+{
+  "agents": {
+    "builtin": {
+      "exploreModel": "fast"
+    }
+  }
+}
+```
+
+This setting accepts the same selectors described above. It is applied only
+when Qwen Code resolves the built-in Explore definition; a session, project,
+user, or extension agent named Explore keeps its own `model` setting.
+
+To let the model select from user-defined grades without exposing concrete
+model IDs, configure `agents.modelGrades` and optionally restrict them with
+`agents.allowedGrades`:
+
+```json
+{
+  "agents": {
+    "modelGrades": {
+      "small": "fast",
+      "high": "qwen-max"
+    },
+    "allowedGrades": ["small", "high"]
+  }
+}
+```
+
+The Agent tool then accepts `model: "small"` or `model: "high"` for regular
+subagents. Unknown, disallowed, fork, and named-teammate grade selections are
+rejected. A custom agent's explicit model still takes precedence over a grade.
+
+#### Permission Mode
+
+Use the optional `approvalMode` frontmatter field to control how a subagent's tool calls are approved. Valid values:
+
+- `default`: Tools require interactive approval (same as the main session default)
+- `plan`: Analyze-only mode — the agent plans but does not execute changes
+- `auto-edit`: Tools are auto-approved without prompting (recommended for most agents)
+- `yolo`: All tools auto-approved, including potentially destructive ones
+- `bubble`: Background-agent tool approvals are surfaced in the parent session
+
+If you omit this field, the subagent's permission mode is determined automatically:
+
+- If the parent session is in **yolo** or **auto-edit** mode, the subagent inherits that mode. A permissive parent stays permissive.
+- If the parent session is in **plan** mode, the subagent stays in plan mode. An analyze-only session cannot mutate files through a delegated agent.
+- If the parent session is in **default** mode (in a trusted folder), the subagent gets **auto-edit** so it can work autonomously.
+
+When you do set `approvalMode`, the parent's permissive modes still take priority. For example, if the parent is in yolo mode, a subagent with `approvalMode: plan` will still run in yolo mode.
+
+```
+---
+name: cautious-reviewer
+description: Reviews code without making changes
+approvalMode: plan
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+
+You are a code reviewer. Analyze the code and report findings.
+Do not modify any files.
+```
+
+#### Tool Configuration
+
+Use `tools` and `disallowedTools` to control which tools a subagent can access.
+
+**`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
+
+```
+---
+name: reader
+description: Read-only agent for code exploration
+tools:
+  - read_file
+  - grep_search
+  - glob
+  - web_fetch
+---
+```
+
+**`disallowedTools` (blocklist):** When specified, the listed tools are removed from the subagent's tool pool. This is useful when you want "everything except X" without listing every permitted tool.
+
+```
+---
+name: safe-worker
+description: Agent that cannot modify files
+disallowedTools:
+  - write_file
+  - edit
+  - run_shell_command
+---
+```
+
+If both `tools` and `disallowedTools` are set, the allowlist is applied first, then the blocklist removes from that set.
+
+**MCP tools** follow the same rules. If a subagent has no `tools` list, it inherits all MCP tools from the parent session. If a subagent has an explicit `tools` list, it only gets MCP tools that are explicitly named in that list.
+
+The `disallowedTools` field supports MCP server-level patterns:
+
+- `mcp__server__tool_name` — blocks a specific MCP tool
+- `mcp__server` — blocks all tools from that MCP server
+
+```
+---
+name: no-slack
+description: Agent without Slack access
+disallowedTools:
+  - mcp__slack
+---
+```
+
+#### Claude Code Compatibility Fields
+
+Qwen Code accepts the Claude Code 2.1.168 frontmatter fields below so you
+can drop a CC agent file into `.qwen/agents/` and have the supported fields
+parse identically. Optional fields with invalid values are silently dropped
+at parse time rather than rejected — the same lenient posture CC uses.
+
+| Field            | Type             | Notes                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                                                           |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins. The legacy nested value is pruned from the on-disk file on save to avoid two sources of truth.                                                           |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is preserved for backward compatibility. Other values are silently dropped on parse.                                         |
+| `mcpServers`     | record of specs  | Per-agent MCP server overrides. Merged with the session-level MCP server set when the agent spawns; on key collision the agent's spec wins (matching CC's `scope: 'agent'` semantics). Malformed entries are dropped per-key with a warning rather than failing the whole agent. |
+| `hooks`          | record of arrays | Per-agent hooks. Keys are CC hook event names (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, …); values are arrays of `{ matcher?, hooks: [...] }` definitions in the same shape as `settings.json`'s `hooks` field. Registered while the agent runs, removed when it stops.  |
+
+Example with all of the above:
+
+```
+---
+name: rigorous-reviewer
+description: Deep code review with a turn cap
+permissionMode: plan
+maxTurns: 50
+color: cyan
+tools:
+  - read_file
+  - grep_search
+  - glob
+mcpServers:
+  filesystem:
+    type: stdio
+    command: node
+    args: [/usr/local/lib/mcp-fs/server.js]
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: echo "review-agent about to run a shell command"
+---
+
+You are a code reviewer. Analyze the code thoroughly and report findings
+ordered by severity.
+```
+
+The remaining CC frontmatter fields — `effort`, `skills`, `initialPrompt`,
+`memory`, `isolation` — are documented in the declarative-agent design doc
+and land in follow-up PRs once the prerequisite infrastructure exists
+(`effort` needs a model-layer parameter; `memory` needs a scoped memory
+subsystem; `--agent` CLI flag enables `initialPrompt`; etc.).
+
+> **`hooks` v1 limitation.** While a subagent declaring `hooks` is running,
+> its hook entries fire for every matching event in the session, not only
+> for that subagent's own tool calls. If two subagents with different
+> per-agent hook sets run concurrently, both sets fire for both agents.
+> Per-agent scope filtering at hook-firing time is left to a follow-up;
+> for v1, prefer per-agent hooks that are safe to fire globally for the
+> duration of the agent's run (e.g. logging) over hooks that mutate
+> behavior.
+
+#### Example Usage
+
+```
+---
+name: project-documenter
+description: Creates project documentation and README files
+---
+
+You are a documentation specialist.
+
+Focus on creating clear, comprehensive documentation that helps both
+new contributors and end users understand the project.
+```
+
+## Using Subagents Effectively
+
+### Automatic Delegation
+
+Qwen Code proactively delegates tasks based on:
+
+- The task description in your request
+- The description field in Subagents configurations
+- Current context and available tools
+
+To encourage more proactive Subagents use, include phrases like "use PROACTIVELY" or "MUST BE USED" in your description field.
+
+### Explicit Invocation
+
+Request a specific Subagent by mentioning it in your command:
+
+```
+Let the testing-expert Subagents create unit tests for the payment module
+Have the documentation-writer Subagents update the API reference
+Get the react-specialist Subagents to optimize this component's performance
+```
+
+## Examples
+
+### Development Workflow Agents
+
+#### Testing Specialist
+
+Perfect for comprehensive test creation and test-driven development.
+
+```
+---
+name: testing-expert
+description: Writes comprehensive unit tests, integration tests, and handles test automation with best practices
+tools:
+  - read_file
+  - write_file
+  - read_many_files
+  - run_shell_command
+---
+
+You are a testing specialist focused on creating high-quality, maintainable tests.
+
+Your expertise includes:
+
+- Unit testing with appropriate mocking and isolation
+- Integration testing for component interactions
+- Test-driven development practices
+- Edge case identification and comprehensive coverage
+- Performance and load testing when appropriate
+
+For each testing task:
+
+1. Analyze the code structure and dependencies
+2. Identify key functionality, edge cases, and error conditions
+3. Create comprehensive test suites with descriptive names
+4. Include proper setup/teardown and meaningful assertions
+5. Add comments explaining complex test scenarios
+6. Ensure tests are maintainable and follow DRY principles
+
+Always follow testing best practices for the detected language and framework.
+Focus on both positive and negative test cases.
+```
+
+**Use Cases:**
+
+- “Write unit tests for the authentication service”
+- “Create integration tests for the payment processing workflow”
+- “Add test coverage for edge cases in the data validation module”
+
+#### Documentation Writer
+
+Specialized in creating clear, comprehensive documentation.
+
+```
+---
+name: documentation-writer
+description: Creates comprehensive documentation, README files, API docs, and user guides
+tools:
+  - read_file
+  - write_file
+  - read_many_files
+---
+
+You are a technical documentation specialist.
+
+Your role is to create clear, comprehensive documentation that serves both
+developers and end users. Focus on:
+
+**For API Documentation:**
+
+- Clear endpoint descriptions with examples
+- Parameter details with types and constraints
+- Response format documentation
+- Error code explanations
+- Authentication requirements
+
+**For User Documentation:**
+
+- Step-by-step instructions with screenshots when helpful
+- Installation and setup guides
+- Configuration options and examples
+- Troubleshooting sections for common issues
+- FAQ sections based on common user questions
+
+**For Developer Documentation:**
+
+- Architecture overviews and design decisions
+- Code examples that actually work
+- Contributing guidelines
+- Development environment setup
+
+Always verify code examples and ensure documentation stays current with
+the actual implementation. Use clear headings, bullet points, and examples.
+```
+
+**Use Cases:**
+
+- “Create API documentation for the user management endpoints”
+- “Write a comprehensive README for this project”
+- “Document the deployment process with troubleshooting steps”
+
+#### Code Reviewer
+
+Focused on code quality, security, and best practices.
+
+```
+---
+name: code-reviewer
+description: Reviews code for best practices, security issues, performance, and maintainability
+tools:
+  - read_file
+  - read_many_files
+---
+
+You are an experienced code reviewer focused on quality, security, and maintainability.
+
+Review criteria:
+
+- **Code Structure**: Organization, modularity, and separation of concerns
+- **Performance**: Algorithmic efficiency and resource usage
+- **Security**: Vulnerability assessment and secure coding practices
+- **Best Practices**: Language/framework-specific conventions
+- **Error Handling**: Proper exception handling and edge case coverage
+- **Readability**: Clear naming, comments, and code organization
+- **Testing**: Test coverage and testability considerations
+
+Provide constructive feedback with:
+
+1. **Critical Issues**: Security vulnerabilities, major bugs
+2. **Important Improvements**: Performance issues, design problems
+3. **Minor Suggestions**: Style improvements, refactoring opportunities
+4. **Positive Feedback**: Well-implemented patterns and good practices
+
+Focus on actionable feedback with specific examples and suggested solutions.
+Prioritize issues by impact and provide rationale for recommendations.
+```
+
+**Use Cases:**
+
+- “Review this authentication implementation for security issues”
+- “Check the performance implications of this database query logic”
+- “Evaluate the code structure and suggest improvements”
+
+### Technology-Specific Agents
+
+#### React Specialist
+
+Optimized for React development, hooks, and component patterns.
+
+```
+---
+name: react-specialist
+description: Expert in React development, hooks, component patterns, and modern React best practices
+tools:
+  - read_file
+  - write_file
+  - read_many_files
+  - run_shell_command
+---
+
+You are a React specialist with deep expertise in modern React development.
+
+Your expertise covers:
+
+- **Component Design**: Functional components, custom hooks, composition patterns
+- **State Management**: useState, useReducer, Context API, and external libraries
+- **Performance**: React.memo, useMemo, useCallback, code splitting
+- **Testing**: React Testing Library, Jest, component testing strategies
+- **TypeScript Integration**: Proper typing for props, hooks, and components
+- **Modern Patterns**: Suspense, Error Boundaries, Concurrent Features
+
+For React tasks:
+
+1. Use functional components and hooks by default
+2. Implement proper TypeScript typing
+3. Follow React best practices and conventions
+4. Consider performance implications
+5. Include appropriate error handling
+6. Write testable, maintainable code
+
+Always stay current with React best practices and avoid deprecated patterns.
+Focus on accessibility and user experience considerations.
+```
+
+**Use Cases:**
+
+- “Create a reusable data table component with sorting and filtering”
+- “Implement a custom hook for API data fetching with caching”
+- “Refactor this class component to use modern React patterns”
+
+#### Python Expert
+
+Specialized in Python development, frameworks, and best practices.
+
+```
+---
+name: python-expert
+description: Expert in Python development, frameworks, testing, and Python-specific best practices
+tools:
+  - read_file
+  - write_file
+  - read_many_files
+  - run_shell_command
+---
+
+You are a Python expert with deep knowledge of the Python ecosystem.
+
+Your expertise includes:
+
+- **Core Python**: Pythonic patterns, data structures, algorithms
+- **Frameworks**: Django, Flask, FastAPI, SQLAlchemy
+- **Testing**: pytest, unittest, mocking, test-driven development
+- **Data Science**: pandas, numpy, matplotlib, jupyter notebooks
+- **Async Programming**: asyncio, async/await patterns
+- **Package Management**: pip, poetry, virtual environments
+- **Code Quality**: PEP 8, type hints, linting with pylint/flake8
+
+For Python tasks:
+
+1. Follow PEP 8 style guidelines
+2. Use type hints for better code documentation
+3. Implement proper error handling with specific exceptions
+4. Write comprehensive docstrings
+5. Consider performance and memory usage
+6. Include appropriate logging
+7. Write testable, modular code
+
+Focus on writing clean, maintainable Python code that follows community standards.
+```
+
+**Use Cases:**
+
+- “Create a FastAPI service for user authentication with JWT tokens”
+- “Implement a data processing pipeline with pandas and error handling”
+- “Write a CLI tool using argparse with comprehensive help documentation”
+
+## Best Practices
+
+### Design Principles
+
+#### Single Responsibility Principle
+
+Each Subagent should have a clear, focused purpose.
+
+**✅ Good:**
+
+```
+---
+name: testing-expert
+description: Writes comprehensive unit tests and integration tests
+---
+```
+
+**❌ Avoid:**
+
+```
+---
+name: general-helper
+description: Helps with testing, documentation, code review, and deployment
+---
+```
+
+**Why:** Focused agents produce better results and are easier to maintain.
+
+#### Clear Specialization
+
+Define specific expertise areas rather than broad capabilities.
+
+**✅ Good:**
+
+```
+---
+name: react-performance-optimizer
+description: Optimizes React applications for performance using profiling and best practices
+---
+```
+
+**❌ Avoid:**
+
+```
+---
+name: frontend-developer
+description: Works on frontend development tasks
+---
+```
+
+**Why:** Specific expertise leads to more targeted and effective assistance.
+
+#### Actionable Descriptions
+
+Write descriptions that clearly indicate when to use the agent.
+
+**✅ Good:**
+
+```
+description: Reviews code for security vulnerabilities, performance issues, and maintainability concerns
+```
+
+**❌ Avoid:**
+
+```
+description: A helpful code reviewer
+```
+
+**Why:** Clear descriptions help the main AI choose the right agent for each task.
+
+### Configuration Best Practices
+
+#### System Prompt Guidelines
+
+**Be Specific About Expertise:**
+
+```
+You are a Python testing specialist with expertise in:
+
+- pytest framework and fixtures
+- Mock objects and dependency injection
+- Test-driven development practices
+- Performance testing with pytest-benchmark
+```
+
+**Include Step-by-Step Approaches:**
+
+```
+For each testing task:
+
+1. Analyze the code structure and dependencies
+2. Identify key functionality and edge cases
+3. Create comprehensive test suites with clear naming
+4. Include setup/teardown and proper assertions
+5. Add comments explaining complex test scenarios
+```
+
+**Specify Output Standards:**
+
+```
+Always follow these standards:
+
+- Use descriptive test names that explain the scenario
+- Include both positive and negative test cases
+- Add docstrings for complex test functions
+- Ensure tests are independent and can run in any order
+```
+
+## Security Considerations
+
+- **Tool Restrictions**: Use `tools` to limit which tools a subagent can access, or `disallowedTools` to block specific tools while inheriting everything else
+- **Permission Mode**: Subagents inherit their parent's permission mode by default. Plan-mode sessions cannot escalate to auto-edit through delegated agents. Privileged modes (auto-edit, yolo) are blocked in untrusted folders.
+- **Provider Selection**: A subagent with `model: authType:modelId`, or
+  `model: fast` where `fastModel` resolves to another auth type, sends that
+  subagent's model requests to the selected provider. Make sure that provider is
+  appropriate for the subagent's task and data.
+- **Sandboxing**: All tool execution follows the same security model as direct tool use
+- **Audit Trail**: All Subagents actions are logged and visible in real-time
+- **Access Control**: Project and user-level separation provides appropriate boundaries
+- **Sensitive Information**: Avoid including secrets or credentials in agent configurations
+- **Production Environments**: Consider separate agents for production vs development environments
+
+## Limits
+
+The following soft warnings apply to Subagent configurations (no hard limits are enforced):
+
+- **Description Field**: A warning is shown for descriptions exceeding 1,000 characters
+- **System Prompt**: A warning is shown for system prompts exceeding 10,000 characters

@@ -1,0 +1,19 @@
+{
+  "name": "mcp-server-example",
+  "displayName": {
+    "en": "MCP Server Example",
+    "zh": "MCP 服务器示例"
+  },
+  "description": {
+    "en": "Example extension that provides an MCP server",
+    "zh": "提供 MCP 服务器的示例扩展"
+  },
+  "version": "1.0.0",
+  "mcpServers": {
+    "nodeServer": {
+      "command": "node",
+      "args": ["${extensionPath}${/}dist${/}example.js"],
+      "cwd": "${extensionPath}"
+    }
+  }
+}

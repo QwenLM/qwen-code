@@ -1,0 +1,5 @@
+{
+  "name": "context-example",
+  "description": "Example extension that provides additional context via QWEN.md",
+  "version": "1.0.0"
+}
