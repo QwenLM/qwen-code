@@ -5455,6 +5455,38 @@ describe('Server Config (config.ts)', () => {
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  describe('isWorkflowPromptProvenanceOn', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    // On unless something turns it off: a subagent that cannot tell its
+    // task text from its user's words is the condition this defaults
+    // against, so an absent setting must not be read as consent.
+    it('is on by default and off only when asked', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE', '');
+      expect(new Config(baseParams).isWorkflowPromptProvenanceOn()).toBe(true);
+      expect(
+        new Config({
+          ...baseParams,
+          workflowPromptProvenance: false,
+        }).isWorkflowPromptProvenanceOn(),
+      ).toBe(false);
+    });
+
+    it('lets the environment override the setting either way', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE', '0');
+      expect(new Config(baseParams).isWorkflowPromptProvenanceOn()).toBe(false);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE', '1');
+      expect(
+        new Config({
+          ...baseParams,
+          workflowPromptProvenance: false,
+        }).isWorkflowPromptProvenanceOn(),
+      ).toBe(true);
+    });
+  });
+
   describe('isWorkflowNameOnly', () => {
     afterEach(() => {
       vi.unstubAllEnvs();

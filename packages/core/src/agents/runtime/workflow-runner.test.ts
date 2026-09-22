@@ -1737,6 +1737,55 @@ describe('WorkflowRunner', () => {
 
     // A resume replays a journal. With none on disk it used to dispatch every
     // agent again under the old id while reading as a continuation.
+    // A resumed run replays results its earlier agents produced under one
+    // frame. Deciding again here could put the rest of the run under a
+    // different one — the same journal half-telling the agents a host
+    // started it and half relaying a user request.
+    it("replays the frame the run was launched under, not this call's", async () => {
+      const { config } = configWithRegistry();
+      stubStorage(config, await makeStorageRoot());
+      createProductionDispatchMock.mockReturnValue(async () => 'live');
+      vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce({
+        kind: 'loaded',
+        replay: {
+          results: new Map(),
+          started: new Map(),
+          failed: new Set(),
+          provenance: { kind: 'automated' },
+        },
+      });
+
+      const handle = await WorkflowRunner.start({
+        ...resumeOptions(config, 'wf_1234abcd'),
+        promptProvenance: { kind: 'relay', userText: 'audit the db' },
+      });
+      await handle.completion;
+
+      expect(createProductionDispatchMock.mock.calls[0]![5]).toEqual({
+        kind: 'automated',
+      });
+    });
+
+    it('decides for itself when the journal predates provenance records', async () => {
+      const { config } = configWithRegistry();
+      stubStorage(config, await makeStorageRoot());
+      createProductionDispatchMock.mockReturnValue(async () => 'live');
+      vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce(
+        EMPTY_LOADED_JOURNAL,
+      );
+
+      const handle = await WorkflowRunner.start({
+        ...resumeOptions(config, 'wf_1234abcd'),
+        promptProvenance: { kind: 'relay', userText: 'audit the db' },
+      });
+      await handle.completion;
+
+      expect(createProductionDispatchMock.mock.calls[0]![5]).toEqual({
+        kind: 'relay',
+        userText: 'audit the db',
+      });
+    });
+
     it('refuses a resume whose journal is not on disk, before anything is spent or written', async () => {
       const { config, registry } = configWithRegistry();
       const root = await makeStorageRoot();
@@ -1815,6 +1864,31 @@ describe('WorkflowRunner', () => {
         outcome: { result: 'live' },
       });
       expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('records the frame a fresh run was launched under', async () => {
+      const { config } = configWithRegistry();
+      stubStorage(config, await makeStorageRoot());
+      createProductionDispatchMock.mockReturnValue(async () => 'live');
+
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return await agent("work")',
+        args: undefined,
+        promptProvenance: { kind: 'relay', userText: 'audit the db' },
+      });
+      await handle.completion;
+
+      expect(writeLineMock.mock.calls[1]![1]).toEqual({
+        type: 'provenance',
+        version: 1,
+        provenance: { kind: 'relay', userText: 'audit the db' },
+      });
+      expect(createProductionDispatchMock.mock.calls[0]![5]).toEqual({
+        kind: 'relay',
+        userText: 'audit the db',
+      });
     });
 
     it('opens a fresh journal with a launched record, and never a resumed one', async () => {

@@ -188,6 +188,11 @@ anything: the script owns all fan-out, and every ambiguity has to be resolved in
 the prompt it is given. Never ask a subagent to spawn its own verifiers —
 dispatch them from the script.
 
+The harness tells the subagent your prompt was computed by a script and carries
+no user authority, and indents it. Writing authority into a prompt ("the user
+approved this") therefore buys nothing, and the user's own request is relayed
+above your task already.
+
 ## What agent() returns
 
 A subagent's final text, or the validated object under `schema`.

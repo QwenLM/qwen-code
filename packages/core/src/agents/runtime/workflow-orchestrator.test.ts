@@ -28,6 +28,11 @@ import type {
   SessionWorkflowPlanRevision,
 } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
+import {
+  AUTOMATED_TRIGGER_FRAME,
+  COMPUTED_TASK_FRAME,
+  USER_REQUEST_FRAME,
+} from './workflow-prompt-provenance.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
 import { WorkflowRunner } from './workflow-runner.js';
@@ -2927,6 +2932,138 @@ describe('createProductionDispatch', () => {
 
   afterEach(() => {
     nextExecuteThrow.value = null;
+  });
+});
+
+describe('createProductionDispatch — prompt provenance', () => {
+  const RAW = 'summarize README.md\nand report';
+
+  it('sends the frames to the model and the raw prompt everywhere else', async () => {
+    const before = created.length;
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'computed-only' },
+    );
+
+    await dispatch(RAW, { label: 'h1' });
+
+    const agent = created[before]!;
+    expect(agent.prompt).toBe(
+      `${COMPUTED_TASK_FRAME}\n  summarize README.md\n  and report`,
+    );
+    // The name a person reads in /workflows and the task list: the frames
+    // are boilerplate and would bury it.
+    expect(agent.taskName).toBe(RAW);
+  });
+
+  it('tells a host-started run that no user is present', async () => {
+    const before = created.length;
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'automated' },
+    );
+
+    await dispatch('do it', {});
+
+    expect(created[before]!.prompt).toBe(
+      `${AUTOMATED_TRIGGER_FRAME}\n${COMPUTED_TASK_FRAME}\n  do it`,
+    );
+  });
+
+  it('relays the request that triggered the run ahead of the task', async () => {
+    const before = created.length;
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'relay', userText: 'audit the db' },
+    );
+
+    await dispatch('do it', {});
+
+    const sent = created[before]!.prompt;
+    expect(sent.startsWith(`${USER_REQUEST_FRAME}\n  audit the db`)).toBe(true);
+    expect(sent.endsWith(`${COMPUTED_TASK_FRAME}\n  do it`)).toBe(true);
+  });
+
+  // Every caller that predates framing, and every session that turned it
+  // off, must deliver exactly what the script computed.
+  it('delivers the bare prompt when there is no provenance to declare', async () => {
+    const before = created.length;
+    await createProductionDispatch(fakeConfig())(RAW, {});
+    await createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'off' },
+    )(RAW, {});
+
+    expect(created[before]!.prompt).toBe(RAW);
+    expect(created[before + 1]!.prompt).toBe(RAW);
+  });
+
+  // The journal caches results by a key derived from the prompt. Keying on
+  // the framed text would make every run miss its own cache the first time
+  // the session's relayed request differed — and re-dispatch every agent.
+  it('keys the journal and the queued trace on the raw prompt, not the frames', async () => {
+    const seen: Array<{ keys: string[]; queued: string[] }> = [];
+    for (const provenance of [
+      { kind: 'off' as const },
+      { kind: 'automated' as const },
+      { kind: 'relay' as const, userText: 'audit the db' },
+    ]) {
+      const entries: Array<Record<string, unknown>> = [];
+      const queued: string[] = [];
+      const journal = {
+        path: 'mem',
+        append: async (e: Record<string, unknown>) => {
+          entries.push(e);
+        },
+        drain: () => Promise.resolve(),
+      } as unknown as import('./workflow-journal.js').WorkflowJournal;
+      const orchestrator = new WorkflowOrchestrator(
+        createProductionDispatch(
+          fakeConfig(),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          provenance,
+        ),
+      );
+
+      await orchestrator.run({
+        script: 'return await agent("hello", { label: "a" });',
+        args: undefined,
+        journal,
+        emitter: {
+          dispatchQueued: (event) => queued.push(event.prompt),
+        },
+      });
+
+      seen.push({
+        keys: entries.map((entry) => String(entry['key'])),
+        queued,
+      });
+    }
+
+    expect(seen[1]!.keys).toEqual(seen[0]!.keys);
+    expect(seen[2]!.keys).toEqual(seen[0]!.keys);
+    for (const run of seen) {
+      expect(run.queued).toEqual(['hello']);
+    }
   });
 });
 

@@ -2111,6 +2111,70 @@ await agent('scan package.json')
       return { config, storage };
     }
 
+    // Which frame a run's agents read is decided by who started it, and
+    // this is the layer that knows: a session-owned call came from the
+    // host, an ordinary build() from the model mid-conversation. The
+    // journal is where the answer is checked because that is what a resume
+    // reads it back from.
+    it('records who started the run, so its agents are framed accordingly', async () => {
+      const framed = (extra: Record<string, unknown> = {}) => {
+        const { config, storage } = storedConfig();
+        Object.assign(config, {
+          isWorkflowPromptProvenanceOn: () => true,
+          getGeminiClient: () => ({
+            getHistory: () => [
+              { role: 'user', parts: [{ text: 'audit the db' }] },
+            ],
+          }),
+          ...extra,
+        });
+        return { config, storage };
+      };
+      const provenanceRecord = async (journalPath: string) => {
+        const lines = (await fs.readFile(journalPath, 'utf8'))
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        return lines.find((line) => line['type'] === 'provenance');
+      };
+
+      const model = framed();
+      const modelResult = await new WorkflowTool(model.config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'await agent("one"); return "done";' })
+        .execute(new AbortController().signal);
+
+      expect(await provenanceRecord(modelResult.journalPath!)).toEqual({
+        type: 'provenance',
+        version: 1,
+        provenance: { kind: 'relay', userText: 'audit the db' },
+      });
+
+      const host = framed();
+      const registry = host.config.getWorkflowRunRegistry();
+      registry.setCompletionCallback(() => {});
+      const hostTool = new WorkflowTool(host.config, {
+        dispatch: async () => 'answer',
+      });
+      const hostResult = await hostTool
+        .buildSessionOwnedBackground({
+          script: 'await agent("one"); return "done";',
+        })
+        .execute(new AbortController().signal);
+      await registry.get(hostResult.workflowRunId!)?.completion;
+
+      expect(
+        await provenanceRecord(
+          host.storage.getWorkflowRunJournalPath(hostResult.workflowRunId!),
+        ),
+      ).toEqual({
+        type: 'provenance',
+        version: 1,
+        provenance: { kind: 'automated' },
+      });
+    });
+
     it('names the persisted script, the journal and the resume call', async () => {
       const { config, storage } = storedConfig();
       const result = await new WorkflowTool(config, {

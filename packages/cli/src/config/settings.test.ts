@@ -3906,6 +3906,54 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('workflow prompt provenance scope handling', () => {
+    it('drops, with a warning, a workspace that would unframe its own analysis', () => {
+      // The project directory is part of what the session reads, so a
+      // repository turning the frames off would be removing the notice that
+      // its own files are not the user speaking.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              tools: { workflowPromptProvenance: false, useRipgrep: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowPromptProvenance).toBeUndefined();
+      expect(settings.merged.tools?.useRipgrep).toBe(false);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowPromptProvenance'),
+        ),
+      ).toBe(true);
+    });
+
+    it('keeps a user scope that turns the frames off', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              tools: { workflowPromptProvenance: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowPromptProvenance).toBe(false);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowPromptProvenance'),
+        ),
+      ).toBe(false);
+    });
+  });
+
   // The workspace is compared against the value in force without it. User
   // overrides SystemDefaults in the merge, so a User value that loosened a
   // SystemDefaults one is the baseline, and a workspace may tighten it back.

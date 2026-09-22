@@ -2330,6 +2330,13 @@ client can withhold the two actions instead of discovering the refusal by
 making the call. `argsOmitted` stays beside it as the reason, for a client
 that wants to say which. The `args` themselves are never put on the wire.
 
+A run a host starts has no interactive user behind it, and its subagents are
+told so: each one's first message opens with an automated-trigger notice, so
+nothing the script computed into a prompt — including anything that arrived in
+`args` — can read as a user instructing or approving. A run the session's model
+started instead relays that session's own last request. Turning this off is a
+session setting (`tools.workflowPromptProvenance`), not a per-call field.
+
 `run-script` passes no definition name, so the run is labelled by the script's own
 `export const meta` — a compiled script should declare one, or the run shows
 only its id.

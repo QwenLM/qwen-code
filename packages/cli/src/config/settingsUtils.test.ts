@@ -1237,6 +1237,7 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
     );
     expect(keys).toEqual([
       'tools.workflowNameOnly',
+      'tools.workflowPromptProvenance',
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
     ]);
@@ -1282,6 +1283,18 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
     expect(lock.strictness(true)).toBeGreaterThan(lock.strictness(false));
     expect(lock.strictness(undefined)).toBe(lock.strictness(false));
     expect(lock.strictness('true')).toBe(lock.strictness(false));
+  });
+
+  // The frames are on by default and a project directory is part of what
+  // the session is analysing, so a repository must not be able to take them
+  // away from the agents reading its files.
+  it('ranks prompt provenance off as the only loosening of the frames', () => {
+    const frames = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'workflowPromptProvenance',
+    )!;
+    expect(frames.strictness(false)).toBeLessThan(frames.strictness(true));
+    expect(frames.strictness(undefined)).toBe(frames.strictness(true));
+    expect(frames.strictness('false')).toBe(frames.strictness(true));
   });
 
   it('ranks the switch off as stricter than on, and unset as on', () => {
