@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
@@ -15065,11 +15066,11 @@ export class Session implements SessionContext {
               ],
               values: () => [
                 ...toolResultPartDiagnosticValues(toolResult.llmContent),
-                ...(typeof toolResult.returnDisplay === 'string'
+                ...(shellResultText(toolResult.returnDisplay) !== undefined
                   ? [
                       {
                         representation: 'display' as const,
-                        value: toolResult.returnDisplay,
+                        value: shellResultText(toolResult.returnDisplay)!,
                       },
                     ]
                   : []),

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
   ConcurrencyBatch,
@@ -2149,9 +2150,7 @@ export async function runNonInteractive(
               toolResponse.error,
               config,
               toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-              typeof toolResponse.resultDisplay === 'string'
-                ? toolResponse.resultDisplay
-                : undefined,
+              shellResultText(toolResponse.resultDisplay),
               { approvalRequired: toolResponse.approvalRequired === true },
             );
           }

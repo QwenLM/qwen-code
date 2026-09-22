@@ -129,6 +129,7 @@ import {
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
+  peekSessionCatalogDisplayName,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
 } from './session-catalog/session-catalog-store';
 import {
@@ -192,6 +193,7 @@ import {
   DaemonStatusDialog,
 } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { GaugeIcon, LayersIcon } from 'lucide-react';
@@ -1599,6 +1601,12 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
 ];
+/**
+ * One trajectory tab per session, so re-opening an already-open one reveals it
+ * rather than stacking a second. Shared with the entry, which hides itself
+ * once this session's tab is open.
+ */
+const trajectoryTabId = (sessionId: string) => `trajectory:${sessionId}`;
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
   ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
@@ -1828,6 +1836,10 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'workspaceCwd'
     >
   | Pick<
+      Extract<ArtifactPanelTab, { kind: 'trajectory' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
+    >
+  | Pick<
       Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
       'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
     >
@@ -2008,6 +2020,13 @@ function parsePersistedArtifactPanelTab(
         kind: 'terminal',
         workspaceCwd: tab['workspaceCwd'],
       } as PersistedArtifactPanelTab;
+    case 'trajectory':
+      if (typeof tab['sessionId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'trajectory',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     case 'token_usage':
     case 'context_usage':
       if (typeof tab['sessionId'] !== 'string') return;
@@ -2154,6 +2173,8 @@ function serializeArtifactPanelTabs(
             workspaceCwd: tab.workspaceCwd,
           },
         ];
+      case 'trajectory':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'token_usage':
       case 'context_usage':
         return tab.sessionId
@@ -3876,6 +3897,29 @@ export function App({
     setSessionStatusDisplayName(undefined);
     setCurrentSessionSummary(undefined);
   }, [logicalSessionKey]);
+  // Declared after the reset above so it wins in the same layout pass. A
+  // history session's name exists only in the session catalog — neither the
+  // load response nor the metadata events carry it — so seeding it from the
+  // cache here keeps the header from flashing the "New session" placeholder
+  // while the load round-trip is in flight.
+  useLayoutEffect(() => {
+    // `?? prev` keeps this from ever blanking a title the catalog already
+    // resolved; the reset above runs first in the same layout pass, so a
+    // session switch still starts from an empty title.
+    setSessionStatusDisplayName(
+      (prev) =>
+        peekSessionCatalogDisplayName(
+          workspace.client,
+          connection.sessionId,
+          connection.workspaceCwd,
+        ) ?? prev,
+    );
+  }, [
+    logicalSessionKey,
+    workspace.client,
+    connection.sessionId,
+    connection.workspaceCwd,
+  ]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
   // cleanup: connection.sessionId can cycle through several sessions during
@@ -3915,7 +3959,7 @@ export function App({
           }
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
-          setSessionStatusDisplayName(summary.displayName);
+          setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
           setCurrentSessionSummary(summary);
         })
         .catch(() => {
@@ -3924,7 +3968,8 @@ export function App({
             worktreeSessionKeyRef.current === sessionKey &&
             owner.isCurrent()
           ) {
-            setSessionStatusDisplayName(undefined);
+            // A failed refresh must not blank a title the catalog already
+            // resolved.
             setCurrentSessionSummary(undefined);
           }
         });
@@ -3941,7 +3986,7 @@ export function App({
           ) {
             setSessionWorktree(undefined);
             setSessionBranch(undefined);
-            setSessionStatusDisplayName(summary.displayName);
+            setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
             setCurrentSessionSummary(summary);
           }
           return;
@@ -3953,7 +3998,7 @@ export function App({
         ) {
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
-          setSessionStatusDisplayName(summary.displayName);
+          setSessionStatusDisplayName((prev) => summary.displayName ?? prev);
           setCurrentSessionSummary(summary);
         }
         return loadSessionCatalogOnce(
@@ -3977,7 +4022,8 @@ export function App({
               (session) => session.sessionId === sid,
             );
             setSessionStatusDisplayName(
-              listedSession?.displayName ?? summary.displayName,
+              (prev) =>
+                listedSession?.displayName ?? summary.displayName ?? prev,
             );
             setCurrentSessionSummary(listedSession ?? summary);
           })
@@ -3989,9 +4035,11 @@ export function App({
           worktreeSessionKeyRef.current === sessionKey &&
           owner.isCurrent()
         ) {
+          // The live summary does not carry a history session's name, and a
+          // failed refresh must not blank a title the catalog already
+          // resolved.
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
-          setSessionStatusDisplayName(undefined);
           setCurrentSessionSummary(undefined);
         }
       });
@@ -4787,6 +4835,7 @@ export function App({
       true;
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
+  const trajectoryAvailable = rightPanelItems.includes('trajectory');
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -5502,6 +5551,28 @@ export function App({
       setArtifactPanelOpen(true);
     },
     [getDefaultReviewPanelWidth, t],
+  );
+  const openTrajectoryPanel = useCallback(
+    (sourceSessionId: string) => {
+      const tab: ArtifactPanelTab = {
+        id: trajectoryTabId(sourceSessionId),
+        kind: 'trajectory',
+        title: t('trajectory.title'),
+        sessionId: sourceSessionId,
+        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t, workspace.client],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6394,6 +6465,23 @@ export function App({
                   return webTerminalAvailable
                     ? { ...tab, initialized: false }
                     : undefined;
+                case 'trajectory': {
+                  if (!tab.sessionId) return undefined;
+                  // A stored tab outlives the host's opt-in, so a host that
+                  // has since stopped listing the item would get the panel
+                  // back — and fetching with it — through the browser profile
+                  // alone.
+                  if (!trajectoryAvailable) return undefined;
+                  // The loader is a function, so it cannot survive storage;
+                  // a restored tab is inert until it is rewired here.
+                  return {
+                    ...tab,
+                    loadPage: createTrajectoryPageLoader(
+                      workspace.client,
+                      tab.sessionId,
+                    ),
+                  };
+                }
                 case 'context_usage':
                 case 'token_usage': {
                   if (!tab.sessionId) return undefined;
@@ -6522,6 +6610,7 @@ export function App({
     resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
+    trajectoryAvailable,
     webTerminalAvailable,
     webPreviewAvailable,
     workspace.baseUrl,
@@ -18190,6 +18279,12 @@ export function App({
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
+    onOpenTrajectory: connection.sessionId
+      ? () => openTrajectoryPanel(connection.sessionId!)
+      : undefined,
+    trajectoryTabId: connection.sessionId
+      ? trajectoryTabId(connection.sessionId)
+      : undefined,
     items: rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,
