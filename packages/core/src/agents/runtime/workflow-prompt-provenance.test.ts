@@ -178,6 +178,34 @@ describe('resolveWorkflowPromptProvenance', () => {
     ).toEqual({ kind: 'relay', userText: 'audit the db' });
   });
 
+  // A user turn as this harness stores it opens with reminders the harness
+  // wrote itself. Relaying those would put words in the user's mouth, and
+  // spend tokens restating a date the subagent's own prompt already has.
+  it('relays what the user typed, not the reminders wrapped around it', () => {
+    const config = configWith({
+      turns: [
+        userTurn(
+          '<system-reminder>\nThe current date is: Tuesday, September 22, 2026.\n</system-reminder>\naudit the db',
+        ),
+      ],
+    });
+    expect(
+      resolveWorkflowPromptProvenance(config, { sessionOwned: false }),
+    ).toEqual({ kind: 'relay', userText: 'audit the db' });
+  });
+
+  it('keeps looking when a turn is nothing but reminders', () => {
+    const config = configWith({
+      turns: [
+        userTurn('audit the db'),
+        userTurn('<system-reminder>token budget is low</system-reminder>'),
+      ],
+    });
+    expect(
+      resolveWorkflowPromptProvenance(config, { sessionOwned: false }),
+    ).toEqual({ kind: 'relay', userText: 'audit the db' });
+  });
+
   it('joins the text parts of the turn it relays', () => {
     const config = configWith({
       turns: [{ role: 'user', parts: [{ text: 'first' }, { text: 'second' }] }],

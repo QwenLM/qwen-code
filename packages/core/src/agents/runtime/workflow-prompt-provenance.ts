@@ -107,6 +107,22 @@ const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
  */
 const TRUSTED_TAG_OPENER = /<(\/?\s*(?:system-reminder|channel|input)\b)/gi;
 
+/**
+ * A user turn carries harness-authored scaffolding as well as what the user
+ * typed — the date reminder, and whatever else a `<system-reminder>` block
+ * holds. None of that is the user speaking, and the relay frame promises it
+ * is, so everything up to the last closing tag is dropped. Upstream trims the
+ * same way at its own relay point.
+ */
+const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
+
+function userWords(text: string): string {
+  const lastClose = text.lastIndexOf(SYSTEM_REMINDER_CLOSE);
+  return (
+    lastClose >= 0 ? text.slice(lastClose + SYSTEM_REMINDER_CLOSE.length) : text
+  ).trim();
+}
+
 /** `\n`-normalized text with two spaces in front of every line. */
 function indent(text: string): string {
   return '  ' + text.replace(LINE_TERMINATORS, '\n').split('\n').join('\n  ');
@@ -128,9 +144,7 @@ export function indentComputed(text: string): string {
  * be a user speaking, so it is also the most valuable to forge into.
  */
 export function indentRelayed(text: string): string {
-  return indent(
-    text.replace(INVISIBLE, '').replace(TRUSTED_TAG_OPENER, '‹$1'),
-  );
+  return indent(text.replace(INVISIBLE, '').replace(TRUSTED_TAG_OPENER, '‹$1'));
 }
 
 /**
@@ -195,11 +209,13 @@ function latestUserRequest(config: Config): string | undefined {
     if (entry.parts.some((part) => part?.functionResponse !== undefined)) {
       continue;
     }
-    const text = entry.parts
-      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
-      .filter((part) => part !== '')
-      .join('\n');
-    if (text.trim() !== '') return text;
+    const text = userWords(
+      entry.parts
+        .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+        .filter((part) => part !== '')
+        .join('\n'),
+    );
+    if (text !== '') return text;
   }
   return undefined;
 }
