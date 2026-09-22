@@ -3146,6 +3146,17 @@ const SETTINGS_SCHEMA = {
           'Restrict the model to running named workflows: saved workflows and the workflows extensions ship, called by name. The model cannot run an inline script or a script path, and a running script cannot nest one by path, so every run the model starts can be matched by a Workflow(name:...) permission rule. It does not replace an approval policy: the model can still save a new workflow file and run it by name, which an approval rule scoped to specific names or script digests will ask about. Runs a host starts over ACP (run-saved, run-script, retry, rerun) are not restricted. QWEN_CODE_WORKFLOW_NAME_ONLY=1 turns it on too. A workspace may set this to true only.',
         showInDialog: true,
       },
+      workflowPromptProvenance: {
+        type: 'boolean',
+        label: 'Workflow Prompt Provenance',
+        category: 'Tools',
+        // Read when a run starts, so the next run picks up a change.
+        requiresRestart: false,
+        default: true,
+        description:
+          "Tell every workflow subagent where its task text came from. A script's agent() prompt is computed at runtime — often from files the run read, an earlier agent's output, or args a host passed — so without this the text arrives as the subagent's own user speaking, and an instruction or an approval claim inside it reads as the user's. The harness prefixes the prompt with what it is, relays the request that triggered the run when the model started it, says no user is present when a host started it, and indents the text so a frame cannot be forged inside it. Turn it off only to reproduce the bare prompts scripts used to receive; QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE=0 does the same for one run. A workspace may not turn it off.",
+        showInDialog: true,
+      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',

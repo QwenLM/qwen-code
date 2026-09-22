@@ -875,9 +875,13 @@ describe('WorkflowRunner', () => {
     ).rejects.toThrow('Workflow start was cancelled.');
     await appended;
 
-    // The launch record was really written; it just must not outlive the
-    // cleanup.
-    expect(writeLineMock).toHaveBeenCalledTimes(1);
+    // The launch records were really written; they just must not outlive
+    // the cleanup.
+    expect(
+      writeLineMock.mock.calls.map(
+        ([, entry]) => (entry as { type: string }).type,
+      ),
+    ).toEqual(['launched', 'provenance']);
     expect(writeLineMock.mock.calls[0][1]).toEqual({
       type: 'launched',
       version: 1,
@@ -1368,8 +1372,10 @@ describe('WorkflowRunner', () => {
   it('freezes snapshot and telemetry before late dispatches drain', async () => {
     const { config, registry } = configWithRegistry();
     stubStorage(config, await makeStorageRoot());
-    // The run's `launched` record is let through; every write after it is
-    // held, so the one held write is the agent's `started` line.
+    // The run's `launched` and `provenance` records are let through; every
+    // write after them is held, so the one held write is the agent's
+    // `started` line.
+    writeLineMock.mockResolvedValueOnce(undefined);
     writeLineMock.mockResolvedValueOnce(undefined);
     writeLineMock.mockImplementation(
       () =>
@@ -1827,7 +1833,7 @@ describe('WorkflowRunner', () => {
         dispatch: async () => 'live',
       });
       await first.completion;
-      expect(types()).toEqual(['launched', 'started', 'result']);
+      expect(types()).toEqual(['launched', 'provenance', 'started', 'result']);
       expect(writeLineMock.mock.calls[0][1]).toEqual({
         type: 'launched',
         version: 1,

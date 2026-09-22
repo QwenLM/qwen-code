@@ -44,6 +44,7 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
+import { resolveWorkflowPromptProvenance } from '../../agents/runtime/workflow-prompt-provenance.js';
 import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
@@ -543,6 +544,13 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         sourceRef: this.params.sourceRef,
         resumeFromRunId: this.params.resumeFromRunId,
         dispatch: this.toolOptions.dispatch,
+        // Resolved here because this is the layer that knows who started the
+        // run: a host's session-owned call has no interactive user behind
+        // it, a model's call does. The runner records the answer in the
+        // journal so a resume replays under the same frame.
+        promptProvenance: resolveWorkflowPromptProvenance(this.config, {
+          sessionOwned: this.sessionOwned,
+        }),
         runInBackground,
         ...(!this.sessionOwned && this.config.isWorkflowNameOnly?.() === true
           ? { restrictNestedScriptPaths: true }

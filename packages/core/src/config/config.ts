@@ -1281,6 +1281,13 @@ export interface ConfigParameters {
    * too.
    */
   workflowNameOnly?: boolean;
+  /**
+   * Frame every workflow subagent prompt with where it came from
+   * (`tools.workflowPromptProvenance`), on unless turned off.
+   * `QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE` overrides the setting: `0` off,
+   * `1` on.
+   */
+  workflowPromptProvenance?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -2929,6 +2936,7 @@ export class Config {
   private readonly skipWorkflowUsageWarning: boolean = false;
   private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
   private readonly workflowNameOnly: boolean;
+  private readonly workflowPromptProvenance: boolean;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -3331,6 +3339,16 @@ export class Config {
       params.workflowNameOnly === true ||
       process.env['QWEN_CODE_WORKFLOW_NAME_ONLY'] === '1';
     this.workflowRunRegistry.setNameOnly(this.workflowNameOnly);
+    // On unless something turns it off. The env var wins over the setting so
+    // a run can be taken back to bare prompts without editing settings —
+    // the escape hatch a behaviour change to every subagent's first message
+    // needs.
+    this.workflowPromptProvenance =
+      process.env['QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE'] === '1'
+        ? true
+        : process.env['QWEN_CODE_WORKFLOW_PROMPT_PROVENANCE'] === '0'
+          ? false
+          : params.workflowPromptProvenance !== false;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -9533,6 +9551,17 @@ export class Config {
    */
   isWorkflowNameOnly(): boolean {
     return this.workflowNameOnly;
+  }
+
+  /**
+   * Whether a workflow subagent's first user message says where its task
+   * text came from. On by default: a script's prompt is computed at runtime
+   * from files, earlier agents' output and host `args`, and without the
+   * frame the subagent cannot tell that text from its user's own words.
+   * Read when each run starts, so a change applies to the next run.
+   */
+  isWorkflowPromptProvenanceOn(): boolean {
+    return this.workflowPromptProvenance;
   }
 
   /**

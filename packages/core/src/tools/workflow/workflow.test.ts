@@ -2290,11 +2290,12 @@ await agent('scan package.json')
         .map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(lines.map((line) => line['type'])).toEqual([
         'launched',
+        'provenance',
         'started',
         'failed',
       ]);
-      expect(lines[2]['key']).toBe(lines[1]['key']);
-      expect(lines[2]['agentId']).toBe(lines[1]['agentId']);
+      expect(lines[3]['key']).toBe(lines[2]['key']);
+      expect(lines[3]['agentId']).toBe(lines[2]['agentId']);
     });
 
     it('carries the trailer and the last log lines on the failure path', async () => {

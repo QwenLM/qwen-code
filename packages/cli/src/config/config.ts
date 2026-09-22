@@ -2604,6 +2604,7 @@ export async function loadCliConfig(
     workflowsEnabled: settings.tools?.workflowsEnabled,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
     workflowNameOnly: settings.tools?.workflowNameOnly,
+    workflowPromptProvenance: settings.tools?.workflowPromptProvenance,
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),

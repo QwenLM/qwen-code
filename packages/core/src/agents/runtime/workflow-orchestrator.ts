@@ -49,6 +49,8 @@ import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
 } from './workflow-prompts.js';
+import { frameSubagentPrompt } from './workflow-prompt-provenance.js';
+import type { WorkflowPromptProvenance } from './workflow-prompt-provenance.js';
 import { AgentTerminateMode } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
 import {
@@ -549,6 +551,13 @@ export function createProductionDispatch(
     dispatchId?: string,
   ) => () => void,
   subagentBounds?: WorkflowSubagentBounds,
+  /**
+   * Where this run's task text came from, decided once when the run started
+   * (see `resolveWorkflowPromptProvenance`) and replayed from the journal on
+   * a resume. Omitted by tests and legacy callers, which then deliver the
+   * script's prompt unframed — the behaviour before framing existed.
+   */
+  promptProvenance?: WorkflowPromptProvenance,
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -596,6 +605,15 @@ export function createProductionDispatch(
           'cannot be enforced. Use an in-process agent definition instead.',
       );
     }
+    // Framed once per `agent()` call, not per attempt: a retry asks the same
+    // agent the same question, and re-framing would only risk the two
+    // attempts disagreeing. The journal key, the queued-dispatch trace and
+    // every preview are derived from the raw prompt upstream of here, so
+    // framing changes what the model reads and nothing else.
+    const framedPrompt = frameSubagentPrompt(
+      prompt,
+      promptProvenance ?? { kind: 'off' },
+    );
     let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {
@@ -607,7 +625,10 @@ export function createProductionDispatch(
         const cleanupTranscript = attachDispatchTranscript(
           config,
           workflowAgentId,
-          prompt,
+          // The transcript records what the agent was actually asked, frames
+          // included: a reader reconstructing why an agent did something
+          // needs the message the model read, not the script's raw string.
+          framedPrompt,
           agentIdentity.name,
           emitter,
           attempt,
@@ -616,6 +637,7 @@ export function createProductionDispatch(
           return await runSingleDispatch(
             config,
             prompt,
+            framedPrompt,
             opts,
             attemptSignal,
             emitter,
@@ -773,7 +795,10 @@ function terminalDispatchError(
  */
 async function runSingleDispatch(
   config: Config,
+  /** What the script computed. Names the agent and keys nothing else here. */
   prompt: string,
+  /** What the model reads: {@link prompt} with its provenance frames. */
+  framedPrompt: string,
   opts: WorkflowAgentOpts,
   attemptSignal: AbortSignal,
   emitter: AgentEventEmitter,
@@ -789,7 +814,10 @@ async function runSingleDispatch(
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
-  ctx.set('task_prompt', prompt);
+  // The subagent's first user message. `AgentHeadless` reads `task_prompt`
+  // for both the message it sends and the message log it records, so the
+  // frames land in both.
+  ctx.set('task_prompt', framedPrompt);
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
   // The fast path hands `config` to AgentHeadless untouched, so it has no
@@ -862,6 +890,7 @@ async function runSingleDispatch(
   return runOverridePath(
     config,
     ctx,
+    prompt,
     opts,
     attemptSignal,
     workflowAgentId,
@@ -1011,6 +1040,12 @@ function resolveDispatchAllows(raw: unknown): string[] | undefined {
 async function runOverridePath(
   config: Config,
   ctx: ContextState,
+  /**
+   * The prompt the script computed, for naming this agent in the surfaces
+   * that show one. Not what the agent reads — that is `ctx`'s `task_prompt`,
+   * which carries the provenance frames as well.
+   */
+  taskName: string,
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
   workflowAgentId: string,
@@ -1394,7 +1429,10 @@ async function runOverridePath(
           ? { modelConfigOverrides: { reasoningEffort: effort } }
           : {}),
         eventEmitter,
-        taskName: String(ctx.get('task_prompt')),
+        // A display name, not a message: the frames are boilerplate and
+        // would bury the task in every surface that shows this. The fast
+        // path names the agent with the same raw string.
+        taskName,
         subagentId: workflowAgentId,
       },
     );

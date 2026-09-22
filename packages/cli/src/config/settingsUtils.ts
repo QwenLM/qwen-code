@@ -318,6 +318,14 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
     strictness: (value: unknown): number => (value === true ? 1 : 0),
   },
   {
+    section: 'tools',
+    key: 'workflowPromptProvenance',
+    // Unset means on — the default — so it ranks with `true`. Only `false`
+    // takes the frames away, which is the loosening a project directory must
+    // not be able to perform on the session analysing it.
+    strictness: (value: unknown): number => (value === false ? 0 : 1),
+  },
+  {
     section: 'agents',
     key: 'crossSessionMessaging',
     // Unset means on — the default — so it ranks with `true`. Anything the

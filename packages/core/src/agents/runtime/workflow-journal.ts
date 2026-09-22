@@ -52,6 +52,8 @@ import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import { readWorkflowPromptProvenance } from './workflow-prompt-provenance.js';
+import type { WorkflowPromptProvenance } from './workflow-prompt-provenance.js';
 import {
   readWorkflowSourceRef,
   type WorkflowSourceRef,
@@ -103,11 +105,25 @@ export interface JournalLaunchedEntry {
   version: 1;
 }
 
+/**
+ * Where this run's task text came from, written once at launch and never on a
+ * resume. A resumed run replays it rather than deciding again: its cached
+ * results were produced under this frame, and a run whose agents half read
+ * "a host started this" and half read a relayed user request would be
+ * describing two different runs.
+ */
+export interface JournalProvenanceEntry {
+  type: 'provenance';
+  version: 1;
+  provenance: WorkflowPromptProvenance;
+}
+
 export type JournalEntry =
   | JournalLaunchedEntry
   | JournalStartedEntry
   | JournalResultEntry
   | JournalFailedEntry
+  | JournalProvenanceEntry
   | { type: 'source'; version: 1; sourceRef: WorkflowSourceRef };
 
 /**
@@ -125,6 +141,8 @@ export type JournalLoadResult =
 export interface JournalReplay {
   sourceRef?: WorkflowSourceRef;
   sourceError?: string;
+  /** The frame this run's dispatches carry. Absent on pre-provenance runs. */
+  provenance?: WorkflowPromptProvenance;
   /** key → the completed result entry (last write wins). */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
@@ -255,6 +273,7 @@ export function deriveArgsSeed(args: unknown): string {
 export function buildReplay(entries: JournalEntry[]): JournalReplay {
   let sourceRef: WorkflowSourceRef | undefined;
   let sourceError: string | undefined;
+  let provenance: WorkflowPromptProvenance | undefined;
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
   const failed = new Set<string>();
@@ -271,6 +290,13 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
       else started.set(e.key, [e]);
     } else if (e.type === 'failed') {
       failed.add(e.key);
+    } else if (e.type === 'provenance') {
+      // One record per run, so the first valid one is the launch's answer;
+      // a later or malformed one cannot redefine what earlier agents read.
+      provenance ??=
+        e.version === 1
+          ? readWorkflowPromptProvenance(e.provenance)
+          : undefined;
     } else if (e.type === 'source') {
       try {
         const ref = readWorkflowSourceRef(e.sourceRef);
@@ -294,6 +320,7 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
     failed,
     ...(sourceRef ? { sourceRef } : {}),
     ...(sourceError ? { sourceError } : {}),
+    ...(provenance ? { provenance } : {}),
   };
 }
 

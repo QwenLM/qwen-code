@@ -5,6 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
@@ -44,6 +45,7 @@ import {
   readWorkflowSourceRef,
   type WorkflowSourceRef,
 } from '../workflow-correlation.js';
+import type { WorkflowPromptProvenance } from './workflow-prompt-provenance.js';
 import {
   createProductionDispatch,
   resolveConcurrencyLimit,
@@ -81,6 +83,8 @@ import {
   type ReviewWorkflowLimits,
 } from './review-workflow.js';
 
+const debugLogger = createDebugLogger('WORKFLOW_RUNNER');
+
 export interface WorkflowRunnerOptions {
   config: Config;
   signal: AbortSignal;
@@ -112,6 +116,13 @@ export interface WorkflowRunnerOptions {
    * host starts itself is not the model's and is left unrestricted.
    */
   restrictNestedScriptPaths?: boolean;
+  /**
+   * Where this run's task text came from, for the frames every dispatch's
+   * first user message carries. Resolved by the caller, which is the only
+   * layer that knows whether a host or the model started this run. A resume
+   * replays the original run's answer from its journal instead.
+   */
+  promptProvenance?: WorkflowPromptProvenance;
 }
 
 /**
@@ -471,6 +482,14 @@ export class WorkflowRunner {
       // start; a foreground start registers and settles `cancelled` so the
       // caller's tool result carries the run it asked for.
       callerWasAbortedBeforeStart = options.signal.aborted;
+      // A resume runs under the frame its cached results were produced
+      // under: re-deciding here would let a host-started run come back as a
+      // relayed user request (or the reverse) halfway through one journal.
+      // A journal written before provenance existed carries no answer, so
+      // those resumes fall back to this call's own.
+      const promptProvenance: WorkflowPromptProvenance =
+        (options.resumeFromRunId ? resumeReplay?.provenance : undefined) ??
+          options.promptProvenance ?? { kind: 'off' };
       if (journal && !(await journal.ensureExists())) {
         journalPath = undefined;
       }
@@ -483,6 +502,17 @@ export class WorkflowRunner {
       // for it before deleting.
       if (journal && journalPath && !options.resumeFromRunId) {
         void journal.markLaunched();
+        void journal
+          .append({
+            type: 'provenance',
+            version: 1,
+            provenance: promptProvenance,
+          })
+          .catch((error) =>
+            debugLogger.warn(
+              `workflow journal provenance-append failed: ${error}`,
+            ),
+          );
       }
       if (sourceRef) {
         if (!journal || !journalPath) {
@@ -532,6 +562,7 @@ export class WorkflowRunner {
                   : () => undefined
             : undefined,
           reviewLimits?.subagent,
+          promptProvenance,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       const registration: WorkflowTaskRegistration = {
