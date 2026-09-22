@@ -1756,6 +1756,11 @@ export class AgentCore {
     if (
       forNestedBinding &&
       isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
+      // An MCP tool name must fall through to the exact-name and pattern
+      // checks below: they are the only place a server-level narrowing in
+      // the allowlist can be honored.
+      (!toolName.startsWith('mcp__') ||
+        (this.executionAllowedMcpPatterns?.length ?? 0) === 0) &&
       this.executionAllowedExactTools?.has(ToolNames.EXEC) &&
       getToolExposure(toolName) === 'code-mode-callable'
     ) {

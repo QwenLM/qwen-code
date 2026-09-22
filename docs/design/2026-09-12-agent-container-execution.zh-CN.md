@@ -58,7 +58,8 @@ CLI 重启时保留环境变量值，供 Node TLS 证书、设置插值等启动
 
 该策略可与 `isolation: "worktree"` 和 `working_dir` 组合。
 它不扩展面向模型的 isolation 枚举，也不改变 `isolation: "remote"`。
-与 `tools.mode: "code_mode_only"` 的组合会在容器启动前被拒绝；首版容器注册表只支持直接工具调用。
+与 `tools.mode: "code_mode_only"` 的组合会在容器启动前被拒绝；`tools.mode: "code_mode"`
+会告警并仅以直接工具继续，不注册 `exec`。首版容器注册表只支持直接工具调用。
 
 ## 后端策略与定义边界
 

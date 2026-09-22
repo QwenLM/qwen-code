@@ -479,6 +479,46 @@ describe('AgentCore skill-gate inputs', () => {
       ).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
     });
 
+    it('honors MCP execution patterns in the hybrid nested binding set', async () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      const readTool = new MockTool({ name: 'mcp__github__read_file' });
+      Object.assign(readTool, {
+        serverName: 'github',
+        serverToolName: 'read_file',
+      });
+      const createTool = new MockTool({ name: 'mcp__github__create_issue' });
+      Object.assign(createTool, {
+        serverName: 'github',
+        serverToolName: 'create_issue',
+      });
+      registry.registerTool(readTool);
+      registry.registerTool(createTool);
+      const core = new AgentCore(
+        'mcp-pattern-hybrid-code-mode',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        {
+          tools: [ToolNames.EXEC, 'mcp__github__read_*'],
+          executionAllowedTools: [ToolNames.EXEC, 'mcp__github__read_*'],
+        },
+      );
+
+      await core.prepareTools();
+
+      expect(
+        (
+          core as unknown as {
+            codeModeAllowedToolNames?: readonly string[];
+          }
+        ).codeModeAllowedToolNames,
+      ).toEqual(['mcp__github__read_file']);
+    });
+
     it('keeps inherited CodeMode declarations executable only when directly allowed', async () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
       const registry = new ToolRegistry(config);
