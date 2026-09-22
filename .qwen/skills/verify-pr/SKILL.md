@@ -494,10 +494,13 @@ pinned / not-pinned. Survivors are not noise — classify each as an ordinary
 **coverage gap** (the behaviour is right, nothing asserts it), as **dead
 code** (the clause cannot decide any outcome), or as **redundant defence** (a
 sibling hunk in this same PR closes the same hazard, so nothing can observe
-this one alone), and say which. A guard whose deletion leaves every test
-green is one of those three, and the difference matters to the author: the
+this one alone), or as a **real defect in the mutant** (driving its build
+shows wrong behaviour; see **Adjudicate a survivor by running its build**).
+Distinguish these four outcomes: the
 first is a test to write, the second is code to delete, and the third is
-correct exactly as it stands. Where a survivor mirrors a pre-existing gap
+correct exactly as it stands; the fourth is a behavioural finding. State
+which build exhibits it: a defect in a mutant does not establish a defect
+in head. Where a survivor mirrors a pre-existing gap
 rather than something the PR introduced, say so — and label the whole set as
 completeness reporting, not merge conditions, unless one of them is load-bearing.
 
@@ -727,8 +730,8 @@ inconclusive.
   WebSocket `upgrade` handshake and bidirectional tunnel; preserve the
   client's original `Host` on both HTTP and WebSocket paths. A request-only
   relay can pass HTTP while dropping ACP connections. Do not use the daemon's
-  access log as a ledger. It is rate-limited to a 60-line burst refilled at
-  2 lines per second.
+  access log as a ledger. Operator traffic and pre-authentication rejects
+  draw from separate rate-limited budgets; neither is a complete ledger.
 - **When the oracle is an instrument, corroborate it with a mechanism that
   does not use that instrument.** A tool's _report_ about the system is not
   the system: a cursor query, a profiler number, a coverage percentage can
@@ -754,7 +757,13 @@ inconclusive.
   nothing behind, so a claim checked only against a fixture holds only for
   first contact. Run error and recovery scenarios twice against the real
   peer: once on a client that has never reached it, and once on a client that
-  has. Measured example: an Android shell's native "cannot reach the daemon →
+  has. Before crediting the second arm, confirm the persistent state exists
+  and affects the client. For a service worker, observe
+  `navigator.serviceWorker.controller !== null` on the page being tested;
+  a successful load or registration alone does not prove control. Web Shell
+  registers its worker only in production builds, and registration can fail.
+  An uncontrolled page does not establish the worker's steady-state path.
+  Measured example: an Android shell's native "cannot reach the daemon →
   Retry" screen worked for a new connection profile. After the daemon's Web
   Shell had loaded once, its service worker answered the failed navigation
   with its own 503 page, and WebView never reported the error to the native
@@ -835,9 +844,17 @@ since the merge-base, say so and re-measure there.
   own encoding**: the same WebView kept a token as UTF-16LE in its Session
   Storage LevelDB log while its Local Storage held an ASCII marker as plain
   bytes, so an ASCII `grep` for a token can report a false absence.
+  Search raw bytes with `buf.indexOf(Buffer.from(secret, 'utf16le'))`,
+  where `buf` is the store's original byte buffer. Whole-file UTF-16LE
+  decoding starts at byte zero and can miss a string at an odd offset in a
+  binary store. Check known-present even and odd offsets plus an absent
+  control; emit only the byte offset (`-1` means absent), never matched bytes.
   Report the store, key, encoding and match offset, never the secret value.
-  This applies to report prose and captures of scan output; redact values
-  before capturing evidence and do not publish raw storage dumps.
+  This applies to report prose, captures of scan output, wire captures and
+  raw harness logs. Redact credentials (including Authorization, Cookie and
+  token-bearing URLs) before recording them in the artifact directory or
+  capturing evidence; do not publish raw storage dumps. Preserve bytes on
+  the forwarded wire; redact the recorded copy, not the request under test.
   Measured example: an Android shell moved its plaintext development token
   into a Keystore-encrypted vault, deleted the old preferences file, and
   passed every migration test. But the base build had
@@ -917,7 +934,9 @@ since the merge-base, say so and re-measure there.
   finding. Probe the **default** path of manual dispatch/config combinations
   (what happens when an operator submits the pre-filled form as-is), not
   just the documented happy path.
-- **Native Android (`packages/mobile-shell/`)**: read
+- **Native Android (`packages/mobile-shell/`)** and changes to the
+  daemon-served Web Shell it renders (`packages/web-shell/` and the serve
+  routes it calls): read
   `references/android.md` before scoping. The `node:22-bookworm` verify
   image ships no JDK and no Android SDK, and the lane passes no `/dev/kvm`
   into the container. The Linux `aapt2` that AGP 8.2 downloads is x86-64
@@ -925,7 +944,9 @@ since the merge-base, say so and re-measure there.
   lane, measure what the container actually has, and expect device-level
   claims to go under _Not covered_. The local recipe is in that reference:
   emulator images picked by WebView capability, where the untrusted build may
-  run, and how to drive the WebView through CDP.
+  run, and how to drive the WebView through CDP. Check the Android workflow's
+  trigger filters even for web-shell-only changes; report _lane never ran_
+  when untriggered, and name any Android behaviour left _Not covered_.
 
 ## Artifact contract (the workflow collects and publishes these)
 

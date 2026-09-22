@@ -1,6 +1,7 @@
 # Native Android (`packages/mobile-shell/`) verification recipe
 
-Read this before scoping a PR that touches `packages/mobile-shell/`. The
+Read this before scoping a PR that touches `packages/mobile-shell/` or the
+daemon-served Web Shell and routes it consumes. The
 measured observations below come from maintainer rounds on #12121, #12129
 and #12130.
 Re-measure anything your round depends on, because image contents and tool
@@ -19,33 +20,45 @@ versions drift.
   `.github/workflows/mobile-shell.yml` owns the `device-tests` matrix and its
   trigger filters. Read that workflow in the reviewed checkout before making
   a claim about current CI coverage.
-- **Building runs PR code.** Gradle executes `settings.gradle.kts`,
-  `build.gradle.kts`, `gradle.properties` and the wrapper's distribution
-  URL, and the PR can edit all of them. The skill's local-invocation
+- **Building runs PR code.** The PR can edit the `gradlew` / `gradlew.bat`
+  launchers, wrapper jar, `gradle/wrapper/gradle-wrapper.properties`
+  (distribution URL and checksum), `settings.gradle.kts`, `build.gradle.kts`
+  and `gradle.properties`. The skill's local-invocation
   isolation rule applies to the build. AGP 8.2 publishes its Linux `aapt2`
   as an x86-64 binary only; there is no `linux-aarch64` classifier. So an
   arm64 Linux host or container (Colima, an Orange Pi) cannot build this
   package without x86 emulation, while macOS arm64 builds natively. An
   x86-64 Linux VM with nested KVM could both build and run the emulator in
-  isolation, but no such setup has been measured yet. If the
-  maintainer decides to build on their own machine, record that decision in
-  the methodology note. Also record that you read every changed build-script
-  file before the first build.
+  isolation, but no such setup has been measured yet. If isolation is
+  unavailable, follow SKILL.md: ask the maintainer to trigger the sandboxed
+  `@qwen-code /verify` lane and record device claims it cannot run as
+  _Not covered_. Reading changed launchers and build scripts or checking
+  hashes does not replace isolation.
 - **The emulator and the APK.** The emulator needs hardware virtualization
   (HVF on macOS, KVM on Linux), so it cannot run in a container that has no
   `/dev/kvm`.
   Code inside an installed APK runs in the emulator's own app sandbox. The
-  daemon the app talks to runs on the host, reached with
-  `adb reverse tcp:<port> tcp:<port>`. The shell's network-security config
-  allows cleartext only for loopback, so use `http://127.0.0.1:<port>`.
+  daemon the app talks to must also run inside the credential-free isolation
+  boundary: a disposable daemon with its own token, scratch `QWEN_HOME`
+  and scratch workspace. A scratch directory alone does not sandbox its
+  tools. Never forward the APK to a daemon owning real sessions or a working
+  checkout. Reach the isolated daemon with
+  `adb reverse tcp:<daemon-port> tcp:<daemon-port>`. The shell's
+  network-security config allows cleartext only for loopback, so use
+  `http://127.0.0.1:<daemon-port>`.
 
 ## Build
 
 JDK 17 (`JAVA_HOME`), plus `ANDROID_HOME` pointing at an SDK with command-line
 tools (`sdkmanager` and `avdmanager`), `platform-tools`, `emulator`,
 `platforms;android-34` and
-`build-tools;34.0.0`. Verify the wrapper jar against its committed
-`gradle-wrapper.jar.sha256` first, as the workflow does. Then, from
+`build-tools;34.0.0`. Compare the wrapper jar's SHA-256 with
+`gradle-wrapper.jar.sha256`: use `sha256sum` on Linux or `shasum -a 256` on
+macOS, comparing only the digest with the whitespace-trimmed checksum file.
+Both files are PR-controlled, so this detects corruption, not substitution.
+For provenance, compare against the trusted base checksum or the official
+Gradle checksum for the declared wrapper version; explain intentional
+upgrades separately. Then, from
 `packages/mobile-shell/`:
 
 ```bash
@@ -91,7 +104,9 @@ version with `adb shell dumpsys webviewupdate`:
 
 The feature columns come from which capability-gated device tests ran and
 which were skipped. API 26 sits below the shell's WebView 111 floor, so it
-exercises the update-guidance path whatever its features are. The API 35 row is the only one where the "profiles
+can reach the update-guidance path by manually connecting; the committed device
+tests do not assert that below-floor path. Do not credit the API 26 CI lane
+with that UI coverage. The API 35 row is the only one where the "profiles
 supported, clearing not supported" branch executed in that round. For current
 CI coverage, use the `device-tests` matrix in `.github/workflows/mobile-shell.yml`:
 read its `api-level:`, `arch:` and `require-profiles:` entries, then confirm
@@ -104,15 +119,21 @@ matrix row. Without run evidence, label the coverage assessment as inferred.
 - Use a private adb server, and start the emulator against it with a port
   outside the default 5554–5585 scan range, so another session's `adb` does
   not pick up your device by default:
-  `ANDROID_ADB_SERVER_PORT=<p> emulator -avd <name> -port <even-port> -no-snapshot -no-audio -no-boot-anim -gpu swiftshader_indirect -no-window`.
-  Wrap `adb -P <p> -s emulator-<port>` in a small script. Wait for
+  `ANDROID_ADB_SERVER_PORT=<adb-server-port> emulator -avd <name> -port <even-port> -no-snapshot -no-audio -no-boot-anim -gpu swiftshader_indirect -no-window`.
+  Every `adb` command in this recipe means
+  `adb -P <adb-server-port> -s emulator-<even-port>`; use that wrapper for
+  installs, reverse/forward mappings, shell, exec-out and shutdown. Keep
+  `<adb-server-port>`, `<even-port>`, `<daemon-port>` and `<cdp-port>` distinct.
+  Wait for
   `getprop sys.boot_completed`, then set `window_animation_scale`,
   `transition_animation_scale` and `animator_duration_scale` to 0 with
   `adb shell settings put global <setting> 0`. The device-test CI action
   already does this through `disable-animations: true`.
   Stop the emulator with `adb emu kill` or by its PID,
   never by pattern.
-- Run device tests with `adb install -r -t` (app APK and test APK), then
+- Run device tests with `adb install -r -t` for
+  `app/build/outputs/apk/debug/app-debug.apk` and
+  `app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`, then
   `adb shell am instrument -w -r com.qwen.mobileshell.test/androidx.test.runner.AndroidJUnitRunner`.
   Add `-e requireProfileIsolation true` before the runner component only on
   an image whose WebView reports both `MULTI_PROFILE` and `DELETE_BROWSING_DATA`.
@@ -120,10 +141,14 @@ matrix row. Without run evidence, label the coverage assessment as inferred.
   literal string `true` converts capability skips into hard assertion failures.
   Re-read the workflow's `require-profiles:` mapping when reproducing CI.
   Do not use Gradle `connected*`: it installs on every visible device and
-  uninstalls the app afterwards.
+  uninstalls the app afterwards. Device and upgrade arms use debug APKs;
+  the unsigned release artifact is a build check, not an install target.
 - Read the per-test status codes, not the summary line: `0` pass, `-2`
   failure, `-4` assumption skip. `OK (7 tests)` is printed even when one of
-  the seven was skipped.
+  the seven was skipped. Also distinguish `1` started (not a result) and
+  `-3` ignored (disabled, not a capability skip). A newly ignored test loses
+  coverage. Runner 1.5.2 reports thrown JUnit4 failures as `-2`, not the
+  deprecated `-1` code.
 
 ## Drive the app
 
@@ -133,29 +158,52 @@ matrix row. Without run evidence, label the coverage assessment as inferred.
   share the same label ("Reset connections"). `adb shell input text` drops
   shell metacharacters such as `(`. Under `swiftshader` a "System UI isn't
   responding" dialog can appear; tap Wait.
-- **WebView.** Debug builds expose `@webview_devtools_remote_<pid>`. Run
-  `adb forward tcp:<p> localabstract:webview_devtools_remote_<pid>`, read
+- **WebView.** Check that `@webview_devtools_remote_<pid>` and a page actually
+  exist before claiming CDP evidence. This app does not call
+  `setWebContentsDebuggingEnabled`; automatic debug-app support requires
+  WebView 113 or later. The app's connection gates can still prevent page
+  creation: in the measured table, only API 36 opens a new or migrated
+  profile. On the other rows record the blocking gate and use native UI
+  evidence; do not silently enable debugging in the reviewed build. Run
+  `adb forward tcp:<cdp-port> localabstract:webview_devtools_remote_<pid>`, read
   `/json/list`, and speak raw CDP to the page's `webSocketDebuggerUrl`. Node
   22+ has a global `WebSocket`. Playwright's `connectOverCDP` rejects
   WebView. Type with `Input.insertText`, because `adb input text` drops
   characters in the Web Shell composer.
 - **State.** `run-as com.qwen.mobileshell` works on debug APKs.
-  `run-as … tar -cf - app_webview` pulls all WebView storage. The default
-  profile is `app_webview/Default`, and named profiles appear as
-  `Profile <n>`. Scan for secrets in UTF-16LE as well as ASCII (see the
-  **Migration and persisted-state PRs** rule in SKILL.md). Report the store,
-  key, encoding and match offset, never the secret value. Apply this to report
-  prose and captures of scan output; redact before capture and do not publish
-  raw storage dumps.
-- **Upgrade arm.** Install the base APK, seed its state (for example write
+  Stop the app before collecting a consistent snapshot. Use the selected
+  device's `adb exec-out run-as com.qwen.mobileshell tar -cf - app_webview`
+  and binary-safe host redirection to a private scratch file outside the
+  artifact directory; extract it before scanning individual stores.
+  The default profile is `app_webview/Default`; named profiles appear as
+  `Profile <n>`. Read the provider's `pref_store` when present (the default
+  Chromium 133 location is `app_webview/pref_store`, included in that tar).
+  Its profile-list `name` / `path` entries map `qwen-<browserId>` to those
+  directories. Record the mapping before upgrade/reset, and do not attribute
+  an unmapped hit to a particular connection profile.
+  Search raw bytes with `buf.indexOf(Buffer.from(secret, 'utf16le'))` for
+  UTF-16LE, including strings at an odd offset; reporting and redaction follow the
+  **Migration and persisted-state PRs** rule in SKILL.md.
+- **Upgrade arm.** Start on a dedicated fresh AVD or run
+  `adb uninstall com.qwen.mobileshell` on the selected disposable device
+  before installing base; confirm no prior app state was restored.
+  `-no-snapshot` does not clear the AVD's userdata. Install the base debug
+  APK, seed its state (for example write
   the legacy `shared_prefs` file with `run-as … cp` and launch once), then
   `adb install -r` the head APK over it. `-r` keeps the app data.
 
 ## Mutation runs
 
-Apply each mutant to a clean copy of the sources, and assert that the file
-actually changed. Rebuild with `--no-daemon`, then run the JVM suite and
+Reuse one dedicated scratch checkout for incremental builds. Before each row,
+restore the preceding mutation to the pinned head and require
+`git status --porcelain` to be empty. Apply exactly one mutant, then inspect
+`git diff` and status to confirm only that mutation remains; keep logs outside
+the checkout. Rebuild with `--no-daemon`, then run the JVM suite and
 `am instrument` on every image in parallel. Include a pristine control row.
+Before interpreting a survivor, require a positive control in the mutated
+file on each image. If capability gates skip all relevant tests, record that
+image as _Not covered_ for the row, not as an adjudicated survivor. Keep that
+missing coverage visible when assessing the CI matrix.
 Keep the capability argument appropriate to each image; a red pristine control
 is not a mutant kill. If `requireProfileIsolation` fails in the control too,
 correct the rig before interpreting mutation results.
