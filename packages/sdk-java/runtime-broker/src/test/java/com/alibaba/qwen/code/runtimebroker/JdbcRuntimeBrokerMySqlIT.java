@@ -19,7 +19,7 @@ class JdbcRuntimeBrokerMySqlIT {
                     PreparedStatement timeZone = connection.prepareStatement(
                             "SET time_zone = '" + offset + "'")) {
                 timeZone.execute();
-                JdbcRepositorySupportTest.assertNearSystemClock(
+                JdbcRepositorySupportTest.assertStorageSafeClock(
                         JdbcRepositorySupport.databaseNow(connection));
             }
         }

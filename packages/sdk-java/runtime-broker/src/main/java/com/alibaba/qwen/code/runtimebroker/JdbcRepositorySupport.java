@@ -77,7 +77,8 @@ final class JdbcRepositorySupport {
                     throw new SQLException(
                             "database returned invalid clock precision");
                 }
-                return Instant.ofEpochSecond(epochSeconds, micros * 1_000L);
+                return Instant.ofEpochSecond(epochSeconds, micros * 1_000L)
+                        .truncatedTo(ChronoUnit.SECONDS);
             }
         }
     }
