@@ -387,6 +387,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onBrandResolved: handleBrandResolved,
                 onSessionIdChange: handleSessionIdChange,
                 sidebar: { enabled: true, showLive: true },
+                showToolCalls: true,
                 header: {
                   items: [
                     'title',

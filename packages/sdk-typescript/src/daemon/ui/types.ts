@@ -203,10 +203,9 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
 export interface DaemonTranscriptTimingMeta {
   kind: 'request' | 'tool';
   /**
-   * Epoch ms, and `kind === 'request'` only. A request is logged when its own
-   * stream ends, so its start follows from its duration. Tool calls can be
-   * logged in one loop after their whole batch settles, so no honest per-tool
-   * start is derivable and a tool frame never carries this.
+   * Epoch ms. Tool starts are explicitly recorded by the scheduler and share
+   * durationMs's scope, including approval and scheduling wait. Missing in
+   * older tool records; never inferred from the batch's log timestamp.
    */
   startedAt?: number;
   durationMs: number;
@@ -280,6 +279,9 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   title?: string;
   status?: string;
   toolName?: string;
+  /** Server-measured call timing; absent in older recordings. */
+  startedAt?: number;
+  durationMs?: number;
   toolKind?: string;
   content?: unknown;
   locations?: unknown;
@@ -1100,6 +1102,9 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
   title: string;
   status: string;
   toolName?: string;
+  /** Server-measured call timing; absent in older recordings. */
+  startedAt?: number;
+  durationMs?: number;
   toolKind?: string;
   preview: DaemonToolPreview;
   /** Typed, redacted result data for explicit document/export projection. */

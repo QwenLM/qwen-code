@@ -61,6 +61,7 @@ export interface TranscriptReplayUsageState {
 export interface PendingTranscriptToolCall {
   readonly callId: string;
   readonly toolName: string;
+  readonly resolvedToolName?: string;
   readonly sourceRecordId: string;
   readonly sourceTimestamp?: string;
   /**
@@ -363,12 +364,8 @@ export function createTranscriptUsageUpdate(
 export interface TranscriptTimingMeta {
   readonly kind: 'request' | 'tool';
   /**
-   * Epoch ms, and `kind === 'request'` only. A request is logged when its
-   * stream ends, so its start time is a real subtraction from a real end time.
-   * Tool calls are logged in one loop after their whole batch settles, so the
-   * recorded timestamp is the batch's end for every tool in it and no honest
-   * per-tool start can be derived; a tool frame carries only `durationMs`
-   * until the recorded event itself carries a start time.
+   * Epoch ms. Tool starts are recorded by the scheduler, never inferred from
+   * the telemetry timestamp (which may be logged after the batch settles).
    */
   readonly startedAt?: number;
   readonly durationMs: number;
@@ -486,14 +483,19 @@ function parseTelemetryTiming(
     if (callId === undefined) return undefined;
     const toolName = nonEmptyString(uiEvent['function_name']);
     const toolStatus = parseToolTimingStatus(uiEvent['status']);
-    // A call denied at confirmation, failed validation, or cancelled before it
-    // ran is recorded with `durationMs: 0` as a placeholder, and
-    // `ToolCallEvent` turns a missing duration into 0 as well. A zero on
-    // anything but a success is therefore a stand-in, not a measurement.
-    if (durationMs === 0 && toolStatus !== 'success') return undefined;
+    const startedAt = finiteNumber(uiEvent['started_at']);
+    // Legacy non-success records use zero for missing timing. A recorded start
+    // distinguishes a measured zero duration from that placeholder.
+    if (
+      durationMs === 0 &&
+      toolStatus !== 'success' &&
+      (startedAt === undefined || startedAt < 0)
+    )
+      return undefined;
     return {
       kind: 'tool',
       ...shared,
+      ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
       callId,
       ...(toolName !== undefined ? { toolName } : {}),
       ...(toolStatus !== undefined ? { toolStatus } : {}),
@@ -1101,6 +1103,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           this.pendingToolCalls.set(callId, {
             callId,
             toolName,
+            ...(toolName === 'tool_call' && typeof args['name'] === 'string'
+              ? { resolvedToolName: args['name'] }
+              : {}),
             sourceRecordId: record.uuid,
             ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
             ...(explicitId !== undefined && explicitId !== callId
@@ -1493,7 +1498,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     for (const pending of this.pendingToolCalls.values()) {
       const recordedId = pending.rawCallId ?? pending.callId;
       if (recordedId !== timing.callId || pending.timingMatched) continue;
-      if (timing.toolName !== undefined && pending.toolName !== timing.toolName)
+      if (
+        timing.toolName !== undefined &&
+        (pending.resolvedToolName ?? pending.toolName) !== timing.toolName
+      )
         continue;
       this.pendingToolCalls.set(pending.callId, {
         ...pending,
@@ -1795,6 +1803,9 @@ function parseInitialState(
         {
           callId: pending['callId'],
           toolName: pending['toolName'],
+          ...(typeof pending['resolvedToolName'] === 'string'
+            ? { resolvedToolName: pending['resolvedToolName'] }
+            : {}),
           sourceRecordId: pending['sourceRecordId'],
           ...(typeof pending['sourceTimestamp'] === 'string'
             ? { sourceTimestamp: pending['sourceTimestamp'] }

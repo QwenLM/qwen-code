@@ -37975,6 +37975,91 @@ describe('Session', () => {
   });
 
   describe('runToolCalls', () => {
+    it('sends approved arguments before execution starts', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      const args = {
+        command: 'printf approved',
+        description: 'Inspect approved command',
+      };
+      const updates = vi.spyOn(session, 'sendUpdate');
+      const execute = vi.fn().mockImplementation(async () => {
+        expect(updates.mock.calls.map(([update]) => update)).toContainEqual(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'approved-call',
+            status: 'in_progress',
+            rawInput: args,
+            _meta: expect.objectContaining({
+              toolName: 'approved_tool',
+              startedAt: expect.any(Number),
+            }),
+          }),
+        );
+        return { llmContent: 'executed', returnDisplay: 'executed' };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('approved_tool', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'approved-prompt', [
+        { id: 'approved-call', name: 'approved_tool', args },
+      ]);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'executed',
+      });
+    });
+
+    it('executes an approved tool even if timing notification fails', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'executed',
+        returnDisplay: 'executed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('timing_tool', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      const original = session.sendUpdate.bind(session);
+      let rejectedTiming = 0;
+      vi.spyOn(session, 'sendUpdate').mockImplementation(async (update) => {
+        if (
+          update.sessionUpdate === 'tool_call_update' &&
+          update.status === 'in_progress' &&
+          update._meta?.['startedAt']
+        ) {
+          rejectedTiming++;
+          throw new Error('timing transport failure');
+        }
+        return original(update);
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+      const result = await (
+        session as unknown as {
+          runToolCalls: (
+            signal: AbortSignal,
+            promptId: string,
+            calls: FunctionCall[],
+          ) => Promise<{ parts: Part[] }>;
+        }
+      ).runToolCalls(new AbortController().signal, 'timing-prompt', [
+        { id: 'timing-call', name: 'timing_tool', args: {} },
+      ]);
+      expect(rejectedTiming).toBe(1);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'executed',
+      });
+    });
+
     type ToolCallInternals = {
       runToolCalls: (
         abortSignal: AbortSignal,
@@ -38462,6 +38547,7 @@ describe('Session', () => {
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
 
+      const before = Date.now();
       const result = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(new AbortController().signal, 'prompt-missing-name', [
@@ -38487,6 +38573,12 @@ describe('Session', () => {
           error_type: core.ToolErrorType.INVALID_TOOL_PARAMS,
         }),
       );
+      const timing = logToolCallSpy.mock.calls.find(
+        ([, event]) => event.call_id === 'missing_name_call',
+      )?.[1];
+      expect(timing?.started_at).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at).toBeLessThanOrEqual(Date.now());
+      expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
         result.parts,
         expect.objectContaining({
@@ -38672,6 +38764,7 @@ describe('Session', () => {
         mockAllowedTool('success_tool', execute),
       );
 
+      const before = Date.now();
       const result = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(new AbortController().signal, 'prompt-success', [
@@ -38690,6 +38783,12 @@ describe('Session', () => {
           execution_status: 'success',
         }),
       );
+      const timing = logToolCallSpy.mock.calls.find(
+        ([, event]) => event.call_id === 'success_call',
+      )?.[1];
+      expect(timing?.started_at).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at).toBeLessThanOrEqual(Date.now());
+      expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         1,
       );

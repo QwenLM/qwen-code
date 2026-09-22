@@ -13003,6 +13003,7 @@ export class Session implements SessionContext {
           prompt_id: promptId,
           function_name: toolName,
           function_args: args,
+          started_at: startTime,
           duration_ms: durationMs,
           status,
           execution_status: executionStatus,
@@ -13068,6 +13069,8 @@ export class Session implements SessionContext {
               callId,
               toolName,
               args,
+              startedAt: startTime,
+              durationMs: Date.now() - startTime,
               message: errorParts,
               error,
               success: false,
@@ -13075,7 +13078,13 @@ export class Session implements SessionContext {
               persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
             });
           } else {
-            await this.toolCallEmitter.emitError(callId, toolName, error);
+            await this.toolCallEmitter.emitError(
+              callId,
+              toolName,
+              error,
+              undefined,
+              { startedAt: startTime, durationMs: Date.now() - startTime },
+            );
           }
         } catch (emitError) {
           debugLogger.debug(
@@ -14450,6 +14459,25 @@ export class Session implements SessionContext {
             }
           }
 
+          if (didRequestPermission && !isAgentTool && !isTodoWriteTool) {
+            try {
+              await this.sendUpdate({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: callId,
+                status: 'in_progress',
+                rawInput: args,
+                _meta: { toolName, startedAt: startTime },
+              });
+            } catch (emitError) {
+              debugLogger.debug(
+                '[Session.runTool] Failed to emit approved tool start update',
+                emitError,
+              );
+            }
+            const startEmissionCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (startEmissionCancellation) return startEmissionCancellation;
+          }
           if ((!didRequestPermission || isAgentTool) && !isTodoWriteTool) {
             // Approved agents also need the initial creating frame when the
             // provider does not emit preparation updates.
@@ -14458,6 +14486,7 @@ export class Session implements SessionContext {
               toolName,
               args,
               status: 'in_progress',
+              startedAt: startTime,
             };
             try {
               await this.toolCallEmitter.emitStart(startParams);
@@ -15224,6 +15253,8 @@ export class Session implements SessionContext {
                 callId,
                 toolName,
                 args,
+                startedAt: startTime,
+                durationMs: Date.now() - startTime,
                 message: responseParts,
                 resultDisplay: toolResult.returnDisplay,
                 error: responseError,
@@ -15253,6 +15284,7 @@ export class Session implements SessionContext {
                 : {}),
               function_name: toolName,
               function_args: args,
+              started_at: startTime,
               duration_ms: durationMs,
               status,
               execution_status: executionStatus,

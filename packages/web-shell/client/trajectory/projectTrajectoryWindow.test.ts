@@ -113,17 +113,15 @@ describe('projectTrajectoryWindow', () => {
     ]);
   });
 
-  it('drops the start time a tool frame may carry', () => {
-    // The merged producer omits it, because tool calls are logged in one loop
-    // after their batch settles and the timestamp is the batch's end for all of
-    // them. This page was captured from a build that still sent it.
+  it('preserves a start time explicitly supplied by replay', () => {
     const toolFrames = timings(projectTrajectoryWindow(REAL_PAGE)).filter(
       (entry) => entry.timing.kind === 'tool',
     );
 
-    expect(toolFrames).not.toHaveLength(0);
+    expect(toolFrames.map((frame) => frame.timing.startedAt)).toEqual([
+      1789877518944, 1789877518982,
+    ]);
     for (const frame of toolFrames) {
-      expect(frame.timing.startedAt).toBeUndefined();
       expect(frame.timing.durationMs).toBeGreaterThan(0);
     }
   });
@@ -353,13 +351,10 @@ describe('projectTrajectoryWindow', () => {
         'read_file',
         'glob',
       ]);
-      expect(
-        tools.every(
-          (row) =>
-            (row.timing?.durationMs ?? 0) > 0 &&
-            row.timing?.startedAt === undefined,
-        ),
-      ).toBe(true);
+      expect(tools.map((row) => row.timing)).toEqual([
+        { durationMs: 35, startedAt: 1789877518944 },
+        { durationMs: 20, startedAt: 1789877518982 },
+      ]);
       expect(tools.map((row) => row.toolStatus)).toEqual([
         'success',
         'success',

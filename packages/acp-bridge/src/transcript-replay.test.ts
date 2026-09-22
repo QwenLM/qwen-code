@@ -2394,6 +2394,39 @@ describe('ui_telemetry timing frames', () => {
     ]);
   });
 
+  it('uses recorded tool starts instead of the later batch log timestamp', () => {
+    const machine = timingMachine();
+    const starts = [1_760_000_000_000, 1_760_000_010_000];
+    const frames = starts.flatMap((startedAt, index) =>
+      timings(
+        machine,
+        telemetry(`timed-${index}`, {
+          ...TOOL_CALL_EVENT,
+          call_id: `timed-${index}`,
+          started_at: startedAt,
+          duration_ms: 4_000,
+        }),
+      ),
+    );
+    expect(
+      frames.map((frame) => [frame?.['startedAt'], frame?.['durationMs']]),
+    ).toEqual(starts.map((startedAt) => [startedAt, 4_000]));
+    const [legacy] = timings(machine, telemetry('legacy', TOOL_CALL_EVENT));
+    expect(legacy).not.toHaveProperty('startedAt');
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, '1760000000000'])(
+    'omits an invalid recorded tool start: %s',
+    (started_at) => {
+      const [frame] = timings(
+        timingMachine(),
+        telemetry('invalid-start', { ...TOOL_CALL_EVENT, started_at }),
+      );
+      expect(frame).not.toHaveProperty('startedAt');
+      expect(frame).toMatchObject({ kind: 'tool', durationMs: 16 });
+    },
+  );
+
   it('omits bulky recorded fields the conversation already carries', () => {
     const [requestTiming] = timings(
       timingMachine(),
@@ -2833,6 +2866,44 @@ describe('ui_telemetry timing frames', () => {
     expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 0 });
   });
 
+  it.each(['error', 'cancelled'] as const)(
+    'keeps measured zero duration and status for %s with a recorded start',
+    (status) => {
+      const [toolTiming] = timings(
+        timingMachine(),
+        telemetry('measured-zero', {
+          ...TOOL_CALL_EVENT,
+          duration_ms: 0,
+          started_at: 1_760_000_000_000,
+          status,
+        }),
+      );
+      expect(toolTiming).toMatchObject({
+        kind: 'tool',
+        durationMs: 0,
+        startedAt: 1_760_000_000_000,
+        toolStatus: status,
+      });
+    },
+  );
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, '1760000000000'])(
+    'does not treat an invalid start as measured zero timing: %s',
+    (started_at) => {
+      expect(
+        timings(
+          timingMachine(),
+          telemetry('invalid-zero', {
+            ...TOOL_CALL_EVENT,
+            duration_ms: 0,
+            started_at,
+            status: 'cancelled',
+          }),
+        ),
+      ).toEqual([]);
+    },
+  );
+
   it('consumes duplicate recorded ids in allocation order', () => {
     // Two calls recorded under one id: the first keeps it, the second is
     // rewritten. Each telemetry record must claim its own allocation.
@@ -2893,6 +2964,68 @@ describe('ui_telemetry timing frames', () => {
 
     expect(firstFrame[0]).toMatchObject({ callId: 'call_dup' });
     expect(secondFrame[0]).toMatchObject({ callId: rewrittenCallId });
+  });
+
+  it('pairs reused bridge call ids with resolved tool names across page state', () => {
+    const first = timingMachine();
+    const target = 'mcp__yuque__yuque_whoami';
+    const starts = ['assistant-1', 'assistant-2'].map((uuid) =>
+      updates(
+        first,
+        record(uuid, 'assistant', {
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'bridge-dup',
+                  name: 'tool_call',
+                  args: { name: target, arguments: {} },
+                },
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const callIds = starts.map(
+      (items) => (items[0] as unknown as { toolCallId: string }).toolCallId,
+    );
+    expect(callIds[0]).not.toBe(callIds[1]);
+    const carried = JSON.parse(
+      JSON.stringify(first.snapshot()),
+    ) as TranscriptReplayStateV1;
+    expect(carried.pendingToolCalls).toEqual([
+      expect.objectContaining({
+        toolName: 'tool_call',
+        resolvedToolName: target,
+      }),
+      expect.objectContaining({
+        toolName: 'tool_call',
+        resolvedToolName: target,
+        rawCallId: 'bridge-dup',
+      }),
+    ]);
+    const next = createTranscriptReplayMachine({
+      includeTiming: true,
+      initialState: carried,
+    });
+    const frames = [515, 42].map(
+      (duration_ms, index) =>
+        timings(
+          next,
+          telemetry(`bridge-timing-${index}`, {
+            ...TOOL_CALL_EVENT,
+            call_id: 'bridge-dup',
+            function_name: target,
+            duration_ms,
+          }),
+        )[0],
+    );
+    expect(frames).toMatchObject([
+      { callId: callIds[0], toolName: target, durationMs: 515 },
+      { callId: callIds[1], toolName: target, durationMs: 42 },
+    ]);
   });
 
   it('does not re-claim a call already matched on an earlier page', () => {

@@ -187,6 +187,8 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   source?: 'model' | 'code_mode';
   function_name: string;
   function_args: Record<string, unknown>;
+  /** Scheduling start, matching duration_ms (including approval wait). */
+  started_at?: number;
   duration_ms: number;
   status: 'success' | 'error' | 'cancelled';
   execution_status?: ToolExecutionStatus | 'unknown';
@@ -225,6 +227,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
       call.request.name === ToolNames.STRUCTURED_OUTPUT
         ? { ...STRUCTURED_OUTPUT_REDACTED_ARGS }
         : call.request.args;
+    this.started_at = call.startedAt;
     this.duration_ms = call.durationMs ?? 0;
     this.status = call.status;
     this.execution_status = call.response.executionStatus;

@@ -19,6 +19,8 @@ import type {
   TrajectoryTurn,
 } from './types';
 
+import { resolveToolCallName } from '../adapters/toolClassification';
+
 /**
  * User records the daemon injects mid-turn. They are real rows, but they do not
  * open a turn — the same split the transcript reader makes server-side with
@@ -229,12 +231,18 @@ export function buildTrajectory(
     if (
       timing.toolName !== undefined &&
       row.block.toolName !== undefined &&
-      timing.toolName !== row.block.toolName
+      timing.toolName !==
+        resolveToolCallName(row.block.toolName, row.block.rawInput)
     ) {
       return;
     }
     if ((fromSubagent !== undefined) !== row.depth > 0) return;
-    row.timing = { durationMs: timing.durationMs };
+    row.timing = {
+      durationMs: timing.durationMs,
+      ...(timing.startedAt !== undefined
+        ? { startedAt: timing.startedAt }
+        : {}),
+    };
     if (timing.toolStatus !== undefined) row.toolStatus = timing.toolStatus;
   };
 

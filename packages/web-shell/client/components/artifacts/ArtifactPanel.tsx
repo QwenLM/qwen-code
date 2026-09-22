@@ -26,6 +26,7 @@ import {
   GlobeIcon,
   ImageIcon,
   LayersIcon,
+  WrenchIcon,
   MessageCirclePlusIcon,
   PanelRightIcon,
   PlusIcon,
@@ -50,6 +51,7 @@ import {
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { DiffView } from '../messages/tools/DiffView';
+import { TurnCallsPanel } from './TurnCallsPanel';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { normalizeTextMediaType } from '../../utils/imageIngestion';
@@ -314,6 +316,17 @@ export type ArtifactPanelTab =
       kind: 'workflow';
       title: string;
       sessionId?: string;
+    }
+  | {
+      id: 'turn_calls';
+      kind: 'turn_calls';
+      title: string;
+      sessionId?: string;
+      promptLabel?: string;
+      /** Id of the turn's leading user message, whose calls this tab lists. */
+      turnId: string;
+      recordId?: string;
+      promptId?: string;
     };
 
 type WorkspaceScopedArtifactPanelTab = Extract<
@@ -368,6 +381,12 @@ interface ArtifactPanelProps {
   loading?: boolean;
   restoring?: boolean;
   error?: string | null;
+  onSelectTurnCallsPrompt?: (
+    turnId: string,
+    recordId?: string,
+    promptId?: string,
+    promptLabel?: string,
+  ) => void;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onOpenFilePreview: (
@@ -447,6 +466,7 @@ export function ArtifactPanel({
   restoring = false,
   error,
   onSelectTab,
+  onSelectTurnCallsPrompt,
   onCloseTab,
   onOpenFilePreview,
   latestReviewAvailable = false,
@@ -602,7 +622,9 @@ export function ArtifactPanel({
                   onFocus={(event) =>
                     measureSessionTitleScroll(event.currentTarget)
                   }
-                  title={tab.title}
+                  title={
+                    tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title
+                  }
                 >
                   <span
                     className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
@@ -669,6 +691,11 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'turn_calls' ? (
+                      <WrenchIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : (
                       <TabScheduledTaskIcon />
                     )}
@@ -677,14 +704,18 @@ export function ArtifactPanel({
                     className={styles.tabTitle}
                     data-web-shell-session-title
                   >
-                    <span className={styles.tabTitleInner}>{tab.title}</span>
+                    <span className={styles.tabTitleInner}>
+                      {tab.kind === 'turn_calls'
+                        ? t('turnCalls.title')
+                        : tab.title}
+                    </span>
                   </span>
                 </button>
                 <button
                   type="button"
                   className={styles.tabCloseButton}
                   onClick={() => onCloseTab(tab.id)}
-                  aria-label={`Close ${tab.title}`}
+                  aria-label={`Close ${tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title}`}
                   title="Close"
                 >
                   <CloseIcon />
@@ -1242,6 +1273,19 @@ export function ArtifactPanel({
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+          />
+        ) : activeTab.kind === 'turn_calls' ? (
+          <TurnCallsPanel
+            key={activeTab.turnId}
+            turnId={activeTab.turnId}
+            ownerSessionId={activeTab.sessionId}
+            recordId={activeTab.recordId}
+            promptId={activeTab.promptId}
+            promptLabel={activeTab.promptLabel}
+            onSelectPrompt={onSelectTurnCallsPrompt}
+            workspaceCwd={workspaceCwd}
+            onOpenFile={onNestedRightPanelOpen}
+            onOpenAgent={onOpenNestedSubagent}
           />
         ) : (
           <ScheduledTaskDetail

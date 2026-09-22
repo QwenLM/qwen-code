@@ -587,6 +587,7 @@ export type ErroredToolCall = {
   request: ToolCallRequestInfo;
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
+  startedAt?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -597,6 +598,7 @@ export type SuccessfulToolCall = {
   tool: AnyDeclarativeTool;
   response: ToolCallResponseInfo;
   invocation: AnyToolInvocation;
+  startedAt?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -635,6 +637,7 @@ export type CancelledToolCall = {
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
   invocation?: AnyToolInvocation;
+  startedAt?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -1359,6 +1362,7 @@ function withPostToolBatchStop(
     request: lastCall.request,
     tool: lastCall.tool,
     response,
+    startedAt: lastCall.startedAt,
     durationMs: lastCall.durationMs,
     outcome: undefined,
   } as ErroredToolCall;
@@ -1967,6 +1971,7 @@ export class CoreToolScheduler {
             invocation,
             status: 'success',
             response: auxiliaryData as CoreToolCallResponseInfo,
+            startedAt: existingStartTime,
             durationMs,
             outcome,
           } as SuccessfulToolCall;
@@ -1980,6 +1985,7 @@ export class CoreToolScheduler {
             status: 'error',
             tool: toolInstance,
             response: auxiliaryData as CoreToolCallResponseInfo,
+            startedAt: existingStartTime,
             durationMs,
             outcome,
           } as ErroredToolCall;
@@ -2079,6 +2085,7 @@ export class CoreToolScheduler {
             invocation,
             status: 'cancelled',
             response,
+            startedAt: existingStartTime,
             durationMs,
             outcome,
           } as CancelledToolCall;

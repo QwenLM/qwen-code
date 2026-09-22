@@ -296,6 +296,23 @@ describe('buildTrajectory', () => {
       expect(rows.find((row) => row.kind === 'tool')?.timing).toBeUndefined();
     });
 
+    it('matches wrapper calls to the resolved tool while rejecting unrelated names', () => {
+      for (const toolName of ['mcp__yuque__yuque_whoami', 'wrong_tool']) {
+        const rows = buildTrajectory([
+          block(
+            toolBlock('call_a', {
+              toolName: 'tool_call',
+              rawInput: { name: 'mcp__yuque__yuque_whoami', arguments: {} },
+            }),
+          ),
+          toolTiming('call_a', { toolName, durationMs: 515 }),
+        ]).rows;
+        expect(
+          rows.find((row) => row.kind === 'tool')?.timing?.durationMs,
+        ).toBe(toolName === 'wrong_tool' ? undefined : 515);
+      }
+    });
+
     it('refuses a main-session frame on a subagent block', () => {
       const rows = buildTrajectory([
         block(toolBlock('call_a', { parentToolCallId: 'call_parent' })),
@@ -342,7 +359,7 @@ describe('buildTrajectory', () => {
       expect(new Set(tools.map((row) => row.key)).size).toBe(2);
     });
 
-    it('ignores a start time on a tool frame', () => {
+    it('preserves an explicitly recorded tool start time', () => {
       const rows = buildTrajectory([
         block(toolBlock('call_a')),
         {
@@ -358,6 +375,7 @@ describe('buildTrajectory', () => {
 
       expect(rows.find((row) => row.kind === 'tool')?.timing).toEqual({
         durationMs: 35,
+        startedAt: 123,
       });
     });
   });

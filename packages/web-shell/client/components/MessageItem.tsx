@@ -43,6 +43,7 @@ import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
+import { useOpenTurnCalls } from '../turnCallsContext';
 
 interface MessageItemProps {
   message: Message;
@@ -189,6 +190,7 @@ export const MessageItem = memo(function MessageItem({
     message.role === 'user' ||
     (message.role === 'system' &&
       message.source === 'mid_turn_message_injected');
+  const openTurnCalls = useOpenTurnCalls();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -388,6 +390,10 @@ export const MessageItem = memo(function MessageItem({
     return selectableSafeBody;
   }
 
+  // A turn's identity is its leading user message's id, so the entry is
+  // available as soon as the turn exists — including while it is still running.
+  const turnCallsTurnId =
+    openTurnCalls && message.role === 'user' ? message.id : undefined;
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
@@ -408,6 +414,12 @@ export const MessageItem = memo(function MessageItem({
           : undefined
       }
       editTitle={t('userMessage.edit')}
+      onOpenTurnCalls={
+        openTurnCalls && turnCallsTurnId
+          ? () => openTurnCalls(turnCallsTurnId)
+          : undefined
+      }
+      turnCallsTitle={t('turnCalls.open')}
     >
       {selectableSafeBody}
     </MessageTimestamp>

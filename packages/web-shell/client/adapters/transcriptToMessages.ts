@@ -31,6 +31,7 @@ import {
   isActiveToolStatus,
   isSubAgentToolCall,
   projectTerminalBackgroundAgentTool,
+  resolveToolCallName,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
 import {
@@ -1585,7 +1586,7 @@ function getString(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function daemonToolBlockToToolCall(
+export function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
   safeToolProjection: boolean,
 ): DaemonMessageToolCall {
@@ -1618,7 +1619,7 @@ function daemonToolBlockToToolCall(
 
   return {
     callId: block.toolCallId,
-    toolName: block.toolName || 'unknown',
+    toolName: resolveToolCallName(block.toolName, block.rawInput) || 'unknown',
     title: block.title,
     status:
       (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
@@ -1646,7 +1647,11 @@ function getToolArgs(
   safeToolProjection: boolean,
 ): Record<string, unknown> | undefined {
   if (!safeToolProjection) {
-    return block.rawInput as Record<string, unknown> | undefined;
+    const rawInput = getRecord(block.rawInput);
+    return block.toolName === 'tool_call' &&
+      resolveToolCallName(block.toolName, rawInput) !== block.toolName
+      ? getRecord(rawInput?.['arguments'])
+      : rawInput;
   }
   return daemonToolPreviewToArgs(block.preview);
 }
