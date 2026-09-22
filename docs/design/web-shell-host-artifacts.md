@@ -8,7 +8,7 @@ Hosts currently replace all right-panel opens. Artifact cards cannot be filtered
 
 ## Contracts
 
-`onRightPanelOpen` returns false to continue native handling. True or undefined retains existing host ownership; missing callbacks use native handling. The ownership decision is synchronous and callback exceptions do not cause a second open. Existing file-review override precedence stays unchanged.
+`onRightPanelOpen` returns false to continue native handling. True or undefined retains existing host ownership; missing callbacks use native handling. The ownership decision is synchronous: legacy async handlers remain host-owned without awaiting their Promise. Callback exceptions do not cause a second open. Existing file-review override precedence stays unchanged.
 An optional `filterArtifact` predicate receives the artifact and source session/turn context. Apply it only to displayed turn outputs before collapsed counts, including split panes. Session artifact synchronization and file-change classification retain original records. Without a predicate, existing rendering is unchanged.
 Expose a framework-independent asynchronous code-highlighting function through the package public API, backed by the existing singleton, language loading and size policy. Input is code, language and light/dark theme; output is highlighted HTML or null for plain-text fallback. Do not expose the mutable Shiki instance. Library consumers own their renderer and styles. Separate JavaScript realms have separate instances.
 
