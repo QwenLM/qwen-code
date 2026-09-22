@@ -321,23 +321,26 @@ test.describe('trajectory panel', () => {
       String(TURNS * ROWS_PER_TURN),
     );
 
-    await alert.getByRole('button').click();
-
     // Counted, not read off the tail: the read that failed carries this same
     // cursor, so the last request cannot tell a retry from no retry at all —
     // and `click()` resolves when the event is dispatched, before the retry's
-    // request has reached the route. Two cursor reads is the failure and its
-    // retry; one cursorless read is the page already on screen, which
-    // re-reading the newest page instead would have made two.
+    // request has reached the route.
     const cursorReads = () =>
       transcriptRequests(daemon).filter((search) =>
         search.includes(`cursor=${OLDER_CURSOR}`),
       ).length;
+    const newestReads = () =>
+      transcriptRequests(daemon).filter((search) => !search.includes('cursor='))
+        .length;
+    // How often the newest page was read before the retry, rather than a fixed
+    // number: StrictMode mounts this panel twice in dev, so the count is the
+    // mount's business and only its change belongs to the retry.
+    const newestBefore = newestReads();
+
+    await alert.getByRole('button').click();
+
     await expect.poll(cursorReads).toBe(2);
-    expect(
-      transcriptRequests(daemon).filter(
-        (search) => !search.includes('cursor='),
-      ),
-    ).toHaveLength(1);
+    // Rebuilding from the newest page would have read it again.
+    expect(newestReads()).toBe(newestBefore);
   });
 });
