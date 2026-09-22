@@ -1636,6 +1636,23 @@ describe('bash word separators (#12089)', () => {
     ])('spawns %j exactly as written', (command) => {
       expect(normalizeMonitorCommand(command).spawnCommand).toBe(command);
     });
+
+    it('keeps glued wrapper syntax visible to analysis without rewriting spawn', () => {
+      const command = `bash -c 'echo hi; rm -f poc.flag '\u00a0; echo y`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized).toEqual({
+        analysisCommand: `echo hi; rm -f poc.flag \u00a0;`,
+        safetyCommand: `echo hi; rm -f poc.flag \u00a0; echo y`,
+        spawnCommand: command,
+        strippedTrailingAmp: false,
+      });
+      expect(getCommandRoots(normalized.safetyCommand)).toEqual([
+        'echo',
+        'rm',
+        'echo',
+      ]);
+    });
   });
 
   describe('stripShellWrapper', () => {

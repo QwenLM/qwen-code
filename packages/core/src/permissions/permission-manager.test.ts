@@ -2596,6 +2596,21 @@ describe('PermissionManager', () => {
       },
     );
 
+    it('denies a monitor command hidden behind glued wrapper syntax', async () => {
+      shellTypeMock.value = 'bash';
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm.initialize();
+
+      expect(
+        await pm.evaluate({
+          toolName: 'monitor',
+          command: `bash -c 'echo hi; rm -f poc.flag '\u00a0; echo y`,
+        }),
+      ).toBe('deny');
+    });
+
     // `splitCommandForRules` has to drive every Bash-rule consumer, not just
     // `evaluate()`. Each of the three below re-splits the command on its own
     // path, so reverting any one of them to `splitCompoundCommand` would leave

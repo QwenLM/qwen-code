@@ -1275,6 +1275,7 @@ interface ParsedMonitorShellWrapper {
   wrapperTokens?: string[];
   innerCommand: string;
   innerQuote: '"' | "'" | '';
+  rawInnerCommandToken?: string;
   innerArgsSuffix?: string;
 }
 
@@ -1402,22 +1403,22 @@ function takeLeadingToken(
 function stripSymmetricQuotes(command: string): {
   value: string;
   quote: '"' | "'" | '';
+  tail: string;
 } {
   const trimmed = trimBashEdgeSeparators(command);
   const quote = trimmed[0];
   if (quote !== '"' && quote !== "'") {
-    return { value: trimmed, quote: '' };
+    return { value: trimmed, quote: '', tail: '' };
   }
   // A token that opens and closes with the same quote: dropping the outer
   // pair keeps every inner `''` / `""` join, so the result means to bash what
   // the -c script means, and re-wrapping it reproduces the token exactly.
   if (trimmed.endsWith(quote)) {
-    return { value: trimmed.slice(1, -1), quote };
+    return { value: trimmed.slice(1, -1), quote, tail: '' };
   }
-  // Otherwise only glue that bash keeps in the word but `String#trim` drops
-  // (CR, VT, FF, NBSP, ...) may follow the matching close quote. Anything
-  // else (a second quote, `$`, a backslash, an operator, plain text) means
-  // `inner + rest` is not the script bash runs, so hand the raw token back.
+  // Non-ASCII/control glue after the closing quote remains in the same bash
+  // word. Keep the full tail for analysis and report the boundary separately
+  // so monitor can preserve the original token when reconstructing the spawn.
   let escaped = false;
   for (let i = 1; i < trimmed.length; i++) {
     const char = trimmed[i];
@@ -1426,16 +1427,20 @@ function stripSymmetricQuotes(command: string): {
       continue;
     }
     if (!escaped && char === quote) {
-      const rest = trimmed.slice(i + 1);
-      if (/^[^\x20-\x7e\t\n]+$/.test(rest)) {
-        return { value: trimmed.slice(1, i) + rest, quote };
+      const tail = trimmed.slice(i + 1);
+      if (/^[^\x20-\x7e\t\n]/.test(tail)) {
+        return {
+          value: trimmed.slice(1, i) + tail,
+          quote: '',
+          tail,
+        };
       }
       break;
     }
     escaped = false;
   }
 
-  return { value: trimmed, quote: '' };
+  return { value: trimmed, quote: '', tail: '' };
 }
 
 function getNormalizedShellToken(token: string): string {
@@ -1568,13 +1573,16 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerQuote: '',
         };
       }
-      const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
-        commandToken.token,
-      );
+      const {
+        value: innerCommand,
+        quote: innerQuote,
+        tail,
+      } = stripSymmetricQuotes(commandToken.token);
       return {
         wrapperTokens,
         innerCommand,
         innerQuote,
+        rawInnerCommandToken: tail ? commandToken.token : undefined,
         innerArgsSuffix: commandToken.rest.trimStart(),
       };
     }
@@ -1606,12 +1614,20 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    rawInnerCommandToken,
+    innerArgsSuffix,
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
-  const rawInnerArgsSuffix = innerArgsSuffix?.trim() ?? '';
+  const normalizedRawInnerCommandToken = rawInnerCommandToken
+    ? stripTrailingBackgroundAmp(rawInnerCommandToken)
+    : undefined;
+  const rawInnerArgsSuffix = trimBashEdgeSeparators(innerArgsSuffix ?? '');
   const normalizedInnerArgsSuffix =
     stripTrailingBackgroundAmp(rawInnerArgsSuffix);
   // Permission safety focuses on command text that the shell may expand or
@@ -1625,17 +1641,19 @@ export function normalizeMonitorCommand(
   ];
   const safetyCommand =
     wrapperTokens && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
+      ? trimBashEdgeSeparators(safetyParts.join(' '))
       : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
-    normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
+    normalizedInnerArgsSuffix !== rawInnerArgsSuffix ||
+    normalizedRawInnerCommandToken !== rawInnerCommandToken;
   const spawnCommand = wrapperTokens
     ? [
         wrapperTokens.join(' '),
-        innerQuote
-          ? `${innerQuote}${analysisCommand}${innerQuote}`
-          : analysisCommand,
+        normalizedRawInnerCommandToken ??
+          (innerQuote
+            ? `${innerQuote}${analysisCommand}${innerQuote}`
+            : analysisCommand),
         normalizedInnerArgsSuffix,
       ]
         .filter(Boolean)
