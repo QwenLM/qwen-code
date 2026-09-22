@@ -132,6 +132,7 @@ import {
   getStartupContextLength,
   isApiUserPrompt,
   isAbsorbedSnapshotOffsetPayload,
+  type AbsorbedSnapshotOffsetRecordPayload,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -2134,10 +2135,29 @@ export class Session implements SessionContext {
    * rewind's retained target both break that parity.
    */
   #absorbedSnapshotOffset: number | null = null;
-  /** Target snapshots kept by file-inclusive rewinds since the last record. */
-  #retainedTargetSnapshots = 0;
+  /**
+   * promptId of the first snapshot that still belongs to the live tail.
+   * Front eviction shifts absolute indexes; the id is resolved on read.
+   */
+  #boundaryPromptId: string | null = null;
+  /** Turn-boundary index of that same live snapshot. Skew vs the snapshot index is the folded-hole count. */
+  #absorbedTurnOffset = 0;
+  /** Prompt ids of target snapshots whose prompts were rewound away. */
+  #retainedPromptIds: string[] = [];
+  /**
+   * Retained count from a record that did not store prompt ids. Materialized
+   * into ids once the snapshot list is available, then left alone so a later
+   * append does not move the hole.
+   */
+  #unlocatedRetainedSnapshots = 0;
+  /** Snapshot opened for the in-flight send, before its prompt is in history. */
+  #pendingSnapshotPromptId: string | undefined;
   /** Compressed history whose recorded offset could not be corroborated. */
   #rewindOffsetUnreconciled = false;
+  /** That install saw an empty snapshot list, so the check waits for hydrate. */
+  #rewindOffsetDeferredForSnapshots = false;
+  /** A rewind offset record has been written, so a later clear must be written too. */
+  #rewindOffsetPersisted = false;
   // Resolves the `<<loop.md>>` / `<<loop.md-dynamic>>` sentinels at fire time.
   // Lazily created on the first loop tick; its content cache is reset on
   // compaction (see #sendMessageStreamWithAutoCompression) and it is rebuilt if
@@ -4714,18 +4734,42 @@ export class Session implements SessionContext {
     const survivingSnapshots = rewindFiles
       ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    const recorderIndex = this.#rewindRecordingIndex(
+      targetTurnIndex,
+      rewindWindow,
+    );
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
-    // The kept target snapshot has no prompt left in history. It sits at the
-    // end of the survivor list, so it must not move the absorbed prefix.
+    // The kept target snapshot has no prompt left in history. A later turn
+    // appends after it, so the hole is the target's promptId, not "the last
+    // snapshot". At most the snapshots still in the survivor list can be holes.
+    const survivorIds = new Set(
+      survivingSnapshots.map((snapshot) => snapshot.promptId),
+    );
+    const keptHoles = this.#retainedPromptIds.filter((promptId) =>
+      survivorIds.has(promptId),
+    );
     if (rewindFiles && targetTurnIndex < snapshotsBeforeRewind.length) {
-      this.#retainedTargetSnapshots += 1;
+      const targetId = snapshotsBeforeRewind[targetTurnIndex]?.promptId;
+      this.#retainedPromptIds = targetId
+        ? [...keptHoles.filter((promptId) => promptId !== targetId), targetId]
+        : keptHoles;
+    } else {
+      this.#retainedPromptIds = keptHoles;
+    }
+    this.#unlocatedRetainedSnapshots = 0;
+    if (
+      this.#absorbedSnapshotOffset !== null ||
+      this.#retainedPromptIds.length > 0 ||
+      this.#rewindOffsetPersisted
+    ) {
+      this.#rewindOffsetPersisted = true;
       this.#persistRewindOffset();
     }
 
     this.config
       .getChatRecordingService()
       ?.rewindRecording(
-        targetTurnIndex,
+        recorderIndex,
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
       );
@@ -4748,11 +4792,14 @@ export class Session implements SessionContext {
    * `start` is the offset recorded when compression succeeded, not
    * `snapshotCount - visible`. Counted turns that never snapshotted stay
    * inside `visible` but do not extend `end`. A missing or uncorroborated
-   * offset fail-closes to an empty range.
+   * offset fail-closes to an empty range. `holes` are snapshot indexes inside
+   * `[start, end)` whose prompts are already gone.
    */
-  getRewindableTurnRange(): { start: number; end: number } {
+  getRewindableTurnRange(): { start: number; end: number; holes?: number[] } {
     const window = this.#rewindOffsetState(this.captureHistorySnapshot());
-    return { start: window.start, end: window.end };
+    return window.holes.length > 0
+      ? { start: window.start, end: window.end, holes: window.holes }
+      : { start: window.start, end: window.end };
   }
 
   /**
@@ -4761,10 +4808,7 @@ export class Session implements SessionContext {
    * alone so a partial replay cannot wipe a live value.
    */
   restoreRecordedRewindOffset(records: readonly ChatRecord[]): void {
-    let payload: {
-      absorbedSnapshotCount: number;
-      retainedTargetSnapshots: number;
-    } | null = null;
+    let payload: AbsorbedSnapshotOffsetRecordPayload | null = null;
     for (const record of records) {
       if (
         record.type !== 'system' ||
@@ -4782,20 +4826,26 @@ export class Session implements SessionContext {
   /**
    * Installs the offset taken from the full restore projection. A paged
    * replay can omit the record; callers apply this after that replay so the
-   * active-chain value wins.
+   * active-chain value wins. A missing payload does not reset a live value.
    */
   applyRecordedRewindOffset(
-    payload:
-      | {
-          absorbedSnapshotCount: number;
-          retainedTargetSnapshots: number;
-        }
-      | undefined,
+    payload: AbsorbedSnapshotOffsetRecordPayload | undefined,
   ): void {
     if (!isAbsorbedSnapshotOffsetPayload(payload)) return;
     this.#absorbedSnapshotOffset = payload.absorbedSnapshotCount;
-    this.#retainedTargetSnapshots = payload.retainedTargetSnapshots;
+    this.#boundaryPromptId = payload.boundaryPromptId ?? null;
+    this.#absorbedTurnOffset =
+      payload.absorbedTurnCount ?? payload.absorbedSnapshotCount;
+    if (payload.retainedPromptIds) {
+      this.#retainedPromptIds = [...payload.retainedPromptIds];
+      this.#unlocatedRetainedSnapshots = 0;
+    } else {
+      this.#retainedPromptIds = [];
+      this.#unlocatedRetainedSnapshots = payload.retainedTargetSnapshots;
+    }
     this.#rewindOffsetUnreconciled = false;
+    this.#rewindOffsetPersisted = true;
+    this.#reconcileRewindOffset(this.captureHistorySnapshot(), 'install');
   }
 
   restoreHistory(history: Content[]): void {
@@ -4807,7 +4857,7 @@ export class Session implements SessionContext {
     }
 
     this.config.getLlmClient()!.setHistory(structuredClone(history));
-    this.#reconcileRewindOffset(history);
+    this.#reconcileRewindOffset(history, 'restore');
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -4824,45 +4874,169 @@ export class Session implements SessionContext {
   }
 
   #persistRewindOffset(): void {
+    const absorbed = this.#absorbedSnapshotOffset ?? 0;
     this.config.getChatRecordingService()?.recordAbsorbedSnapshotOffset({
-      absorbedSnapshotCount: this.#absorbedSnapshotOffset ?? 0,
-      retainedTargetSnapshots: this.#retainedTargetSnapshots,
+      absorbedSnapshotCount: absorbed,
+      retainedTargetSnapshots: this.#retainedPromptIds.length,
+      ...(this.#boundaryPromptId
+        ? { boundaryPromptId: this.#boundaryPromptId }
+        : {}),
+      ...(this.#retainedPromptIds.length > 0
+        ? { retainedPromptIds: [...this.#retainedPromptIds] }
+        : {}),
+      ...(this.#absorbedTurnOffset !== absorbed
+        ? { absorbedTurnCount: this.#absorbedTurnOffset }
+        : {}),
     });
+  }
+
+  #snapshotIsPending(
+    promptId: string,
+    snapshots: ReadonlyArray<{ promptId: string }>,
+  ): boolean {
+    const pendingId = this.#pendingSnapshotPromptId;
+    return (
+      pendingId !== undefined &&
+      promptId === pendingId &&
+      snapshots.at(-1)?.promptId === pendingId
+    );
   }
 
   /**
    * Records the snapshot prefix compression just removed.
    *
-   * The in-flight turn may already own a snapshot before its prompt is in
-   * history (user send snapshots first), or it may be in history without a
-   * snapshot (cron, notification). Neither belongs in the absorbed prefix.
+   * Walk back from the live tail, skipping retained holes and a snapshot
+   * opened for a prompt that is not in history yet. A counted prompt is
+   * already inside `visible`, so a suffixed send id does not add a slot.
    */
-  #noteAbsorbedSnapshotsAfterCompression(
-    promptId: string,
-    turnInHistory: boolean,
-  ): void {
+  #noteAbsorbedSnapshotsAfterCompression(promptId: string): void {
     const history = this.#getCurrentChat().getHistoryShallow();
     const snapshots = this.config.getFileHistoryService().getSnapshots();
     const visible = countApiUserPrompts(history, ACP_API_USER_PROMPT_OPTIONS);
-    const turnHasSnapshot = snapshots.at(-1)?.promptId === promptId;
-    const pendingSnapshot = turnHasSnapshot && !turnInHistory;
-    const unsnapshottedTurnInHistory = !turnHasSnapshot && turnInHistory;
-    const absorbed = Math.max(
-      0,
-      snapshots.length -
-        visible -
-        (pendingSnapshot ? 1 : 0) +
-        (unsnapshottedTurnInHistory ? 1 : 0),
-    );
-    this.#absorbedSnapshotOffset = absorbed;
-    this.#retainedTargetSnapshots = 0;
+    const pending = this.#snapshotIsPending(promptId, snapshots);
+    const holeIds = new Set(this.#retainedPromptIds);
+    const end = snapshots.length - (pending ? 1 : 0);
+    const live: number[] = [];
+    for (let i = end - 1; i >= 0 && live.length < visible; i--) {
+      if (holeIds.has(snapshots[i]!.promptId)) continue;
+      live.push(i);
+    }
+    const firstLive = live.length > 0 ? Math.min(...live) : end;
+    let foldedHoles = 0;
+    for (let i = 0; i < firstLive; i++) {
+      if (holeIds.has(snapshots[i]!.promptId)) foldedHoles++;
+    }
+    this.#absorbedSnapshotOffset = firstLive;
+    this.#absorbedTurnOffset = firstLive - foldedHoles;
+    this.#retainedPromptIds = this.#retainedPromptIds.filter((id) => {
+      const index = snapshots.findIndex((snapshot) => snapshot.promptId === id);
+      return index >= firstLive;
+    });
+    this.#unlocatedRetainedSnapshots = 0;
+    this.#boundaryPromptId = snapshots[firstLive]?.promptId ?? null;
     this.#rewindOffsetUnreconciled = false;
+    this.#rewindOffsetDeferredForSnapshots = false;
+    this.#rewindOffsetPersisted = true;
     this.#persistRewindOffset();
+  }
+
+  #recordOutOfBandCompressionOffset(promptId: string): void {
+    if (this.#absorbedSnapshotOffset !== null) return;
+    if (
+      !this.#historyHasCompressedPrefix(
+        this.#getCurrentChat().getHistoryShallow(),
+      )
+    ) {
+      return;
+    }
+    this.#noteAbsorbedSnapshotsAfterCompression(promptId);
+  }
+
+  #materializeRetainedPromptIds(
+    snapshots: ReadonlyArray<{ promptId: string }>,
+  ): void {
+    if (
+      this.#retainedPromptIds.length > 0 ||
+      this.#unlocatedRetainedSnapshots <= 0 ||
+      snapshots.length === 0
+    ) {
+      return;
+    }
+    const count = Math.min(this.#unlocatedRetainedSnapshots, snapshots.length);
+    this.#retainedPromptIds = snapshots
+      .slice(-count)
+      .map((snapshot) => snapshot.promptId);
+    this.#unlocatedRetainedSnapshots = 0;
+  }
+
+  #holeIndexSet(snapshots: ReadonlyArray<{ promptId: string }>): Set<number> {
+    this.#materializeRetainedPromptIds(snapshots);
+    if (this.#retainedPromptIds.length === 0) return new Set();
+    const wanted = new Set(this.#retainedPromptIds);
+    const holes = new Set<number>();
+    snapshots.forEach((snapshot, index) => {
+      if (wanted.has(snapshot.promptId)) holes.add(index);
+    });
+    return holes;
+  }
+
+  /**
+   * Snapshot index of the first live tail slot. A stored boundary promptId
+   * rebases after front eviction; a missing id is not a negative gap.
+   */
+  #effectiveAbsorbed(snapshots: ReadonlyArray<{ promptId: string }>): {
+    start: number;
+    missingBoundary: boolean;
+  } {
+    const absorbed = this.#absorbedSnapshotOffset ?? 0;
+    if (this.#boundaryPromptId) {
+      const index = snapshots.findIndex(
+        (snapshot) => snapshot.promptId === this.#boundaryPromptId,
+      );
+      if (index >= 0) return { start: index, missingBoundary: false };
+      return { start: absorbed, missingBoundary: true };
+    }
+    if (absorbed > snapshots.length) {
+      return { start: absorbed, missingBoundary: true };
+    }
+    return { start: absorbed, missingBoundary: false };
+  }
+
+  #publishedWindow(
+    snapshots: ReadonlyArray<{ promptId: string }>,
+    start: number,
+    visible: number,
+    holeSet: Set<number>,
+  ): { end: number; holes: number[] } {
+    const live: number[] = [];
+    for (let i = start; i < snapshots.length && live.length < visible; i++) {
+      if (holeSet.has(i)) continue;
+      live.push(i);
+    }
+    const end = live.length > 0 ? live[live.length - 1]! + 1 : start;
+    const holes = [...holeSet]
+      .filter((index) => index >= start && index < end)
+      .sort((a, b) => a - b);
+    return { end, holes };
+  }
+
+  #rewindRecordingIndex(
+    targetTurnIndex: number,
+    window: { start: number; absorbed: number; holes: number[] },
+  ): number {
+    const holesBelow = window.holes.filter(
+      (index) => index >= window.start && index < targetTurnIndex,
+    ).length;
+    return Math.max(
+      0,
+      targetTurnIndex - window.absorbed + this.#absorbedTurnOffset - holesBelow,
+    );
   }
 
   #rewindOffsetState(apiHistory: Content[]): {
     start: number;
     end: number;
+    holes: number[];
     visible: number;
     absorbed: number;
     retained: number;
@@ -4873,87 +5047,162 @@ export class Session implements SessionContext {
       apiHistory,
       ACP_API_USER_PROMPT_OPTIONS,
     );
-    const snapshotCount = this.config
-      .getFileHistoryService()
-      .getSnapshots().length;
-    const retained = this.#retainedTargetSnapshots;
+    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    const snapshotCount = snapshots.length;
+    if (this.#rewindOffsetDeferredForSnapshots && snapshotCount > 0) {
+      this.#reconcileRewindOffset(apiHistory, 'install');
+    }
+    const retained = this.#retainedPromptIds.length;
+    const failClosed = {
+      start: 0,
+      end: 0,
+      holes: [] as number[],
+      visible,
+      absorbed: -1,
+      retained,
+      snapshotCount,
+      failClosed: true,
+    };
     if (!this.#historyHasCompressedPrefix(apiHistory)) {
-      const end =
-        retained > 0
-          ? Math.min(visible, Math.max(0, snapshotCount - retained))
-          : visible;
+      const holeSet = this.#holeIndexSet(snapshots);
+      if (holeSet.size === 0) {
+        return {
+          start: 0,
+          end: visible,
+          holes: [],
+          visible,
+          absorbed: 0,
+          retained: 0,
+          snapshotCount,
+          failClosed: false,
+        };
+      }
+      const published = this.#publishedWindow(snapshots, 0, visible, holeSet);
       return {
         start: 0,
-        end,
+        end: published.end,
+        holes: published.holes,
         visible,
         absorbed: 0,
-        retained,
+        retained: holeSet.size,
         snapshotCount,
         failClosed: false,
       };
     }
     if (
+      this.#absorbedSnapshotOffset === null &&
+      !this.#rewindOffsetUnreconciled
+    ) {
+      const recorder = this.config.getChatRecordingService();
+      const derive = recorder?.deriveUnrecordedAbsorbedOffset;
+      const derived =
+        typeof derive === 'function'
+          ? derive.call(
+              recorder,
+              snapshots.map((snapshot) => snapshot.promptId),
+            )
+          : undefined;
+      if (derived && derived.absorbedSnapshotCount <= snapshotCount) {
+        this.#absorbedSnapshotOffset = derived.absorbedSnapshotCount;
+        this.#absorbedTurnOffset = derived.absorbedTurnCount;
+        this.#boundaryPromptId = derived.boundaryPromptId ?? null;
+        this.#retainedPromptIds = [];
+        this.#unlocatedRetainedSnapshots = 0;
+        this.#rewindOffsetUnreconciled = false;
+        this.#rewindOffsetDeferredForSnapshots = false;
+        this.#reconcileRewindOffset(apiHistory, 'install');
+        if (
+          !this.#rewindOffsetUnreconciled &&
+          this.#absorbedSnapshotOffset !== null
+        ) {
+          this.#rewindOffsetPersisted = true;
+          this.#persistRewindOffset();
+        }
+      }
+    }
+    if (
       this.#rewindOffsetUnreconciled ||
       this.#absorbedSnapshotOffset === null
     ) {
-      return {
-        start: 0,
-        end: 0,
-        visible,
-        absorbed: -1,
-        retained,
-        snapshotCount,
-        failClosed: true,
-      };
+      return failClosed;
     }
-    const absorbed = this.#absorbedSnapshotOffset;
-    const tailSlots = snapshotCount - absorbed - retained;
-    const end =
-      tailSlots < 0 ? absorbed : absorbed + Math.min(visible, tailSlots);
-    return {
-      start: absorbed,
-      end,
+    if (this.#rewindOffsetDeferredForSnapshots && snapshotCount === 0) {
+      return failClosed;
+    }
+    const resolved = this.#effectiveAbsorbed(snapshots);
+    if (resolved.missingBoundary) {
+      return failClosed;
+    }
+    const holeSet = this.#holeIndexSet(snapshots);
+    const published = this.#publishedWindow(
+      snapshots,
+      resolved.start,
       visible,
-      absorbed,
-      retained,
+      holeSet,
+    );
+    return {
+      start: resolved.start,
+      end: published.end,
+      holes: published.holes,
+      visible,
+      absorbed: resolved.start,
+      retained: holeSet.size,
       snapshotCount,
       failClosed: false,
     };
   }
 
   /**
-   * A client-installed history has no snapshot adjustment. Keep the recorded
-   * offset only when the snapshot list still corroborates it. Extra counted
-   * prompts (negative gap) still match. Extra snapshots do not: fail closed.
+   * Keep the recorded offset only when the snapshot list still corroborates
+   * it. Extra counted prompts (negative gap) still match. Extra snapshots,
+   * or a boundary promptId that front eviction dropped, fail closed.
    */
-  #reconcileRewindOffset(apiHistory: Content[]): void {
+  #reconcileRewindOffset(
+    apiHistory: Content[],
+    mode: 'install' | 'restore',
+  ): void {
+    const snapshots = this.config.getFileHistoryService().getSnapshots();
     if (!this.#historyHasCompressedPrefix(apiHistory)) {
+      if (
+        mode === 'install' &&
+        apiHistory.length === 0 &&
+        snapshots.length === 0 &&
+        this.#absorbedSnapshotOffset !== null
+      ) {
+        return;
+      }
       this.#absorbedSnapshotOffset = null;
-      this.#retainedTargetSnapshots = 0;
+      this.#boundaryPromptId = null;
+      this.#absorbedTurnOffset = 0;
+      this.#retainedPromptIds = [];
+      this.#unlocatedRetainedSnapshots = 0;
       this.#rewindOffsetUnreconciled = false;
+      this.#rewindOffsetDeferredForSnapshots = false;
       return;
     }
     if (this.#absorbedSnapshotOffset === null) {
       this.#rewindOffsetUnreconciled = true;
+      this.#rewindOffsetDeferredForSnapshots = false;
       return;
     }
+    if (snapshots.length === 0 && this.#absorbedSnapshotOffset > 0) {
+      this.#rewindOffsetDeferredForSnapshots = true;
+      this.#rewindOffsetUnreconciled = false;
+      return;
+    }
+    const resolved = this.#effectiveAbsorbed(snapshots);
     const visible = countApiUserPrompts(
       apiHistory,
       ACP_API_USER_PROMPT_OPTIONS,
     );
-    const snapshotCount = this.config
-      .getFileHistoryService()
-      .getSnapshots().length;
     const unexplained =
-      snapshotCount -
+      snapshots.length -
       visible -
-      this.#absorbedSnapshotOffset -
-      this.#retainedTargetSnapshots;
-    if (unexplained > 0 || this.#absorbedSnapshotOffset > snapshotCount) {
-      this.#rewindOffsetUnreconciled = true;
-      return;
-    }
-    this.#rewindOffsetUnreconciled = false;
+      resolved.start -
+      this.#holeIndexSet(snapshots).size;
+    this.#rewindOffsetUnreconciled =
+      resolved.missingBoundary || unexplained > 0;
+    this.#rewindOffsetDeferredForSnapshots = false;
   }
 
   #computeApiTruncationIndexForUserTurn(
@@ -4961,19 +5210,20 @@ export class Session implements SessionContext {
     targetTurnIndex: number,
   ): number {
     const window = this.#rewindOffsetState(apiHistory);
-    // Anything outside the recorded window was absorbed, is a retained
-    // target snapshot, or is an empty tail. Ordinal 0 stays valid only
-    // while `end` is past `start`.
     if (
       window.failClosed ||
       targetTurnIndex < window.start ||
-      targetTurnIndex >= window.end
+      targetTurnIndex >= window.end ||
+      window.holes.includes(targetTurnIndex)
     ) {
       return -1;
     }
+    const holesBelow = window.holes.filter(
+      (index) => index < targetTurnIndex,
+    ).length;
     return findApiRewindCutPoint(
       apiHistory,
-      targetTurnIndex - window.start,
+      targetTurnIndex - window.start - holesBelow,
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -6452,6 +6702,12 @@ export class Session implements SessionContext {
                   onFullTurnModel,
                   shouldRecordSlashCommand,
                 );
+                if (
+                  slashCommandName === 'compress' ||
+                  slashCommandName === 'summarize'
+                ) {
+                  this.#recordOutOfBandCompressionOffset(promptId);
+                }
               } catch (error) {
                 logConversationFinishedEvent(
                   this.config,
@@ -6612,6 +6868,7 @@ export class Session implements SessionContext {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
                 await fileHistoryService.makeSnapshot(promptId);
+                this.#pendingSnapshotPromptId = promptId;
                 try {
                   const latestSnapshot = fileHistoryService
                     .getSnapshots()
@@ -7034,7 +7291,6 @@ export class Session implements SessionContext {
                           resp.info,
                           requestRouteKey,
                           promptId,
-                          true,
                         );
                       }
                     }
@@ -8189,7 +8445,6 @@ export class Session implements SessionContext {
               response.info,
               requestRouteKey,
               promptIdForSend,
-              true,
             );
           }
         }
@@ -8895,7 +9150,6 @@ export class Session implements SessionContext {
         compressionInfo,
         requestRouteKey,
         promptId,
-        false,
       );
     } else {
       this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
@@ -8973,6 +9227,9 @@ export class Session implements SessionContext {
     const responseStream = goalPermit
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
+    // The prompt is in history once this stream is consumed. An in-send
+    // COMPRESSED event must not treat the snapshot as still pending.
+    this.#pendingSnapshotPromptId = undefined;
     return { responseStream, requestRouteKey };
   }
 
@@ -9297,12 +9554,11 @@ export class Session implements SessionContext {
     info: ChatCompressionInfo,
     requestRouteKey: string,
     promptId?: string,
-    turnInHistory = false,
   ): void {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
       if (promptId !== undefined) {
-        this.#noteAbsorbedSnapshotsAfterCompression(promptId, turnInHistory);
+        this.#noteAbsorbedSnapshotsAfterCompression(promptId);
       }
       return;
     }
@@ -10499,7 +10755,6 @@ export class Session implements SessionContext {
                         resp.info,
                         requestRouteKey,
                         promptId,
-                        true,
                       );
                     }
                   }
@@ -11562,7 +11817,6 @@ export class Session implements SessionContext {
                     resp.info,
                     requestRouteKey,
                     promptId,
-                    true,
                   );
                 }
               }

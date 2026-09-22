@@ -10196,6 +10196,7 @@ class QwenAgent implements Agent {
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
         const rewindableTurnRange = session.getRewindableTurnRange();
+        const rewindHoles = new Set(rewindableTurnRange.holes ?? []);
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -10208,7 +10209,8 @@ class QwenAgent implements Agent {
             .filter(
               ({ idx }) =>
                 idx >= rewindableTurnRange.start &&
-                idx < rewindableTurnRange.end,
+                idx < rewindableTurnRange.end &&
+                !rewindHoles.has(idx),
             )
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
