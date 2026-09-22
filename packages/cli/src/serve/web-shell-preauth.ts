@@ -5,6 +5,9 @@
  */
 
 import type { Request } from 'express';
+import { WEB_SHELL_PWA_ASSETS } from '@qwen-code/sdk/daemon';
+
+export { WEB_SHELL_PWA_ASSETS } from '@qwen-code/sdk/daemon';
 
 /**
  * Dependency-light home of the pre-auth Web Shell request discriminators.
@@ -56,7 +59,7 @@ const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
  * data: pre-auth answers serve only the public shell HTML or the MCP App
  * sandbox proxy, identical to `GET /` (or the startup-failure envelope).
  * Keep in sync with the routes registered in `mountWebShellAssets` and
- * `mountMcpAppSandbox`.
+ * `mountMcpAppSandbox`, including the public manifest and service worker.
  */
 export function isPreAuthWebShellRequest(req: Request): boolean {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
@@ -70,7 +73,12 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
     reqPath === '//' ||
     reqPath === '/assets' ||
     reqPath.startsWith('/assets/') ||
-    reqPath === '/mcp-app-sandbox'
+    reqPath === '/mcp-app-sandbox' ||
+    // Manifest and worker requests cannot attach Authorization. Express
+    // matches these routes case-insensitively with an optional trailing slash.
+    WEB_SHELL_PWA_ASSETS.some(
+      ({ route }) => reqPath === route || reqPath === `${route}/`,
+    )
   )
     return true;
   return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);

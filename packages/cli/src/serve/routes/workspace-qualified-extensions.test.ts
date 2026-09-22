@@ -229,6 +229,10 @@ function mockExtensionManager(
     ExtensionManager.prototype,
     'refreshCacheWithSnapshot',
   ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'refreshCatalogSnapshot',
+  ).mockResolvedValue({ snapshot, extensions: [extension] });
   vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue([
     extension,
   ]);
@@ -297,6 +301,59 @@ function mockExtensionManager(
     'uninstallExtensionById',
   ).mockResolvedValue(snapshot);
   return extension;
+}
+
+/**
+ * GETs the owned skill state of the mocked `demo` extension carrying one skill
+ * the extension authored as `pdf`, which registers as `demo:pdf`. Both
+ * spellings go in verbatim so a caller can ask which entry the surface blames.
+ */
+async function prefixedSkillStateBody(opts: {
+  disabled?: string[];
+  enabled?: string[];
+  defaultEnabled?: boolean;
+}) {
+  const h = await makeHarness();
+  const extension = mockExtensionManager();
+  extension.config.skillStates = { pdf: opts.defaultEnabled ?? true };
+  extension.skills = [
+    {
+      name: 'pdf',
+      description: 'pdf',
+      body: 'pdf',
+      level: 'extension',
+      filePath: '/extensions/demo/pdf/SKILL.md',
+      extensionName: 'demo',
+    },
+  ];
+  vi.mocked(
+    ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+  ).mockReturnValue({
+    default: 'enabled',
+    workspace: 'inherit',
+    effective: 'enabled',
+    source: 'default',
+  });
+  vi.spyOn(settingsModule, 'loadSettings').mockReturnValue({
+    merged: {
+      skills: {
+        disabled: opts.disabled ?? [],
+        enabled: opts.enabled ?? [],
+      },
+    },
+    forScope: () => ({ settings: {} }),
+  } as unknown as settingsModule.LoadedSettings);
+  try {
+    const response = await auth(
+      request(h.app).get(
+        `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`,
+      ),
+    );
+    expect(response.status).toBe(200);
+    return response.body as { skills: Array<Record<string, unknown>> };
+  } finally {
+    await fsp.rm(h.scratch, { recursive: true, force: true });
+  }
 }
 
 async function pollOperation(
@@ -381,13 +438,93 @@ describe('extension management v2 REST', () => {
         ],
       });
       expect(
-        ExtensionManager.prototype.refreshCacheWithSnapshot,
+        ExtensionManager.prototype.refreshCatalogSnapshot,
       ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).not.toHaveBeenCalled();
       expect(
         ExtensionManager.prototype.getExtensionStoreSnapshot,
       ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serves an unmocked catalog whose identity fields match a full refresh', async () => {
+    // No manager mocks: real fixture files on disk, real manifest-head load.
+    // Pins the response mapping against entries built by the head-only path,
+    // including a linked install's extension id and install type.
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-catalog-'));
+    process.env['QWEN_HOME'] = qwenHome;
+    const extensionsDir = path.join(qwenHome, 'extensions');
+    await fsp.mkdir(path.join(extensionsDir, 'plain'), { recursive: true });
+    await fsp.writeFile(
+      path.join(extensionsDir, 'plain', 'qwen-extension.json'),
+      JSON.stringify({ name: 'plain', version: '1.1.0' }),
+    );
+    const linkedSource = path.join(qwenHome, 'linked-source');
+    await fsp.mkdir(linkedSource, { recursive: true });
+    await fsp.writeFile(
+      path.join(linkedSource, 'qwen-extension.json'),
+      JSON.stringify({ name: 'linked', version: '2.0.0' }),
+    );
+    await fsp.mkdir(path.join(extensionsDir, 'linked-install'), {
+      recursive: true,
+    });
+    await fsp.writeFile(
+      path.join(
+        extensionsDir,
+        'linked-install',
+        '.qwen-extension-install.json',
+      ),
+      JSON.stringify({ type: 'link', source: linkedSource }),
+    );
+    try {
+      const h = await makeHarness();
+      const manager = new ExtensionManager({
+        workspaceDir: h.primary.workspaceCwd,
+        isWorkspaceTrusted: true,
+      });
+      const full = await manager.refreshCacheWithSnapshot();
+      const expected = manager
+        .getLoadedExtensions()
+        .map((extension) => {
+          const policy = full.extensions[extension.id];
+          return {
+            id: extension.id,
+            name: extension.name,
+            version: extension.version,
+            ...(extension.installMetadata?.type
+              ? { installType: extension.installMetadata.type }
+              : {}),
+            defaultActivation: policy?.defaultActivation ?? 'enabled',
+            workspaceOverrideCount: 0,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      const response = await auth(request(h.app).get('/extensions'));
+      expect(response.status).toBe(200);
+      expect(response.body.v).toBe(1);
+      expect(
+        response.body.extensions.sort(
+          (a: { name: string }, b: { name: string }) =>
+            a.name.localeCompare(b.name),
+        ),
+      ).toEqual(expected);
+      expect(expected.map((e) => e.name)).toEqual(['linked', 'plain']);
+      expect(expected.find((e) => e.name === 'linked')?.installType).toBe(
+        'link',
+      );
+    } finally {
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(qwenHome, { recursive: true, force: true });
     }
   });
 
@@ -461,7 +598,11 @@ describe('extension management v2 REST', () => {
     const loadSettings = vi
       .spyOn(settingsModule, 'loadSettings')
       .mockReturnValue({
-        merged: { skills: { disabled: ['alpha'], enabled: ['beta'] } },
+        // `alpha` is disabled under the authored spelling the entry was
+        // written with; the `beta` grant has to carry the registry identity
+        // (`demo:beta`) because a grant is not a restriction — a bare
+        // `enabled: ['beta']` opts nothing in once the skill is prefixed.
+        merged: { skills: { disabled: ['alpha'], enabled: ['demo:beta'] } },
         forScope: () => ({ settings: {} }),
       } as unknown as settingsModule.LoadedSettings);
     const snapshot =
@@ -574,6 +715,50 @@ describe('extension management v2 REST', () => {
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
+  });
+
+  it('reports a legacy bare disable entry as blocking the prefixed skill', async () => {
+    // skills.disabled: ['pdf']; the extension authors `pdf`, which registers as
+    // `demo:pdf`. The picker must show it disabled rather than offer a toggle
+    // that appears to do nothing.
+    const body = await prefixedSkillStateBody({ disabled: ['pdf'] });
+    expect(body.skills).toEqual([
+      expect.objectContaining({
+        name: 'pdf',
+        effectiveEnabled: false,
+        disabledReason: 'hard',
+      }),
+    ]);
+  });
+
+  it('reports the prefixed disable entry as blocking the prefixed skill', async () => {
+    // The spelling the picker itself writes. A surface that only knows the
+    // authored name blames nothing and shows an enabled row for a skill the
+    // config has already blocked.
+    const body = await prefixedSkillStateBody({ disabled: ['demo:pdf'] });
+    expect(body.skills).toEqual([
+      expect.objectContaining({
+        name: 'pdf',
+        effectiveEnabled: false,
+        disabledReason: 'hard',
+      }),
+    ]);
+  });
+
+  it('does not let a legacy bare enable opt the prefixed skill in', async () => {
+    // skills.enabled: ['pdf'] with the skill declared default-disabled. The
+    // grant is keyed by the registry identity, so it opens nothing.
+    const body = await prefixedSkillStateBody({
+      enabled: ['pdf'],
+      defaultEnabled: false,
+    });
+    // `default`, not `hard`: nothing blocks the skill by name — no grant opened
+    // it. Attributing the denial to the wrong entry would point the user at a
+    // settings line that does not gate the skill.
+    expect(body.skills[0]).toMatchObject({
+      effectiveEnabled: false,
+      disabledReason: 'default',
+    });
   });
 
   it('records state ownership failures without refreshing either workspace', async () => {

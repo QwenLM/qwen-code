@@ -20,6 +20,10 @@ export type LocalFilesBlocker =
   | 'cross-origin-frame'
   /** The session's workspace cannot host a bridge (untrusted or live). */
   | 'workspace-ineligible'
+  /** The workspace snapshot has not landed yet; judgement impossible. */
+  | 'workspace-resolving'
+  /** The daemon does not advertise the reverse channel at all. */
+  | 'unsupported-daemon'
   | null;
 
 export interface LocalFilesCapability {

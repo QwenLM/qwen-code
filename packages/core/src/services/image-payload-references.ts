@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, ContentListUnion } from '@google/genai';
 import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
@@ -131,9 +131,46 @@ export function buildReattachParts(
   return [
     {
       text: reattachContextText(recent.map((img) => img.id)),
+      partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
     ...recent.map(storedImageToPart),
   ];
+}
+
+/**
+ * `partMetadata` key stamped on the leading text marker of the volatile
+ * reattach region. `buildReattachParts` re-generates that region on every
+ * request, so the DashScope cache pass uses this marker to place the
+ * conversation breakpoint *before* the reattached images instead of after
+ * them — keeping the cached prefix stable across turns (issue #11627).
+ * It is client-side metadata only: the OpenAI-compatible converters never
+ * serialize `partMetadata`, and the native SDK generator strips it in
+ * `LlmContentGenerator.stripPartFields` before the request is built, so it
+ * never reaches the wire.
+ */
+export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
+
+/**
+ * Number of trailing parts of the last content that belong to the reattach
+ * region, or 0 when the request ends without one. Each reattach part (one
+ * text marker + N inline images) converts to exactly one OpenAI content
+ * block, so this equals the trailing reattach block count on the wire.
+ */
+export function trailingReattachPartCount(contents: ContentListUnion): number {
+  const last = Array.isArray(contents) ? contents.at(-1) : undefined;
+  const parts =
+    last && typeof last === 'object' && 'parts' in last
+      ? last.parts
+      : undefined;
+  if (!Array.isArray(parts) || parts.length === 0) return 0;
+  const firstMarked = parts.findIndex(
+    (part) =>
+      typeof part === 'object' &&
+      part !== null &&
+      part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true,
+  );
+  if (firstMarked === -1) return 0;
+  return parts.length - firstMarked;
 }
 
 export function prepareImagePayloadsForRequest(

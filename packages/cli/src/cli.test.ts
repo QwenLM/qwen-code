@@ -1211,7 +1211,10 @@ describe('bootstrap import boundaries', () => {
   it('uses the bootstrap file as the production bundle entry', () => {
     const source = readFileSync('../../esbuild.config.js', 'utf8');
 
-    expect(source).toContain("entryPoints: { cli: 'packages/cli/src/cli.ts' }");
+    expect(source).toContain("cli: 'packages/cli/src/cli.ts'");
+    expect(source).toContain(
+      "'execution-worker': 'packages/core/src/services/execution-worker-main.ts'",
+    );
   });
 
   it('keeps bootstrap fast paths in-process in the npm bin wrapper', () => {
@@ -1734,11 +1737,13 @@ describe('bootstrap import boundaries', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
       ['authCommand', 'auth'],
+      ['boardCommand', 'board'],
       ['channelCommand', 'channel'],
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],
       ['reviewCommand', 'review'],
+      ['sandboxCommand', 'sandbox'],
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
       ['updateCommand', 'update'],

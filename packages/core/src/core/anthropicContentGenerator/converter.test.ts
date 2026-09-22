@@ -4421,4 +4421,274 @@ describe('AnthropicContentConverter', () => {
       });
     });
   });
+
+  // https://github.com/QwenLM/qwen-code/issues/9453
+  //
+  // The OpenAI Responses generator stashes an opaque reasoning-replay payload
+  // in the shared `Part.thoughtSignature` field (responses-converter.ts:
+  // `encodeReasoningSignature({ id, encrypted_content })`). That payload is
+  // only meaningful to the Responses API; after a provider switch it must not
+  // reach the Anthropic wire as a native `thinking.signature`, while the
+  // visible reasoning summary is kept.
+  describe('cross-provider reasoning replay metadata', () => {
+    const responsesReplaySignature = JSON.stringify({
+      id: 'rs_68c6c0c9ff5c8191a29b2e78c1a40c83',
+      encrypted_content: 'gAAAAABvcmVhc29uaW5nLXJlcGxheS1wYXlsb2Fk',
+    });
+
+    // A native Anthropic signature is an opaque token: it never starts with
+    // '{' and never parses as the Responses replay payload shape.
+    const anthropicNativeSignature =
+      'EqQBCgIYAhIkAc6dE9c2eN8aBf1c5d7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6E=';
+
+    const buildRequest = (thoughtSignature: string) => ({
+      model: 'models/test',
+      contents: [
+        { role: 'user' as const, parts: [{ text: 'First' }] },
+        {
+          role: 'model' as const,
+          parts: [
+            {
+              text: 'Reasoning summary',
+              thought: true,
+              thoughtSignature,
+            },
+            { text: 'Visible answer' },
+          ],
+        },
+        { role: 'user' as const, parts: [{ text: 'Second' }] },
+      ],
+    });
+
+    it('forwards a native Anthropic thinking signature unchanged', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        buildRequest(anthropicNativeSignature),
+        { enableCacheControl: false },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'Reasoning summary',
+            signature: anthropicNativeSignature,
+          },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('does not forward a Responses replay payload as a native signature', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        buildRequest(responsesReplaySignature),
+        { enableCacheControl: false },
+      );
+
+      // The foreign replay payload must not be attached as a native
+      // `signature`: the thinking block is emitted unsigned (no `signature`
+      // key), leaving the summary text intact for the downstream
+      // strip/normalize passes to decide its fate.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Reasoning summary' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('strips the foreign replay payload under stripAssistantThinking', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        buildRequest(responsesReplaySignature),
+        { stripAssistantThinking: true, enableCacheControl: false },
+      );
+
+      // The hidden reasoning must not leak as visible assistant prose: under
+      // stripAssistantThinking the unsigned thinking block is removed, and no
+      // demoted `'Reasoning summary'` text block is emitted.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Visible answer' }],
+      });
+    });
+
+    it('does not throw on an active tool-use turn when dropping the replay payload', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user' as const, parts: [{ text: 'First' }] },
+            {
+              role: 'model' as const,
+              parts: [
+                {
+                  text: 'Reasoning summary',
+                  thought: true,
+                  thoughtSignature: responsesReplaySignature,
+                },
+                {
+                  functionCall: { id: 'call-1', name: 'tool_name', args: {} },
+                },
+              ],
+            },
+            {
+              role: 'user' as const,
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'tool_name',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { dropUnsignedAssistantThinking: true },
+      );
+
+      // Must not throw "proxy omitted the thinking signature": the replay
+      // payload is dropped rather than emitted as an unsigned thinking block,
+      // so dropUnsignedThinkingFromAssistantMessages never sees an unsigned
+      // thinking block on this active tool-use turn. The demoted reasoning
+      // summary survives as plain text, and the tool_use block is untouched.
+      const assistant = messages.find((m) => m.role === 'assistant');
+      expect(assistant?.content).toEqual([
+        { type: 'text', text: 'Reasoning summary' },
+        { type: 'tool_use', id: 'call-1', name: 'tool_name', input: {} },
+      ]);
+    });
+
+    it('never forwards a signature-only replay payload as a native signature', () => {
+      // flushThoughtEpisode always sets `text` (to '' for a signature-only
+      // episode), so the shape reaching this converter is an empty-text
+      // thought part, not a part with no `text` key.
+      const signatureOnlyPart = {
+        text: '',
+        thought: true,
+        thoughtSignature: responsesReplaySignature,
+      };
+
+      const build = (isLatestTurn: boolean) => ({
+        model: 'models/test',
+        contents: [
+          { role: 'user' as const, parts: [{ text: 'First' }] },
+          {
+            role: 'model' as const,
+            parts: [signatureOnlyPart, { text: 'Visible answer' }],
+          },
+          ...(isLatestTurn
+            ? []
+            : [
+                { role: 'user' as const, parts: [{ text: 'Second' }] },
+                { role: 'model' as const, parts: [{ text: 'Later answer' }] },
+              ]),
+        ],
+      });
+
+      const findAssistant = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => result.messages.find((m) => m.role === 'assistant');
+
+      // Under dropUnsignedAssistantThinking the replay payload is dropped and
+      // no thinking block is emitted. With empty (signature-only) text there
+      // is nothing to demote, so the exact content is just the visible answer
+      // — pinning that no empty-text block leaks through.
+      const assertDropped = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => {
+        expect(findAssistant(result)?.content).toEqual([
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      };
+
+      // Under the bare option set on the LATEST turn the empty-text block is
+      // kept but left unsigned (no `signature` key), so the foreign payload
+      // still never reaches the wire — the latest turn's signatures must
+      // replay byte-exact, so dropEmptyTextThinkingBlocks leaves it.
+      const assertUnsigned = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => {
+        expect(findAssistant(result)?.content).toEqual([
+          { type: 'thinking', thinking: '' },
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      };
+
+      // Under the bare option set on a NON-latest turn, dropEmptyTextThinkingBlocks
+      // deletes the empty-text thinking block, leaving only the visible answer.
+      // This is the assertion that only a genuine second (later) model turn can
+      // reach: with today's single-model-turn fixture the block would survive.
+      const assertNonLatestThinkingDropped = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => {
+        expect(findAssistant(result)?.content).toEqual([
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      };
+
+      // Latest-turn and non-latest-turn positions, under both the production
+      // proxy option set (dropUnsignedAssistantThinking) and the bare option
+      // set. The replay payload must never surface as a native signature in
+      // any of them.
+      assertDropped(
+        converter.convertLlmRequestToAnthropic(build(false), {
+          dropUnsignedAssistantThinking: true,
+        }),
+      );
+      assertDropped(
+        converter.convertLlmRequestToAnthropic(build(true), {
+          dropUnsignedAssistantThinking: true,
+        }),
+      );
+      assertNonLatestThinkingDropped(
+        converter.convertLlmRequestToAnthropic(build(false), {
+          enableCacheControl: false,
+        }),
+      );
+      assertUnsigned(
+        converter.convertLlmRequestToAnthropic(build(true), {
+          enableCacheControl: false,
+        }),
+      );
+    });
+
+    it('demotes a non-empty replay summary to plain text instead of dropping it', () => {
+      // The empty-text signature-only case above cannot tell "demoted to
+      // text" apart from "dropped entirely", because with no text there is
+      // nothing to preserve. A non-empty summary pins the demote path: under
+      // dropUnsignedAssistantThinking the thinking block is dropped AND the
+      // visible summary survives as a plain-text block.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user' as const, parts: [{ text: 'First' }] },
+            {
+              role: 'model' as const,
+              parts: [
+                {
+                  text: 'Reasoning summary',
+                  thought: true,
+                  thoughtSignature: responsesReplaySignature,
+                },
+                { text: 'Visible answer' },
+              ],
+            },
+          ],
+        },
+        { dropUnsignedAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Reasoning summary' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+  });
 });

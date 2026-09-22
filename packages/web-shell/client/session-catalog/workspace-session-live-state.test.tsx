@@ -212,6 +212,29 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(getLiveState.mock.calls.length).toBeGreaterThan(initialRequests);
   });
 
+  it('retains request start time when a live-state response is delayed', async () => {
+    await renderProbe();
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    let resolve!: (value: DaemonWorkspaceSessionLiveState) => void;
+    getLiveState.mockImplementationOnce(
+      () =>
+        new Promise<DaemonWorkspaceSessionLiveState>((done) => {
+          resolve = done;
+        }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    clock.mockReturnValue(200);
+    await act(async () => {
+      resolve(liveState(1));
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+    expect(
+      getSessionCatalogStore(client).getLiveSessionRequestStartedAt('/work'),
+    ).toBe(100);
+  });
+
   it('polls only live-state after the initial version-fenced catalog load', async () => {
     let active = false;
     getLiveState.mockImplementation(async () => liveState(1, active));

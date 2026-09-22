@@ -28,8 +28,13 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import {
+  assertWritableOutPath,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
   REVIEW_TMP_DIR,
@@ -37,7 +42,11 @@ import {
 } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
-import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
+import {
+  deadlineOption,
+  EFFORT_OPTION,
+  type ReviewEffort,
+} from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import {
   buildDiffPlan,
@@ -52,7 +61,7 @@ import {
   type PlanReport,
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
+import { captureDeadline, validateDeadlineFlag } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
@@ -79,6 +88,8 @@ interface CaptureLocalArgs {
   target: string;
   untracked: boolean;
   effort?: ReviewEffort;
+  /** `--deadline`: minutes, or `none`; omitted for the tier's default wall. */
+  deadline?: string;
   cache?: string;
 }
 
@@ -1252,6 +1263,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every hunk touching a file git handed us in a non-UTF-8 encoding.
   writeFileSync(diffPath, diffBytes);
 
+  const wall = captureDeadline(process.env, args.deadline, plan);
   const result: CaptureLocalResult = {
     // The token the CLI derived, so nothing downstream has to re-derive it.
     // `qwen review run` pins the artifact name it waits for from the same
@@ -1264,10 +1276,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // No ref to `git show` a pre-change file out of, so per-file line counts and
     // heaviness are unavailable — same as `plan-diff`. Chunk coverage, which is
     // what the topology needs, is not.
-    ...buildPlanReport(plan, null, {
-      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-      hasDeadline: hasReviewDeadline(process.env),
-    }),
+    ...buildPlanReport(
+      plan,
+      null,
+      {
+        operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+        hasDeadline: wall.explicit,
+      },
+      diffBytes.toString('utf8'),
+    ),
+    ...wall.fields,
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...(incremental ? { incremental } : {}),
@@ -1433,6 +1451,7 @@ export const captureLocalCommand: CommandModule = {
           'Include untracked, non-ignored files. On by default: `git diff` cannot see them, so without this a brand-new file goes unreviewed.',
       })
       .option('effort', EFFORT_OPTION)
+      .option('deadline', deadlineOption({ resumes: false }))
       .option('cache', {
         type: 'string',
         describe:
@@ -1449,6 +1468,33 @@ export const captureLocalCommand: CommandModule = {
           'says why.',
       }),
   handler: (argv) => {
-    runCaptureLocal(argv as unknown as CaptureLocalArgs);
+    const args = argv as unknown as CaptureLocalArgs;
+    // plan-diff's contract: a usage error (a TypeError) exits 2 and anything
+    // else exits 1, each on one stderr line — a repairable invocation gets no
+    // crash banner. Two rulings run first, before the tree is captured and
+    // planned rather than at the plan write after that work is done: an
+    // --out that is blank, repeated or names a directory (the check
+    // `fetch-diff` and `issue-context` make), and the --deadline ruling, which covers both
+    // bars and runs again inside `captureDeadline` (it is pure given the
+    // environment).
+    //
+    // The one line is for the operator. It cannot say where an internal fault
+    // happened — and a TypeError from a bug is classified as a usage error
+    // here, as in plan-diff — so --debug prints the stack after it. Only
+    // the flag: debug variables in the environment are set for other tools
+    // (and by the dev launcher), and must not change what an operator sees.
+    try {
+      assertWritableOutPath(args.out);
+      validateDeadlineFlag(process.env, args.deadline);
+      runCaptureLocal(args);
+    } catch (err) {
+      // writeStderrLineSafe, as in plan-diff: a broken stderr must not let
+      // the throw escape the catch and lose the exit classification.
+      writeStderrLineSafe(`capture-local: ${(err as Error).message}`);
+      if (argv['debug'] === true && err instanceof Error && err.stack) {
+        writeStderrLineSafe(err.stack);
+      }
+      process.exitCode = err instanceof TypeError ? 2 : 1;
+    }
   },
 };

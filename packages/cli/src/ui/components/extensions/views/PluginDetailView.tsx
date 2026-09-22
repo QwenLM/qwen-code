@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
@@ -13,6 +13,7 @@ import {
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
+import { extensionComponentsSummary } from '../../../../services/extension-components-summary.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 
 export type PluginDetailAction =
@@ -31,6 +32,14 @@ interface PluginDetailViewProps {
   isFocused: boolean;
   /** Whether to offer the favorite toggle (hidden in the Sources tab). */
   showFavorite?: boolean;
+  /**
+   * Action the cursor starts on. A busy action replaces this view with a
+   * loading line, so it is remounted once the action settles and would
+   * otherwise re-seed the cursor to the first row — keep it on the action the
+   * user activated instead. Missing (or no longer offered) falls back to the
+   * first row.
+   */
+  initialAction?: PluginDetailAction;
   onAction: (action: PluginDetailAction) => void;
 }
 
@@ -53,19 +62,6 @@ const InfoRow = ({
   </Box>
 );
 
-function componentSummary(ext: Extension): string {
-  const parts: string[] = [];
-  const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
-  if (mcpCount) parts.push(t('{{count}} MCP', { count: String(mcpCount) }));
-  if (ext.skills?.length)
-    parts.push(t('{{count}} Skills', { count: String(ext.skills.length) }));
-  if (ext.commands?.length)
-    parts.push(t('{{count}} Commands', { count: String(ext.commands.length) }));
-  if (ext.agents?.length)
-    parts.push(t('{{count}} Agents', { count: String(ext.agents.length) }));
-  return parts.length ? parts.join(' · ') : t('None');
-}
-
 export const PluginDetailView = ({
   extension,
   scope,
@@ -73,6 +69,7 @@ export const PluginDetailView = ({
   hasUpdateAvailable,
   isFocused,
   showFavorite = true,
+  initialAction,
   onAction,
 }: PluginDetailViewProps) => {
   const ext = extension;
@@ -122,6 +119,23 @@ export const PluginDetailView = ({
     return items;
   }, [isActive, isFavorite, hasUpdateAvailable, showFavorite]);
 
+  // Cursor seed, resolved ONCE per mount against the rows offered at that
+  // moment: the index of `initialAction`, or the first row when it is absent
+  // (no request, or the action is already gone — e.g. "Update Now" after a
+  // successful update).
+  //
+  // Deliberately not re-derived from the rows as they are now: a *changed*
+  // `initialIndex` is how the list is told to move the cursor (the INITIALIZE
+  // branch in useSelectionList treats it as an override of the user's cursor).
+  // So re-deriving it when a row disappears mid-mount — e.g. a background
+  // check landing and taking "Update Now" away — would drag the highlight off
+  // the row the user is on and onto the first one ("Disable"), and the next
+  // Enter would run that instead.
+  const [initialIndex] = useState(() => {
+    const index = actions.findIndex((item) => item.value === initialAction);
+    return index < 0 ? 0 : index;
+  });
+
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
@@ -146,13 +160,16 @@ export const PluginDetailView = ({
             {ext.installMetadata.originSource}
           </InfoRow>
         )}
-        <InfoRow label={t('Components:')}>{componentSummary(ext)}</InfoRow>
+        <InfoRow label={t('Components:')}>
+          {extensionComponentsSummary(ext)}
+        </InfoRow>
       </Box>
 
       <Box flexDirection="column">
         <Text color={theme.text.secondary}>{t('Actions')}</Text>
         <RadioButtonSelect
           items={actions}
+          initialIndex={initialIndex}
           isFocused={isFocused}
           showNumbers={false}
           onSelect={onAction}

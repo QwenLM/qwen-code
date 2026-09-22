@@ -524,7 +524,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'either mode.',
       })
       .option('child-heap-mode', {
-        choices: ['off', 'observe'] as const,
+        choices: ['off', 'observe', 'admit'] as const,
         default: 'observe' as const,
         description:
           'Whether the daemon models a per-child heap partition of the ' +
@@ -536,7 +536,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'refusal count of 0 does NOT mean the partition would be safe to ' +
           'apply; children still run on the much larger host-derived ' +
           'ceiling, so a workload needing more old space than the modeled ' +
-          'ceiling looks healthy here.',
+          'ceiling looks healthy here. `admit` rejects starts past the modeled ' +
+          'process limit but keeps the existing child heap arguments.',
       })
       .option('mcp-client-budget', {
         type: 'number',

@@ -10,6 +10,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHookOutput, HookEventName, HookType } from './types.js';
+import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
 import type {
   HookConfig,
   HookInput,
@@ -39,11 +40,6 @@ import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
-
-/**
- * Default timeout for hook execution (60 seconds)
- */
-const DEFAULT_HOOK_TIMEOUT = 60000;
 
 /**
  * Maximum length for stdout/stderr output (1MB)
@@ -107,7 +103,7 @@ const removeInput = () => {
 };
 
 const signalGroup = (signal) => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   try {
     process.kill(-hook.pid, signal);
     return true;
@@ -121,7 +117,7 @@ const signalGroup = (signal) => {
 };
 
 const groupAlive = () => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   if (process.platform === 'win32') return hook.exitCode === null;
   try {
     process.kill(-hook.pid, 0);
@@ -277,6 +273,13 @@ function signalProcessGroup(
   pid: number,
   signal: NodeJS.Signals,
 ): 'sent' | 'gone' | 'failed' {
+  // Negating PID 1 broadcasts to every permitted process on POSIX.
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Refusing ${signal} for hook process group ${pid}: not a safe integer greater than 1`,
+    );
+    return 'gone';
+  }
   try {
     process.kill(-pid, signal);
     return 'sent';
@@ -292,6 +295,7 @@ function signalProcessGroup(
 }
 
 function isProcessGroupAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
   try {
     process.kill(-pid, 0);
     return true;
@@ -421,16 +425,13 @@ async function terminatePosixHookProcessTree(
   );
 }
 
-async function terminateWindowsHookProcessTree(
-  child: ChildProcess,
-): Promise<void> {
-  const pid = child.pid;
-  if (!pid) {
-    killDirectChild(child, 'SIGKILL');
-    return;
-  }
-
-  await new Promise<void>((resolve) => {
+/**
+ * `taskkill /f /t` a pid, resolving to false when the kill did not land so the
+ * caller can fall back. Windows has no process groups to signal, so the tree
+ * walk is the only way to reach a hook's descendants.
+ */
+async function taskkillProcessTree(pid: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     try {
       execFile(
         WINDOWS_TASKKILL,
@@ -444,19 +445,36 @@ async function terminateWindowsHookProcessTree(
             debugLogger.warn(
               `taskkill failed for hook process tree ${pid}: ${error.message}`,
             );
-            killDirectChild(child, 'SIGKILL');
+            resolve(false);
+            return;
           }
-          resolve();
+          resolve(true);
         },
       );
     } catch (error) {
       debugLogger.warn(
         `taskkill threw for hook process tree ${pid}: ${error instanceof Error ? error.message : String(error)}`,
       );
-      killDirectChild(child, 'SIGKILL');
-      resolve();
+      resolve(false);
     }
   });
+}
+
+async function terminateWindowsHookProcessTree(
+  child: ChildProcess,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  const pid = child.pid;
+  if (!pid) {
+    killDirectChild(child, 'SIGKILL');
+    return;
+  }
+
+  if (!(await taskkillProcessTree(pid))) {
+    killDirectChild(child, 'SIGKILL');
+  }
 }
 
 async function terminateHookProcessTree(
@@ -470,11 +488,111 @@ async function terminateHookProcessTree(
   await terminatePosixHookProcessTree(child, graceMs);
 }
 
+/**
+ * Tri-state `process.kill(pid, 0)` liveness probe for the surviving-hook
+ * branch: alive on success or EPERM/EACCES (the process exists but cannot be
+ * opened), gone on ESRCH, and unknown on any other errno, which establishes
+ * nothing about the pid and must not be silently folded into either answer.
+ * File-local on purpose: the shared `isPidAlive` deliberately exposes only
+ * the binary answer, and this branch is the only caller that needs the
+ * unknown case told apart.
+ */
+function probePidLiveness(
+  pid: number,
+): { state: 'alive' | 'gone' } | { state: 'unknown'; detail: string } {
+  try {
+    process.kill(pid, 0);
+    return { state: 'alive' };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ESRCH') {
+      return { state: 'gone' };
+    }
+    if (code === 'EPERM' || code === 'EACCES') {
+      return { state: 'alive' };
+    }
+    return {
+      state: 'unknown',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function terminateSurvivingHookProcessGroup(
   pid: number,
   graceMs = HOOK_TERMINATE_GRACE_MS,
 ): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Skipping reap of surviving hook ${pid}: not a safe integer greater than 1`,
+    );
+    return;
+  }
   if (process.platform === 'win32') {
+    // The surviving hook runs under a detached supervisor, so the parent's own
+    // `terminateHookProcessTree` on the supervisor may miss it: the supervisor
+    // can already have exited (leaving the shell reparented and out of its
+    // tree), or its taskkill can fail. Without this branch nothing on Windows
+    // ever reaps the hook's cmd.exe tree. See #11303.
+    //
+    // The liveness probe is the #6067 guard: taskkill has no process-group
+    // equivalent, so it must not be fired at a pid that has already exited and
+    // may have been recycled onto an unrelated application. The tri-state
+    // classification (`probePidLiveness`) tells an unexpected errno (host
+    // memory or handle pressure, libuv's UV_UNKNOWN catch-all) apart from a
+    // provably gone pid: both skip the reap, but the unknown case leaves the
+    // hook's cmd.exe tree running, so it warns in the debug log (requires
+    // --debug) rather than vanishing without a trace. The alive/gone decision
+    // is unchanged from the shared `isPidAlive` helper — alive is exactly
+    // success or EPERM/EACCES, anything else still skips.
+    const probe = probePidLiveness(pid);
+    if (probe.state === 'unknown') {
+      debugLogger.warn(
+        `Skipping reap of surviving hook ${pid}: liveness probe failed: ${probe.detail}`,
+      );
+    }
+    if (probe.state !== 'alive') {
+      return;
+    }
+    // `taskkillProcessTree` resolves false when execFile errors or when
+    // taskkill exceeds WINDOWS_TASKKILL_TIMEOUT_MS — both reachable on a deep
+    // tree or a locked-down System32. Dropping that boolean leaves the hook's
+    // cmd.exe tree running with nothing else able to reap it, which is exactly
+    // the leak this branch exists to close. Mirrors the fallback in
+    // terminateWindowsHookProcessTree above.
+    //
+    // But taskkill also resolves false when the pid was ALREADY dead, and a
+    // pid-based kill against a recycled pid is a collateral kill (the #6067
+    // failure mode). Re-probe liveness before falling back so a dead pid is
+    // never signalled directly. The re-probe shares the first probe's
+    // tri-state classification: an unexpected errno still skips the fallback,
+    // but warns in the debug log instead of vanishing silently.
+    if (await taskkillProcessTree(pid)) {
+      return;
+    }
+    const reprobe = probePidLiveness(pid);
+    if (reprobe.state === 'unknown') {
+      debugLogger.warn(
+        `Skipping SIGKILL fallback for surviving hook ${pid}: liveness re-probe failed: ${reprobe.detail}`,
+      );
+    }
+    if (reprobe.state !== 'alive') {
+      return;
+    }
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (error) {
+      // ESRCH means the pid is already gone; anything else (EPERM from an
+      // elevated or AV-protected hook) is a refused kill that must not
+      // vanish silently while the tree keeps running.
+      if (!isNoSuchProcessError(error)) {
+        debugLogger.warn(
+          `SIGKILL fallback failed for surviving hook ${pid}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     return;
   }
 
@@ -570,7 +688,9 @@ export class HookRunner {
     try {
       // Check if this is an async command hook
       if (this.isAsyncHook(hookConfig)) {
-        return this.executeAsyncHook(
+        // Awaited so a rejection lands in the catch below: executeHook never
+        // throws, and the caller's onHookEnd always runs.
+        return await this.executeAsyncHook(
           hookConfig as CommandHookConfig,
           eventName,
           input,
@@ -637,6 +757,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };
@@ -727,6 +848,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -743,7 +865,7 @@ export class HookRunner {
       hookEvent: eventName,
       sessionId: input.session_id,
       startTime: Date.now(),
-      timeout: hookConfig.timeout || DEFAULT_HOOK_TIMEOUT,
+      timeout: resolveCommandHookTimeoutMs(hookConfig.timeout, hookName),
       stdout: '',
       stderr: '',
     });
@@ -757,6 +879,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -800,6 +923,7 @@ export class HookRunner {
       hookConfig,
       eventName,
       success: true,
+      outcome: 'success',
       duration: 0,
       isAsync: true,
       output: { continue: true },
@@ -864,7 +988,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -874,7 +1002,7 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, index);
       return result;
     });
 
@@ -890,7 +1018,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -908,7 +1040,7 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, i);
       results.push(result);
 
       // If the hook succeeded and has output, use it to modify the input for the next hook
@@ -1004,7 +1136,10 @@ export class HookRunner {
     startTime: number,
     signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
-    const timeout = hookConfig.timeout ?? DEFAULT_HOOK_TIMEOUT;
+    const timeout = resolveCommandHookTimeoutMs(
+      hookConfig.timeout,
+      hookConfig.name || hookConfig.command,
+    );
 
     return new Promise((resolve) => {
       if (!hookConfig.command) {
@@ -1236,10 +1371,11 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: aborted ? 'cancelled' : 'timeout',
           error: new Error(
             aborted
               ? 'Hook execution cancelled (aborted)'
-              : `Hook timed out after ${timeout}ms`,
+              : `Hook timed out after ${timeout / 1000}s`,
           ),
           stdout,
           stderr,
@@ -1359,7 +1495,8 @@ export class HookRunner {
             hookConfig,
             eventName,
             success: false,
-            error: new Error(`Hook timed out after ${timeout}ms`),
+            outcome: 'timeout',
+            error: new Error(`Hook timed out after ${timeout / 1000}s`),
             stdout,
             stderr,
             duration,
@@ -1403,19 +1540,31 @@ export class HookRunner {
             !Array.isArray(parsed)
           ) {
             output = parsed as HookOutput;
+          } else if (
+            parseFailed &&
+            !isBlockingError &&
+            textToParse.startsWith('{')
+          ) {
+            // Output that starts like a JSON object but does not parse is a
+            // broken structured payload, not context or a message: as in
+            // Claude Code, it is a non-blocking error and nothing of it reaches
+            // the model. Exit code 2 still blocks on its stderr text below.
+            debugLogger.warn(
+              `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`,
+            );
+            finish({
+              hookConfig,
+              eventName,
+              success: false,
+              outcome: 'non_blocking_error',
+              error: new Error('Hook output is not valid JSON'),
+              stdout,
+              stderr,
+              exitCode: exitCode ?? -1,
+              duration,
+            });
+            return;
           } else {
-            // Output shaped like a JSON object that fails to parse is a broken
-            // structured payload, not context: as in Claude Code, it is kept
-            // out of the model.
-            const malformedObject =
-              parseFailed &&
-              textToParse.startsWith('{') &&
-              textToParse.endsWith('}');
-            if (malformedObject) {
-              debugLogger.warn(
-                `Hook "${hookConfig.name || hookConfig.command}" printed output that looks like a JSON object but is not valid JSON; it is not added to model context`,
-              );
-            }
             output = this.convertPlainTextToHookOutput(
               textToParse,
               isBlockingError
@@ -1423,7 +1572,7 @@ export class HookRunner {
                 : exitCode === EXIT_CODE_SUCCESS
                   ? EXIT_CODE_SUCCESS
                   : EXIT_CODE_NON_BLOCKING_ERROR,
-              parsedFromStdout && !malformedObject ? eventName : undefined,
+              parsedFromStdout ? eventName : undefined,
             );
           }
         }
@@ -1433,6 +1582,14 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: exitCode === EXIT_CODE_SUCCESS,
+          // A signal this runner did not send (it returned above for its own
+          // abort and timeout) leaves exitCode null: a failure, not a cancel.
+          outcome:
+            exitCode === EXIT_CODE_SUCCESS
+              ? 'success'
+              : exitCode === 2
+                ? 'blocking'
+                : 'non_blocking_error',
           output,
           stdout,
           stderr,
@@ -1455,6 +1612,7 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error,
           stdout,
           stderr,
@@ -1465,18 +1623,32 @@ export class HookRunner {
   }
 
   /**
-   * Expand command with environment variables and input context
+   * Resolve project directory variables in a command string before launch.
+   *
+   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
+   * always exported in the hook's environment. Bash expands exported
+   * variables itself, so a bash command is passed through unchanged: a text
+   * substitution would put shell quotes inside a double-quoted
+   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
+   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
+   * for those shells each variable is replaced with the quoted project
+   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
+   * left for the shell to read.
    */
   private expandCommand(
     command: string,
     input: HookInput,
     shellType: ShellType,
   ): string {
+    if (shellType === 'bash') {
+      return command;
+    }
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
   }
 
   /**
