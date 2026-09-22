@@ -1716,20 +1716,24 @@ Review content`;
       expect(manager.hasDiscoveryErrors()).toBe(true);
     });
 
-    it('reports unreadable skill files instead of confirming their removal', async () => {
-      vi.mocked(fs.readdir).mockResolvedValue([
-        {
-          name: 'unreadable',
-          isDirectory: () => true,
-          isSymbolicLink: () => false,
-        },
-      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-      vi.mocked(fs.access).mockRejectedValue(
-        Object.assign(new Error('unreadable'), { code: 'EACCES' }),
-      );
-      await manager.refreshCache();
-      expect(manager.hasDiscoveryErrors()).toBe(true);
-    });
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'distinguishes unreadable skill files from confirmed removal: %s',
+      async (code) => {
+        vi.mocked(fs.readdir).mockResolvedValue([
+          {
+            name: 'unreadable',
+            isDirectory: () => true,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        vi.mocked(fs.access).mockRejectedValue(
+          Object.assign(new Error(code), { code }),
+        );
+        await manager.refreshCache();
+        expect(manager.getCachedSkills()).toEqual([]);
+        expect(manager.hasDiscoveryErrors()).toBe(code !== 'ENOENT');
+      },
+    );
   });
 
   describe('conditional skill activation', () => {

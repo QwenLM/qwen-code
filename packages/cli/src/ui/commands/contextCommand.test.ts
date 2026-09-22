@@ -698,14 +698,23 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(trackedBody),
       );
       expect(sumRows(data.breakdown)).toBe(100_000);
+      const text = formatContextUsageText(data);
+      expect(text).not.toContain('report-builder (body loaded)');
+      expect(text.match(/body loaded/g)).toHaveLength(1);
     });
 
     it.each([0, 100_000])(
       'bills repeated copies of a tracked skill body as messages (API total %i)',
       async (total) => {
+        const trackedBodies = new Map([[trackedBody, 'report-builder']]);
         const options = {
           total,
-          tools: [skillToolDouble],
+          tools: [
+            {
+              ...skillToolDouble,
+              getLoadedSkillContentNames: () => trackedBodies,
+            },
+          ],
           declared: [skillToolSchema],
           skillList: trackedSkillList,
           history: [prelude, conversation[0]!, skillResponse(trackedBody)],
@@ -735,6 +744,9 @@ describe('collectContextData (contextCommand)', () => {
         // Accounting must not consume the live tool's history tracking.
         expect(await collectContextData(repeatedConfig, true)).toEqual(
           repeated,
+        );
+        expect(trackedBodies).toEqual(
+          new Map([[trackedBody, 'report-builder']]),
         );
       },
     );

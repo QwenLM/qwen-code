@@ -232,9 +232,6 @@ function SkillsSection({
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
               {skill.name}
-              {skill.loaded && (
-                <span className={styles.success}> {labels.bodyLoaded}</span>
-              )}
             </span>
             <span className={styles.value}>
               {formatTokens(skill.tokens)} {labels.tokens}

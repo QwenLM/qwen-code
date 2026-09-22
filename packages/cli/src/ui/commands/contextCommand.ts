@@ -976,9 +976,8 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       lines.push('');
       lines.push('**Skills**');
       for (const skill of sortedSkills) {
-        const label = skill.loaded ? `${skill.name} (body loaded)` : skill.name;
         lines.push(
-          fmtCategoryRow(label, skill.tokens, contextWindowSize, '  └ '),
+          fmtCategoryRow(skill.name, skill.tokens, contextWindowSize, '  └ '),
         );
         if (skill.loaded && skill.bodyTokens && skill.bodyTokens > 0) {
           lines.push(
