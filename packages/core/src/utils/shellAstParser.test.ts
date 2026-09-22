@@ -391,6 +391,24 @@ describe('isShellCommandReadOnlyAST', () => {
         await isShellCommandReadOnlyAST("sed --in-place 's/foo/bar/' file.txt"),
       ).toBe(false);
     });
+
+    it('allows sed with --quiet/--silent read-only flags', async () => {
+      expect(await isShellCommandReadOnlyAST("sed -n 's/a/b/' file")).toBe(
+        true,
+      );
+      expect(await isShellCommandReadOnlyAST("sed --quiet 's/a/b/' file")).toBe(
+        true,
+      );
+      expect(
+        await isShellCommandReadOnlyAST("sed --silent 's/a/b/' file"),
+      ).toBe(true);
+    });
+
+    it('still rejects sed write scripts with --quiet', async () => {
+      expect(await isShellCommandReadOnlyAST("sed --quiet 'w out' file")).toBe(
+        false,
+      );
+    });
   });
 
   // =======================================================================

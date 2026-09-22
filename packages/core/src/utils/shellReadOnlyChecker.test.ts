@@ -243,6 +243,16 @@ describe('evaluateShellCommandReadOnly', () => {
         isShellCommandReadOnly("sed --in-place 's/foo/bar/' file.txt"),
       ).toBe(false);
     });
+
+    it('allows sed with --quiet/--silent read-only flags', () => {
+      expect(isShellCommandReadOnly("sed -n 's/a/b/' file")).toBe(true);
+      expect(isShellCommandReadOnly("sed --quiet 's/a/b/' file")).toBe(true);
+      expect(isShellCommandReadOnly("sed --silent 's/a/b/' file")).toBe(true);
+    });
+
+    it('still rejects sed write scripts with --quiet', () => {
+      expect(isShellCommandReadOnly("sed --quiet 'w out' file")).toBe(false);
+    });
   });
 
   describe('tri-state classifier mirrors', () => {
