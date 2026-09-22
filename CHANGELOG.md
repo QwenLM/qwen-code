@@ -12,6 +12,206 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.24.3](https://github.com/QwenLM/qwen-code/releases/tag/v0.24.3) - 2026-09-21
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Web Shell
+
+Web Shell gains structured shell results, optional trajectory metrics, host settings allowlists, and mobile navigation fixes.
+
+- Web Shell now presents structured shell execution results with command, output, execution details, elapsed time, and scrollable content. ([#12311](https://github.com/QwenLM/qwen-code/pull/12311))
+- Adds an opt-in trajectory table tab in Web Shell showing per-turn durations, time to first token, token counts, and tool timing. ([#12388](https://github.com/QwenLM/qwen-code/pull/12388))
+- web-shell: support host settings item allowlists ([#12328](https://github.com/QwenLM/qwen-code/pull/12328))
+- web-shell: restore mobile history navigation ([#12362](https://github.com/QwenLM/qwen-code/pull/12362))
+- web-shell: stop the header title from showing the new-session placeholder ([#12379](https://github.com/QwenLM/qwen-code/pull/12379))
+
+### Live Voice
+
+Live Voice capture moves to AudioWorklet with a fallback, improves failure reporting, and supports shared-screen requests.
+
+- Live Voice microphone capture now uses an AudioWorklet with the old ScriptProcessorNode kept as fallback, reducing main-thread work while preserving level metering and call gating. ([#12338](https://github.com/QwenLM/qwen-code/pull/12338))
+- live: report the cause when Live Voice fails to start with a non-Error ([#12377](https://github.com/QwenLM/qwen-code/pull/12377))
+- live: let a browser Host answer a screen request from a shared screen ([#12378](https://github.com/QwenLM/qwen-code/pull/12378))
+
+### Runtime and sessions
+
+Runtime foundations add managed state, session records, JDBC persistence, and broader serve channel restoration.
+
+- java: Add managed runtime state foundation ([#12301](https://github.com/QwenLM/qwen-code/pull/12301))
+- core: Add managed session record foundation ([#12302](https://github.com/QwenLM/qwen-code/pull/12302))
+- Adds JDBC persistence for Runtime bindings and sessions, enabling shared state across broker processes and restart-safe ownership. ([#12390](https://github.com/QwenLM/qwen-code/pull/12390))
+- qwen serve now restores serve.channels from every trusted workspace at boot, not just the primary workspace. ([#12385](https://github.com/QwenLM/qwen-code/pull/12385))
+
+### Review workflow
+
+Review behavior becomes more focused with critical fix-audit rounds and safer base-tree reuse.
+
+- review: swap re-review rounds to a fix-audit shape under the critical posture ([#10136](https://github.com/QwenLM/qwen-code/pull/10136))
+- Fixes review base-tree reuse by storing merge-base evidence outside the mounted sandbox, so stale or conflicting anchors are rejected based on trusted host-side lease state. ([#11540](https://github.com/QwenLM/qwen-code/pull/11540))
+
+### Chrome extension
+
+Chrome extension release packaging and privacy documentation are now in place.
+
+- Adds Chrome Web Store packaging and a release workflow that can build, scan, upload, and optionally publish the Chrome extension during stable releases or manual dispatch. ([#12329](https://github.com/QwenLM/qwen-code/pull/12329))
+- chrome: disclose browser data handling and limited use ([#12330](https://github.com/QwenLM/qwen-code/pull/12330))
+
+### Desktop and CLI
+
+macOS gets a native integrated title bar, CLI startup is more resilient, and history retry states are clearer.
+
+- macOS desktop now uses an integrated native title bar with content painted behind traffic-light controls and a dedicated drag region. ([#12393](https://github.com/QwenLM/qwen-code/pull/12393))
+- CLI startup no longer crashes when the output-language file cannot be written; it continues without the file. ([#10455](https://github.com/QwenLM/qwen-code/pull/10455))
+- History entries that cannot be retried now expose argsUnavailable so clients can accurately reflect retry limitations. ([#12349](https://github.com/QwenLM/qwen-code/pull/12349))
+
+### Performance and execution
+
+Headless execution is leaner and duplicate workspace-provider requests are coalesced.
+
+- One-shot headless execution now defaults to a pipe-based shell backend and optimizes relaunch behavior for lower overhead. ([#12340](https://github.com/QwenLM/qwen-code/pull/12340))
+- Concurrent workspace-providers requests for the same resolved URL now share one in-flight request, reducing duplicate network calls without adding caching or TTL behavior. ([#12327](https://github.com/QwenLM/qwen-code/pull/12327))
+
+### Other Changes
+
+- core: Route runtime tools through bwrap ([#12269](https://github.com/QwenLM/qwen-code/pull/12269))
+- workflows: write a resumed run's checkpoint before it registers ([#12347](https://github.com/QwenLM/qwen-code/pull/12347))
+- core: reject broadcast-capable hook PIDs ([#12344](https://github.com/QwenLM/qwen-code/pull/12344))
+- E2E CI install steps now retry transient npm ci failures up to three times before failing, reducing flaky workflow breaks. ([#11731](https://github.com/QwenLM/qwen-code/pull/11731))
+- Release standalone archive downloads now use timeouts and retries with checksum verification inside the retry loop, improving resilience to transient network failures. ([#11879](https://github.com/QwenLM/qwen-code/pull/11879))
+- Channel grouping can now accept an ownership hint to resolve ambiguous channel names and skip tolerated names while preserving existing behavior. ([#12383](https://github.com/QwenLM/qwen-code/pull/12383))
+- Updates SDK E2E integration assertions to recognize deferred MCP tool calls while still accepting direct MCP tool-use blocks. ([#12365](https://github.com/QwenLM/qwen-code/pull/12365))
+- Defines a versioned private protocol foundation for Hosted Harness, including capability envelope, boot fence, and request validation. ([#12409](https://github.com/QwenLM/qwen-code/pull/12409))
+- test(cli): keep an ambient GIT_CONFIG_GLOBAL from hijacking withHome ([#12407](https://github.com/QwenLM/qwen-code/pull/12407))
+- release: resume automated web-shell publishing ([#12387](https://github.com/QwenLM/qwen-code/pull/12387))
+
+### 中文摘要
+
+#### Web Shell
+
+Web Shell 新增结构化 shell 结果、可选 trajectory 指标、主机设置白名单，并修复移动端历史导航。
+
+- Web Shell 现在以结构化方式展示 shell 执行结果，包含命令、输出、执行详情、耗时和可滚动内容区域。 ([#12311](https://github.com/QwenLM/qwen-code/pull/12311))
+- Web Shell 新增可选的 trajectory 表格页签，展示每轮耗时、首 token 时间、token 数量和工具调用耗时。 ([#12388](https://github.com/QwenLM/qwen-code/pull/12388))
+- 新增可选 settings.includeItems 白名单，主机可仅显示指定设置和内置块；excludeItems 优先，空白名单显示空状态。 ([#12328](https://github.com/QwenLM/qwen-code/pull/12328))
+- web-shell: restore mobile history navigation ([#12362](https://github.com/QwenLM/qwen-code/pull/12362))
+- web-shell: stop the header title from showing the new-session placeholder ([#12379](https://github.com/QwenLM/qwen-code/pull/12379))
+
+#### Live Voice
+
+Live Voice 麦克风采集改用 AudioWorklet 并保留回退，改进启动失败原因展示，并支持从共享屏幕响应请求。
+
+- Live Voice 麦克风采集改用 AudioWorklet，并保留旧 ScriptProcessorNode 作为回退，减少主线程负担，同时保持电平表和通话控制行为不变。 ([#12338](https://github.com/QwenLM/qwen-code/pull/12338))
+- live: report the cause when Live Voice fails to start with a non-Error ([#12377](https://github.com/QwenLM/qwen-code/pull/12377))
+- live: let a browser Host answer a screen request from a shared screen ([#12378](https://github.com/QwenLM/qwen-code/pull/12378))
+
+#### 运行时与会话
+
+运行时基础新增托管状态、会话记录、JDBC 持久化，并在启动时恢复更多受信任 workspace 的 serve.channels。
+
+- java: Add managed runtime state foundation ([#12301](https://github.com/QwenLM/qwen-code/pull/12301))
+- core: Add managed session record foundation ([#12302](https://github.com/QwenLM/qwen-code/pull/12302))
+- 为 Runtime bindings 和 sessions 添加 JDBC 持久化，支持跨 broker 进程共享状态及重启后保留所有权。 ([#12390](https://github.com/QwenLM/qwen-code/pull/12390))
+- qwen serve 现在在启动时会恢复所有受信任 workspace 的 serve.channels，而不仅是主 workspace。 ([#12385](https://github.com/QwenLM/qwen-code/pull/12385))
+
+#### 审查工作流
+
+审查行为更聚焦：critical 多轮审查改用 fix-audit 形态，并修复基础树复用的锚点校验。
+
+- 当多轮 /review 明确进入仅发布 critical 的模式且存在增量锚点时，改用更窄的 fix-audit 形态，而不是重复完整首轮审查。 ([#10136](https://github.com/QwenLM/qwen-code/pull/10136))
+- 修复 review 基础树复用问题：将合并基准证据移出挂载沙箱，基于主机侧租约状态拒绝过期或冲突的锚点。 ([#11540](https://github.com/QwenLM/qwen-code/pull/11540))
+
+#### Chrome 扩展
+
+Chrome extension 新增打包与发布工作流，并补充浏览器数据处理与隐私说明。
+
+- 新增 Chrome Web Store 打包与发布工作流，可在稳定版发布或手动触发时构建、扫描、上传并可选发布 Chrome extension。 ([#12329](https://github.com/QwenLM/qwen-code/pull/12329))
+- 更新隐私文档，披露浏览器数据处理、extension 权限、本地 token 存储、模型提供方传输、保留控制和 Limited Use 承诺。 ([#12330](https://github.com/QwenLM/qwen-code/pull/12330))
+
+#### 桌面端与 CLI
+
+macOS 使用集成原生标题栏，CLI 启动更稳健，历史记录重试限制展示更准确。
+
+- macOS 桌面端现在使用集成的原生标题栏，内容延伸至窗口控制按钮后方，并保留专用拖拽区域。 ([#12393](https://github.com/QwenLM/qwen-code/pull/12393))
+- 当 output-language 文件无法写入时，CLI 启动不再崩溃，而是继续运行。 ([#10455](https://github.com/QwenLM/qwen-code/pull/10455))
+- 无法重试的历史记录现在会标记 argsUnavailable，使客户端能准确反映重试限制。 ([#12349](https://github.com/QwenLM/qwen-code/pull/12349))
+
+#### 性能与执行
+
+一次性 headless 执行开销更低，相同 workspace-providers URL 的并发请求会合并。
+
+- 一次性 headless 执行现在默认使用基于 pipe 的 shell 后端，并优化重启行为以降低开销。 ([#12340](https://github.com/QwenLM/qwen-code/pull/12340))
+- 针对同一已解析 URL 的并发 workspace-providers 请求现在会共享同一个进行中的请求，减少重复网络调用，且不引入缓存或 TTL。 ([#12327](https://github.com/QwenLM/qwen-code/pull/12327))
+
+#### 其他变更
+
+- 新增内部运行时支持，为各工具启用 bwrap 隔离并应用不可变工作区策略，同时禁用不受支持的主机副作用路径，本阶段暂不公开设置。 ([#12269](https://github.com/QwenLM/qwen-code/pull/12269))
+- workflows: write a resumed run's checkpoint before it registers ([#12347](https://github.com/QwenLM/qwen-code/pull/12347))
+- core: reject broadcast-capable hook PIDs ([#12344](https://github.com/QwenLM/qwen-code/pull/12344))
+- E2E CI 安装步骤现在会对瞬时 npm ci 失败最多重试三次后再失败，减少工作流误报。 ([#11731](https://github.com/QwenLM/qwen-code/pull/11731))
+- 发布流程中的 standalone 归档下载现在使用超时与重试，并在重试循环内校验 checksum，提高对瞬时网络故障的容错能力。 ([#11879](https://github.com/QwenLM/qwen-code/pull/11879))
+- channel 分组现在可接受 ownership hint，以解析歧义 channel 名称并跳过可容忍名称，同时保持现有行为。 ([#12383](https://github.com/QwenLM/qwen-code/pull/12383))
+- 更新 SDK E2E 集成断言，使其能识别延迟 MCP 工具调用，同时继续支持直接 MCP 工具调用。 ([#12365](https://github.com/QwenLM/qwen-code/pull/12365))
+- 为 Hosted Harness 定义版本化私有协议基础，包含能力封装、启动防护和请求校验。 ([#12409](https://github.com/QwenLM/qwen-code/pull/12409))
+- test(cli): keep an ambient GIT_CONFIG_GLOBAL from hijacking withHome ([#12407](https://github.com/QwenLM/qwen-code/pull/12407))
+- release: resume automated web-shell publishing ([#12387](https://github.com/QwenLM/qwen-code/pull/12387))
+
+### Complete Change List (31 pull requests)
+
+#### Features
+
+- web-shell: capture the Live Voice microphone with an AudioWorklet ([#12338](https://github.com/QwenLM/qwen-code/pull/12338)) by @qqqys
+- core: Route runtime tools through bwrap ([#12269](https://github.com/QwenLM/qwen-code/pull/12269)) by @doudouOUC
+- review: swap re-review rounds to a fix-audit shape under the critical posture ([#10136](https://github.com/QwenLM/qwen-code/pull/10136)) by @wenshao
+- chrome-extension: publish the extension to the Chrome Web Store ([#12329](https://github.com/QwenLM/qwen-code/pull/12329)) by @tanzhenxin
+- web-shell: support host settings item allowlists ([#12328](https://github.com/QwenLM/qwen-code/pull/12328)) by @Lilian0122
+- java: Add managed runtime state foundation ([#12301](https://github.com/QwenLM/qwen-code/pull/12301)) by @doudouOUC
+- core: Add managed session record foundation ([#12302](https://github.com/QwenLM/qwen-code/pull/12302)) by @doudouOUC
+- live: let a browser Host answer a screen request from a shared screen ([#12378](https://github.com/QwenLM/qwen-code/pull/12378)) by @qqqys
+- serve: let channel grouping take an ownership hint and skip tolerated names ([#12383](https://github.com/QwenLM/qwen-code/pull/12383)) by @qqqys
+- serve: restore every trusted workspace's own serve.channels at boot ([#12385](https://github.com/QwenLM/qwen-code/pull/12385)) by @qqqys
+- java: Add JDBC binding and session persistence ([#12390](https://github.com/QwenLM/qwen-code/pull/12390)) by @doudouOUC
+- web-shell: present structured shell execution results ([#12311](https://github.com/QwenLM/qwen-code/pull/12311)) by @ytahdn
+- web-shell: trajectory table showing where a run spent its time ([#12388](https://github.com/QwenLM/qwen-code/pull/12388)) by @qqqys
+- desktop: integrate the macOS title bar ([#12393](https://github.com/QwenLM/qwen-code/pull/12393)) by @yiliang114
+- serve: Define Hosted Harness private protocol ([#12409](https://github.com/QwenLM/qwen-code/pull/12409)) by @doudouOUC
+
+#### Bug Fixes
+
+- review: fence base-tree reuse on state kept outside the mount ([#11540](https://github.com/QwenLM/qwen-code/pull/11540)) by @wenshao
+- web-shell: restore mobile history navigation ([#12362](https://github.com/QwenLM/qwen-code/pull/12362)) by @wenshao
+- workflows: write a resumed run's checkpoint before it registers ([#12347](https://github.com/QwenLM/qwen-code/pull/12347)) by @qqqys
+- live: report the cause when Live Voice fails to start with a non-Error ([#12377](https://github.com/QwenLM/qwen-code/pull/12377)) by @qqqys
+- core: reject broadcast-capable hook PIDs ([#12344](https://github.com/QwenLM/qwen-code/pull/12344)) by @yiliang114
+- web-shell: stop the header title from showing the new-session placeholder ([#12379](https://github.com/QwenLM/qwen-code/pull/12379)) by @ytahdn
+- ci: retry transient npm ci failures in e2e.yml install steps (#11726) ([#11731](https://github.com/QwenLM/qwen-code/pull/11731)) by @qwen-code-dev-bot
+- release: retry transient standalone runtime downloads (#11870) ([#11879](https://github.com/QwenLM/qwen-code/pull/11879)) by @qwen-code-dev-bot
+- cli: don't crash startup when the output-language file is unwritable (#10453) ([#10455](https://github.com/QwenLM/qwen-code/pull/10455)) by @qwen-code-dev-bot
+- serve: tell clients which history entries cannot be retried ([#12349](https://github.com/QwenLM/qwen-code/pull/12349)) by @qqqys
+- release: resume automated web-shell publishing ([#12387](https://github.com/QwenLM/qwen-code/pull/12387)) by @yiliang114
+
+#### Performance
+
+- sdk: dedupe in-flight workspace-providers requests per resolved URL ([#12327](https://github.com/QwenLM/qwen-code/pull/12327)) by @Willam2004
+- cli: optimize one-shot headless execution ([#12340](https://github.com/QwenLM/qwen-code/pull/12340)) by @yiliang114
+
+#### Documentation
+
+- chrome: disclose browser data handling and limited use ([#12330](https://github.com/QwenLM/qwen-code/pull/12330)) by @tanzhenxin
+
+#### Internal Changes
+
+- test(integration): support deferred MCP tool calls in SDK E2E ([#12365](https://github.com/QwenLM/qwen-code/pull/12365)) by @dvd233
+- test(cli): keep an ambient GIT_CONFIG_GLOBAL from hijacking withHome ([#12407](https://github.com/QwenLM/qwen-code/pull/12407)) by @yiliang114
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.24.2...v0.24.3
+
 ## [0.24.2](https://github.com/QwenLM/qwen-code/releases/tag/v0.24.2) - 2026-09-20
 
 ### Highlights

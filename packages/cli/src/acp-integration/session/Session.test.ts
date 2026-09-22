@@ -16755,6 +16755,43 @@ describe('Session', () => {
       },
     );
 
+    it('keeps SSH workspace file references for remote tools without reading local files', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ssh-ref-')),
+      );
+      const localImage = path.join(tempDir, 'image.png');
+      await fs.writeFile(localImage, 'must not read locally');
+      mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi
+        .fn()
+        .mockReturnValue({ isPathWithinWorkspace: () => true });
+      const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: `Inspect @${localImage}` },
+            {
+              type: 'resource_link',
+              uri: `file://${localImage}`,
+              name: 'image.png',
+              mimeType: 'image/png',
+            },
+          ],
+        });
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+        expect(textParts(firstSentMessage())).toContain(`@${localImage}`);
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('preserves unsupported image @ files for the vision bridge', async () => {
       const tempDir = await fs.realpath(
         await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-resource-')),

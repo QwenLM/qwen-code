@@ -418,6 +418,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isWorkflowRunId: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isWorkflowRunId,
+  snapshotArgsUnavailable: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).snapshotArgsUnavailable,
   WorkflowJournalUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).WorkflowJournalUnavailableError,
@@ -1206,6 +1209,7 @@ import {
   WorkflowJournalUnavailableError,
   type Config,
   type GoalSnapshotV2,
+  type WorkflowSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
@@ -7193,6 +7197,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('rejects SSH workspace relocation and local runtime mutations before dispatch', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const relocateWorkingDirectory = vi.fn();
+    Object.assign(innerConfig, {
+      getExecutionEnvironment: vi.fn().mockReturnValue({}),
+      relocateWorkingDirectory,
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: '/nonexistent-ssh-local-target',
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd, {
+          sessionId,
+          name: 'unsafe',
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      Object.assign(mockConfig, {
+        getExecutionEnvironment: vi.fn().mockReturnValue({}),
+      });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize, {}),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+      await expect(
+        agent.extMethod('qwen/settings/setCoreValue', {
+          path: 'hooks',
+          value: {},
+        }),
+      ).rejects.toThrow('unavailable for SSH workspaces');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('serializes a working-directory change and hard-suspends Todo Stop Guard', async () => {
@@ -16960,6 +17006,65 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
       await daemon.stop();
     });
+
+    // This end of the contract: the refusal is `snapshotArgsUnavailable` and
+    // nothing else. The other end -- that the projection puts the same
+    // predicate on the wire as `argsUnavailable` -- is pinned in
+    // `tasksSnapshot.test.ts` against the same exported function, because
+    // this file's core mock lists its exports one by one and cannot import
+    // the projection. Either end drifting fails its own suite.
+    it.each([
+      ['kept its args', {}, false],
+      ['recorded that it had none', { args: undefined }, false],
+      ['could not keep its args', { argsOmitted: true, args: undefined }, true],
+      [
+        'predates kept args',
+        { argsRecorded: undefined, args: undefined },
+        true,
+      ],
+    ])(
+      'refuses a retry of a run that %s exactly when the predicate says its args are gone',
+      async (_case, fields, refused) => {
+        const sdk = await actualSdk();
+        const daemon = await startDaemon();
+        const snapshot = historical(fields);
+        for (const [key, value] of Object.entries(fields)) {
+          if (value === undefined) {
+            delete (snapshot as Record<string, unknown>)[key];
+          }
+        }
+        mockReadWorkflowSnapshot.mockResolvedValue(snapshot);
+
+        const { snapshotArgsUnavailable } = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core')
+        >('@qwen-code/qwen-code-core');
+        expect(
+          snapshotArgsUnavailable(
+            snapshot as Pick<
+              WorkflowSnapshot,
+              'args' | 'argsOmitted' | 'argsRecorded'
+            >,
+          ) !== undefined,
+        ).toBe(refused);
+
+        if (refused) {
+          // Only the refusing rows build a RequestError; installed for the
+          // others it would survive into whatever runs next.
+          vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+            sdk.RequestError.invalidParams,
+          );
+          await expect(daemon.act('retry')).rejects.toMatchObject({
+            data: { errorKind: 'workflow_args_unavailable' },
+          });
+          expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+        } else {
+          await expect(daemon.act('retry')).resolves.toMatchObject({
+            changed: true,
+          });
+        }
+        await daemon.stop();
+      },
+    );
 
     it('retries only a failed run, and reruns any finished one', async () => {
       const daemon = await startDaemon();

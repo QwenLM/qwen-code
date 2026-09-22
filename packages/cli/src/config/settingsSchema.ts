@@ -87,6 +87,10 @@ export interface SettingDefinition {
   label: string;
   category: string;
   requiresRestart: boolean;
+  // Required even when there is no fixed default (use
+  // `default: undefined as <type> | undefined`): it is load-bearing for the
+  // `satisfies SettingsSchema` constraint and `InferSettings` below, and at
+  // runtime it feeds only display and reset paths, never the load path.
   default: SettingsValue;
   description?: string;
   parentKey?: string;
@@ -585,7 +589,7 @@ const SETTINGS_SCHEMA = {
         default: 30,
         minimum: 0,
         description:
-          'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.',
+          'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind, background subagent transcripts under <projectDir>/subagents/, and session debug logs under the runtime debug/ directory. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.',
         showInDialog: true,
       },
       gitCoAuthor: {
@@ -2920,9 +2924,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: true,
+            default: undefined as boolean | undefined,
             description:
-              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
+              'Use node-pty for an interactive shell experience. Explicit one-shot prompts default to child_process when this setting is unset; interactive and input-driven modes default to PTY.',
             showInDialog: true,
           },
           pager: {

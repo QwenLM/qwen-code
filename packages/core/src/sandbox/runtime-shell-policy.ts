@@ -65,6 +65,7 @@ export function admitShellSandbox(
     params.lsp?.enabled ||
     params.lspClient ||
     params.agentExecutionBackend !== undefined ||
+    params.executionEnvironment !== undefined ||
     params.executionEnvironmentFactory !== undefined
   ) {
     throw new Error(

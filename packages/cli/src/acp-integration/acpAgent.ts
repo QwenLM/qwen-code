@@ -161,6 +161,7 @@ import {
   isWorkflowRunId,
   readWorkflowCheckpoint,
   readWorkflowSnapshot,
+  snapshotArgsUnavailable,
   WorkflowCheckpointUnwritableError,
   WorkflowJournalUnavailableError,
   type WorkflowStatus,
@@ -352,6 +353,7 @@ import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
+import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
 import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
@@ -9340,6 +9342,21 @@ class QwenAgent implements Agent {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    const sessionId = params['sessionId'];
+    const sessionConfig =
+      typeof sessionId === 'string'
+        ? this.sessions.get(sessionId)?.getConfig()
+        : undefined;
+    if (
+      (this.config.getExecutionEnvironment?.() ||
+        sessionConfig?.getExecutionEnvironment?.()) &&
+      !isSshWorkspaceExtMethodAllowed(method)
+    ) {
+      throw RequestError.invalidParams(
+        { errorKind: 'unsupported_operation' },
+        'This operation is unavailable for SSH workspaces.',
+      );
+    }
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
@@ -15351,11 +15368,15 @@ class QwenAgent implements Agent {
         // kept cannot say whether the run had any, so it is refused for the
         // same reason as one whose args were too large — the cost is a
         // legacy run that truly had none, which a relaunch covers.
-        const startedWith = snapshot.argsOmitted
-          ? 'args too large to keep in its history'
-          : snapshot.argsRecorded !== true && snapshot.args === undefined
-            ? 'args this daemon recorded before it kept them, so its history cannot say what they were'
-            : undefined;
+        // The same answer the task projection reports as `argsUnavailable`,
+        // so a client is never offered an action this refuses.
+        const unavailable = snapshotArgsUnavailable(snapshot);
+        const startedWith =
+          unavailable === 'omitted'
+            ? 'args too large to keep in its history'
+            : unavailable === 'unrecorded'
+              ? 'args this daemon recorded before it kept them, so its history cannot say what they were'
+              : undefined;
         if (startedWith) {
           throw RequestError.invalidParams(
             { errorKind: 'workflow_args_unavailable' },
