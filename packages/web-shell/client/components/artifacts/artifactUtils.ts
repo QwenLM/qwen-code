@@ -1,4 +1,4 @@
-import { saveBlob } from '../../utils/saveBlob';
+import { saveBlob } from '../../utils/saveBlob.js';
 import type {
   DaemonSessionArtifact,
   DaemonWorkspaceFileBytes,
