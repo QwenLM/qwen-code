@@ -4197,18 +4197,40 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * this session" and exempted from the Auto-mode destructive-command
    * block.
    *
-   * Same success criterion as {@link attachCommitAttribution}: HEAD
-   * movement, not the shell exit code. A compound
-   * `git commit -m "x" && npm test` can land the commit and then fail,
-   * and gating on `exitCode !== 0` would leave a real agent commit
-   * unregistered — its amend would then be blocked. Conversely, a failed
-   * commit (`git commit` with nothing staged) leaves HEAD alone, so the
-   * pre-existing HEAD is never registered and amending somebody else's
-   * commit stays blocked.
+   * The criterion is "a `git commit` put HEAD there", read from the HEAD
+   * reflog — not "HEAD moved", and not the shell exit code. Both of those
+   * proxies are wrong in opposite directions:
    *
-   * An amend also moves HEAD (it rewrites the commit), so the rewritten
-   * SHA is registered here too and a second consecutive amend keeps
-   * working.
+   * - Exit code is too strict. A compound `git commit -m "x" && npm test`
+   *   can land the commit and then fail; gating on `exitCode !== 0` would
+   *   leave a real agent commit unregistered, so its amend would be
+   *   blocked.
+   * - HEAD movement is too loose, and *fail-open*. In
+   *   `git pull && git commit -m "x"` where nothing is staged, the pull
+   *   fast-forwards HEAD onto somebody else's commit and the commit
+   *   segment then exits non-zero. HEAD moved, so a movement-only test
+   *   registers a SHA the agent never authored — and because
+   *   `gitCommitContext` does not treat `pull`/`checkout`/`merge` as
+   *   cwd-shifting, and the call site has no exit-code gate, that chain
+   *   really does reach here. `isAmendOfSessionCommit` would then exempt an
+   *   amend of a human's commit, dropping the deterministic Layer-0 block
+   *   and handing a history rewrite to the non-deterministic classifier.
+   *
+   * The reflog answers the question directly: its newest HEAD entry records
+   * the action that moved HEAD, so `commit`, `commit (initial)` and
+   * `commit (amend)` mean a commit created it, while `pull: Fast-forward`,
+   * `checkout: moving from …`, `reset: moving to …` and `rebase …` do not.
+   * This keeps both cases above correct — the `&& npm test` chain still
+   * registers (its newest entry is the commit), and the failed-commit-after
+   * -pull chain does not (its newest entry is the pull). An amend rewrites
+   * HEAD and leaves a `commit (amend)` entry, so the rewritten SHA is
+   * registered too and a second consecutive amend keeps working.
+   *
+   * Fail-closed when the reflog cannot answer: a repo with
+   * `core.logAllRefUpdates` off, or one whose reflog has been expired, makes
+   * `git log -g` fail, which resolves to `null` and registers nothing. The
+   * cost is a blocked amend that falls back to manual approval, never a
+   * lifted block.
    *
    * Deliberately independent of the `gitCoAuthor.commit` attribution
    * toggle: that setting governs whether AI credit is written into the
@@ -4229,10 +4251,57 @@ export class ShellToolInvocation extends BaseToolInvocation<
     cwd: string,
     preHead: string | null,
   ): Promise<void> {
-    const postHead = await this.getGitHead(cwd);
-    if (postHead !== null && postHead !== preHead) {
-      registerSessionCommit(postHead);
+    const head = await this.getGitHeadOrigin(cwd);
+    // Both conditions are load-bearing and neither subsumes the other:
+    // `createdByCommit` rejects a HEAD that something other than a commit
+    // relocated, and the `preHead` comparison rejects a command that never
+    // moved HEAD at all (a `git commit` with nothing staged), which would
+    // otherwise re-register the pre-existing HEAD and exempt an amend of
+    // somebody else's commit.
+    if (head !== null && head.createdByCommit && head.sha !== preHead) {
+      registerSessionCommit(head.sha);
     }
+  }
+
+  /**
+   * Read HEAD together with the reflog action that last moved it, in a
+   * single subprocess (`%H` and the reflog subject `%gs` on two lines).
+   *
+   * Returns `null` when git cannot answer — not a repository, no HEAD yet,
+   * reflog disabled or expired, git missing — so every caller fails closed.
+   */
+  private async getGitHeadOrigin(
+    cwd: string,
+  ): Promise<{ sha: string; createdByCommit: boolean } | null> {
+    return new Promise((resolve) => {
+      const child = childProcess.execFile(
+        'git',
+        ['log', '-g', '-1', '--format=%H%n%gs', 'HEAD'],
+        { cwd, timeout: 2000, windowsHide: true },
+        (error, stdout) => {
+          if (error) {
+            resolve(null);
+            return;
+          }
+          const [sha, subject] = String(stdout).split('\n');
+          if (!sha || !subject) {
+            resolve(null);
+            return;
+          }
+          // Reflog action verbs are not localised by git. `\b` admits
+          // `commit:`, `commit (initial):`, `commit (amend):` and
+          // `commit (merge):`, and excludes every other verb — `pull`,
+          // `checkout`, `reset`, `rebase`, `merge`, `cherry-pick`.
+          resolve({
+            sha: sha.trim(),
+            createdByCommit: /^commit\b/.test(subject),
+          });
+        },
+      );
+      // Suppress unhandled-error events from the child stream (e.g. ENOENT
+      // when git is missing); the callback still receives the error.
+      child.on('error', () => {});
+    });
   }
 
   /**

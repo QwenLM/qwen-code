@@ -256,6 +256,93 @@ describe.skipIf(process.platform === 'win32')(
       expect(amendVerdict()?.blocked).toBe(true);
     });
 
+    it('does not register a HEAD that a pull moved when the commit never landed', async () => {
+      // Regression ⑤ — the fail-open half of ②. HEAD *did* move, but not
+      // because of the agent's `git commit`: `git pull` fast-forwards onto
+      // somebody else's commit and the `git commit` segment then exits
+      // non-zero with nothing staged. Registering that HEAD would exempt an
+      // amend of a commit the agent never authored, which lifts the
+      // deterministic Auto-mode block and leaves a history rewrite to the
+      // non-deterministic classifier.
+      //
+      // The chain really does reach the registration call site:
+      // `gitCommitContext` only latches `cwdShifted` on cd/pushd/popd or a
+      // cwd-shifting git flag, and `git pull` is neither, so
+      // `attributableInCwd` stays true; and the call site is gated on
+      // sandbox/attributability only, with no exit-code condition.
+      const upstreamDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-12460-upstream-'),
+      );
+      try {
+        execSync('git init -q --initial-branch=main', { cwd: upstreamDir });
+        execSync('git config user.email upstream@example.com', {
+          cwd: upstreamDir,
+        });
+        execSync('git config user.name "Upstream Author"', {
+          cwd: upstreamDir,
+        });
+        execSync('git config commit.gpgsign false', { cwd: upstreamDir });
+        fs.writeFileSync(path.join(upstreamDir, 'seed.txt'), 'seed\n');
+        execSync('git add seed.txt && git commit -q -m "initial commit"', {
+          cwd: upstreamDir,
+        });
+        fs.writeFileSync(
+          path.join(upstreamDir, 'upstream.txt'),
+          'upstream work\n',
+        );
+        execSync('git add upstream.txt && git commit -q -m "upstream work"', {
+          cwd: upstreamDir,
+        });
+        const upstreamHead = execSync('git rev-parse HEAD', {
+          cwd: upstreamDir,
+          encoding: 'utf-8',
+        }).trim();
+
+        // Put the working repo on upstream's history one commit behind, so
+        // the pull is a genuine fast-forward rather than an unrelated-history
+        // merge.
+        execSync(`git fetch -q ${upstreamDir} main`, { cwd: repoDir });
+        execSync('git reset -q --hard FETCH_HEAD', { cwd: repoDir });
+        execSync('git reset -q --hard HEAD~1', { cwd: repoDir });
+        execSync(`git remote add upstream ${upstreamDir}`, { cwd: repoDir });
+
+        const preHead = headSha();
+        // The pull succeeds and moves HEAD; the commit then exits non-zero
+        // because nothing is staged, so the whole chain's exit code is 1.
+        await runShellCommand(
+          'git pull -q upstream main && git commit -m "agent work"',
+        );
+
+        const postHead = headSha();
+        // HEAD really moved, and onto the upstream author's commit — so a
+        // criterion based on HEAD movement alone cannot tell this apart from
+        // a commit the agent landed itself.
+        expect(postHead).not.toBe(preHead);
+        expect(postHead).toBe(upstreamHead);
+        expect(
+          execSync('git log -1 --pretty=%ae', {
+            cwd: repoDir,
+            encoding: 'utf-8',
+          }).trim(),
+        ).toBe('upstream@example.com');
+        expect(
+          execSync('git log -1 --pretty=%s', {
+            cwd: repoDir,
+            encoding: 'utf-8',
+          }).trim(),
+        ).toBe('upstream work');
+
+        // Witness assertion: the agent did not produce this HEAD, so the
+        // amend must stay blocked.
+        expect(amendVerdict()?.blocked).toBe(true);
+        expect(amendVerdict()?.reason).toContain(
+          'not made by the agent in this session',
+        );
+      } finally {
+        fs.rmSync(upstreamDir, { recursive: true, force: true });
+      }
+    });
+
     it('registers the rewritten HEAD after an amend so amend-of-amend is exempt', async () => {
       // Regression ③: an amend replaces HEAD, so the new SHA has to be
       // registered too — otherwise the second amend in a row is blocked.
