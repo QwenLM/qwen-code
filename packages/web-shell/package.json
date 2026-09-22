@@ -22,6 +22,10 @@
     "./transcript": {
       "types": "./dist/types/transcript.d.ts",
       "import": "./dist/transcript.js"
+    },
+    "./code-highlighter": {
+      "types": "./dist/types/code-highlighter.d.ts",
+      "import": "./dist/code-highlighter.js"
     }
   },
   "files": [

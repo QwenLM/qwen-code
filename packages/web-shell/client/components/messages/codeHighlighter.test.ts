@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   __resetForTesting,
   getCachedHtml,
+  highlightCode,
   getCodeHighlighter,
   highlightToHtmlSync,
   isTooLargeToHighlight,
@@ -72,5 +73,46 @@ describe('codeHighlighter', () => {
     ]);
     expect(results).toHaveLength(3);
     expect(highlightToHtmlSync('x = 1', 'python', THEME)).toContain('shiki');
+  });
+});
+
+describe('public highlightCode', () => {
+  it.each([
+    ['sql', 'SELECT id FROM orders WHERE id = 1'],
+    ['json', '{"count": 1}'],
+    ['yaml', 'count: 1'],
+    ['html', '<h1>Hello</h1>'],
+    ['python', 'print(42)'],
+    ['markdown', '# Hello'],
+  ])(
+    'highlights %s with the shared engine in both themes',
+    async (language, code) => {
+      const light = await highlightCode({ code, language, theme: 'light' });
+      const dark = await highlightCode({ code, language, theme: 'dark' });
+      expect(light).toContain('<span style="color:');
+      expect(dark).toContain('<span style="color:');
+      expect(light).not.toBe(dark);
+      expect(dark).toBe(getCachedHtml(code, language, THEME));
+    },
+  );
+
+  it('returns plain-text fallback for unknown languages and oversized code', async () => {
+    expect(
+      await highlightCode({
+        code: 'hello',
+        language: 'not-a-language',
+        theme: 'dark',
+      }),
+    ).toBeNull();
+    expect(
+      await highlightCode({
+        code: 'x'.repeat(MAX_HIGHLIGHT_LINE_CHARS + 1),
+        language: 'sql',
+        theme: 'dark',
+      }),
+    ).toBeNull();
+    expect(
+      getCachedHtml('x'.repeat(MAX_HIGHLIGHT_LINE_CHARS + 1), 'sql', THEME),
+    ).toBeNull();
   });
 });
