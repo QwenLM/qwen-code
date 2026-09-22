@@ -185,6 +185,7 @@ export interface MessageListProps {
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
   sourceEntries?: readonly WebShellSource[];
   sourceSessionId?: string;
+  mcpAppSessionId?: string;
   onSourceOpen?: (source: WebShellSource) => void;
   turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
   onReviewChanges?: (
@@ -2982,6 +2983,7 @@ export const MessageList = memo(
       turnArtifacts,
       sourceEntries,
       sourceSessionId,
+      mcpAppSessionId = sourceSessionId,
       onSourceOpen,
       turnScheduledTasks,
       onReviewChanges,
@@ -5901,7 +5903,7 @@ export const MessageList = memo(
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
     return (
-      <McpAppSessionContext.Provider value={sourceSessionId}>
+      <McpAppSessionContext.Provider value={mcpAppSessionId}>
         <div
           ref={containerRef}
           className={joinClassNames(

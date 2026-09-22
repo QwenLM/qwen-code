@@ -12,7 +12,7 @@ Tableau MCP App 4.8.1 的 335,305 字节 HTML 可以载入 Qwen WebShell，但�
 
 在发现和现有连接池中保留服务端声明的 App 可见性。ToolRegistry 维护独立 App 工具查找，App-only 工具不会进入模型声明、搜索或延迟调用。两个目录均遵守现有会话服务端过滤、禁用工具和注册表生命周期。
 
-WebShell 提供绑定到所显示会话的执行回调。AppBridge 仅在具有该回调时声明 `serverTools`。宿主从已渲染 App 固定服务端和资源 URI，只接受 iframe 提交的精确原始工具名与参数。未绑定会话的独立 transcript 仅展示内容。
+WebShell 提供绑定到所显示会话的执行回调。AppBridge 仅在具有该回调时声明 `serverTools`。宿主从已渲染 App 固定服务端和资源 URI，只接受 iframe 提交的精确原始工具名与参数。历史分页在停用来源和反馈控件时，仍保留 transcript 的 App 会话绑定。未绑定会话的独立 transcript 仅展示内容。
 
 受 mutation 保护的 REST 端点解析实时会话所属运行时，并验证已注册客户端，不回退到其他运行时。bridge 分别记录 App 调用及其发起客户端，将请求交给对应会话的 ACP 子进程，并在断开时取消。子进程要求同一服务端已声明对应 App 资源，且目标工具允许 App 访问。可撤销的关闭闸门拒绝新调用，但不终止已有调用。实时恢复与迁移按现有时限等待工作结束；超时后释放闸门并保留 App 调用。强制关闭、managed shutdown 与销毁会显式中止 App 调用。App 调用可以与模型 prompt 共存；现有权限队列串行显示审批，审批发起者不继承当前模型 prompt。
 
