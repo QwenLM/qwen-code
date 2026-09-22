@@ -162,12 +162,8 @@ export class LiveUnavailableError extends Error {
 export class LiveBrowserHostUnsupportedError extends Error {
   readonly code = 'live_browser_host_unsupported' as const;
 
-  constructor(readonly feature: 'screen' | 'camera') {
-    super(
-      feature === 'camera'
-        ? 'Camera capture is unavailable in browser Live sessions.'
-        : 'This browser cannot share a screen with Live Voice.',
-    );
+  constructor(readonly feature: 'screen') {
+    super('This browser cannot share a screen with Live Voice.');
     this.name = 'LiveBrowserHostUnsupportedError';
   }
 }

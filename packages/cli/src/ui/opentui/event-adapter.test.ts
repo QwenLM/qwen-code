@@ -707,14 +707,24 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ).toBe('S\nN');
     });
 
-    it('renders task_execution without dumping toolCalls payloads (R1-68)', () => {
+    it('renders task_execution as ink one-line summary (R1-68)', () => {
       expect(
         renderResultDisplay({
           type: 'task_execution',
           subagentName: 'reviewer',
+          taskDescription: 'check imports',
           status: 'completed',
           terminateReason: 'done',
           result: 'all good',
+          executionSummary: {
+            totalToolCalls: 5,
+            totalDurationMs: 12_000,
+            outputTokens: 2400,
+            toolUsage: [
+              { name: 'read-file', success: 5, failure: 0 },
+              { name: 'task', success: 2, failure: 1 },
+            ],
+          },
           toolCalls: [
             {
               callId: 'c1',
@@ -724,7 +734,34 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
             },
           ],
         }),
-      ).toBe('reviewer: completed\ndone\nall good');
+      ).toBe(
+        ' ✔ reviewer: check imports · 5 tools · 2 sub-agents · 12s · 2.4k tokens',
+      );
+    });
+
+    it('renders nothing for a task_execution that is still running', () => {
+      expect(
+        renderResultDisplay({
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          taskDescription: 'check imports',
+          status: 'running',
+          result: 'partial answer',
+        }),
+      ).toBe('');
+    });
+
+    it('appends the terminate reason only when the subagent did not complete', () => {
+      expect(
+        renderResultDisplay({
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          taskDescription: 'check imports',
+          status: 'failed',
+          terminateReason: 'model error',
+          executionSummary: { totalToolCalls: 1, totalDurationMs: 900 },
+        }),
+      ).toBe(' ✖ reviewer: check imports · 1 tool · 900ms · model error');
     });
 
     it('renders findings_list as a count summary (R1-68)', () => {
@@ -824,6 +861,35 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         display: '',
         todos,
       });
+    });
+
+    it('keeps a terminal subagent summary structured for its coloured runs', () => {
+      expect(
+        toolResultEvent('c1', {
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          taskDescription: 'check imports',
+          status: 'cancelled',
+          terminateReason: 'interrupted',
+          executionSummary: { totalToolCalls: 2 },
+        }),
+      ).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: '',
+        subagentSummary: {
+          glyph: '✖',
+          tone: 'warning',
+          prefix: 'reviewer: ',
+          rest: 'check imports · 2 tools · interrupted',
+        },
+      });
+    });
+
+    it('leaves a running subagent to the roster, structured or not', () => {
+      expect(
+        toolResultEvent('c1', { type: 'task_execution', status: 'running' }),
+      ).toBe(null);
     });
 
     it('falls back to the flattened text, and to no event at all', () => {
