@@ -440,6 +440,10 @@ export interface DaemonWorkspaceActions {
     sessionId: string,
     update: DaemonSessionOrganizationUpdate,
   ): Promise<DaemonSessionOrganizationResult>;
+  updateWorkspacePin(
+    registrationId: string,
+    isPinned: boolean,
+  ): Promise<{ id: string; isPinned: boolean; pinnedAt?: string }>;
   deleteSession(sessionId: string): Promise<boolean>;
   deleteSessions(sessionIds: string[]): Promise<{
     removed: string[];

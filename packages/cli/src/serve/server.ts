@@ -2392,6 +2392,7 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+    workspaceRegistrationStore: deps.workspaceRegistrationStore,
   });
   registerBrandRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,

@@ -1748,10 +1748,19 @@ export function WebShellSidebar({
     () => displayedWorkspaces.filter((entry) => entry.kind === 'live'),
     [displayedWorkspaces],
   );
-  const projectWorkspaces = useMemo(
-    () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
-    [displayedWorkspaces],
-  );
+  const projectWorkspaces = useMemo(() => {
+    const nonLive = displayedWorkspaces.filter(
+      (entry) => entry.kind !== 'live',
+    );
+    const pinned = nonLive.filter((entry) => entry.isPinned);
+    const unpinned = nonLive.filter((entry) => !entry.isPinned);
+    pinned.sort((a, b) => {
+      const aTime = a.pinnedAt ? new Date(a.pinnedAt).getTime() : 0;
+      const bTime = b.pinnedAt ? new Date(b.pinnedAt).getTime() : 0;
+      return bTime - aTime;
+    });
+    return [...pinned, ...unpinned];
+  }, [displayedWorkspaces]);
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
       const explicitCwd = session.workspaceCwd;
@@ -3514,6 +3523,43 @@ export function WebShellSidebar({
       setSessionBusy,
       t,
     ],
+  );
+
+  const handleToggleWorkspacePin = useCallback(
+    (workspace: DaemonWorkspaceCapability) => {
+      const targetPinned = !workspace.isPinned;
+      void (async () => {
+        let registrationId: string;
+        try {
+          const hashBuffer = await crypto.subtle.digest(
+            'SHA-256',
+            new TextEncoder().encode(workspace.cwd),
+          );
+          const hashArray = Array.from(new Uint8Array(hashBuffer));
+          registrationId = hashArray
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join('')
+            .slice(0, 16);
+        } catch {
+          return;
+        }
+        try {
+          await workspaceActions.updateWorkspacePin(
+            registrationId,
+            targetPinned,
+          );
+        } catch (error) {
+          onError(error, t('sidebar.pinWorkspaceFailed'));
+          return;
+        }
+        try {
+          await workspace.refreshCapabilities?.();
+        } catch {
+          // Reconciled by the next capabilities refresh.
+        }
+      })();
+    },
+    [workspaceActions, onError, t],
   );
 
   const handleArchive = useCallback(
@@ -6093,6 +6139,12 @@ export function WebShellSidebar({
                                   ws.trusted &&
                                   Boolean(onOpenWorkspaceManagement);
                                 const menuActions: WorkspaceMenuActions = {
+                                  ...(!ws.primary
+                                    ? {
+                                        togglePin: () =>
+                                          handleToggleWorkspacePin(ws),
+                                      }
+                                    : {}),
                                   ...(canRename
                                     ? {
                                         rename: () =>

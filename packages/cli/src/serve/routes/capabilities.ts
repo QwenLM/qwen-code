@@ -22,6 +22,8 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { WorkspaceRegistrationStore } from '../workspace-registration-store.js';
+import { workspaceRegistrationId } from '../workspace-registration-store.js';
 
 interface RegisterCapabilitiesRoutesDeps {
   qwenCodeVersion?: string;
@@ -38,6 +40,7 @@ interface RegisterCapabilitiesRoutesDeps {
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
 }
 
 function workflowsEnabledForRuntime(
@@ -74,7 +77,7 @@ export function registerCapabilitiesRoutes(
     configuredPollIntervalMs <= 2_147_483_647
       ? configuredPollIntervalMs
       : 5_000;
-  app.get('/capabilities', (_req, res) => {
+  app.get('/capabilities', async (_req, res) => {
     const entries = deps.workspaceRegistry
       .listAllEntries()
       .filter(
@@ -88,6 +91,15 @@ export function registerCapabilitiesRoutes(
     const multipleAdmissionPools = entries.length > 1;
     const features = deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
+    let pinnedAts: Record<string, string> | undefined;
+    if (deps.workspaceRegistrationStore) {
+      try {
+        const snapshot = await deps.workspaceRegistrationStore.read();
+        pinnedAts = snapshot.pinnedAts;
+      } catch {
+        // Pin state is best-effort; do not block capabilities.
+      }
+    }
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       protocolVersions: getServeProtocolVersions(),
@@ -135,27 +147,33 @@ export function registerCapabilitiesRoutes(
             }
           : {}),
       },
-      workspaces: entries.map((entry) => ({
-        id: entry.workspaceId,
-        cwd: entry.workspaceCwd,
-        ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
-          ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
-          : {}),
-        ...(entry.displayName !== undefined
-          ? { displayName: entry.displayName }
-          : {}),
-        primary: entry.primary,
-        trusted:
-          entry.state === 'active' && entry.current?.runtime.trusted === true,
-        workflowsEnabled: workflowsEnabledForRuntime(
-          entry.state === 'active' ? entry.current?.runtime : undefined,
-          deps.daemonEnv,
-        ),
-        ...(runtimeRemoval ? { removable: entry.removable } : {}),
-        ...(entry.current?.runtime.provenance === 'live-conversation'
-          ? { kind: 'live' as const }
-          : {}),
-      })),
+      workspaces: entries.map((entry) => {
+        const pinnedAt =
+          pinnedAts?.[workspaceRegistrationId(entry.workspaceCwd)];
+        return {
+          id: entry.workspaceId,
+          cwd: entry.workspaceCwd,
+          ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
+            ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
+            : {}),
+          ...(entry.displayName !== undefined
+            ? { displayName: entry.displayName }
+            : {}),
+          primary: entry.primary,
+          trusted:
+            entry.state === 'active' && entry.current?.runtime.trusted === true,
+          workflowsEnabled: workflowsEnabledForRuntime(
+            entry.state === 'active' ? entry.current?.runtime : undefined,
+            deps.daemonEnv,
+          ),
+          ...(runtimeRemoval ? { removable: entry.removable } : {}),
+          ...(entry.current?.runtime.provenance === 'live-conversation'
+            ? { kind: 'live' as const }
+            : {}),
+          isPinned: pinnedAt !== undefined,
+          ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+        };
+      }),
       supportedLanguages: deps.languageCodes,
     };
     res.status(200).json(envelope);

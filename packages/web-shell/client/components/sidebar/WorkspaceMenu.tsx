@@ -19,6 +19,8 @@ import {
   FolderOpenIcon,
   GitForkIcon,
   PencilIcon,
+  PinIcon,
+  PinOffIcon,
   PlugIcon,
   RadioTowerIcon,
   RefreshCwIcon,
@@ -59,6 +61,7 @@ export interface WorkspaceMenuActions {
   openManagement?: (target: WorkspaceManagementTarget) => void;
   reload?: () => void;
   remove?: () => void;
+  togglePin?: () => void;
 }
 
 type ContentProps = ComponentProps<typeof DropdownMenuContent>;
@@ -121,6 +124,15 @@ export function WorkspaceMenu({
 
   const sections: ReactNode[][] = [];
   const primary: ReactNode[] = [];
+  if (actions.togglePin) {
+    const isPinned = workspace.isPinned === true;
+    primary.push(
+      <DropdownMenuItem key="toggle-pin" onSelect={actions.togglePin}>
+        {isPinned ? <PinOffIcon /> : <PinIcon />}
+        {isPinned ? t('sidebar.unpinWorkspace') : t('sidebar.pinWorkspace')}
+      </DropdownMenuItem>,
+    );
+  }
   if (actions.rename) {
     primary.push(
       <DropdownMenuItem key="rename" onSelect={actions.rename}>

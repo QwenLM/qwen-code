@@ -185,6 +185,10 @@ export interface DaemonWorkspaceCapability {
   removable?: boolean;
   /** Daemon-owned Live conversation runtime. */
   kind?: 'live';
+  /** Whether this workspace is pinned to the top of the sidebar. */
+  isPinned?: boolean;
+  /** ISO-8601 timestamp of when the workspace was pinned. */
+  pinnedAt?: string;
 }
 
 export interface DaemonWorkspaceUpdate {
