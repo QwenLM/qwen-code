@@ -19,7 +19,7 @@
 
 </div>
 
-![Wherever you build — Qwen Code in the terminal, desktop and web app, chat, and editor, with VS Code, Zed, and JetBrains integrations](https://g.alicdn.com/alishu/cdn-with-onebox/0.1.77/build/qwen-code/AD248E18-DEF9-48C0-B66C-7AD14113B063.png)
+![Qwen Code across interfaces: terminal, desktop, browser, editor, and chat integrations including Telegram, DingTalk, WeChat, and Feishu](https://g.alicdn.com/alishu/cdn-with-onebox/0.1.77/build/qwen-code/AD248E18-DEF9-48C0-B66C-7AD14113B063.png)
 
 ## Why Qwen Code?
 
