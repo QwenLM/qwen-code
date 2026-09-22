@@ -174,9 +174,17 @@ describe('CUA release workflow', () => {
       "throw 'A trusted Windows code-signing certificate is required",
     );
     expect(signingScript).toContain("$signature.Status -ne 'Valid'");
+    // `EnhancedKeyUsageList` holds provider display strings and `Oid` exposes
+    // only FriendlyName/Value, so filtering on `.ObjectId` selects nothing and
+    // fails closed even on a correctly configured PFX. Pin the EKU-extension
+    // route instead of the dead member access.
+    expect(signingScript).not.toContain('EnhancedKeyUsageList.ObjectId');
+    expect(signingScript).toContain("$_.Oid.Value -eq '2.5.29.37'");
     expect(signingScript).toContain(
-      "$_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3'",
+      'X509EnhancedKeyUsageExtension]::new($_, $false).EnhancedKeyUsages',
     );
+    expect(signingScript).toContain("$_.Value -eq '1.3.6.1.5.5.7.3.3'");
+    expect(signingScript).toContain('$_.HasPrivateKey');
     expect(steps[installIndex].run).toContain('npm install');
     expect(steps[installIndex].run).toContain('--ignore-scripts=false');
     expect(steps[installIndex].run).toContain(
@@ -186,7 +194,12 @@ describe('CUA release workflow', () => {
       'Get-AuthenticodeSignature -LiteralPath $worker',
     );
     expect(cuaSdkInstallScript).toContain('await run("powershell", args');
-    expect(cuaSdkInstallScript).toContain('Microsoft.PowerShell.Security');
+    // Retry only on the non-localized 5.1 module-autoload failure. The broader
+    // `Microsoft.PowerShell.Security` substring also appears in ordinary
+    // Get-AuthenticodeSignature errors, where retrying hides the real result
+    // behind a missing pwsh.
+    expect(cuaSdkInstallScript).toContain('CouldNotAutoloadMatchingModule');
+    expect(cuaSdkInstallScript).not.toContain('Microsoft.PowerShell.Security');
     expect(cuaSdkInstallScript).toContain('await run("pwsh", args');
   });
 

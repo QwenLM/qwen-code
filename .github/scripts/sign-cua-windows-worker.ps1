@@ -9,6 +9,9 @@ if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
 }
 $certificate = $null
 if ($env:SIGNING_TEST_ONLY -eq 'true') {
+  # Dry-run only. This plants a self-signed root in LocalMachine and never
+  # removes it, which is safe solely because the workflow runs on ephemeral
+  # GitHub-hosted runners; a self-hosted Windows runner would need cleanup.
   $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Qwen CUA Driver CI Test' -CertStoreLocation Cert:\CurrentUser\My
   $cer = Join-Path $env:RUNNER_TEMP 'qwen-cua-driver-ci-test.cer'
   Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
@@ -29,8 +32,19 @@ if ($env:SIGNING_TEST_ONLY -eq 'true') {
     [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($pfx))
     $password = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
     $imported = @(Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password)
+    # Match the raw EKU extension. The Certificate provider's
+    # `EnhancedKeyUsageList` holds display strings such as
+    # "Code Signing (1.3.6.1.5.5.7.3.3)", and `Oid` exposes only FriendlyName
+    # and Value - neither type has an `ObjectId` member to filter on.
     $certificate = $imported | Where-Object {
-      $_.HasPrivateKey -and $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3'
+      $_.HasPrivateKey -and @(
+        $_.Extensions |
+          Where-Object { $_.Oid.Value -eq '2.5.29.37' } |
+          ForEach-Object {
+            [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($_, $false).EnhancedKeyUsages
+          } |
+          Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' }
+      ).Count -gt 0
     } | Select-Object -First 1
     if (-not $certificate) { throw 'The Windows PFX must contain a code-signing certificate with a private key.' }
   } finally {
