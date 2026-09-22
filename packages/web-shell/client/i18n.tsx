@@ -7718,7 +7718,7 @@ const ZH: Messages = {
 
   'settings.label.ui.disableWorkflowKeywordTrigger': '禁用工作流关键词触发',
   'settings.description.ui.disableWorkflowKeywordTrigger':
-    '启用后，在提示中提及"workflow"一词不再自动引导至工作流工具。',
+    '启用后，在提示中提及"workflow"一词不再自动引导至工作流工具。仅在启用工作流时生效。',
   'settings.label.ui.showStatusInTitle': '在标题栏显示状态',
   'settings.description.ui.showStatusInTitle':
     '在终端窗口标题中显示 Qwen Code 会话名称和状态。',
@@ -7743,7 +7743,7 @@ const ZH: Messages = {
   'settings.description.tools.webSearch.model': '显式搜索路径的模型选择器。',
   'settings.label.tools.webSearch.webExtractor': '打开结果页面',
   'settings.description.tools.webSearch.webExtractor':
-    '允许搜索代理打开并阅读结果页面，以获得更有依据的回答。',
+    '允许搜索代理打开并阅读结果页面，以获得更有依据的回答。由 DashScope 单独计费。',
   'settings.label.tools.webSearch.timeoutMs': '搜索超时（毫秒）',
   'settings.description.tools.webSearch.timeoutMs':
     '单次 web_search 调用的总时间预算（毫秒）。超出范围的值会被忽略并回退到默认值。',
@@ -7761,7 +7761,7 @@ const ZH: Messages = {
     '启用内置的 todo_write 工具及其系统提示词引导。',
   'settings.label.tools.workflowsEnabled': '动态工作流',
   'settings.description.tools.workflowsEnabled':
-    '启用工作流工具，允许模型编写并运行脚本以并行编排子智能体。',
+    '启用工作流工具，允许模型编写并运行脚本以并行编排子智能体。默认关闭；一次运行可调度多个子智能体并消耗相应 token。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.label.tools.workflowSizeGuideline': '动态工作流规模',
   'settings.description.tools.workflowSizeGuideline':
     '模型编写的动态工作流的建议规模指导。',
@@ -7778,7 +7778,7 @@ const ZH: Messages = {
 
   'settings.label.goals.modelProposed': '模型提议目标',
   'settings.description.goals.modelProposed':
-    '控制 propose_goal 工具，允许模型为你提议一个会话目标供审批。',
+    '控制 propose_goal 工具，允许模型为你提议一个会话目标供审批。涉及同意权限，仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
   'settings.option.goals.modelProposed.alwaysAsk': '始终询问',
   'settings.option.goals.modelProposed.disabled': '禁用',
 
@@ -7787,7 +7787,7 @@ const ZH: Messages = {
     '启用会话内 cron/loop 工具，用于创建周期性提示。',
   'settings.label.experimental.sessionWriterLease': '启用 ACP 会话写入锁',
   'settings.description.experimental.sessionWriterLease':
-    '为持久化 ACP 和 daemon 会话启用跨进程写入围栏。生效值在进程启动时冻结；所有并发的 ACP/daemon 写入方都必须启用，围栏才会生效。',
+    '为持久化 ACP 和 daemon 会话启用跨进程写入围栏。生效值在进程启动时冻结；所有并发的 ACP/daemon 写入方都必须启用，围栏才会生效；交互式和 headless 写入方不在该协议范围内。',
   'settings.label.experimental.agentTeam': '启用智能体团队',
   'settings.description.experimental.agentTeam':
     '启用智能体团队协作工具（实验性）。',

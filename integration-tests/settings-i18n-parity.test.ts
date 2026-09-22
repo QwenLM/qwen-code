@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { dirname, join } from 'path';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
 import {
   getDialogSettingKeys,
   getSettingDefinition,
@@ -10,55 +13,56 @@ import {
 } from '../packages/web-shell/client/i18n.js';
 import { WEB_SHELL_THEMES } from '../packages/web-shell/client/themeContext.js';
 
-// NOTE (R2-2): These sets are hand-copied from production because they are not exported.
-// Production sources:
-//   - TUI_ONLY_SETTINGS: packages/cli/src/serve/routes/workspace-settings.ts:36-52
-//   - SECURITY_SENSITIVE_SETTINGS: workspace-settings.ts:108
-//   - WEB_SHELL_SETTINGS: workspace-settings.ts:56-62
-//   - HIDDEN_SETTING_KEYS: packages/web-shell/client/components/messages/SettingsMessage.tsx:123-131
-//   - LIVE_SETTING_KEYS: SettingsMessage.tsx:132-135
-// If a setting is added to any of these sets in production, this test must be updated.
-// The workspace-settings.test.ts "web-shell settings alias drift" test parses some of these
-// from source, but that mechanism is not available for integration tests across packages.
-const TUI_ONLY_SETTINGS = new Set([
-  'general.vimMode',
-  'general.terminalBell',
-  'general.notificationMode',
-  'general.preferredEditor',
-  'general.outputLanguage',
-  'ide.enabled',
-  'ui.showLineNumbers',
-  'ui.showToolCallArgs',
-  'ui.renderMode',
-  'ui.useTerminalBuffer',
-  'ui.mouseTracking',
-  'ui.showScrollbar',
-  'ui.hideBanner',
-  'ui.accessibility.enableLoadingPhrases',
-  'ui.enableWelcomeBack',
-]);
+// Derive filter sets from production source instead of hard-copying them.
+// This follows the pattern established in workspace-settings.test.ts:1027
+// ("web-shell settings alias drift"). If a key is added to or removed from
+// any of these sets in production, this test automatically picks up the
+// change — no manual synchronization needed.
+const thisDir = dirname(fileURLToPath(import.meta.url));
+const workspaceSettingsSource = readFileSync(
+  join(thisDir, '../packages/cli/src/serve/routes/workspace-settings.ts'),
+  'utf8',
+);
+const settingsMessageSource = readFileSync(
+  join(
+    thisDir,
+    '../packages/web-shell/client/components/messages/SettingsMessage.tsx',
+  ),
+  'utf8',
+);
 
-const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
+function parseKeySet(source: string, name: string): Set<string> {
+  const match = source.match(
+    new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\)`),
+  );
+  if (!match) throw new Error(`${name} not found in source`);
+  return new Set(
+    [...match[1].replace(/\/\/[^\n]*/g, '').matchAll(/'([^']+)'/g)].map(
+      (m) => m[1]!,
+    ),
+  );
+}
 
-const WEB_SHELL_SETTINGS = new Set([
-  'ui.compactMode',
-  'voiceModel',
-  'imageModel',
-  'mcpServers',
-]);
-
-const HIDDEN_SETTING_KEYS = new Set([
-  'ui.hideTips',
-  'ui.enableUserFeedback',
-  'ui.compactMode',
-  'mcpServers',
-  'model.reasoningEffort',
-]);
-
-const LIVE_SETTING_KEYS = new Set([
-  'experimental.liveVoice.enabled',
-  'experimental.liveVoice.shortcut',
-]);
+const TUI_ONLY_SETTINGS = parseKeySet(
+  workspaceSettingsSource,
+  'TUI_ONLY_SETTINGS',
+);
+const SECURITY_SENSITIVE_SETTINGS = parseKeySet(
+  workspaceSettingsSource,
+  'SECURITY_SENSITIVE_SETTINGS',
+);
+const WEB_SHELL_SETTINGS = parseKeySet(
+  workspaceSettingsSource,
+  'WEB_SHELL_SETTINGS',
+);
+const HIDDEN_SETTING_KEYS = parseKeySet(
+  settingsMessageSource,
+  'HIDDEN_SETTING_KEYS',
+);
+const LIVE_SETTING_KEYS = parseKeySet(
+  settingsMessageSource,
+  'LIVE_SETTING_KEYS',
+);
 
 /**
  * Get all setting keys visible in the Web Shell settings panel.
@@ -85,35 +89,40 @@ function getPanelVisibleSettingKeys(): string[] {
 }
 
 /**
- * Get all categories that formatSettingCategory can actually produce.
- * This includes both descriptor categories from visible settings and
- * hardcoded literals from SettingsMessage.tsx.
+ * Parse formatSettingCategory literals from SettingsMessage.tsx source.
+ * These are the hardcoded category names that the panel can produce
+ * even if no descriptor carries that category value.
  */
-function getReachableCategories(visibleKeys: string[]): Set<string> {
-  const reachable = new Set<string>();
-
-  // From descriptor categories
-  for (const key of visibleKeys) {
-    const def = getSettingDefinition(key);
-    if (def?.category) {
-      reachable.add(def.category);
-    }
+function parseFormatSettingCategoryLiterals(source: string): Set<string> {
+  const literals = new Set<string>();
+  const regex = /formatSettingCategory\(\s*'([^']+)'/g;
+  let match;
+  while ((match = regex.exec(source)) !== null) {
+    literals.add(match[1]!);
   }
-
-  // Hardcoded literals from formatSettingCategory (SettingsMessage.tsx:496/511/522/532/539)
-  // These must be added unconditionally (R2-4)
-  for (const lit of ['UI', 'Experimental', 'Daemon', 'Model', 'Connections']) {
-    reachable.add(lit);
-  }
-
-  return reachable;
+  return literals;
 }
 
 const zh = getTranslator('zh-CN');
 
 describe('settings i18n parity', () => {
   const visibleKeys = getPanelVisibleSettingKeys();
-  const reachableCategories = getReachableCategories(visibleKeys);
+
+  // Forward direction: categories from descriptors + all formatSettingCategory literals
+  const descriptorCategories = new Set<string>();
+  for (const key of visibleKeys) {
+    const def = getSettingDefinition(key);
+    if (def?.category) {
+      descriptorCategories.add(def.category);
+    }
+  }
+  const formatLiterals = parseFormatSettingCategoryLiterals(
+    settingsMessageSource,
+  );
+  const forwardCategories = new Set([
+    ...descriptorCategories,
+    ...formatLiterals,
+  ]);
 
   // Label translation tests with direct ZH catalog assertion (R1-4 fix-induced)
   it.each(visibleKeys)('translates settings.label.%s', (key) => {
@@ -169,8 +178,9 @@ describe('settings i18n parity', () => {
   });
 
   // Forward direction: all reachable categories have translations
+  // Uses descriptor categories + parsed formatSettingCategory literals
   it('translates every reachable settings category', () => {
-    for (const cat of reachableCategories) {
+    for (const cat of forwardCategories) {
       const catKey = `settings.category.${cat}`;
       expect(hasMessage('zh-CN', catKey)).toBe(true);
       const translated = zh(catKey);
@@ -179,13 +189,14 @@ describe('settings i18n parity', () => {
   });
 
   // Reverse direction: all category keys in ZH catalog are reachable (R1-2 still stands)
-  // This catches dead category keys that no code path reads
+  // The expected set is derived from descriptor categories + parsed formatSettingCategory
+  // literals, so a literal removed from production code becomes unreachable here.
   it('has no dead category keys in ZH catalog', () => {
     const zhKeys = messageKeys('zh-CN');
     for (const key of zhKeys) {
       if (!key.startsWith('settings.category.')) continue;
       const cat = key.slice('settings.category.'.length);
-      expect(reachableCategories.has(cat)).toBe(true);
+      expect(forwardCategories.has(cat)).toBe(true);
     }
   });
 });
