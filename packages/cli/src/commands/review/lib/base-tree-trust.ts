@@ -155,15 +155,6 @@ function sameIdentity(a: number, b: number): boolean {
 }
 
 /**
- * The host-side directory the trust file keys under, derived LEXICALLY from
- * the worktree — never through git, because the worktree's own pointer lives
- * inside the mount and asking git for the root would let a planted pointer
- * choose where the run's state is written. Validated, not just derived: the
- * walk assumes the pipeline's `<root>/.qwen/tmp/<name>` geometry, and a
- * worktree outside that shape (a hand-passed `--worktree /tmp/wt`) must be
- * refused here, before anything creates directories two levels up from it.
- */
-/**
  * The one file holding a run's base-tree trust state, named by a digest of
  * the plan's path alone — the run identity is INSIDE the file (see the
  * module doc), so a re-captured plan rotates the content, not the name, and

@@ -19,6 +19,7 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sanitizeFilenameComponent, Storage } from '@qwen-code/qwen-code-core';
+import { getProjectHash } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { safeTarget } from '../../../utils/paths.js';
 
 /**
@@ -76,7 +77,7 @@ function outermostReviewRepositoryRoot(repositoryRoot: string): string {
 function canonicalReviewRepositoryRoot(repositoryRoot: string): string {
   let canonical = outermostReviewRepositoryRoot(repositoryRoot);
   try {
-    canonical = realpathSync(canonical);
+    canonical = realpathSync.native(canonical);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     // Review repositories exist in production. Keeping the lexical fallback
@@ -93,13 +94,14 @@ function canonicalReviewRepositoryRoot(repositoryRoot: string): string {
 
 /** Host-trusted review state, outside every repository workspace. */
 export function reviewTrustStateDir(repositoryRoot: string): string {
-  const digest = createHash('sha256')
-    .update(canonicalReviewRepositoryRoot(repositoryRoot))
-    .digest('hex');
+  const digest = getProjectHash(canonicalReviewRepositoryRoot(repositoryRoot));
   return join(Storage.getGlobalQwenDir(), REVIEW_TRUST_STATE_DIR, digest);
 }
 
-/** The outermost repository root encoded by a review worktree path. */
+/**
+ * The outermost repository root encoded by a review worktree path. Derive it
+ * from path geometry, never Git metadata inside the reviewed worktree.
+ */
 export function reviewRepositoryRootForWorktree(worktree: string): string {
   const resolved = resolve(worktree);
   const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;

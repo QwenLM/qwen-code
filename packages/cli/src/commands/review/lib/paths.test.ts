@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -90,6 +91,22 @@ describe('trusted review state paths', () => {
       expect(reviewTrustStateDir(upper)).not.toBe(reviewTrustStateDir(lower));
     } finally {
       rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one namespace for case variants of the same repository', () => {
+    const variant = join(dirname(repo), basename(repo).toUpperCase());
+    let sameRepository = false;
+    try {
+      const actual = statSync(repo);
+      const alternate = statSync(variant);
+      sameRepository =
+        actual.dev === alternate.dev && actual.ino === alternate.ino;
+    } catch {
+      return;
+    }
+    if (sameRepository) {
+      expect(reviewTrustStateDir(variant)).toBe(reviewTrustStateDir(repo));
     }
   });
 
