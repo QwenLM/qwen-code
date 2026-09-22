@@ -353,6 +353,21 @@ final class JdbcRepositoryContract {
         assertEquals(executionId, original.getExecutionCallId());
         assertFalse(original.sameRequest(changed));
 
+        String lowercaseId = prefix + "-case-execution";
+        String uppercaseId = prefix + "-CASE-EXECUTION";
+        ToolExecutionRecord lowercase = first.findOrCreate(execution(
+                lowercaseId, prefix + "-case-lower-idempotency",
+                prefix + "-case-lower-digest"));
+        ToolExecutionRecord uppercase = first.findOrCreate(execution(
+                uppercaseId, prefix + "-case-upper-idempotency",
+                prefix + "-case-upper-digest"));
+        assertEquals(lowercaseId, lowercase.getExecutionCallId());
+        assertEquals(uppercaseId, uppercase.getExecutionCallId());
+        assertEquals(lowercaseId, second.findByExecutionCallId(lowercaseId)
+                .getExecutionCallId());
+        assertEquals(uppercaseId, second.findByExecutionCallId(uppercaseId)
+                .getExecutionCallId());
+
         String typesKey = prefix + "-types-idempotency";
         Map<String, Object> typedReference = new LinkedHashMap<>();
         typedReference.put("sessionId", prefix + "-types-runtime-session");

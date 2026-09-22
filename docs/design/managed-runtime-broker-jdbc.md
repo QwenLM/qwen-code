@@ -35,7 +35,7 @@ The broker owns four private tables:
 - `qwen_runtime_binding_slot` serializes creation for one hashed runtime scope.
 - `qwen_runtime_binding` stores the current runtime binding, generation, endpoint, operation lease, lifecycle state, and optimistic version.
 - `qwen_runtime_session` stores runtime sessions and their terminal state under a binding generation.
-- `qwen_tool_execution` stores one durable Tool Execution per globally unique idempotency key, including immutable request identity, dispatch fencing, cancellation intent, `UNKNOWN` state, and the settled result.
+- `qwen_tool_execution` stores one durable Tool Execution per globally unique idempotency key, including immutable request identity, dispatch fencing, cancellation intent, `UNKNOWN` state, and the settled result. Execution-call and idempotency identifiers use deterministic hashes for case-sensitive lookup under any database collation, while each lookup verifies the complete identifier.
 
 Scope identity is represented by a deterministic hash and is always checked together with the full tenant-scoped identity. Endpoint tokens remain encrypted or opaque values supplied by the caller; the repository does not log or transform them.
 

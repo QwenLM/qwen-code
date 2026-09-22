@@ -35,7 +35,7 @@ Broker 私有拥有四张表：
 - `qwen_runtime_binding_slot` 用于串行化同一哈希 Runtime Scope 的创建。
 - `qwen_runtime_binding` 保存当前 Runtime Binding、generation、endpoint、操作租约、生命周期状态和乐观锁版本。
 - `qwen_runtime_session` 保存某个 Binding generation 下的 Runtime Session 及其终态。
-- `qwen_tool_execution` 按全局唯一的 idempotency key 保存一个持久化 Tool Execution，包括不可变请求身份、dispatch fencing、取消意图、`UNKNOWN` 状态和最终结果。
+- `qwen_tool_execution` 按全局唯一的 idempotency key 保存一个持久化 Tool Execution，包括不可变请求身份、dispatch fencing、取消意图、`UNKNOWN` 状态和最终结果。execution-call 和 idempotency 标识使用确定性哈希，从而在任意数据库排序规则下保持大小写敏感查询；每次查询还会校验完整标识。
 
 Scope 身份使用确定性哈希表示，并始终与完整的租户级身份一起校验。Endpoint token 仍是调用方提供的加密值或不透明值；Repository 不记录也不转换它。
 

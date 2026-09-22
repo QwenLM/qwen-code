@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_session (
 );
 
 CREATE TABLE IF NOT EXISTS qwen_tool_execution (
-    execution_call_id VARCHAR(512) PRIMARY KEY,
+    execution_call_id_hash CHAR(64) PRIMARY KEY,
+    execution_call_id VARCHAR(512) NOT NULL,
     idempotency_key_hash CHAR(64) NOT NULL,
     idempotency_key VARCHAR(512) NOT NULL,
     binding_id VARCHAR(512) NOT NULL,
