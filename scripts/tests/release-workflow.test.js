@@ -132,16 +132,36 @@ describe('CUA release workflow', () => {
     );
   });
 
-  it('ships the Windows UIAccess worker for target-machine signing', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /Build \(release\)[\s\S]*?Remove-Item[^\n]*cua-driver-uia\.exe[^\n]*\n[^\n]*cargo build[\s\S]*?Verify unsigned UIAccess worker/,
+  it('signs the Windows worker and exercises packaged postinstall before upload', () => {
+    const steps = parse(cuaReleaseWorkflow).jobs['build-windows'].steps;
+    const signIndex = steps.findIndex(
+      (step) => step.name === 'Sign UIAccess worker',
     );
-    expect(cuaReleaseWorkflow).toMatch(
-      /Build \(release\)[\s\S]*?Verify unsigned UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?NotSigned[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
+    const packageIndex = steps.findIndex((step) => step.name === 'Package');
+    const installIndex = steps.findIndex(
+      (step) => step.name === 'Clean-install Windows SDK from packaged payload',
     );
-    expect(cuaReleaseWorkflow).not.toMatch(/WINDOWS_CERTIFICATE|WIN_CSC_LINK/);
-    expect(cuaReleaseWorkflow).toContain(
-      '- **Windows**: unsigned UIAccess worker + native SDK payload',
+    const uploadIndex = steps.findIndex(
+      (step) => step.uses === 'actions/upload-artifact@v4',
+    );
+    expect(signIndex).toBeGreaterThan(-1);
+    expect(packageIndex).toBeGreaterThan(signIndex);
+    expect(installIndex).toBeGreaterThan(packageIndex);
+    expect(uploadIndex).toBeGreaterThan(installIndex);
+    expect(steps[signIndex].env.SIGNING_TEST_ONLY).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/') }}",
+    );
+    expect(steps[signIndex].run).toContain(
+      "throw 'A trusted Windows code-signing certificate is required",
+    );
+    expect(steps[signIndex].run).toContain("$signature.Status -ne 'Valid'");
+    expect(steps[installIndex].run).toContain('npm install');
+    expect(steps[installIndex].run).toContain('--ignore-scripts=false');
+    expect(steps[installIndex].run).toContain(
+      "throw 'Windows SDK postinstall failed'",
+    );
+    expect(steps[installIndex].run).toContain(
+      'Get-AuthenticodeSignature -LiteralPath $worker',
     );
   });
 

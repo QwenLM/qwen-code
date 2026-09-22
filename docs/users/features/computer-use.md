@@ -36,6 +36,12 @@ The SDK installation leaves `package.json` and the lockfile unchanged, but it
 does write to the workspace's `node_modules`. Its postinstall downloads and
 verifies the native payload for the current platform.
 
+On Windows, run the SDK installation from an elevated terminal: the signed
+UIAccess worker must be installed under `Program Files\Qwen\CuaDriver`.
+An unsigned worker cannot enable UIAccess; do not bypass the signature check.
+Older unsigned releases need a new signed driver release, not a reinstall of
+the same version.
+
 Removing the MCP configuration or workspace SDK installation disables the
 execution path; there is no legacy fallback.
 
