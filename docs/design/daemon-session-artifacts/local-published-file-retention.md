@@ -76,17 +76,20 @@ descriptors are unchanged.
 
 ## Risks
 
-A rewind whose rebuilt snapshot contains only expired local pages replaces
-the live list with an empty list and no user-facing warning. That is the
-durable metadata state after the drop. Operators can still see the stderr
-action.
+On rewind the live page stays visible — the rewind caller restores with
+`preserveLiveEphemeral`, and the page is now ephemeral — but the snapshot
+recorded after the rewind no longer contains it. That is the durable metadata
+state after the drop; no user-facing warning is emitted. Operators can still
+see the stderr action.
 
 ## Validation
 
-- Unit tests in `packages/acp-bridge` cover write-time coerce, persistence
-  skip, quiet restore drop, mixed workspace/snapshot restore, marker drop,
-  the original forged-file rollback, and a rebuilt journal shaped like
-  issue #12389.
+- Unit tests in `packages/acp-bridge` cover write-time coerce on the omitted-
+  `retention` producer batch, persistence skip, quiet restore drop, mixed
+  workspace/snapshot restore, marker drop, rewind with
+  `preserveLiveEphemeral`, tombstone clear on re-publish, forged-id and
+  mixed-journal rollback, merged-result coerce, the original forged-file
+  rollback, and a rebuilt journal shaped like issue #12389.
 - `cd packages/acp-bridge && npx vitest run src/sessionArtifacts.test.ts`
 
 ## Acceptance criteria

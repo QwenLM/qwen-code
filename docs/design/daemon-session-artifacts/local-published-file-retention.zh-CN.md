@@ -71,15 +71,18 @@ HTTP/HTTPS published 定位符和快照描述符不变。
 
 ## 风险
 
-若回放后的 snapshot 只剩下过期本地页，实时列表会被替换成空列表，且没有对用户
-的 warning。这就是丢弃后的持久化 metadata 状态。运维仍可在 stderr 看到该
-action。
+回放（rewind）时 live 页面仍然可见 —— rewind 调用方使用 `preserveLiveEphemeral`
+进行 restore，而该页面现在是 ephemeral —— 但回放之后记录的 snapshot 不再包含它。
+这就是丢弃后的 durable metadata 状态；不会产生面向用户的 warning。运维仍然可以
+通过 stderr action 看到。
 
 ## 验证
 
-- `packages/acp-bridge` 单测覆盖写入强制、跳过持久化、安静恢复丢弃、workspace/
-  快照混合恢复、marker 丢弃、原有伪造文件回滚，以及 issue #12389 形态的
-  journal 回放。
+- `packages/acp-bridge` 单测覆盖生产形态（省略 `retention` 的批量写入）强制、
+  跳过持久化、安静恢复丢弃、workspace/快照混合恢复、marker 丢弃、
+  `preserveLiveEphemeral` rewind、重新发布时清除 tombstone、伪造 id 与混合
+  journal 回滚、合并后再强制 ephemeral、原有伪造文件回滚，以及 issue #12389
+  形态的 journal 回放。
 - `cd packages/acp-bridge && npx vitest run src/sessionArtifacts.test.ts`
 
 ## 验收标准

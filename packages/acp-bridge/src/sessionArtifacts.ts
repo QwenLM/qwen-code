@@ -430,6 +430,9 @@ export class SessionArtifactStore {
               insertSeq: ++this.insertSeq,
             };
             this.artifacts.set(stored.id, stored);
+            this.tombstonedIds.delete(stored.id);
+            this.tombstonedClientIds.delete(stored.id);
+            this.markerArtifacts.delete(stored.id);
             changes.push({
               action: 'created',
               artifactId: stored.id,
@@ -791,7 +794,10 @@ export class SessionArtifactStore {
         }
       }
       for (const artifact of snapshot?.artifacts ?? []) {
-        if (isExpectedExpiredLocalPublishedArtifact(artifact)) {
+        if (
+          isExpectedExpiredLocalPublishedArtifact(artifact) &&
+          artifactIdMatchesIdentity(this.sessionId, artifact)
+        ) {
           expectedExpiredDrops++;
           writeStderrLine(
             `[artifacts] session=${this.sessionId} ` +
@@ -812,8 +818,7 @@ export class SessionArtifactStore {
             input,
             ++this.receivedSeq,
             artifact.storage === 'published' &&
-              (!isFileArtifactUrl(artifact.url) ||
-                Boolean(getWebPreviewSnapshotId(artifact))),
+              !isNonSnapshotFileLocator(artifact),
             {
               metadataBudget: 'persisted',
               workspaceExpected: workspaceExpectedFromArtifact(artifact),
@@ -1000,7 +1005,10 @@ export class SessionArtifactStore {
     warnings: string[],
     metadataOnly = false,
   ): Promise<PersistedSessionArtifact | undefined> {
-    if (isExpectedExpiredLocalPublishedArtifact(artifact)) {
+    if (
+      isExpectedExpiredLocalPublishedArtifact(artifact) &&
+      artifactIdMatchesIdentity(this.sessionId, artifact)
+    ) {
       writeStderrLine(
         `[artifacts] session=${this.sessionId} ` +
           'action=legacy_local_published_dropped ' +
@@ -1019,9 +1027,7 @@ export class SessionArtifactStore {
       const normalized = await this.normalizeInput(
         input,
         ++this.receivedSeq,
-        artifact.storage === 'published' &&
-          (!isFileArtifactUrl(artifact.url) ||
-            Boolean(getWebPreviewSnapshotId(artifact))),
+        artifact.storage === 'published' && !isNonSnapshotFileLocator(artifact),
         {
           metadataBudget: 'persisted',
           workspaceExpected: workspaceExpectedFromArtifact(artifact),
@@ -2330,6 +2336,11 @@ function mergeArtifact(
     next.metadata = stripExpandedFromDirectoryMarker(next.metadata);
   }
 
+  if (isNonSnapshotPublishedFileUrl(next)) {
+    next.retention = 'ephemeral';
+    next.retentionExplicit = true;
+  }
+
   const changed = !publicArtifactsEqual(
     toPublicArtifact(existing),
     toPublicArtifact(next),
@@ -2781,14 +2792,43 @@ function isFileArtifactUrl(raw: unknown): boolean {
   }
 }
 
+function isNonSnapshotFileLocator(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return isFileArtifactUrl(artifact.url) && !getWebPreviewSnapshotId(artifact);
+}
+
 function isNonSnapshotPublishedFileUrl(
   artifact: Partial<PersistedSessionArtifact>,
 ): boolean {
-  return (
-    artifact.storage === 'published' &&
-    isFileArtifactUrl(artifact.url) &&
-    !getWebPreviewSnapshotId(artifact)
-  );
+  return artifact.storage === 'published' && isNonSnapshotFileLocator(artifact);
+}
+
+function artifactIdMatchesIdentity(
+  sessionId: string,
+  artifact: Partial<PersistedSessionArtifact> & {
+    storage?: PersistedSessionArtifact['storage'];
+  },
+): boolean {
+  if (!artifact.id || artifact.storage === undefined) {
+    return false;
+  }
+  try {
+    return (
+      artifact.id ===
+      stableSessionArtifactId(
+        sessionId,
+        buildIdentityKey({
+          storage: artifact.storage,
+          workspacePath: artifact.workspacePath,
+          managedId: artifact.managedId,
+          url: artifact.url,
+        }),
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isExpectedExpiredLocalPublishedArtifact(

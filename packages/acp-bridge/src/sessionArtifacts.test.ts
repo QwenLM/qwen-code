@@ -2047,10 +2047,12 @@ describe('SessionArtifactStore', () => {
   });
 
   it('does not persist trusted local published file urls', async () => {
+    const sessionId = 's2-published-file-url-ephemeral';
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
-      sessionId: 's2-published-file-url-ephemeral',
+      sessionId,
       workspaceCwd: workspace,
+      runtimeBaseDir: workspace,
       persistence: {
         recordEvent: async (payload) => {
           events.push(payload);
@@ -2062,6 +2064,11 @@ describe('SessionArtifactStore', () => {
     try {
       const url = pathToFileURL(path.join(outside, 'page.html')).href;
       await fs.writeFile(path.join(outside, 'page.html'), '<html>ok</html>');
+      const snapshot = await writePersistedSnapshot(
+        sessionId,
+        workspace,
+        'c93b4bad-1e90-4f17-b8ef-2ccc89d5a97b',
+      );
       const created = await store.upsertMany(
         [
           {
@@ -2072,21 +2079,57 @@ describe('SessionArtifactStore', () => {
             toolName: 'artifact',
             managedId: 'a582c3d4-1111-4111-8111-111111111111',
             url,
-            retention: 'restorable',
+          },
+          {
+            kind: 'html',
+            title: snapshot.title,
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId: snapshot.managedId,
+            url: snapshot.url,
+            metadata: snapshot.metadata,
           },
         ],
         { strict: true, trustedPublisher: true },
       );
 
-      expect(created.changes[0]?.artifact).toMatchObject({
-        storage: 'published',
-        retention: 'ephemeral',
-        url,
-      });
-      expect(created.changes[0]?.artifact?.persistedAt).toBeUndefined();
-      expect(events).toEqual([]);
+      expect(created.changes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            artifact: expect.objectContaining({
+              title: 'Local published page',
+              retention: 'ephemeral',
+            }),
+          }),
+          expect.objectContaining({
+            artifact: expect.objectContaining({
+              id: snapshot.id,
+              retention: 'restorable',
+            }),
+          }),
+        ]),
+      );
+      expect(
+        created.changes.find(
+          (change) => change.artifact?.title === 'Local published page',
+        )?.artifact,
+      ).not.toHaveProperty('persistedAt');
+      expect(events).toHaveLength(1);
+      expect(events[0]?.changes).toHaveLength(1);
+      expect(events[0]?.changes[0]?.artifactId).toBe(snapshot.id);
+      expect(events[0]?.changes[0]?.artifact?.url).toBe(snapshot.url);
       await expect(store.list()).resolves.toMatchObject({
-        artifacts: [{ title: 'Local published page', retention: 'ephemeral' }],
+        artifacts: expect.arrayContaining([
+          expect.objectContaining({
+            title: 'Local published page',
+            retention: 'ephemeral',
+          }),
+          expect.objectContaining({
+            id: snapshot.id,
+            retention: 'restorable',
+          }),
+        ]),
       });
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
@@ -7426,12 +7469,54 @@ describe('SessionArtifactStore', () => {
       sessionId,
       'a582c3d4-4444-4444-8444-444444444444',
     );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     const store = new SessionArtifactStore({
       sessionId,
       workspaceCwd: workspace,
     });
 
-    const warnings = await store.restore({
+    try {
+      const warnings = await store.restore({
+        v: 2,
+        sessionId,
+        sequence: 5,
+        artifacts: [],
+        tombstonedIds: [expired.id],
+        stickyEphemeralIds: [],
+        markerArtifacts: [expired],
+        warnings: [],
+      });
+
+      expect(warnings).toEqual([]);
+      expect(
+        stderr.mock.calls.map((call) => String(call[0])).join(''),
+      ).toContain('action=legacy_local_published_dropped');
+      await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('clears a tombstone when a local published page is re-created', async () => {
+    const sessionId = 's11-republish-clears-local-published-tombstone';
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    const expired = persistedLocalPublishedPage(
+      sessionId,
+      'a582c3d4-5555-4555-8555-555555555555',
+    );
+    await store.restore({
       v: 2,
       sessionId,
       sequence: 5,
@@ -7442,8 +7527,224 @@ describe('SessionArtifactStore', () => {
       warnings: [],
     });
 
-    expect(warnings).toEqual([]);
-    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    await store.upsertMany(
+      [
+        {
+          kind: 'html',
+          title: 'Local published page',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          managedId: expired.managedId,
+          url: expired.url,
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    await expect(store.recordSnapshot()).resolves.toEqual([]);
+
+    const payload = snapshots.at(-1);
+    expect(payload?.tombstonedIds).not.toContain(expired.id);
+    expect(
+      (payload?.markerArtifacts ?? []).filter((artifact) =>
+        artifact.url?.startsWith('file:'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps a live local published page across rewind restore', async () => {
+    const sessionId = 's11-rewind-keeps-live-local-published';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const url = pathToFileURL(path.join(outside, 'page.html')).href;
+      await fs.writeFile(path.join(outside, 'page.html'), '<html>ok</html>');
+      const created = await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Local published page',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId: 'a582c3d4-6666-4666-8666-666666666666',
+            url,
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      const pageId = created.changes[0]!.artifactId;
+
+      const warnings = await store.restore(
+        {
+          v: 2,
+          sessionId,
+          sequence: 2,
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+          warnings: [],
+        },
+        { preserveLiveEphemeral: true },
+      );
+
+      expect(warnings).toEqual([]);
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [
+          expect.objectContaining({
+            id: pageId,
+            retention: 'ephemeral',
+            url,
+          }),
+        ],
+      });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('still rolls back a forged-id Artifact-shaped local published page', async () => {
+    const sessionId = 's11-restore-forged-id-local-published';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+    const forged = {
+      ...persistedLocalPublishedPage(
+        sessionId,
+        'a582c3d4-7777-4777-8777-777777777777',
+      ),
+      id: 'tampered-published-file',
+    };
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 8,
+      artifacts: [forged],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: liveId, title: 'Live' }],
+    });
+  });
+
+  it('still rolls back when a legacy local page is mixed with a forged file url', async () => {
+    const sessionId = 's11-restore-mixed-legacy-and-forged-file';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+    const expired = persistedLocalPublishedPage(
+      sessionId,
+      'a582c3d4-8888-4888-8888-888888888888',
+    );
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 4,
+      artifacts: [
+        expired,
+        {
+          id: 'tampered-published-file',
+          kind: 'link',
+          storage: 'published',
+          source: 'client',
+          status: 'available',
+          title: 'Tampered',
+          url: 'file:///tmp/secret.html',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: liveId, title: 'Live' }],
+    });
+  });
+
+  it('does not let a later upsert promote a local published page back to restorable', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-no-promote-local-published',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const url = pathToFileURL(path.join(outside, 'page.html')).href;
+      await fs.writeFile(path.join(outside, 'page.html'), '<html>ok</html>');
+      const managedId = 'a582c3d4-9999-4999-8999-999999999999';
+      await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Local published page',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            url,
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      events.length = 0;
+
+      await store.upsertMany(
+        [{ managedId, title: 'keep', retention: 'restorable' }],
+        { strict: true },
+      );
+
+      expect(events).toEqual([]);
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [
+          expect.objectContaining({
+            storage: 'published',
+            retention: 'ephemeral',
+            url,
+          }),
+        ],
+      });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('prunes over-limit restored artifacts and records eviction tombstones', async () => {
