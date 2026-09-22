@@ -156,13 +156,15 @@ async function requireValidAuthenticodeSignature(source) {
     `$signature = Get-AuthenticodeSignature -LiteralPath ${quotePowerShell(source)}; ` +
     `if ($signature.Status -ne 'Valid') { ` +
     `throw \"UIAccess worker Authenticode status is $($signature.Status)\" }`
-  await run(
-    "powershell",
-    ["-NoProfile", "-NonInteractive", "-Command", command],
-    {
-      timeout: 30_000,
-    },
-  )
+  const args = ["-NoProfile", "-NonInteractive", "-Command", command]
+  try {
+    await run("powershell", args, { timeout: 30_000 })
+  } catch (error) {
+    if (!String(error?.stderr).includes("Microsoft.PowerShell.Security")) {
+      throw error
+    }
+    await run("pwsh", args, { timeout: 30_000 })
+  }
 }
 
 async function installUiAccessWorker(source, version, env) {

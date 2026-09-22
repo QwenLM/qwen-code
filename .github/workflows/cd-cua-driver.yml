@@ -349,14 +349,22 @@ jobs:
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
+      - name: 'Sign UIAccess worker with test certificate'
+        if: "github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/')"
+        shell: 'pwsh'
+        env:
+          SIGNING_TEST_ONLY: 'true'
+        run: >-
+          ./.github/scripts/sign-cua-windows-worker.ps1
+          -Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
       - name: 'Sign UIAccess worker'
+        if: "github.event_name != 'workflow_dispatch' || inputs.dry_run != true || startsWith(github.ref, 'refs/tags/')"
         shell: 'pwsh'
         env:
           WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
           WINDOWS_CERTIFICATE_PASSWORD: '${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}'
           LEGACY_WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}'
           LEGACY_WIN_CSC_KEY_PASSWORD: '${{ secrets.WIN_CSC_KEY_PASSWORD }}'
-          SIGNING_TEST_ONLY: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/') }}"
         run: >-
           ./.github/scripts/sign-cua-windows-worker.ps1
           -Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"

@@ -59,6 +59,10 @@ const nodeReplPackage = JSON.parse(
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
+const cuaSdkInstallScript = readFileSync(
+  'packages/cua-driver/typescript/scripts/install-native.mjs',
+  'utf8',
+);
 const cuaSdkPackageLock = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
 );
@@ -134,6 +138,9 @@ describe('CUA release workflow', () => {
 
   it('signs the Windows worker and exercises packaged postinstall before upload', () => {
     const steps = parse(cuaReleaseWorkflow).jobs['build-windows'].steps;
+    const testSignIndex = steps.findIndex(
+      (step) => step.name === 'Sign UIAccess worker with test certificate',
+    );
     const signIndex = steps.findIndex(
       (step) => step.name === 'Sign UIAccess worker',
     );
@@ -144,13 +151,19 @@ describe('CUA release workflow', () => {
     const uploadIndex = steps.findIndex(
       (step) => step.uses === 'actions/upload-artifact@v4',
     );
+    expect(testSignIndex).toBeGreaterThan(-1);
     expect(signIndex).toBeGreaterThan(-1);
     expect(packageIndex).toBeGreaterThan(signIndex);
     expect(installIndex).toBeGreaterThan(packageIndex);
     expect(uploadIndex).toBeGreaterThan(installIndex);
-    expect(steps[signIndex].env.SIGNING_TEST_ONLY).toBe(
-      "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/') }}",
+    expect(steps[testSignIndex].if).toBe(
+      "github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/')",
     );
+    expect(steps[testSignIndex].env).toEqual({ SIGNING_TEST_ONLY: 'true' });
+    expect(steps[signIndex].if).toBe(
+      "github.event_name != 'workflow_dispatch' || inputs.dry_run != true || startsWith(github.ref, 'refs/tags/')",
+    );
+    expect(steps[signIndex].env).not.toHaveProperty('SIGNING_TEST_ONLY');
     const signingScriptPath = '.github/scripts/sign-cua-windows-worker.ps1';
     expect(steps[signIndex].run).toContain(signingScriptPath);
     expect(steps[signIndex].run).toContain(
@@ -172,6 +185,9 @@ describe('CUA release workflow', () => {
     expect(steps[installIndex].run).toContain(
       'Get-AuthenticodeSignature -LiteralPath $worker',
     );
+    expect(cuaSdkInstallScript).toContain('await run("powershell", args');
+    expect(cuaSdkInstallScript).toContain('Microsoft.PowerShell.Security');
+    expect(cuaSdkInstallScript).toContain('await run("pwsh", args');
   });
 
   it('pins exact Computer Use package versions across the skill and user guide', () => {
