@@ -322,9 +322,22 @@ test.describe('trajectory panel', () => {
     );
 
     await alert.getByRole('button').click();
-    const reads = transcriptRequests(daemon);
-    // Re-reading the newest page instead would throw away everything the
-    // reader had already paged back through.
-    expect(reads.at(-1)).toContain(`cursor=${OLDER_CURSOR}`);
+
+    // Counted, not read off the tail: the read that failed carries this same
+    // cursor, so the last request cannot tell a retry from no retry at all —
+    // and `click()` resolves when the event is dispatched, before the retry's
+    // request has reached the route. Two cursor reads is the failure and its
+    // retry; one cursorless read is the page already on screen, which
+    // re-reading the newest page instead would have made two.
+    const cursorReads = () =>
+      transcriptRequests(daemon).filter((search) =>
+        search.includes(`cursor=${OLDER_CURSOR}`),
+      ).length;
+    await expect.poll(cursorReads).toBe(2);
+    expect(
+      transcriptRequests(daemon).filter(
+        (search) => !search.includes('cursor='),
+      ),
+    ).toHaveLength(1);
   });
 });

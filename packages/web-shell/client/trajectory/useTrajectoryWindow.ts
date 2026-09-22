@@ -18,12 +18,13 @@ import type { Trajectory } from './types';
 export const TRAJECTORY_PAGE_SIZE = 250;
 /**
  * Pages held at once. The window is re-projected whole on every change and
- * each page is a full replay of its records, so this bounds both the retained
- * bytes and the per-change work. A backward page can exceed what it was asked
- * for — the daemon extends it to keep turns and tool pairs whole, up to
- * `3 * limit` records and its own 4 MB ceiling — so the worst case held here
- * is nearer 3000 records than 1000. Asking for more per read and holding fewer
- * reads spends fewer round trips to walk the same distance back.
+ * each page is a full replay of its records, so this is what bounds the
+ * retained bytes and the per-change work — and holding four pages where the
+ * table held one raises both by four, to 1000 records nominally. The true
+ * worst case is nearer 3000: a backward page can exceed the limit it was
+ * asked for, because the daemon extends it to keep turns and tool pairs
+ * whole, up to `3 * limit` records and its own 4 MB ceiling. Four is where
+ * that ceiling stays defensible while still reaching a useful way back.
  */
 export const TRAJECTORY_MAX_PAGES = 4;
 
@@ -169,6 +170,12 @@ export function useTrajectoryWindow(
 
   const loadNewest = useCallback(() => {
     if (!loadPage) return;
+    // Deliberately not the mirror of `loadOlder`'s guard: this one cancels a
+    // page in flight rather than refusing to run. A refresh rebuilds the
+    // window from the newest page, so whatever that page would have added is
+    // discarded either way, and the reader sees the rebuild it asked for. The
+    // reverse — a page silently discarding a refresh — leaves nothing on
+    // screen to say the refresh happened, which is why that one refuses.
     const generation = ++generationRef.current;
     olderInFlightRef.current = false;
     newestInFlightRef.current = true;
