@@ -317,6 +317,65 @@ final class JdbcRepositoryContract {
         ToolExecutionRecord original = reconstructed.findOrCreate(changed);
         assertEquals(executionId, original.getExecutionCallId());
         assertFalse(original.sameRequest(changed));
+
+        String takeoverKey = prefix + "-takeover-idempotency";
+        ToolExecutionRecord takeoverCreated = first.findOrCreate(execution(
+                prefix + "-takeover-execution", takeoverKey,
+                prefix + "-takeover-digest"));
+        ToolExecutionRecord firstClaim = first.claimDispatch(
+                takeoverCreated.getExecutionCallId(),
+                prefix + "-dispatcher-a", Duration.ofMinutes(30));
+        expire(dataSource, "qwen_tool_execution",
+                "dispatch_lease_until", "execution_call_id",
+                takeoverCreated.getExecutionCallId());
+        ToolExecutionRecord secondClaim = second.claimDispatch(
+                takeoverCreated.getExecutionCallId(),
+                prefix + "-dispatcher-b", Duration.ofMinutes(30));
+        assertEquals(2, secondClaim.getDispatchGeneration());
+        assertNull(first.compareAndSet(secondClaim,
+                secondClaim.withResult(result("error"), 0, START),
+                prefix + "-dispatcher-a",
+                firstClaim.getDispatchGeneration()));
+        ToolExecutionRecord takeoverSettled = second.compareAndSet(
+                secondClaim,
+                secondClaim.withResult(result("success"), 0, START),
+                prefix + "-dispatcher-b",
+                secondClaim.getDispatchGeneration());
+        assertEquals("success", takeoverSettled.getExecutionStatus());
+
+        String executingKey = prefix + "-executing-idempotency";
+        ToolExecutionRecord executingCreated = first.findOrCreate(execution(
+                prefix + "-executing-execution", executingKey,
+                prefix + "-executing-digest"));
+        ToolExecutionRecord executingClaim = first.claimDispatch(
+                executingCreated.getExecutionCallId(),
+                prefix + "-dispatcher-a", Duration.ofMinutes(30));
+        ToolExecutionRecord rawExecuting = first.compareAndSet(
+                executingClaim,
+                executingClaim.withState(
+                        ToolExecutionRecord.State.EXECUTING, false),
+                prefix + "-dispatcher-a",
+                executingClaim.getDispatchGeneration());
+        expire(dataSource, "qwen_tool_execution",
+                "dispatch_lease_until", "execution_call_id",
+                executingCreated.getExecutionCallId());
+        assertNull(second.claimDispatch(
+                executingCreated.getExecutionCallId(),
+                prefix + "-dispatcher-b", Duration.ofMinutes(30)));
+        ToolExecutionRecord executingUnknown = second
+                .findByExecutionCallId(
+                        executingCreated.getExecutionCallId());
+        assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                executingUnknown.getState());
+        assertFalse(executingUnknown.isCancelRequested());
+        assertNull(first.compareAndSet(rawExecuting,
+                rawExecuting.withResult(result("error"), 1, START),
+                prefix + "-dispatcher-a",
+                rawExecuting.getDispatchGeneration()));
+        ToolExecutionRecord executingResolved = second.resolveUnknown(
+                executingUnknown, result("cancelled"), START);
+        assertEquals("cancelled",
+                executingResolved.getExecutionStatus());
     }
 
     private static ToolExecutionRecord execution(String executionCallId,
