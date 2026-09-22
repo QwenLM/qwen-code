@@ -167,6 +167,13 @@ describe('AgentTool', () => {
       waitForBackgroundSlot: vi
         .fn()
         .mockResolvedValue({ id: Symbol('background-slot') }),
+      tryReserveForegroundModelSlot: vi
+        .fn()
+        .mockReturnValue({ id: Symbol('background-slot') }),
+      waitForForegroundModelSlot: vi
+        .fn()
+        .mockResolvedValue({ id: Symbol('background-slot') }),
+      getForegroundQueuedCount: vi.fn().mockReturnValue(0),
       releaseBackgroundSlot: vi.fn(),
       getQueuedCount: vi.fn().mockReturnValue(0),
       register: vi.fn(),
@@ -7036,6 +7043,9 @@ describe('AgentTool', () => {
       resolvePerModelCap: ReturnType<typeof vi.fn>;
       tryReserveBackgroundSlot: ReturnType<typeof vi.fn>;
       waitForBackgroundSlot: ReturnType<typeof vi.fn>;
+      tryReserveForegroundModelSlot: ReturnType<typeof vi.fn>;
+      waitForForegroundModelSlot: ReturnType<typeof vi.fn>;
+      getForegroundQueuedCount: ReturnType<typeof vi.fn>;
       releaseBackgroundSlot: ReturnType<typeof vi.fn>;
       getQueuedCount: ReturnType<typeof vi.fn>;
       get: ReturnType<typeof vi.fn>;
@@ -7095,6 +7105,13 @@ describe('AgentTool', () => {
         waitForBackgroundSlot: vi
           .fn()
           .mockResolvedValue({ id: Symbol('background-slot') }),
+        tryReserveForegroundModelSlot: vi
+          .fn()
+          .mockReturnValue({ id: Symbol('background-slot') }),
+        waitForForegroundModelSlot: vi
+          .fn()
+          .mockResolvedValue({ id: Symbol('background-slot') }),
+        getForegroundQueuedCount: vi.fn().mockReturnValue(0),
         releaseBackgroundSlot: vi.fn(),
         getQueuedCount: vi.fn().mockReturnValue(0),
         get: vi.fn().mockReturnValue(restartedEntry),
@@ -8472,7 +8489,7 @@ describe('AgentTool', () => {
       expect(mockRegistry.waitForBackgroundSlot).not.toHaveBeenCalled();
     });
 
-    it('reserves and releases a per-model slot for a top-level foreground launch when a per-model cap is configured', async () => {
+    it('reserves a foreground per-model slot, holds it for the whole run, and releases the exact reservation', async () => {
       const fgSubagent: SubagentConfig = {
         ...bgSubagent,
         name: 'file-search',
@@ -8481,9 +8498,15 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
       // A per-model cap is configured for the resolved model ('parent-model').
       mockRegistry.resolvePerModelCap.mockReturnValue(1);
-      mockRegistry.tryReserveBackgroundSlot.mockReturnValue({
-        id: Symbol('background-slot'),
-      });
+      const reservation = { id: Symbol('fg-model-slot') };
+      mockRegistry.tryReserveForegroundModelSlot.mockReturnValue(reservation);
+      let releaseExecute: (() => void) | undefined;
+      vi.mocked(mockAgent.execute).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseExecute = resolve;
+          }),
+      );
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -8493,20 +8516,87 @@ describe('AgentTool', () => {
         subagent_type: 'file-search',
         run_in_background: false,
       });
-      await invocation.execute();
+      const executePromise = invocation.execute();
 
-      // The foreground launch now consults the per-model cap and reserves a
-      // slot against the resolved model instead of bypassing the cap.
-      expect(mockRegistry.resolvePerModelCap).toHaveBeenCalledWith(
-        'parent-model',
-      );
-      expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+      await vi.waitFor(() => expect(mockRegistry.register).toHaveBeenCalled());
+      // The slot is held for the whole foreground run: not released while the
+      // agent is still executing.
+      expect(mockRegistry.releaseBackgroundSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.tryReserveForegroundModelSlot).toHaveBeenCalledWith(
         'parent-model',
         null,
       );
-      // The reservation is released when the foreground call returns, so the
-      // slot is not leaked.
-      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalled();
+
+      releaseExecute?.();
+      await executePromise;
+
+      // Released with the exact reservation object — the registry deletes by
+      // reservation.id and only then drains the queue, so object identity is
+      // what distinguishes a real release from a no-op.
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledWith(
+        reservation,
+      );
+    });
+
+    it('queues a foreground launch behind a full per-model cap and clears the waiting display', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      mockRegistry.resolvePerModelCap.mockReturnValue(1);
+      mockRegistry.tryReserveForegroundModelSlot.mockReturnValue(undefined);
+      mockRegistry.getForegroundQueuedCount.mockReturnValue(2);
+      const reservation = { id: Symbol('fg-model-slot') };
+      let releaseSlot: ((r: unknown) => void) | undefined;
+      mockRegistry.waitForForegroundModelSlot.mockReturnValue(
+        new Promise((resolve) => {
+          releaseSlot = resolve;
+        }),
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const updates: ToolResultDisplay[] = [];
+      const executePromise = invocation.execute(undefined, (output) => {
+        updates.push(output);
+      });
+      await Promise.resolve();
+
+      // The resolved model ID flows through to the foreground wait call.
+      expect(mockRegistry.waitForForegroundModelSlot).toHaveBeenCalledWith(
+        undefined,
+        'parent-model',
+        null,
+      );
+      expect(
+        updates.some(
+          (u) =>
+            (u as AgentResultDisplay).terminateReason ===
+            'Waiting for a model slot (2 already queued).',
+        ),
+      ).toBe(true);
+
+      releaseSlot?.(reservation);
+      await executePromise;
+
+      // The waiting display is cleared once the slot is acquired.
+      const lastRunning = [...updates]
+        .reverse()
+        .find((u) => (u as AgentResultDisplay).status === 'running');
+      expect(
+        (lastRunning as AgentResultDisplay).terminateReason,
+      ).toBeUndefined();
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledWith(
+        reservation,
+      );
     });
 
     it('routes owned monitor notifications and cleanup for foreground agents', async () => {
