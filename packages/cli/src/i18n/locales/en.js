@@ -225,6 +225,7 @@ export default {
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
   'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
+  'toolDisplayName.ToolCall': 'toolDisplayName.ToolCall',
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
@@ -2435,6 +2436,9 @@ export default {
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',
+  'Startup context': 'Startup context',
+  Unattributed: 'Unattributed',
+  'Cached prefix': 'Cached prefix',
   'Run /context detail for per-item breakdown.':
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':

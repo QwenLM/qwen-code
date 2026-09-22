@@ -265,6 +265,93 @@ describe('PlaywrightRuntime command contracts', () => {
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
+  it('discovers profiles without binding and selects before starting the bridge', async () => {
+    const selected: string[] = [];
+    const start = vi.fn(async () => {
+      expect(selected).toEqual(['chrome:profile-b']);
+    });
+    const fixture = await runtimeFixture({
+      bridgeOverrides: {
+        start,
+        profiles: async () =>
+          ['a', 'b'].map((id) => ({
+            extensionInstanceId: `profile-${id}`,
+            hostInstanceId: `host-${id}`,
+            protocolVersion: 3,
+            extensionProtocolVersion: 3,
+            socketPath: `/profile-${id}`,
+            pid: 1,
+            ...(id === 'b'
+              ? { profileName: 'Chrome · Work', lastUsed: true }
+              : {}),
+          })),
+        selectProfile: (id) => {
+          if (selected.length === 0) selected.push(id);
+        },
+      },
+    });
+    const profiles = await fixture.runtime.dispatch('browsers.list', {});
+    expect(profiles).toEqual([
+      expect.objectContaining({
+        id: 'chrome:profile-a',
+        name: 'Chrome · profile-a',
+      }),
+      expect.objectContaining({
+        id: 'chrome:profile-b',
+        name: 'Chrome · Work',
+      }),
+    ]);
+    expect(start).not.toHaveBeenCalled();
+    expect(selected).toEqual([]);
+    await expect(
+      fixture.runtime.dispatch('browsers.get', { id: 'chrome:profile-b' }),
+    ).resolves.toMatchObject({ id: 'chrome:profile-b' });
+    expect(start).toHaveBeenCalledOnce();
+    await expect(
+      fixture.runtime.dispatch('tabs.new', { browserId: 'chrome:profile-b' }),
+    ).resolves.toMatchObject({ id: expect.any(String) });
+  });
+
+  it('a profile that never connects does not become the runtime id', async () => {
+    const start = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(
+        new BrowserRuntimeError(
+          'BROWSER_DISCONNECTED',
+          'Chrome extension is not connected',
+        ),
+      )
+      .mockResolvedValue(undefined);
+    const fixture = await runtimeFixture({
+      bridgeOverrides: { start, selectProfile: () => undefined },
+    });
+    await expect(
+      fixture.runtime.dispatch('browsers.get', { id: 'chrome:typo' }),
+    ).rejects.toMatchObject({ code: 'BROWSER_DISCONNECTED' });
+    expect(fixture.runtime.browserId).toBe('chrome');
+    await expect(
+      fixture.runtime.dispatch('browsers.get', { id: 'chrome:profile-a' }),
+    ).resolves.toMatchObject({ id: 'chrome:profile-a' });
+  });
+
+  it('rejects profile discovery once shutdown starts', async () => {
+    const profiles = vi.fn(async () => []);
+    const start = vi.fn(async () => undefined);
+    const fixture = await runtimeFixture({
+      bridgeOverrides: { profiles, start },
+    });
+    const stopping = fixture.runtime.stop();
+    await expect(
+      fixture.runtime.dispatch('browsers.list', {}),
+    ).rejects.toMatchObject({ code: 'NOT_RUNNING' });
+    await stopping;
+    await expect(
+      fixture.runtime.dispatch('browsers.list', {}),
+    ).rejects.toMatchObject({ code: 'NOT_RUNNING' });
+    expect(profiles).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it('delegates tab navigation to Playwright', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -2200,10 +2287,64 @@ describe('PlaywrightRuntime command contracts', () => {
       title: 'Fixture',
       url: 'about:blank',
     });
-    expect(attachCalls()).toEqual([['tabs.attach', { tabId: 17 }]]);
+    // The renderer probe attaches first; registration's attach is a no-op.
+    expect(attachCalls()).toEqual([
+      ['tabs.attach', { tabId: 17 }],
+      ['tabs.attach', { tabId: 17 }],
+    ]);
     await expect(
       fixture.runtime.dispatch('tabs.selected', { browserId: 'chrome' }),
     ).resolves.toMatchObject({ title: 'Fixture' });
+  });
+
+  it('re-claiming a controlled tab never probes or releases it', async () => {
+    const fixture = await runtimeFixture();
+    const first = await claimOpenTab(fixture);
+    // A dialog under this session's own debugger blocks the renderer.
+    blockAttachProbe(fixture);
+    await expect(claimOpenTab(fixture)).resolves.toMatchObject({
+      id: first.id,
+    });
+    expect(fixture.request).not.toHaveBeenCalledWith('tabs.release', {
+      tabId: 17,
+    });
+  });
+
+  it('releases the probed tab when the probe fails before answering', async () => {
+    const fixture = await runtimeFixture();
+    blockAttachProbe(fixture, () =>
+      Promise.reject(
+        new BrowserRuntimeError('OPERATION_FAILED', 'Target crashed'),
+      ),
+    );
+    await expect(claimOpenTab(fixture)).rejects.toThrow('Target crashed');
+    expect(fixture.request).toHaveBeenCalledWith('tabs.release', { tabId: 17 });
+  });
+
+  it('hands back a tab whose unattached dialog blocks its renderer', async () => {
+    const fixture = await runtimeFixture();
+    // Chrome's own dialog UI owns the modal: the renderer never answers.
+    blockAttachProbe(fixture);
+    vi.useFakeTimers();
+    try {
+      const claimed = claimOpenTab(fixture).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await claimed).toMatchObject({
+        code: 'DIALOG_OPEN',
+        message: expect.stringContaining('only the user can close'),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    const methods = fixture.request.mock.calls.map(([method]) => method);
+    expect(methods).toContain('tabs.release');
+    // Only the probe attached; Playwright registration never started.
+    expect(methods.filter((method) => method === 'tabs.attach')).toHaveLength(
+      1,
+    );
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([]);
   });
 
   it('adopts a tracked popup only when its opener is a controlled tab', async () => {
@@ -3061,7 +3202,10 @@ function dialogEvent(
   return { type: 'event', tabId, method, params: {} };
 }
 
-function blockAttachProbe(fixture: RuntimeFixture): void {
+function blockAttachProbe(
+  fixture: RuntimeFixture,
+  answer = (): Promise<unknown> => new Promise<never>(() => {}),
+): void {
   // A dialog already open when the tab attaches is replayed by neither
   // Chrome nor Playwright, but the modal blocks the renderer — so the
   // attach probe's Runtime.evaluate never answers.
@@ -3069,9 +3213,19 @@ function blockAttachProbe(fixture: RuntimeFixture): void {
   fixture.request.mockImplementation(
     (method: string, params: Record<string, unknown> = {}) =>
       method === 'cdp.send' && params.method === 'Runtime.evaluate'
-        ? new Promise<never>(() => {})
+        ? answer()
         : request(method, params),
   );
+}
+
+async function claimOpenTab(fixture: RuntimeFixture): Promise<TabInfo> {
+  const [open] = (await fixture.runtime.dispatch('browser.user.openTabs', {
+    browserId: 'chrome',
+  })) as BrowserUserTabInfo[];
+  return (await fixture.runtime.dispatch('browser.user.claimTab', {
+    browserId: 'chrome',
+    tab: open,
+  })) as TabInfo;
 }
 
 function openDialog(
@@ -3095,7 +3249,10 @@ function openDialog(
 }
 
 async function runtimeFixture(
-  options: { unrelatedPage?: boolean } = {},
+  options: {
+    unrelatedPage?: boolean;
+    bridgeOverrides?: Partial<ChromeBridge>;
+  } = {},
 ): Promise<RuntimeFixture> {
   const locator = fakeLocator();
   const typingState = {
@@ -3254,6 +3411,7 @@ async function runtimeFixture(
       };
     },
     stop: vi.fn(async () => undefined),
+    ...options.bridgeOverrides,
   };
   const runtime = new PlaywrightRuntime({
     bridge,

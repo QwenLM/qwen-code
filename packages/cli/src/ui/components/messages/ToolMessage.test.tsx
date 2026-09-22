@@ -1912,6 +1912,34 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('- Step 2: Do another thing');
   });
 
+  it('renders structured shell results as their display text', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'shell_result',
+          version: 1,
+          text: 'Health check complete',
+          output: 'raw stdout must not replace display text',
+          directory: '/workspace',
+          exitCode: 0,
+          signal: null,
+          pid: 42,
+          error: null,
+          outcome: 'completed',
+          notices: [],
+          truncated: false,
+          outputFiles: [],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Health check complete');
+    expect(lastFrame()).not.toContain('shell_result');
+    expect(lastFrame()).not.toContain('raw stdout');
+  });
+
   it('renders structured question answers as their display text', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage

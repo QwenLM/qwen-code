@@ -114,6 +114,58 @@ function nativeHello() {
   };
 }
 
+/** A 1x1 JPEG: enough to satisfy the wire's SOI/EOI and base64 checks. */
+const JPEG = Buffer.from([
+  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01,
+  0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xd9,
+]).toString('base64');
+
+/** A page that reported it can be asked for a screen. */
+function sharingHello() {
+  return browserHello({
+    selfChecks: { audioInput: true, audioOutput: true, screenShare: true },
+  });
+}
+
+function screenResult(requestId: string) {
+  return {
+    type: 'host.visual_capture_result',
+    requestId,
+    success: true,
+    source: 'screen',
+    image: JPEG,
+    width: 1920,
+    height: 1080,
+    appName: 'Shared screen',
+    windowTitle: 'Terminal',
+    accessibilityText: '',
+    screenshotPath: '/captures/stored-1.jpg',
+  };
+}
+
+class FakeCaptureStore {
+  readonly stored: Buffer[] = [];
+  failWith?: Error;
+
+  store(image: Buffer): Promise<string> {
+    if (this.failWith) return Promise.reject(this.failWith);
+    this.stored.push(image);
+    return Promise.resolve(`/captures/stored-${this.stored.length}.jpg`);
+  }
+
+  dispose(): void {}
+}
+
+/** An active call whose coordinator session is the one allowed to ask. */
+function startSharedCall(value: LiveHostCoordinator) {
+  const call = value.start('resume');
+  value.setCoordinator(call.epoch, {
+    workspaceCwd: '/conversations/live-1',
+    sessionId: 'coordinator-1',
+  });
+  return call;
+}
+
 function connectBrowser(
   value: LiveHostCoordinator,
   hello: unknown = browserHello(),
@@ -315,7 +367,7 @@ describe('LiveHostCoordinator browser Host', () => {
     );
   });
 
-  it('refuses screen capture without asking the page', async () => {
+  it('refuses screen capture without asking a page that cannot share', async () => {
     const value = coordinator();
     const socket = connectBrowser(value);
     const call = value.start('resume');
@@ -330,6 +382,104 @@ describe('LiveHostCoordinator browser Host', () => {
     expect(socket.messages().map((message) => message.type)).not.toContain(
       'host.capture_visual',
     );
+  });
+
+  it('asks a sharing page for the screen and stores what it sends', async () => {
+    const store = new FakeCaptureStore();
+    const value = coordinator({ visualCaptures: store });
+    const socket = connectBrowser(value, sharingHello());
+    const capture = startSharedCall(value);
+
+    const pending = value.captureVisualContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_visual');
+    expect(request).toMatchObject({ epoch: capture.epoch, source: 'screen' });
+
+    socket.receive(screenResult((request as { requestId: string }).requestId));
+
+    await expect(pending).resolves.toEqual({
+      appName: 'Shared screen',
+      windowTitle: 'Terminal',
+      accessibilityText: '',
+      screenshotPath: '/captures/stored-1.jpg',
+    });
+    // The bytes the page sent, not a path it named.
+    expect(store.stored).toEqual([Buffer.from(JPEG, 'base64')]);
+  });
+
+  it('ignores a path a page claims and hands over the one it stored', async () => {
+    const store = new FakeCaptureStore();
+    const value = coordinator({ visualCaptures: store });
+    const socket = connectBrowser(value, sharingHello());
+    startSharedCall(value);
+
+    const pending = value.captureVisualContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_visual');
+    socket.receive({
+      ...screenResult((request as { requestId: string }).requestId),
+      screenshotPath: '/etc/passwd',
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      screenshotPath: '/captures/stored-1.jpg',
+    });
+  });
+
+  it('reports a page that answers with a failure', async () => {
+    const value = coordinator({ visualCaptures: new FakeCaptureStore() });
+    const socket = connectBrowser(value, sharingHello());
+    startSharedCall(value);
+
+    const pending = value.captureVisualContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_visual');
+    socket.receive({
+      type: 'host.visual_capture_result',
+      requestId: (request as { requestId: string }).requestId,
+      success: false,
+      error: 'The user is not sharing a screen.',
+    });
+
+    await expect(pending).rejects.toThrow('The user is not sharing a screen.');
+  });
+
+  it('reports a capture it could not store rather than a path that is not there', async () => {
+    const store = new FakeCaptureStore();
+    store.failWith = new Error('The Live capture directory is not private.');
+    const value = coordinator({ visualCaptures: store });
+    const socket = connectBrowser(value, sharingHello());
+    startSharedCall(value);
+
+    const pending = value.captureVisualContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_visual');
+    socket.receive(screenResult((request as { requestId: string }).requestId));
+
+    await expect(pending).rejects.toThrow(
+      'The shared screen could not be saved: The Live capture directory is not private.',
+    );
+  });
+
+  it('still requires a native Host to persist its own Appshot', async () => {
+    const value = coordinator({ visualCaptures: new FakeCaptureStore() });
+    const socket = connectNative(value);
+    startSharedCall(value);
+
+    const pending = value.captureVisualContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_visual');
+    const { screenshotPath: _dropped, ...withoutPath } = screenResult(
+      (request as { requestId: string }).requestId,
+    );
+    socket.receive(withoutPath);
+
+    await expect(pending).rejects.toThrow('did not persist');
   });
 
   it('keeps a shortcut change as a setting for the next native Host', async () => {

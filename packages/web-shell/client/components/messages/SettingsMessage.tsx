@@ -7,6 +7,7 @@ import {
 } from 'react';
 import {
   BotIcon,
+  CableIcon,
   DatabaseIcon,
   FlaskConicalIcon,
   PaletteIcon,
@@ -73,8 +74,8 @@ import { Switch } from '../ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 import {
-  isItemExcluded,
-  isSettingExcluded,
+  isItemVisible,
+  isSettingVisible,
   type WebShellSettingsOptions,
 } from '../../settings';
 
@@ -90,6 +91,8 @@ interface SettingsMessageProps {
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagement?: ModelManagementProps;
+  /** Browser-local remote computer catalog and connection controls. */
+  connections?: ReactNode;
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
@@ -261,6 +264,7 @@ type SettingsPageItem =
   | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
   | { type: 'local-control' }
   | { type: 'live' }
+  | { type: 'connections' }
   | { type: 'model-management' };
 
 interface SettingsPageCategory {
@@ -297,13 +301,15 @@ function CategoryIcon({ category }: { category: string }) {
           ? ShieldIcon
           : normalized.includes('model')
             ? BotIcon
-            : normalized.includes('daemon')
-              ? ServerIcon
-              : normalized.includes('advanced')
-                ? SlidersHorizontalIcon
-                : normalized.includes('experimental')
-                  ? FlaskConicalIcon
-                  : Settings2Icon;
+            : normalized.includes('connection')
+              ? CableIcon
+              : normalized.includes('daemon')
+                ? ServerIcon
+                : normalized.includes('advanced')
+                  ? SlidersHorizontalIcon
+                  : normalized.includes('experimental')
+                    ? FlaskConicalIcon
+                    : Settings2Icon;
   return <Icon data-icon="inline-start" aria-hidden="true" />;
 }
 
@@ -431,6 +437,7 @@ export function SettingsMessage({
   chatWidthMode,
   onChatWidthModeChange,
   modelManagement,
+  connections,
   embedded = false,
   initialCategory,
 }: SettingsMessageProps) {
@@ -526,12 +533,19 @@ export function SettingsMessage({
           items: [{ type: 'model-management' }],
         });
     }
+    if (connections) {
+      groups.push({
+        id: 'Connections',
+        label: formatSettingCategory('Connections', t),
+        items: [{ type: 'connections' }],
+      });
+    }
     return groups
       .map((group) => ({
         ...group,
         items: group.items.filter((item) => {
           if (item.type === 'setting') {
-            return !isSettingExcluded(item.setting.key, presentation);
+            return isSettingVisible(item.setting.key, presentation);
           }
           const id =
             item.type === 'local'
@@ -542,8 +556,10 @@ export function SettingsMessage({
                 ? 'builtin:live-setup'
                 : item.type === 'local-control'
                   ? 'builtin:local-control'
-                  : 'builtin:model-management';
-          return !isItemExcluded(id, presentation);
+                  : item.type === 'connections'
+                    ? 'builtin:connections'
+                    : 'builtin:model-management';
+          return isItemVisible(id, presentation);
         }),
       }))
       .filter((group) => group.items.length > 0);
@@ -553,6 +569,7 @@ export function SettingsMessage({
     t,
     hasNotifications,
     modelManagement,
+    connections,
     presentation,
     showInitialLoading,
   ]);
@@ -617,9 +634,14 @@ export function SettingsMessage({
     categories[0];
 
   const activeRows =
-    activeGroup?.items.filter((item) => item.type !== 'model-management') ?? [];
+    activeGroup?.items.filter(
+      (item) => item.type !== 'model-management' && item.type !== 'connections',
+    ) ?? [];
   const showModelManagement = activeGroup?.items.some(
     (item) => item.type === 'model-management',
+  );
+  const showConnections = activeGroup?.items.some(
+    (item) => item.type === 'connections',
   );
 
   const renderSelect = (
@@ -794,17 +816,19 @@ export function SettingsMessage({
           setScope(next as Scope);
         }}
       >
-        <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
-          <TabsList className="p-0">
-            <TabsTrigger value="workspace">
-              {t('settings.scope.workspace')}
-            </TabsTrigger>
-            <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
-          </TabsList>
-          {restartPending && (
-            <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
-          )}
-        </div>
+        {activeGroup?.id !== 'Connections' && (
+          <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
+            <TabsList className="p-0">
+              <TabsTrigger value="workspace">
+                {t('settings.scope.workspace')}
+              </TabsTrigger>
+              <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
+            </TabsList>
+            {restartPending && (
+              <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
+            )}
+          </div>
+        )}
 
         <TabsContent
           value={scope}
@@ -1048,6 +1072,7 @@ export function SettingsMessage({
                     <ModelManagementSection {...modelManagement} />
                   </div>
                 )}
+                {showConnections && connections}
               </div>
             )}
           </section>
