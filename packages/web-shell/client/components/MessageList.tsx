@@ -508,6 +508,21 @@ function updateCompactStreamingThinkingTail(
   return result;
 }
 
+function settleStaleStreamingMessage(message: Message): Message {
+  if (message.role === 'assistant' || message.role === 'thinking') {
+    return message.isStreaming ? { ...message, isStreaming: false } : message;
+  }
+  if (message.role !== 'tool_group' || !message.thoughts?.length)
+    return message;
+  let changed = false;
+  const thoughts = message.thoughts.map((thought) => {
+    if (!thought.isStreaming) return thought;
+    changed = true;
+    return { ...thought, isStreaming: false };
+  });
+  return changed ? { ...message, thoughts } : message;
+}
+
 export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
   return groupParallelAgentsBase(
     normalizeTerminalBackgroundAgentTools(sourceMessages),
@@ -3032,6 +3047,7 @@ export const MessageList = memo(
           sourceMessages: readonly Message[];
           compactMode: boolean;
           pendingApproval: PermissionRequest | null;
+          isResponding: boolean;
           value: Message[];
         }
       | undefined
@@ -3044,7 +3060,8 @@ export const MessageList = memo(
         streamingTailContentOnly &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
-        cached.pendingApproval === pendingApproval
+        cached.pendingApproval === pendingApproval &&
+        cached.isResponding === isResponding
       ) {
         if (
           tail?.role === 'assistant' &&
@@ -3064,14 +3081,25 @@ export const MessageList = memo(
           ? mergeCompactToolGroups(standaloneTools, pendingApproval)
           : standaloneTools;
       }
+      // A restored replay can retain a streaming block after the daemon has
+      // already reported the whole session idle. The session lifecycle is the
+      // authoritative backstop for rendered completion in that state.
+      if (!isResponding) value = value.map(settleStaleStreamingMessage);
       mergedMessagesCache.current = {
         sourceMessages: messages,
         compactMode,
         pendingApproval,
+        isResponding,
         value,
       };
       return value;
-    }, [compactMode, messages, pendingApproval, streamingTailContentOnly]);
+    }, [
+      compactMode,
+      isResponding,
+      messages,
+      pendingApproval,
+      streamingTailContentOnly,
+    ]);
     const displayItemsCache = useRef<
       | {
           sourceMessages: readonly Message[];
