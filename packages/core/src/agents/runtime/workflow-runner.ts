@@ -192,7 +192,8 @@ export class WorkflowRunHandle {
 const WORKFLOW_SCRIPT_SYNTAX_HINT =
   'Workflow scripts must be plain JavaScript — the usual causes are ' +
   'TypeScript syntax (type annotations, interfaces, generics) and ' +
-  'broken string quoting or escaping. Metadata must use literal values.';
+  'broken string quoting or escaping. Metadata must be the first ' +
+  'non-comment statement and use literal values.';
 
 /**
  * The script was refused before a run was created: it did not compile, or it

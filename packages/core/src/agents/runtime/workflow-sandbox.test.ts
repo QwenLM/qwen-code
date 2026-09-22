@@ -190,6 +190,39 @@ return x;`;
     expect(meta).toEqual({ name: 'real', description: 'real' });
   });
 
+  // R1-1 (PR #12245 review round 4): ECMAScript defines four line terminators.
+  // A `//` comment ends at any LineTerminator, not only \n. A header comment
+  // closed by CR, LS or PS would cause skipTrivia to over-consume live code
+  // and stop inside a template literal, re-opening the T33-class false match.
+  it.each([
+    [
+      'CR only',
+      `// header\rexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'LF only',
+      `// header\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'CR+LF',
+      `// header\r\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'LS only',
+      `// header\u2028export const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'PS only',
+      `// header\u2029export const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+    ],
+  ])(
+    'handles all four ECMAScript line terminators in leading comment (%s)',
+    (_case, src) => {
+      const { meta } = compileWorkflowScript(src);
+      expect(meta).toEqual({ name: 'real', description: 'd' });
+    },
+  );
+
   // Reported in PR #12245 review: the anchor must tolerate every
   // whitespace spelling Claude Code accepts (`export  const`,
   // `export const meta=`, tabs and newlines around `=`).

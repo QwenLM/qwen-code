@@ -52,13 +52,16 @@ export function stripExportMeta(source: string): string {
  * inside a template literal (the T33-class false match). A walk consumes
  * characters only from where it stands, so neither hazard is reachable.
  */
+const LINE_TERMINATORS = new Set(['\n', '\r', '\u2028', '\u2029']);
+const isLineTerminator = (ch: string) => LINE_TERMINATORS.has(ch);
+
 function skipTrivia(source: string, from: number): number {
   let i = from;
   for (;;) {
     while (i < source.length && /\s/.test(source[i]!)) i++;
     if (source.startsWith('//', i)) {
       i += 2;
-      while (i < source.length && source[i] !== '\n') i++;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
       continue;
     }
     if (source.startsWith('/*', i)) {
@@ -112,10 +115,11 @@ function findMetaBlockBounds(source: string): {
   while (i < source.length && depth > 0) {
     const ch = source[i];
     const next = source[i + 1];
-    // Single-line comment: skip to newline (T16).
+    // Single-line comment: skip to end-of-line (all four ECMAScript
+    // LineTerminators — T16 plus CR, LS, PS).
     if (ch === '/' && next === '/') {
       i += 2;
-      while (i < source.length && source[i] !== '\n') i++;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
       continue;
     }
     // Block comment: skip to closing `*/` (T16).
@@ -135,7 +139,7 @@ function findMetaBlockBounds(source: string): {
       while (
         i < source.length &&
         (inClass || source[i] !== '/') &&
-        source[i] !== '\n'
+        !isLineTerminator(source[i]!)
       ) {
         if (source[i] === '\\') i += 2;
         else if (source[i] === '[') {
