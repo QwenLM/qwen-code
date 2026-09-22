@@ -155,6 +155,9 @@ describe('CUA release workflow', () => {
       "throw 'A trusted Windows code-signing certificate is required",
     );
     expect(steps[signIndex].run).toContain("$signature.Status -ne 'Valid'");
+    expect(steps[signIndex].run).toContain(
+      "$_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3'",
+    );
     expect(steps[installIndex].run).toContain('npm install');
     expect(steps[installIndex].run).toContain('--ignore-scripts=false');
     expect(steps[installIndex].run).toContain(
