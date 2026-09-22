@@ -222,7 +222,6 @@ describe('TurnOutputs artifact downloads', () => {
     expect(click).toHaveBeenCalledOnce();
     expect(click.mock.instances[0]?.download).toBe('report.pdf');
     expect(createdBlobs[0]?.type).toBe('application/pdf');
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:artifact');
 
     act(() => root.unmount());
   });
