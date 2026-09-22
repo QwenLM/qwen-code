@@ -509,12 +509,52 @@ export class PeerMessaging {
       this.submitFn = fn;
       // A refused frame means the queue is full; leave it and the rest
       // buffered — `deliver` retries them, in order, on the next arrival.
-      while (this.buffered.length > 0) {
-        const head = this.buffered[0];
-        if (!head || !this.submit(head.frame, head.origin)) break;
-        this.buffered.shift();
-      }
+      this.flushBuffered();
     });
+  }
+
+  /**
+   * Hand the buffered frames over, oldest first, until one cannot be
+   * taken.
+   *
+   * A frame whose addressee this host no longer holds is dropped rather
+   * than retried: it cannot become deliverable again, and a head that can
+   * never be taken would stop every frame behind it — and, since the
+   * retry runs on each new arrival, would turn every later message to
+   * every session of this process away as though the queue were full.
+   * Its sender is told, as it is for a frame still buffered at close:
+   * this one reached no session either.
+   *
+   * Returns false when a frame is still waiting, which for a caller that
+   * must empty the buffer means the receiving queue is full.
+   */
+  private flushBuffered(): boolean {
+    while (this.buffered.length > 0) {
+      const head = this.buffered[0];
+      if (!head) break;
+      if (
+        this.hostSettlesUnread &&
+        head.frame.toSessionId !== undefined &&
+        this.canonicalName(head.frame.toSessionId) === undefined
+      ) {
+        this.buffered.shift();
+        debugLogger.debug(
+          `dropping buffered peer message ${head.frame.msgId}: session ${head.frame.toSessionId} is gone`,
+        );
+        this.reportExpired({
+          msgId: head.frame.msgId,
+          admissionKey: peerSenderKey(head.frame, head.origin),
+          ...(head.frame.from !== undefined ? { from: head.frame.from } : {}),
+          ...(head.frame.replyToken !== undefined
+            ? { replyToken: head.frame.replyToken }
+            : {}),
+        });
+        continue;
+      }
+      if (!this.submit(head.frame, head.origin)) return false;
+      this.buffered.shift();
+    }
+    return true;
   }
 
   /**
@@ -1006,15 +1046,6 @@ export class PeerMessaging {
   }
 
   /**
-   * The host's own name for the session `id` names, or undefined when it
-   * holds no such session.
-   *
-   * A host that cannot answer is answered for: a resolver throwing while
-   * a session tears down leaves the frame misaddressed, which tells the
-   * sender its directory is stale and lets it try again, rather than
-   * delivering to an address nobody confirmed.
-   */
-  /**
    * The same question the gate's membership test asks, without the
    * catch.
    *
@@ -1029,6 +1060,15 @@ export class PeerMessaging {
     return this.resolveSessionId?.(id);
   }
 
+  /**
+   * The host's own name for the session `id` names, or undefined when it
+   * holds no such session.
+   *
+   * A host that cannot answer is answered for: a resolver throwing while
+   * a session tears down leaves the frame misaddressed, which tells the
+   * sender its directory is stale and lets it try again, rather than
+   * delivering to an address nobody confirmed.
+   */
   private canonicalName(id: string): string | undefined {
     try {
       return this.resolveSessionId?.(id);
@@ -1053,12 +1093,8 @@ export class PeerMessaging {
     }
     if (this.buffered.length > 0) {
       this.withControllerValidity(() => {
-        while (this.buffered.length > 0) {
-          const head = this.buffered[0];
-          if (!head || !this.submit(head.frame, head.origin)) {
-            throw new Error('accepted-message backlog is full');
-          }
-          this.buffered.shift();
+        if (!this.flushBuffered()) {
+          throw new Error('accepted-message backlog is full');
         }
       });
     }

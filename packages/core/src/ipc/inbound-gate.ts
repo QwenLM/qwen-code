@@ -108,7 +108,8 @@ export type HoldCause =
   | 'mode-mismatch'
   | 'no-mode-asserted'
   | 'mode-unknown'
-  | 'policy-unreadable';
+  | 'policy-unreadable'
+  | 'policy-unrecognized';
 
 /**
  * Cap on parked messages, per addressed session.
@@ -588,8 +589,12 @@ export class InboundGate {
             configured,
           )}`,
         );
+        // A value that was read and is not one of the three: the
+        // session's standing answer until someone edits the setting,
+        // which is a different thing from a reader that could not answer
+        // this once.
         return this.hold(
-          'policy-unreadable',
+          'policy-unrecognized',
           this.policyScope(frame?.toSessionId),
         );
       }
@@ -798,9 +803,11 @@ export class InboundGate {
       // that threw — so the id is left unsettled, and the receipt says
       // the message ran out rather than telling its sender this session
       // declines what it sends: settling or refusing would stop a sender
-      // that the next attempt would have reached. The other three are the
+      // that the next attempt would have reached. The rest are the
       // session's own standing answer, which does not change while it
-      // runs.
+      // runs, and a value nobody recognises is one of them: it will read
+      // the same way until a person edits the setting, so a sender told
+      // to wait would retry against it forever.
       const momentary =
         decision.policy === 'hold' &&
         (decision.cause === 'mode-unknown' ||
@@ -1453,6 +1460,15 @@ export function describeHoldCause(
           return 'the agents.crossSessionInbound value in system settings could not be read';
         default:
           return 'your crossSessionInbound setting could not be read';
+      }
+    case 'policy-unrecognized':
+      switch (scope) {
+        case 'workspace':
+          return "the agents.crossSessionInbound value in this repository's workspace settings is not one this build knows";
+        case 'system':
+          return 'the agents.crossSessionInbound value in system settings is not one this build knows';
+        default:
+          return 'your crossSessionInbound setting is not one this build knows';
       }
     default: {
       const exhaustive: never = cause;

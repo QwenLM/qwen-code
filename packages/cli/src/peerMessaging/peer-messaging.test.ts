@@ -779,6 +779,67 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     });
   });
 
+  it('drops a buffered message whose session went away, and keeps going', async () => {
+    // A frame that arrived before there was anywhere to put it waits
+    // here, and the retry runs on every later arrival. One whose
+    // addressee has since gone can never be taken, so leaving it at the
+    // head would turn every later message to every session of this
+    // process away as though the queue were full.
+    const sender = await startSenderInbox();
+    const held = new Set(['session-a', 'session-b']);
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
+      resolveSessionId: (id) => (held.has(id) ? id : undefined),
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    // No submit function yet, so this one waits in the buffer.
+    const stranded = peerFrame({
+      content: 'for a session that is about to go',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await send(started.socketPath!, stranded);
+    await settle();
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'delivered',
+      origMsgId: stranded.msgId,
+    });
+
+    held.delete('session-a');
+    const submitted: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) submitted.push(delivery);
+      return true;
+    });
+
+    // The head was dropped rather than retried, and its sender told.
+    expect(submitted).toHaveLength(0);
+    await settle();
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'expired',
+      origMsgId: stranded.msgId,
+    });
+
+    // And the sibling session is still reachable.
+    const later = peerFrame({
+      content: 'for the session that is still here',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-b',
+    });
+    await send(started.socketPath!, later);
+    await settle();
+    expect(submitted.map((entry) => entry.msgId)).toEqual([later.msgId]);
+  });
+
   it('leaves a message a session took for its host to settle', async () => {
     // The sessions of a host read at their own pace, so the order
     // messages were handed over in says nothing about which are still

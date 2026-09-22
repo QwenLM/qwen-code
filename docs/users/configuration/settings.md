@@ -437,7 +437,9 @@ cannot be made. Every message that would have been held is turned away
 instead — not only under `agents.crossSessionInbound: hold`, but also
 the ones the unset default holds, such as a sender in another review
 class or one that asserted no class. A sender is told `refused` when the
-reason will not change while the session runs, and `expired` when it was
+reason will not change while the session runs — including a
+`crossSessionInbound` value this build does not recognise, which reads
+the same way until someone edits it — and `expired` when the reason was
 momentary, such as an approval mode that could not be read while the
 session tore down; the same message can land on a later attempt.
 Messages its gate accepts are delivered as usual, as a background turn

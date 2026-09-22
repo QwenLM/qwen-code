@@ -5144,6 +5144,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     config: Config,
     settings: LoadedSettings,
+    session: Session,
   ): void {
     // Each session's own settings decide: one process can host sessions
     // from more than one workspace, and a record exists to be addressed,
@@ -5156,6 +5157,12 @@ class QwenAgent implements Agent {
     this.startPeerMessaging();
     if (this.registeredSessions.has(sessionId)) return;
     this.registeredSessions.add(sessionId);
+    // A message a turn took and could not read is corrected as soon as
+    // that is known. Waiting for this session to leave would be waiting
+    // on the close its uncorrected message keeps from happening.
+    session.setUnreadPeerDeliveryReporter((delivery) => {
+      this.peerMessaging?.reportExpired(delivery);
+    });
     config.trackSessionRegistration(
       registerSession({
         sessionId,
@@ -15973,7 +15980,7 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
-      this.registerHostedSession(sessionId, config, settings);
+      this.registerHostedSession(sessionId, config, settings, session);
       // The session boots converged on the mode its settings derived; later
       // reloads track convergence from here. Restricted sessions derive
       // DEFAULT, mirroring the fold the reload loop applies to them.

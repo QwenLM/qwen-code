@@ -412,7 +412,7 @@ describe('policy scope', () => {
     h.setRawPolicy('maybe');
     h.gate.admit(frame({ fromMode: 'prompting' }));
     expect(h.gate.getHeld()[0]).toMatchObject({
-      cause: 'policy-unreadable',
+      cause: 'policy-unrecognized',
       policyScope: 'system',
     });
   });
@@ -488,11 +488,14 @@ describe('explicit setting', () => {
 describe('unreadable policy setting', () => {
   it('holds when the setting is a value we do not recognize', () => {
     // settings.json is user-edited and the CLI casts it straight through,
-    // so "Accept" or `true` reaches the gate verbatim.
+    // so "Accept" or `true` reaches the gate verbatim. Its own cause: the
+    // value was read and will read the same way until someone edits it,
+    // which is a different thing from a reader that could not answer
+    // this once.
     const h = harness({ mode: ApprovalMode.DEFAULT });
     h.setRawPolicy('Accept');
     expect(h.gate.admit(frame())).toBe('held');
-    expect(h.gate.getHeld()[0].cause).toBe('policy-unreadable');
+    expect(h.gate.getHeld()[0].cause).toBe('policy-unrecognized');
     expect(h.delivered).toHaveLength(0);
   });
 
@@ -1289,6 +1292,9 @@ describe('describeHoldCause', () => {
     expect(describeHoldCause('policy-unreadable')).toContain(
       'crossSessionInbound',
     );
+    expect(describeHoldCause('policy-unrecognized')).toContain(
+      'not one this build knows',
+    );
   });
 
   it('names who set the policy instead of blaming the user', () => {
@@ -1306,6 +1312,12 @@ describe('describeHoldCause', () => {
       'workspace settings',
     );
     expect(describeHoldCause('policy-unreadable', 'system')).toContain(
+      'system settings',
+    );
+    expect(describeHoldCause('policy-unrecognized', 'workspace')).toContain(
+      'workspace settings',
+    );
+    expect(describeHoldCause('policy-unrecognized', 'system')).toContain(
       'system settings',
     );
     // The parity causes have no scope to name; passing one is harmless.
@@ -1436,7 +1448,7 @@ describe('controller grants', () => {
     h.setRawPolicy('invalid');
     expect(h.gate.admit(frame(), viaController)).toBe('held');
     expect(h.gate.getHeld()[0]).toMatchObject({
-      cause: 'policy-unreadable',
+      cause: 'policy-unrecognized',
       controller: VOICE,
     });
   });
@@ -2563,6 +2575,15 @@ describe('a host that cannot present a held message', () => {
       hold: (h) => h.setMode(null),
       frame: () => frame({ fromMode: 'prompting' }),
       receipt: 'expired',
+    },
+    {
+      // Read, and not one of the three. It reads the same way on every
+      // later attempt, so a sender told to wait would retry against it
+      // for as long as the session runs.
+      name: 'a setting value it does not recognise',
+      hold: (h) => h.setRawPolicy('allow'),
+      frame: () => frame({ fromMode: 'prompting' }),
+      receipt: 'refused',
     },
     {
       name: 'a sender that asserted no mode',

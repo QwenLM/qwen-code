@@ -15518,6 +15518,29 @@ describe('Session', () => {
         expect(queuedKinds()).toHaveLength(0);
       });
 
+      it('can be asked again about a message it did not accept', async () => {
+        // `beginClose()` is reversible, so the session that answered
+        // "not accepted" can still be here when the sender tries again.
+        // Remembering the id would have the second answer contradict the
+        // first: the set is read as "already accepted, do not queue it
+        // again", and this one was never queued.
+        const internals = session as unknown as { closing: boolean };
+        mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+          async () => {
+            internals.closing = true;
+          },
+        );
+        await expect(queuePeer('msg-retried')).resolves.toEqual({
+          accepted: false,
+        });
+
+        internals.closing = false;
+        await expect(queuePeer('msg-retried')).resolves.toEqual({
+          accepted: true,
+        });
+        expect(queuedKinds()).toEqual(['peer']);
+      });
+
       it('hands back what it never read, once', async () => {
         await queuePeer('msg-unread-1');
         await queuePeer('msg-unread-2');
@@ -15583,10 +15606,17 @@ describe('Session', () => {
         });
       });
 
-      it('still owes a sender a message the turn dropped before sending it', async () => {
+      it('tells a sender at once when the turn dropped its message', async () => {
         // The session token limit stops the send, and that bail keeps
         // only tool results in history — a message is text, so nothing
         // will ever read it, while its sender holds a `delivered`.
+        // Waiting for the sweep at close would be waiting on a close this
+        // message is itself holding up: until it is settled it reports
+        // itself as work in progress and spends a place in the allowance.
+        const unread: Array<{ msgId: string }> = [];
+        session.setUnreadPeerDeliveryReporter((delivery) =>
+          unread.push(delivery),
+        );
         await letTheQueueDrain();
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockLlmClient.tryCompressChat.mockResolvedValue({
@@ -15597,13 +15627,19 @@ describe('Session', () => {
 
         await queuePeer('msg-dropped');
 
-        // Off the queue, which on its own says nothing about who read it.
-        await vi.waitFor(() => expect(queuedKinds()).toEqual([]));
-        expect(
-          session.takeUnconsumedPeerDeliveries().map((entry) => entry.msgId),
-        ).toEqual(['msg-dropped']);
-        // Taken once, here as anywhere.
+        await vi.waitFor(() =>
+          expect(unread.map((entry) => entry.msgId)).toEqual(['msg-dropped']),
+        );
+        expect(queuedKinds()).toEqual([]);
+        // Settled, so nothing is left for the sweep to hand over twice.
         expect(session.takeUnconsumedPeerDeliveries()).toEqual([]);
+        // And the session is idle again, with its allowance back.
+        expect(
+          session
+            .collectActiveWorkHolds()
+            .filter((hold) => hold.id === 'msg-dropped'),
+        ).toEqual([]);
+        expect(session.hasRoomForPeerMessage()).toBe(true);
       });
 
       it('waits in one place when the host turns its turn away', async () => {

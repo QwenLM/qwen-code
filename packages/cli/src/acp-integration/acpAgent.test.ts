@@ -1109,6 +1109,7 @@ vi.mock('./session/Session.js', () => {
   // cross-session lookup, and for what it never read when it leaves.
   SessionMock.prototype.isOpenForPeerMessages = () => true;
   SessionMock.prototype.takeUnconsumedPeerDeliveries = () => [];
+  SessionMock.prototype.setUnreadPeerDeliveryReporter = () => {};
   return {
     Session: SessionMock,
     // Awaited by every session creation before the session is published.
@@ -2456,6 +2457,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         hasRoomForPeerMessage: ReturnType<typeof vi.fn>;
         getConfig: ReturnType<typeof vi.fn>;
         takeUnconsumedPeerDeliveries: ReturnType<typeof vi.fn>;
+        setUnreadPeerDeliveryReporter: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         buildAvailableCommandsSnapshot: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
@@ -5246,6 +5248,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           hasRoomForPeerMessage: vi.fn().mockReturnValue(true),
           enqueuePeerMessage: vi.fn().mockResolvedValue({ accepted: true }),
           takeUnconsumedPeerDeliveries: vi.fn().mockReturnValue([]),
+          setUnreadPeerDeliveryReporter: vi.fn(),
           getWorkflowHistory: vi.fn().mockReturnValue(workflowHistory),
           refreshWorkflowHistory: vi.fn(() =>
             mockListWorkflowSnapshots(createdConfig),
@@ -5999,6 +6002,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(reportExpired).toHaveBeenCalledTimes(80);
       expect(peakInFlight).toBeLessThanOrEqual(32);
       expect(close).toHaveBeenCalled();
+    });
+
+    it('gives a session a way to settle what a turn dropped', async () => {
+      // A message a turn took and could not read cannot wait for the
+      // sweep at close: until it is settled it reports itself as work in
+      // progress, and the close that would sweep it waits for the
+      // session to be idle.
+      const { agentPromise, reportExpired } =
+        await startWithInbox('hosted-drops');
+      const session = lastSessionMock!;
+      const report = session.setUnreadPeerDeliveryReporter.mock
+        .calls[0]![0] as (delivery: ReturnType<typeof peerDelivery>) => void;
+
+      const dropped = peerDelivery('hosted-drops', 'msg-dropped');
+      report(dropped);
+
+      expect(reportExpired).toHaveBeenCalledWith(dropped);
+
+      mockConnectionState.resolve();
+      await agentPromise;
     });
 
     it('settles one session as it leaves, while the process carries on', async () => {

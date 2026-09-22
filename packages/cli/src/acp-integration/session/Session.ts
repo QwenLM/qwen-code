@@ -2188,6 +2188,16 @@ export class Session implements SessionContext {
     PeerQueuedDelivery
   >();
   /**
+   * How this session tells the host about a message it took and will
+   * never read, at the moment that becomes true rather than at close.
+   *
+   * The host owns the transport and is the only party that can answer a
+   * sender. Set by the host for a session it makes addressable.
+   */
+  private reportUnreadPeerDelivery:
+    | ((delivery: PeerQueuedDelivery) => void)
+    | undefined;
+  /**
    * Notifications lost to queue overflow since the last drain. Reported as one
    * summary on the next notification turn rather than per loss, so an overflow
    * burst cannot itself flood the session.
@@ -10797,6 +10807,20 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Register how to tell a sender its message went unread.
+   *
+   * Called once by the host that made this session addressable. Without
+   * it a stranded message waits for the sweep at close, which is too
+   * late: until then it counts against the peer allowance and reports
+   * itself as work in progress.
+   */
+  setUnreadPeerDeliveryReporter(
+    report: (delivery: PeerQueuedDelivery) => void,
+  ): void {
+    this.reportUnreadPeerDelivery = report;
+  }
+
+  /**
    * Remove the peer messages nothing has read and hand back what the
    * host needs to correct their receipts.
    *
@@ -10891,7 +10915,14 @@ export class Session implements SessionContext {
       // round: its sender is waiting on a receipt, and nothing will read
       // a message queued into a session that is going. Say so, so the
       // sender is not left holding a `delivered` nobody earned.
-      return peerDelivery === undefined;
+      if (peerDelivery === undefined) return true;
+      // And stop remembering the id, or the answer to this message and
+      // the answer to a later one carrying it would disagree: the set
+      // above is read as "already accepted, do not queue it again", and
+      // this one was not accepted. `beginClose()` is reversible, so a
+      // session that answered this can still be here to be asked.
+      this.persistedBackgroundNotificationTaskIds.delete(item.taskId);
+      return false;
     }
     this.#enqueueBackgroundNotification({
       ...item,
@@ -10981,15 +11012,32 @@ export class Session implements SessionContext {
    * either way its sender's `delivered` receipt is true and the host has
    * nothing to correct.
    */
+  #peerDeliveryWentUnread(item: QueuedBackgroundNotification): void {
+    if (item.kind !== 'peer') return;
+    const delivery = this.inFlightPeerDeliveries.get(item.taskId);
+    this.#forgetPeerDelivery(item.taskId);
+    // Now, not at the sweep this session's close would run. A message
+    // nobody will read is not work in progress: left on the in-flight
+    // list it reports itself as a hold, which keeps this session from
+    // ever being idle — and an `onlyIfUnheld` close is what that sweep
+    // waits for, so the correction would be waiting on the hold that the
+    // missing correction is producing.
+    if (delivery) this.reportUnreadPeerDelivery?.(delivery);
+  }
+
   #peerDeliveryWasRead(item: QueuedBackgroundNotification): void {
     if (item.kind !== 'peer') return;
-    this.inFlightPeerDeliveries.delete(item.taskId);
+    this.#forgetPeerDelivery(item.taskId);
+  }
+
+  #forgetPeerDelivery(taskId: string): void {
+    this.inFlightPeerDeliveries.delete(taskId);
     // And the session stops remembering the id. What keeps a message
     // from arriving twice is the transport's own record of what it has
     // settled; this set only has to answer for one that is still on its
     // way through here, and peer ids are the one kind of id an outside
     // party can mint without limit.
-    this.persistedBackgroundNotificationTaskIds.delete(item.taskId);
+    this.persistedBackgroundNotificationTaskIds.delete(taskId);
   }
 
   #deferBackgroundAdmission(item: QueuedBackgroundNotification): void {
@@ -11437,11 +11485,12 @@ export class Session implements SessionContext {
               this.todoStopGuard.suspend();
               // Only a cancelled send keeps the whole message in history;
               // any other stop reason drops everything that is not a tool
-              // result, which is all a peer message is. Leaving it on the
-              // in-flight list is what earns its sender a correction.
+              // result, which is all a peer message is — so nothing will
+              // ever read it, and its sender is told at once.
               const keptInHistory = sendResult.stopReason === 'cancelled';
               this.#preserveUnsentMessageHistory(nextMessage, keptInHistory);
               if (keptInHistory) this.#peerDeliveryWasRead(item);
+              else this.#peerDeliveryWentUnread(item);
               await finishBackgroundNotificationTurn(
                 sendResult.stopReason,
                 true,
