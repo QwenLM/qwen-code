@@ -93,47 +93,11 @@ jobs:
           node-version-file: '.nvmrc'
           package-manager-cache: false
 
-      # The v0.24.4 release (run 35746011401, #12480) lost its macos-15-intel
-      # leg to a registry connect timeout while corepack downloaded pnpm
-      # itself, and a plain re-run passed. Fetch pnpm on its own, with the
-      # bounded retry e2e.yml uses, so the store cache below (which runs
-      # `corepack pnpm store path`) and the install find it already on disk.
-      # The store cache only covers dependencies: it saves most registry
-      # traffic on a hit, but a miss still downloads, so the install keeps
-      # its own retry. A deterministically broken tree fails all attempts.
-      - name: 'Fetch pnpm'
-        shell: 'bash'
-        run: |-
-          for attempt in 1 2 3; do
-            corepack install && break
-            if [[ "${attempt}" == "3" ]]; then
-              exit 1
-            fi
-            echo "::warning::corepack install failed (attempt ${attempt}), retrying."
-            sleep $((attempt * 15))
-          done
-
-      - name: 'Cache pnpm store'
-        uses: './.github/actions/pnpm-store-cache'
-
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-        # The loop is bash; windows-latest would otherwise run it under pwsh.
-        shell: 'bash'
         run: |-
-          for attempt in 1 2 3; do
-            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
-              if [[ "${attempt}" != "1" ]]; then
-                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it."
-              fi
-              break
-            fi
-            if [[ "${attempt}" == "3" ]]; then
-              exit 1
-            fi
-            sleep $((attempt * 15))
-          done
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Verify published export renderer'
         # An exported transcript loads its renderer from unpkg, pinned to this
@@ -282,40 +246,11 @@ jobs:
           node-version-file: '.nvmrc'
           package-manager-cache: false
 
-      # Same pnpm fetch, store cache and retries as the prepare job (#12480).
-      - name: 'Fetch pnpm'
-        shell: 'bash'
-        run: |-
-          for attempt in 1 2 3; do
-            corepack install && break
-            if [[ "${attempt}" == "3" ]]; then
-              exit 1
-            fi
-            echo "::warning::corepack install failed (attempt ${attempt}), retrying."
-            sleep $((attempt * 15))
-          done
-
-      - name: 'Cache pnpm store'
-        uses: './.github/actions/pnpm-store-cache'
-
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-        # The loop is bash; windows-latest would otherwise run it under pwsh.
-        shell: 'bash'
         run: |-
-          for attempt in 1 2 3; do
-            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
-              if [[ "${attempt}" != "1" ]]; then
-                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it."
-              fi
-              break
-            fi
-            if [[ "${attempt}" == "3" ]]; then
-              exit 1
-            fi
-            sleep $((attempt * 15))
-          done
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Install VSCE'
         run: |-
