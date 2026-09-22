@@ -5768,7 +5768,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
 
     it('hands an accepted message to the session it names', async () => {
-      const { agent, agentPromise, submit } = await startWithInbox('hosted-in');
+      const { agentPromise, submit } = await startWithInbox('hosted-in');
       const session = lastSessionMock!;
 
       expect(
@@ -5794,7 +5794,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // Returning false leaves the id unsettled, so the sender is told
       // the queue is full and can try again — the honest answer when the
       // addressee is gone or has no room.
-      const { agent, agentPromise, submit } = await startWithInbox('hosted-in');
+      const { agentPromise, submit } = await startWithInbox('hosted-in');
       const session = lastSessionMock!;
 
       expect(submit('<peer-message />', 'display', undefined)).toBe(false);
@@ -5813,7 +5813,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
 
     it('corrects the receipt when the session could not take the message', async () => {
-      const { agent, agentPromise, submit, reportExpired } =
+      const { agentPromise, submit, reportExpired } =
         await startWithInbox('hosted-in');
       const session = lastSessionMock!;
       session.enqueuePeerMessage.mockResolvedValue({ accepted: false });
@@ -5828,7 +5828,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
 
     it('corrects the receipt when queuing the message throws', async () => {
-      const { agent, agentPromise, submit, reportExpired } =
+      const { agentPromise, submit, reportExpired } =
         await startWithInbox('hosted-in');
       const session = lastSessionMock!;
       session.enqueuePeerMessage.mockRejectedValue(new Error('no room at all'));
