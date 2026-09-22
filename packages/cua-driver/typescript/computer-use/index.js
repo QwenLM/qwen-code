@@ -858,14 +858,13 @@ export class ComputerUse {
   }
 
   async listApps(options = {}) {
-    let platform;
     try {
-      platform = await this.getPlatform({ signal: options.signal });
+      await this.getPlatform({ signal: options.signal });
     } catch (error) {
       if (error?.code !== "driver_platform_unavailable") throw error;
     }
     const apps = await this.#listAppsDetailed(options);
-    return platform === "macos" ? apps.map(compactApp) : apps;
+    return apps.map(compactApp);
   }
 
   async getApp(selector, options = {}) {

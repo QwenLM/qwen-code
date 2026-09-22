@@ -1,6 +1,8 @@
 import { ComputerUseError } from "./index.js";
 import { realpathSync } from "node:fs";
-import { isAbsolute, normalize } from "node:path";
+import { isAbsolute, normalize, win32 } from "node:path";
+
+const appQueues = new WeakMap();
 
 const MANAGED_OPTIONS = new Set([
   "pid", "windowId", "window_id", "elementToken", "element_token",
@@ -19,7 +21,11 @@ function optionsForApp(options = {}) {
 }
 
 function appPath(value) {
-  if (typeof value !== "string" || !isAbsolute(value)) return undefined;
+  if (typeof value !== "string") return undefined;
+  if (win32.isAbsolute(value) && !value.startsWith("/")) {
+    return win32.normalize(value).replace(/\\$/, "").toLocaleLowerCase();
+  }
+  if (!isAbsolute(value)) return undefined;
   try { return realpathSync(value); } catch { return normalize(value).replace(/\/$/, ""); }
 }
 
@@ -72,7 +78,6 @@ export class ComputerUseApp {
   #observation;
   #elements = new Map();
   #generation;
-  #queue = Promise.resolve();
 
   constructor(computer, app, launch, listApps) {
     this.#launch = launch;
@@ -85,8 +90,8 @@ export class ComputerUseApp {
   }
 
   #serial(operation) {
-    const next = this.#queue.then(operation);
-    this.#queue = next.catch(() => undefined);
+    const next = (appQueues.get(this.#computer) ?? Promise.resolve()).then(operation);
+    appQueues.set(this.#computer, next.catch(() => undefined));
     return next;
   }
 

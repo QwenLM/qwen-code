@@ -1016,6 +1016,7 @@ pub fn with_x11_foreground<T>(
     let retry_at = started + timeout / 2;
     let mut retried = false;
     let target = xid as x11::xlib::Window;
+    let target_owner = x11_transient_owner(display, target);
     let restore_focus = prior != Some(target) || !x11_focus_is_within(display, target);
     prepare_x11_focus(display, target);
     let focused = loop {
@@ -1045,24 +1046,43 @@ pub fn with_x11_foreground<T>(
         ))
     };
 
-    // Undo temporary focus preparation, not intentional widget/dialog focus
-    // changes from an action in the already focused target.
-    if restore_focus {
-        if let Some(p) = prior {
-            if ewmh_active_window(display) != Some(p) {
-                ewmh_activate_window(display, p, xid as x11::xlib::Window);
-                // Let the window manager finish restoring its active window
-                // before restoring widget-local focus, which it can overwrite.
-                let restore_deadline = std::time::Instant::now() + timeout;
-                while ewmh_active_window(display) != Some(p) || !x11_focus_is_within(display, p) {
-                    if std::time::Instant::now() >= restore_deadline {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
+    let restored = (|| -> Result<()> {
+        if !restore_focus {
+            return Ok(());
         }
-        if prior_core_focus != 0 {
+        let Some(prior) = prior else {
+            return Ok(());
+        };
+        let current = ewmh_active_window(display);
+        let owned = current.is_some_and(|active| {
+            active == target
+                || Some(active) == target_owner
+                || x11_transient_reaches(display, active, target)
+        });
+        if !owned {
+            return Ok(());
+        }
+        ewmh_activate_window(display, prior, target);
+        let restore_deadline = std::time::Instant::now() + timeout;
+        loop {
+            let active = ewmh_active_window(display);
+            if active == Some(prior) && x11_focus_is_within(display, prior) {
+                break;
+            }
+            if active.is_some_and(|active| {
+                active != prior
+                    && active != target
+                    && Some(active) != target_owner
+                    && !x11_transient_reaches(display, active, target)
+            }) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= restore_deadline {
+                bail!("focus_restore_failed: input may have been dispatched; observe the app before retrying");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if prior_core_focus != 0 && ewmh_active_window(display) == Some(prior) {
             unsafe {
                 let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
                 x11::xlib::XSetInputFocus(
@@ -1075,11 +1095,43 @@ pub fn with_x11_foreground<T>(
                 x11::xlib::XSetErrorHandler(previous_handler);
             }
         }
-    }
+        Ok(())
+    })();
     unsafe {
         x11::xlib::XCloseDisplay(display);
     }
-    result
+    result.and_then(|value| restored.map(|()| value))
+}
+
+fn x11_transient_owner(
+    display: *mut x11::xlib::Display,
+    window: x11::xlib::Window,
+) -> Option<x11::xlib::Window> {
+    unsafe {
+        let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+        let mut owner = 0;
+        let status = x11::xlib::XGetTransientForHint(display, window, &mut owner);
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+        (status != 0 && owner != 0 && owner != window).then_some(owner)
+    }
+}
+
+fn x11_transient_reaches(
+    display: *mut x11::xlib::Display,
+    mut window: x11::xlib::Window,
+    target: x11::xlib::Window,
+) -> bool {
+    for _ in 0..32 {
+        let Some(owner) = x11_transient_owner(display, window) else {
+            return false;
+        };
+        if owner == target {
+            return true;
+        }
+        window = owner;
+    }
+    false
 }
 
 fn x11_focus_is_within(display: *mut x11::xlib::Display, target: x11::xlib::Window) -> bool {

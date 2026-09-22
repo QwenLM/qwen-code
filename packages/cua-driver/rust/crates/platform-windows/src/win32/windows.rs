@@ -85,6 +85,26 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
     merged
 }
 
+pub(crate) fn resolve_app_window(windows: &[WindowInfo]) -> Option<u64> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetLastActivePopup};
+    let visible: Vec<_> = windows.iter().filter(|w| w.is_on_screen).collect();
+    let foreground = unsafe { GetForegroundWindow() }.0 as usize as u64;
+    let selected = visible
+        .iter()
+        .find(|w| w.hwnd == foreground)
+        .or_else(|| visible.first())?;
+    let popup = unsafe { GetLastActivePopup(HWND(selected.hwnd as *mut _)) }.0 as usize as u64;
+    if visible
+        .iter()
+        .any(|w| w.hwnd == popup && w.pid == selected.pid)
+        && (popup == selected.hwnd
+            || owner_chain_reaches_target(selected.hwnd, popup, window_owner_handle))
+    {
+        return Some(popup);
+    }
+    Some(selected.hwnd)
+}
+
 /// Resolve one exact Win32 window without entering the global UIA tree.
 ///
 /// Exact `(pid, HWND)` callers already have a native identity anchor. Avoiding
@@ -235,6 +255,34 @@ pub(crate) fn foreground_matches_target_or_owned_window(
         ownership_reaches_target,
         actual_is_prior_owner: target.owner == Some(actual),
     })
+}
+
+pub(crate) fn restore_input_foreground(prior: u64, target: ForegroundTarget) -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsWindow, SetForegroundWindow,
+    };
+    if prior == 0 || prior == target.hwnd || !unsafe { IsWindow(HWND(prior as *mut _)) }.as_bool() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut requested = false;
+    loop {
+        let current = unsafe { GetForegroundWindow() }.0 as usize as u64;
+        if current == prior || !foreground_matches_target_or_owned_window(target, current) {
+            // A foreign focus change belongs to the user. Never wait for the
+            // target to return and steal focus from a later operation.
+            return Ok(());
+        }
+        if !requested {
+            let _ = unsafe { SetForegroundWindow(HWND(prior as *mut _)) };
+            requested = true;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("focus_restore_failed: input may have been dispatched; observe the app before retrying");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn window_info_by_handle(hwnd: u64) -> Option<WindowInfo> {

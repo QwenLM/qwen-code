@@ -63,7 +63,9 @@ pub fn requested_format_resync_reason(
 ) -> Option<FullResyncReason> {
     if request.serializer_version != ACCESSIBILITY_SERIALIZER_VERSION {
         Some(FullResyncReason::SerializerChanged)
-    } else if request.projection_version != ACCESSIBILITY_PROJECTION_VERSION {
+    } else if request.projection_version != ACCESSIBILITY_PROJECTION_VERSION
+        && request.projection_version != APP_ACCESSIBILITY_PROJECTION_VERSION
+    {
         Some(FullResyncReason::ProjectionChanged)
     } else {
         None
