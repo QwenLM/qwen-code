@@ -614,7 +614,7 @@ export class BackgroundTaskRegistry {
   }
 
   /** Configured per-model cap for `model`, or undefined when none applies. */
-  private resolvePerModelCap(model?: string): number | undefined {
+  resolvePerModelCap(model?: string): number | undefined {
     if (model === undefined) {
       return undefined;
     }

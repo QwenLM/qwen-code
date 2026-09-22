@@ -160,6 +160,7 @@ describe('AgentTool', () => {
     const stubRegistry = {
       assertCanStartBackgroundAgent: vi.fn(),
       canStartBackgroundAgent: vi.fn().mockReturnValue(true),
+      resolvePerModelCap: vi.fn().mockReturnValue(undefined),
       tryReserveBackgroundSlot: vi
         .fn()
         .mockReturnValue({ id: Symbol('background-slot') }),
@@ -7032,6 +7033,7 @@ describe('AgentTool', () => {
     let mockRegistry: {
       assertCanStartBackgroundAgent: ReturnType<typeof vi.fn>;
       canStartBackgroundAgent: ReturnType<typeof vi.fn>;
+      resolvePerModelCap: ReturnType<typeof vi.fn>;
       tryReserveBackgroundSlot: ReturnType<typeof vi.fn>;
       waitForBackgroundSlot: ReturnType<typeof vi.fn>;
       releaseBackgroundSlot: ReturnType<typeof vi.fn>;
@@ -7086,6 +7088,7 @@ describe('AgentTool', () => {
       mockRegistry = {
         assertCanStartBackgroundAgent: vi.fn(),
         canStartBackgroundAgent: vi.fn().mockReturnValue(true),
+        resolvePerModelCap: vi.fn().mockReturnValue(undefined),
         tryReserveBackgroundSlot: vi
           .fn()
           .mockReturnValue({ id: Symbol('background-slot') }),
@@ -8467,6 +8470,43 @@ describe('AgentTool', () => {
         expect.objectContaining({ isBackgrounded: false }),
       );
       expect(mockRegistry.waitForBackgroundSlot).not.toHaveBeenCalled();
+    });
+
+    it('reserves and releases a per-model slot for a top-level foreground launch when a per-model cap is configured', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      // A per-model cap is configured for the resolved model ('parent-model').
+      mockRegistry.resolvePerModelCap.mockReturnValue(1);
+      mockRegistry.tryReserveBackgroundSlot.mockReturnValue({
+        id: Symbol('background-slot'),
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      await invocation.execute();
+
+      // The foreground launch now consults the per-model cap and reserves a
+      // slot against the resolved model instead of bypassing the cap.
+      expect(mockRegistry.resolvePerModelCap).toHaveBeenCalledWith(
+        'parent-model',
+      );
+      expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+        'parent-model',
+        null,
+      );
+      // The reservation is released when the foreground call returns, so the
+      // slot is not leaked.
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalled();
     });
 
     it('routes owned monitor notifications and cleanup for foreground agents', async () => {

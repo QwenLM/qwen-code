@@ -3076,6 +3076,57 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           },
           updateOutput,
         );
+      } else if (isTopLevelSession() && subagentConfig.executor === undefined) {
+        // Foreground top-level sub-agents previously bypassed the per-model
+        // concurrency cap entirely: the cap lived only in the background
+        // reservation path, so a skill (e.g. /batch) or any single message
+        // issuing multiple Agent calls could fan out N concurrent foreground
+        // agents on a low-capacity model and exhaust its VRAM. Reserve the
+        // same per-model slot here so `agents.maxParallelAgentsByModel`
+        // bounds foreground launches too. The reservation is released by the
+        // existing foreground `finally` / outer `catch` via
+        // releaseBackgroundSlotReservation(). Gated on a configured per-model
+        // cap so models without one keep their current uncapped foreground
+        // behavior, and on top-level launches so a nested agent never waits on
+        // a slot its own parent is holding.
+        const resolvedSubagentModel = resolveModelId(
+          subagentConfig.model,
+          buildModelIdContext(this.config),
+        );
+        subagentModelId =
+          resolvedSubagentModel?.modelId ?? this.config.getModel();
+        const fgRegistry = this.config.getBackgroundTaskRegistry();
+        if (fgRegistry.resolvePerModelCap(subagentModelId) !== undefined) {
+          backgroundSlotReservation = fgRegistry.tryReserveBackgroundSlot(
+            subagentModelId,
+            backgroundOwnerId,
+          );
+          if (!backgroundSlotReservation) {
+            const queuedCount = fgRegistry.getQueuedCount();
+            const queueText =
+              queuedCount === 0
+                ? 'no agents ahead'
+                : queuedCount === 1
+                  ? '1 already queued'
+                  : `${queuedCount} already queued`;
+            this.updateDisplay(
+              {
+                status: 'running' as const,
+                terminateReason: `Waiting for a model slot (${queueText}).`,
+              },
+              updateOutput,
+            );
+            backgroundSlotReservation = await fgRegistry.waitForBackgroundSlot(
+              signal,
+              subagentModelId,
+              backgroundOwnerId,
+            );
+            this.updateDisplay(
+              { status: 'running' as const, terminateReason: undefined },
+              updateOutput,
+            );
+          }
+        }
       }
 
       // ── Optional worktree isolation (Phase 1: provision) ──────────
