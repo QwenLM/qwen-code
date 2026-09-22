@@ -641,10 +641,11 @@ function detectCompressedPrefixLength(
 }
 
 /**
- * Openings produced before attachment entries carried a structural sentinel.
- * These are the full producer templates, not the bare tags: a real first
- * prompt after an attachment-less compress can start with `<background-tasks>`
- * or `<plan-mode-active>` and must still count as a turn.
+ * Frozen historical openings — never sync these to a producer change;
+ * current output is recognized by the sentinel. Matching is `startsWith`,
+ * not equality: producers emit longer strings. A real first prompt that
+ * only opens with `<background-tasks>` or `<plan-mode-active>` must still
+ * count as a turn, so these stay the historical openings, not the bare tags.
  */
 const LEGACY_POST_COMPACT_ATTACHMENT_PREFIXES = [
   'The following files were recently accessed before context was compacted.',

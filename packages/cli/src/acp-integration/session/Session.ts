@@ -4742,13 +4742,6 @@ export class Session implements SessionContext {
     return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
 
-  getRewindableUserTurnCount(): number {
-    return countApiUserPrompts(
-      this.captureHistorySnapshot(),
-      ACP_API_USER_PROMPT_OPTIONS,
-    );
-  }
-
   /**
    * Absolute file-history snapshot indexes a client may rewind to.
    *

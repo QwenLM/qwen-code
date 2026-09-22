@@ -13,6 +13,9 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createUserContent, type Content } from '@google/genai';
 import {
   buildAddedMcpToolsReminder,
@@ -38,6 +41,11 @@ import {
 } from './environmentContext.js';
 import { prependToFirstTextPart } from '../utils/partUtils.js';
 import { POST_COMPACT_ATTACHMENT_SENTINEL } from '../services/post-compact-attachment-mark.js';
+import {
+  buildFileRestorationBlocks,
+  buildImageRestorationBlock,
+  buildStateReminderParts,
+} from '../services/postCompactAttachments.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -923,6 +931,131 @@ describe('getStartupContextLength', () => {
     expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
       2,
     );
+  });
+
+  // Hand-typed openings. A producer reword that also updates the legacy
+  // list leaves a live-producer assertion green and these red.
+  it.each([
+    [
+      'file references',
+      'The following files were recently accessed before context was compacted.',
+    ],
+    [
+      'embedded file',
+      'Recently accessed file (full current content embedded):',
+    ],
+    [
+      'visual snapshots',
+      'Recent visual snapshots preserved from before context was compacted',
+    ],
+    ['plan mode', '<plan-mode-active>\nYou are currently in PLAN mode.'],
+    [
+      'background tasks',
+      '<background-tasks>\nThe following background subagent tasks were active at compaction.',
+    ],
+  ] as const)(
+    'counts the frozen %s opening as a compressed attachment',
+    (_label, opening) => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        { role: 'user', parts: [{ text: opening }] },
+      ];
+      expect(
+        getStartupContextLength(history, { includeCompressed: true }),
+      ).toBe(3);
+    },
+  );
+
+  it('counts unmarked producer attachments by their frozen openings', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'legacy-attach-'));
+    const compressedLength = (text: string, withFunctionCall = false) => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: text.replaceAll(POST_COMPACT_ATTACHMENT_SENTINEL, ''),
+            },
+          ],
+        },
+      ];
+      if (withFunctionCall) {
+        history.push({
+          role: 'model',
+          parts: [{ functionCall: { name: 'fn', args: {} } }],
+        });
+      }
+      return getStartupContextLength(history, { includeCompressed: true });
+    };
+    const textOf = (content: Content | null | undefined) => {
+      const text = content?.parts?.find(
+        (part) => typeof part.text === 'string',
+      )?.text;
+      if (typeof text !== 'string') {
+        throw new Error('attachment producer emitted no text');
+      }
+      return text;
+    };
+
+    try {
+      const small = join(dir, 'small.ts');
+      const large = join(dir, 'large.ts');
+      writeFileSync(small, 'export const x = 1;\n');
+      writeFileSync(large, 'x'.repeat(30_000));
+      const fileBlocks = await buildFileRestorationBlocks([large, small]);
+      const image = buildImageRestorationBlock([
+        {
+          part: { inlineData: { mimeType: 'image/png', data: 'aaaa' } },
+          turnIndex: 1,
+        },
+      ]);
+      const plan = buildStateReminderParts({ planModeActive: true });
+      const tasks = buildStateReminderParts({
+        runningSubagents: [
+          {
+            id: 'agent-1',
+            description: 'still running',
+            status: 'running',
+            startTime: 1,
+          },
+        ],
+      });
+      expect(fileBlocks).toHaveLength(2);
+      expect(image).not.toBeNull();
+      expect(plan).toHaveLength(1);
+      expect(tasks).toHaveLength(1);
+
+      const openings = [
+        textOf(fileBlocks[0]),
+        textOf(fileBlocks[1]),
+        textOf(image),
+        textOf({ role: 'user', parts: plan }),
+        textOf({ role: 'user', parts: tasks }),
+      ];
+      expect(openings.map((text) => compressedLength(text))).toEqual([
+        3, 3, 3, 3, 3,
+      ]);
+      expect(
+        compressedLength(textOf({ role: 'user', parts: plan }), true),
+      ).toBe(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('is 4 for rewind with a marked attachment and a trailing function call', () => {

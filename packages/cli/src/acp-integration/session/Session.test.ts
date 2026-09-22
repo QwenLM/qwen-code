@@ -7571,7 +7571,7 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 2 });
     });
 
     it('does not count a mid-history MCP added-tool reminder as a user turn', () => {
@@ -7634,7 +7634,7 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 2 });
       expect(session.rewindToTurn(1)).toEqual({
         targetTurnIndex: 1,
         apiTruncateIndex: 6,
@@ -7655,7 +7655,7 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      expect(session.getRewindableUserTurnCount()).toBe(1);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 1 });
     });
 
     it('counts cleared media placeholders as rewindable prompts (twin divergence)', () => {
@@ -7672,7 +7672,7 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      expect(session.getRewindableUserTurnCount()).toBe(1);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 1 });
     });
 
     it('rejects unreachable user turns', () => {
@@ -7711,7 +7711,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(snapshots);
       seedAbsorbedOffset(2);
 
-      expect(session.getRewindableUserTurnCount()).toBe(2);
       expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 4 });
       expect(session.rewindToTurn(2)).toEqual({
         targetTurnIndex: 2,
@@ -8004,6 +8003,76 @@ describe('Session', () => {
       );
     });
 
+    it('does not shift a compressed snapshot deficit onto the next prompt', () => {
+      // Recorded absorbed 0, two counted prompts, one snapshot. The missing
+      // snapshot does not extend `end`, and ordinal 0 still cuts at the
+      // compressed prefix rather than the second prompt.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        { role: 'user', parts: [{ text: 'third' }] },
+        { role: 'model', parts: [{ text: 'third reply' }] },
+        { role: 'user', parts: [{ text: 'fourth' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
+        {
+          promptId: 'p0',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+      seedAbsorbedOffset(0);
+
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 1 });
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 2,
+      });
+      expect(() => session.rewindToTurn(1)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(mockChat.truncateHistory).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not shift an uncompressed snapshot surplus', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+        ['p0', 'p1', 'p2'].map((promptId) => ({
+          promptId,
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        })),
+      );
+
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 2 });
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+      });
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+      });
+      expect(() => session.rewindToTurn(2)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+    });
+
     it('keeps the rewind count aligned when a retry pops and resends a turn', () => {
       const failed: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
@@ -8011,10 +8080,10 @@ describe('Session', () => {
         { role: 'user', parts: [{ text: 'second' }] },
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(failed);
-      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 2 });
 
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(failed.slice(0, 2));
-      expect(session.getRewindableUserTurnCount()).toBe(1);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 1 });
 
       const retried: Content[] = [
         ...failed.slice(0, 2),
@@ -8023,7 +8092,7 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(retried);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(retried);
-      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 2 });
 
       const compressed: Content[] = [
         {
@@ -8055,7 +8124,6 @@ describe('Session', () => {
       ]);
       seedAbsorbedOffset(1);
 
-      expect(session.getRewindableUserTurnCount()).toBe(1);
       expect(session.getRewindableTurnRange()).toEqual({ start: 1, end: 2 });
       expect(session.rewindToTurn(1)).toEqual({
         targetTurnIndex: 1,
