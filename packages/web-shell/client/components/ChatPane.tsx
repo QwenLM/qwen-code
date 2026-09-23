@@ -187,8 +187,8 @@ export interface ChatPaneProps {
   onApprovalChange?: (sessionId: string, pending: boolean) => void;
   /**
    * The workspace this pane's session lives in. Passed explicitly by the split
-   * view (which knows it per session) and shown as a composer-toolbar chip on a
-   * multi-workspace daemon; falls back to the connection's own workspace.
+   * view (which knows it per session); falls back to the connection's own
+   * workspace.
    */
   workspaceCwd?: string;
   /**
@@ -1449,10 +1449,8 @@ export function ChatPane({
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
   const sessionStamp = sessionSummary?.updatedAt || sessionSummary?.createdAt;
 
-  // On a multi-workspace daemon, surface this pane's workspace as a composer-
-  // toolbar chip (next to where the git-branch chip sits), so it's clear which
-  // workspace a message goes to. Multi-workspace-ness comes from the shared
-  // workspace provider (the pane's own session connection may not carry it).
+  // Multi-workspace-ness comes from the shared workspace provider (the
+  // pane's own session connection may not carry it).
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
   const prepareContextCompression = useCallback(() => {
@@ -1484,11 +1482,11 @@ export function ChatPane({
   // `React.memo`, and a fresh `[...]` each render would defeat it.
   const paneToolbarActions = useMemo(
     () =>
-      (showWorkspaceChip
+      (embedded && showWorkspaceChip
         ? [...PANE_TOOLBAR_ACTIONS, 'workspace' as const]
         : PANE_TOOLBAR_ACTIONS
       ).filter((action) => action !== 'plan' || planControlVisible),
-    [showWorkspaceChip, planControlVisible],
+    [embedded, showWorkspaceChip, planControlVisible],
   );
   const headerActions =
     connection.sessionId && renderHeaderActions
@@ -1499,12 +1497,8 @@ export function ChatPane({
         })
       : null;
 
-  // Also surface the workspace in the pane HEADER (always visible at the top),
-  // not just the composer chip at the bottom — on a narrow split the composer
-  // chip collapses to a bare folder icon, so the header is where you tell panes
-  // apart. A stable per-workspace accent color (same palette as the sidebar
-  // session-group dots) lets same-workspace panes read as a group at a glance,
-  // and keeps them distinguishable even when the header name ellipsizes.
+  // The header identifies each split pane's workspace; only embedded panes
+  // without a header need the composer chip. The accent matches sidebar dots.
   const workspaceLabel =
     showWorkspaceChip && paneWorkspaceCwd
       ? workspaceLabelForCwd(

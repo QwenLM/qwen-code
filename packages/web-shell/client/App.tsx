@@ -3214,6 +3214,7 @@ export function App({
     () => resolveSidebarOptions(sidebar),
     [sidebar],
   );
+  const showMobileAccess = header?.showMobileAccess ?? false;
   const chatHeaderItems = header?.items ?? DEFAULT_CHAT_HEADER_ITEMS;
   const chatHeaderEnabled =
     chatHeaderItems.length > 0 && Boolean(header || renderChatHeader);
@@ -9265,13 +9266,16 @@ export function App({
     setSettingsInitialCategory('Daemon');
     openPanel('settings');
   }, [openPanel]);
-  // Built-in pane actions: Local Control QR entry is always shown; usage
-  // actions follow the same opt-ins as the chat header.
+  // Built-in pane actions follow the same opt-ins as the chat header.
   // Hosts can override via `renderPaneHeaderActions` to replace or extend it.
   const defaultPaneHeaderActions = useCallback<PaneHeaderActionsRenderer>(
     ({ sessionId, sessionActions }) => (
       <>
-        <LocalControlQrButton onOpenSettings={handleOpenLocalControlSettings} />
+        {showMobileAccess && (
+          <LocalControlQrButton
+            onOpenSettings={handleOpenLocalControlSettings}
+          />
+        )}
         {contextUsageHeaderItemVisible && (
           <button
             type="button"
@@ -9306,6 +9310,7 @@ export function App({
     ),
     [
       handleOpenLocalControlSettings,
+      showMobileAccess,
       openTokenUsagePanel,
       openContextUsagePanel,
       t,
@@ -19178,9 +19183,10 @@ export function App({
                                 ),
                             }
                           : {}),
-                        onOpenLocalControlSettings: workspaceContextActive
-                          ? handleOpenLocalControlSettings
-                          : undefined,
+                        onOpenLocalControlSettings:
+                          showMobileAccess && workspaceContextActive
+                            ? handleOpenLocalControlSettings
+                            : undefined,
                       })}
                     </div>
                   ) : (
@@ -19229,7 +19235,7 @@ export function App({
                           : undefined
                       }
                       onOpenLocalControlSettings={
-                        workspaceContextActive
+                        showMobileAccess && workspaceContextActive
                           ? handleOpenLocalControlSettings
                           : undefined
                       }

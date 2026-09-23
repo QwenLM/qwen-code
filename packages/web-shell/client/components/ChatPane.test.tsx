@@ -1693,7 +1693,7 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.builtinAtProviders).toBeUndefined();
   });
 
-  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+  it('keeps the workspace in the split header and only shows the toolbar chip when embedded', () => {
     connectionState.capabilities = {
       features: [],
       workspaceCwd: '/work/web-shell',
@@ -1710,6 +1710,19 @@ describe('ChatPane', () => {
     };
     // The split view hands each pane its own workspace explicitly.
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]')?.textContent,
+    ).toContain('Payments API');
+
+    rerender({
+      title: 'Add pagination',
+      workspaceCwd: '/work/api',
+      embedded: true,
+    });
+    expect(container!.querySelector('header')).toBeNull();
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
     expect(latestChatEditorProps.workspaceName).toBe('Payments API');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
