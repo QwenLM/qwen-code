@@ -756,6 +756,41 @@ test('runCli plan renders the named job into the filed body', () => {
   );
 });
 
+test('plan writes exactly the searched test markers and workflow bridge', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sig-plan-markers-'));
+  const analysisPath = join(dir, 'analysis.json');
+  const logs = Array.from(
+    { length: MAX_SEARCH_MARKERS + 2 },
+    (_unused, index) => ` FAIL  cli/case-${index}.test.ts > case ${index}`,
+  );
+  const analysis = analyzeLogs('Qwen Code CI', logs);
+  writeFileSync(analysisPath, JSON.stringify(analysis));
+
+  const planned = JSON.parse(
+    captureStdout([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--sha',
+      OCCURRENCE.sha,
+      '--run-url',
+      OCCURRENCE.runUrl,
+      '--run-id',
+      OCCURRENCE.runId,
+      '--at',
+      OCCURRENCE.at,
+    ]),
+  );
+
+  assert.deepEqual(planned.searchMarkers, [
+    ...analysis.markers.slice(0, MAX_SEARCH_MARKERS),
+    workflowBridgeMarker('Qwen Code CI'),
+  ]);
+  for (const marker of analysis.markers.slice(0, MAX_SEARCH_MARKERS)) {
+    assert.ok(planned.body.includes(`<!-- ${marker} -->`));
+  }
+});
+
 // The workflow-scoped bridge marker is the last search marker in both arms
 // (per-test and per-commit): restoring the body download re-activated a dedupe
 // class disjoint from the per-commit stubs filed since gh 2.97, so a search
@@ -1039,14 +1074,63 @@ test('a legacy stub is parsed and migrated without losing its bridge', () => {
   ].join('\n');
   const merged = renderIssueBody({
     analysis,
-    occurrence: { ...OCCURRENCE, runId: '302' },
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
     existingBody: legacy,
   });
 
   assert.ok(merged.includes('<!-- qwen-main-ci-failure-header -->'));
   assert.ok(merged.includes('<!-- /qwen-main-ci-failure-header -->'));
   assert.ok(merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  assert.ok(
+    merged.includes(
+      '- Run: https://github.com/QwenLM/qwen-code/actions/runs/302',
+    ),
+  );
+  assert.ok(!merged.includes('- Run ID: 301'));
+  assert.ok(merged.includes('before any test result was'));
+  assert.equal(
+    (
+      merged.match(
+        /This issue is labeled for autofix so the existing agent can create a repair PR\./g,
+      ) ?? []
+    ).length,
+    1,
+  );
   assert.ok(merged.includes('[run 302]'));
+});
+
+test('a delimited per-commit header stays replaceable across repeated merges', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  let merged = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  merged = renderIssueBody({
+    analysis,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: merged,
+  });
+  merged = renderIssueBody({
+    analysis,
+    occurrence: { ...OCCURRENCE, runId: '303' },
+    existingBody: merged,
+  });
+
+  assert.equal(
+    (merged.match(/<!-- qwen-main-ci-failure-header -->/g) ?? []).length,
+    1,
+  );
+  assert.equal(
+    (merged.match(/<!-- \/qwen-main-ci-failure-header -->/g) ?? []).length,
+    1,
+  );
+  assert.ok(merged.includes('- Run ID: 303'));
+  assert.ok(!merged.includes('- Run ID: 302'));
 });
 
 test('a note between legacy identity bullets survives without refreshing the header', () => {
@@ -1074,7 +1158,11 @@ test('a note between legacy identity bullets survives without refreshing the hea
   ].join('\n');
   const merged = renderIssueBody({
     analysis,
-    occurrence: { ...OCCURRENCE, runId: '302' },
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
     existingBody: existing,
   });
 
@@ -1082,6 +1170,11 @@ test('a note between legacy identity bullets survives without refreshing the hea
   assert.ok(merged.includes('- Run ID: 301'));
   assert.ok(merged.includes('- Commit: af7a9ec12722ab34'));
   assert.ok(!merged.includes('- Run ID: 302'));
+  assert.ok(
+    merged.includes(
+      '- Run: https://github.com/QwenLM/qwen-code/actions/runs/301',
+    ),
+  );
   assert.ok(merged.includes('[run 302]'));
 });
 
@@ -1092,7 +1185,7 @@ test('a per-commit merge preserves prior failed jobs when the latest run has non
     [WINDOWS_JOB],
   );
   const latest = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
-  const merged = renderIssueBody({
+  let merged = renderIssueBody({
     analysis: latest,
     occurrence: {
       ...OCCURRENCE,
@@ -1104,9 +1197,18 @@ test('a per-commit merge preserves prior failed jobs when the latest run has non
       occurrence: OCCURRENCE,
     }),
   });
+  merged = renderIssueBody({
+    analysis: latest,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '303',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/303',
+    },
+    existingBody: merged,
+  });
   assert.match(merged, /^- Failed jobs \(last reported for run 301\):$/m);
   assert.ok(merged.includes('windows-latest'));
-  assert.ok(merged.includes('- Run ID: 302'));
+  assert.ok(merged.includes('- Run ID: 303'));
   assert.ok(!merged.match(/^- Failed jobs:$/m));
 });
 
@@ -1278,7 +1380,11 @@ test('a malformed stub is retained below the adopted per-test head', () => {
   const testRun = analyzeLogs('E2E Tests', [VITEST_LOG]);
   const merged = renderIssueBody({
     analysis: testRun,
-    occurrence: { ...OCCURRENCE, runId: '302' },
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
     existingBody: stub,
   });
 
@@ -1287,6 +1393,16 @@ test('a malformed stub is retained below the adopted per-test head', () => {
   assert.ok(merged.includes('- Workflow: E2E Tests'));
   assert.ok(merged.includes('- Run ID: 301'));
   assert.ok(merged.includes('- Commit: human-note-sha'));
+  assert.ok(!merged.includes('before any test result was'));
+  assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  assert.equal(
+    (
+      merged.match(
+        /This issue is labeled for autofix so the existing agent can create a repair PR\./g,
+      ) ?? []
+    ).length,
+    1,
+  );
 });
 
 // R1-10 mirror: a per-commit run landing on a per-test body keeps the
@@ -1314,6 +1430,9 @@ test('a per-test body keeps its shape under a per-commit merge', () => {
   assert.ok(merged.includes('## Failing tests'));
   assert.ok(merged.includes(`- \`${testAnalysis.tests[0].id}\``));
   assert.ok(merged.includes('[run 302]'));
+  assert.ok(merged.includes('## Previous failed jobs'));
+  assert.ok(merged.includes('last reported for run 302'));
+  assert.ok(merged.includes('windows-latest'));
   // R1-1: the per-test body must not gain the bridge from this merge.
   assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
 });

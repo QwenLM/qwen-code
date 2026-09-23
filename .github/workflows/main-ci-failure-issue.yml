@@ -142,6 +142,17 @@ jobs:
           # no identifiable test this is the per-commit marker instead.
           existing_issue=''
           while read -r marker; do
+            candidate_list="${RUNNER_TEMP}/candidate-list-${RANDOM}.txt"
+            if ! gh issue list \
+              --repo "${REPO}" \
+              --state open \
+              --search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc" \
+              --json number \
+              --jq '.[].number' > "${candidate_list}"; then
+              echo "::error::Could not search issues while checking ${marker}"
+              rm -f "${candidate_list}"
+              exit 1
+            fi
             while read -r candidate; do
               [[ -z "${candidate}" ]] && continue
               candidate_body="${RUNNER_TEMP}/candidate-${candidate}.md"
@@ -155,17 +166,12 @@ jobs:
               if grep -qF "<!-- ${marker} -->" "${candidate_body}"; then
                 existing_issue="${candidate}"
                 echo "Issue #${existing_issue} already tracks this failure (${marker})."
+                rm -f "${candidate_list}"
                 break 2
               fi
               echo "Issue #${candidate} did not carry ${marker}; continuing search."
-            done < <(
-              gh issue list \
-                --repo "${REPO}" \
-                --state open \
-                --search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc" \
-                --json number \
-                --jq '.[].number'
-            )
+            done < "${candidate_list}"
+            rm -f "${candidate_list}"
           done < <(jq -r '.searchMarkers[]' "${plan}")
 
           # Re-plan against the existing body so recorded recurrences, extra

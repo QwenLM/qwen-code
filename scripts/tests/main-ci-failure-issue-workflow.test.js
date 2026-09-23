@@ -243,9 +243,17 @@ describe('main CI failure issue workflow', () => {
       '--search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc"',
     );
     expect(plan).toContain("--jq '.[].number'");
+    expect(plan).toContain(
+      'if ! gh issue list --repo "${REPO}" --state open --search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc" --json number --jq \'.[].number\' > "${candidate_list}"; then echo "::error::Could not search issues while checking ${marker}" rm -f "${candidate_list}" exit 1 fi',
+    );
+    expect(plan).toContain('done < "${candidate_list}"');
+    expect(plan).toContain('rm -f "${candidate_list}"');
     expect(plan).not.toContain('--jq \'.[0].number // ""\'');
     expect(plan).toContain(
       'echo "Issue #${candidate} did not carry ${marker}; continuing search."',
+    );
+    expect(plan).toContain(
+      'if ! gh issue view "${candidate}" --repo "${REPO}" --json body --jq \'.body\' > "${candidate_body}"; then echo "::warning::Could not read issue #${candidate} while checking ${marker}" continue fi',
     );
     expect(plan).toContain('break 2');
     const verify = plan.indexOf(

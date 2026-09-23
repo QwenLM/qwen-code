@@ -398,6 +398,63 @@ function replacePerCommitHeader(head, headerBlock, remainder = []) {
   )}`;
 }
 
+const LEGACY_MARKER_LINE_RE = new RegExp(
+  `^<!-- ${LEGACY_MARKER_PREFIX}\\S+ -->$`,
+);
+const WORKFLOW_MARKER_LINE_RE = new RegExp(
+  `^<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->$`,
+);
+
+function stripPerCommitMachineLines(
+  text,
+  { removeLegacyMarkers = false } = {},
+) {
+  const withoutFixedText = text
+    .replace(PER_COMMIT_INTRO, '')
+    .replace(PER_COMMIT_FOOTER, '');
+  return withoutFixedText
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (
+        trimmed === PER_COMMIT_HEADER_START ||
+        trimmed === PER_COMMIT_HEADER_END ||
+        WORKFLOW_MARKER_LINE_RE.test(trimmed)
+      ) {
+        return false;
+      }
+      return !(removeLegacyMarkers && LEGACY_MARKER_LINE_RE.test(trimmed));
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function preservedPerCommitProse(head, header) {
+  const outsideMachineRange = [
+    head.slice(0, header.replaceStart),
+    header.remainder.join('\n'),
+    head.slice(header.replaceEnd),
+  ].join('\n');
+  const prose = stripPerCommitMachineLines(outsideMachineRange, {
+    removeLegacyMarkers: true,
+  });
+  return prose ? prose.split('\n') : [];
+}
+
+function appendPreviousFailedJobs(head, failedJobs, runId) {
+  if (!failedJobs.length) return head;
+  const section = [
+    `## Previous failed jobs (last reported for run ${runId})`,
+    '',
+    ...failedJobLines(failedJobs),
+  ].join('\n');
+  const existing = /\n*## Previous failed jobs(?:[^\n]*)\n+(?:  - [^\n]*\n?)+/;
+  return existing.test(head)
+    ? head.replace(existing, `\n${section}`)
+    : `${head.trimEnd()}\n\n${section}`;
+}
+
 /**
  * The standard per-test head: signature + per-test markers, the prose, and
  * the identified failures. Shared by the create path and by the per-test
@@ -524,13 +581,19 @@ export function renderIssueBody({
     });
     const ownsHeader =
       !existingHeader || existingHeader.workflow === analysis.workflow;
-    const refreshed = ownsHeader
-      ? replacePerCommitHeader(
+    const refreshed = existingHeader
+      ? ownsHeader
+        ? replacePerCommitHeader(
+            withoutHeading,
+            headerBlock,
+            existingHeader.remainder,
+          )
+        : withoutHeading
+      : appendPreviousFailedJobs(
           withoutHeading,
-          headerBlock,
-          existingHeader?.remainder,
-        )
-      : withoutHeading;
+          analysis.failedJobs,
+          occurrence.runId,
+        );
     // R1-8: the bridge funnels every unidentifiable failure of a workflow
     // onto one open issue, and every landing used to add one sha marker to
     // the head permanently — past GitHub's 65,536-character body limit,
@@ -647,14 +710,21 @@ export function renderIssueBody({
           testLines,
           additionalMarkers: legacyMarkers,
           preservedFailedJobLines: stubHeader.failedJobLines,
-          preservedRemainder: stubHeader.remainder,
+          preservedRemainder: preservedPerCommitProse(
+            withoutHeading,
+            stubHeader,
+          ),
         })
       : [
-          renderPerTestHead({ analysis, bodyMarkers, testLines }),
-          // A malformed machine block is retained verbatim below the new
-          // per-test head. Losing it would silently discard the stub's run,
-          // commit and bridge markers merely because a human edited its tail.
-          withoutHeading,
+          renderPerTestHead({
+            analysis,
+            bodyMarkers,
+            testLines,
+            preservedRemainder: (() => {
+              const retained = stripPerCommitMachineLines(withoutHeading);
+              return retained ? retained.split('\n') : [];
+            })(),
+          }),
         ].join('\n\n')
     : withoutHeading;
   const adoptLines = adoptsStub
