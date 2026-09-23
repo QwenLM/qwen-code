@@ -590,20 +590,19 @@ test('mobile history search stays reachable above a soft keyboard @smoke', async
   const close = page
     .locator('[data-web-shell-composer-surface]')
     .getByRole('button', { name: 'close', exact: true });
-  // Not even the panel's minimum height fits, so it overlaps the composer.
-  expect(
-    await search.evaluate((element) =>
-      Number.parseFloat(
-        element
-          .closest<HTMLElement>('[style*="--chat-editor-search-shift"]')!
-          .style.getPropertyValue('--chat-editor-search-shift'),
-      ),
-    ),
-  ).toBeGreaterThan(0);
   // Polled: the Add drawer's closing overlay briefly covers the page.
   for (const control of [search, close]) {
     await expect.poll(() => isUncovered(control, { topEdge: true })).toBe(true);
   }
+  // Not even the panel's minimum height fits, so it overlaps the composer.
+  const shift = await search.evaluate(
+    (element) =>
+      element
+        .closest<HTMLElement>('[style*="--chat-editor-search-shift"]')
+        ?.style.getPropertyValue('--chat-editor-search-shift') ?? null,
+  );
+  expect(shift).not.toBeNull();
+  expect(Number.parseFloat(shift!)).toBeGreaterThan(0);
   await close.tap();
   await expect(textarea).toHaveValue('working draft');
   await expect(textarea).toBeFocused();
