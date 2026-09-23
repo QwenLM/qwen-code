@@ -256,8 +256,23 @@ export function ThreadChat({
   const { t } = useI18n();
   const [sending, setSending] = useState(false);
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
+  // "Keep waiting" on a quiet run hides the stall warning for a while.
+  const [snoozedUntil, setSnoozedUntil] = useState<Record<string, number>>({});
   const { live, past } = buildRunRows(thread.runs);
   const now = useNow(live.length > 0);
+  // Offer a retry for an agent whose latest run failed and that is not
+  // already working again on this thread.
+  const retryable = useMemo(() => {
+    const latest = new Map<string, RunView>();
+    for (const run of thread.runs) {
+      const seen = latest.get(run.agentId);
+      if (!seen || (run.startedAt ?? 0) >= (seen.startedAt ?? 0))
+        latest.set(run.agentId, run);
+    }
+    return [...latest.values()].filter(
+      (run) => run.status === 'failed' && thread.status !== 'done',
+    );
+  }, [thread.runs, thread.status]);
   const messages = useMemo<Message[]>(
     () =>
       [
@@ -559,17 +574,17 @@ export function ThreadChat({
                               (current) =>
                                 new Set([...current, permission.requestId]),
                             );
-                            void onRespondPermission(
-                              sessionId,
-                              permission.requestId,
-                              option.optionId,
-                            ).catch(() =>
+                            const reopen = () =>
                               setAnswered((current) => {
                                 const next = new Set(current);
                                 next.delete(permission.requestId);
                                 return next;
-                              }),
-                            );
+                              });
+                            void onRespondPermission(
+                              sessionId,
+                              permission.requestId,
+                              option.optionId,
+                            ).then((ok) => ok === false && reopen(), reopen);
                           }}
                         >
                           {option.name}
@@ -582,12 +597,17 @@ export function ThreadChat({
               const hostOffline =
                 agents.find((agent) => agent.id === run.agentId)?.runtime
                   ?.status === 'offline';
-              const { text, stalled } = describeLiveRun(
-                run,
-                hostOffline,
-                now,
-                t,
-              );
+              const described = describeLiveRun(run, hostOffline, now, t);
+              const stalled =
+                described.stalled && now >= (snoozedUntil[run.id] ?? 0);
+              const text = stalled
+                ? described.text
+                : described.stalled
+                  ? t('collab.run.working', {
+                      agent: run.agentName,
+                      elapsed: formatElapsed(now - (run.startedAt ?? now), t),
+                    })
+                  : described.text;
               return (
                 <div
                   key={run.id}
@@ -605,6 +625,20 @@ export function ThreadChat({
                     }`}
                   />
                   <span className="min-w-0 flex-1 truncate">{text}</span>
+                  {stalled && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() =>
+                        setSnoozedUntil((current) => ({
+                          ...current,
+                          [run.id]: now + STALL_NOTICE_MS,
+                        }))
+                      }
+                    >
+                      {t('collab.run.keepWaiting')}
+                    </Button>
+                  )}
                   {(stalled || run.status === 'queued') && !pending && (
                     <Button
                       size="sm"
@@ -617,6 +651,32 @@ export function ThreadChat({
                 </div>
               );
             })}
+            {retryable.map((run) => (
+              <div
+                key={run.id}
+                role="status"
+                className="mb-2 flex items-center gap-2 text-sm text-[var(--status-attention-fg)]"
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  {run.error === 'agent_run_stalled'
+                    ? t('collab.run.timedOut', { agent: run.agentName })
+                    : t('collab.run.failed', { agent: run.agentName })}
+                </span>
+                {!pending && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      void onSend(
+                        `@${run.agentName} ${t('collab.run.retryPrompt')}`,
+                      )
+                    }
+                  >
+                    {t('collab.run.retry')}
+                  </Button>
+                )}
+              </div>
+            ))}
             {preview && (
               <div role="status" className="mb-2 text-xs text-muted-foreground">
                 {summarizePreview(preview)}

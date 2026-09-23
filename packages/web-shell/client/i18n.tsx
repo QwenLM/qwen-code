@@ -506,6 +506,12 @@ const EN: Messages = {
   'collab.run.stalled': (v) =>
     `${v?.agent} has shown no progress for ${v?.elapsed}. It may be stuck.`,
   'collab.run.stop': 'Stop',
+  'collab.run.keepWaiting': 'Keep waiting',
+  'collab.run.timedOut': (v) =>
+    `${v?.agent} was stopped after 15 minutes without progress`,
+  'collab.run.failed': (v) => `${v?.agent} stopped with an error`,
+  'collab.run.retry': 'Retry',
+  'collab.run.retryPrompt': 'please continue from where you stopped.',
   'collab.mention.provider': 'Agents',
   'collab.mention.noAttachments':
     'Attachments cannot be sent to an agent yet. Send text to start.',
@@ -4589,6 +4595,11 @@ const ZH: Messages = {
   'collab.run.stalled': (v) =>
     `${v?.agent} 已经 ${v?.elapsed} 没有进展，可能卡住了`,
   'collab.run.stop': '停止',
+  'collab.run.keepWaiting': '再等等',
+  'collab.run.timedOut': (v) => `${v?.agent} 15 分钟没有进展，已停止`,
+  'collab.run.failed': (v) => `${v?.agent} 出错停止了`,
+  'collab.run.retry': '重试',
+  'collab.run.retryPrompt': '请从中断的地方继续。',
   'collab.mention.provider': 'Agent',
   'collab.mention.noAttachments': '暂时不能把附件发给 Agent，请先用文字发起。',
   'collab.agentStatus.idle': '空闲',

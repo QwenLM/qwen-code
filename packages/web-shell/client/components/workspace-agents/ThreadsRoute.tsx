@@ -204,7 +204,10 @@ export function createThreadsHttpApi(
         },
       );
       if (!response.ok) {
-        throw new Error(`Approval failed (${response.status})`);
+        const body = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(body.error || `Approval failed (${response.status})`);
       }
     },
   };
@@ -556,7 +559,20 @@ export function ThreadsRoute({
             }
             onMarkDone={() => void mutate(() => client.markDone(openId))}
             {...(client.respondToPermission
-              ? { onRespondPermission: client.respondToPermission }
+              ? {
+                  onRespondPermission: (
+                    sessionId: string,
+                    requestId: string,
+                    optionId: string,
+                  ) =>
+                    mutate(() =>
+                      client.respondToPermission!(
+                        sessionId,
+                        requestId,
+                        optionId,
+                      ),
+                    ),
+                }
               : {})}
             onOpenThread={(id) => {
               if (workspaceCwd && onOpenThreadChat)
