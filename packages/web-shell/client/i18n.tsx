@@ -3009,7 +3009,14 @@ const EN: Messages = {
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated': 'Showing the most recent records of this session.',
+  'trajectory.truncated':
+    'Showing the most recent records; earlier history is not loaded.',
+  'trajectory.loadingPages': (v) =>
+    `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
+  'trajectory.olderFailed': (v) =>
+    `Earlier records could not be read: ${v?.message ?? ''}`,
+  'trajectory.olderPartial':
+    'Earlier records could only be read in part, so they are left out.',
   'trajectory.loadFailed': (v) =>
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
@@ -6819,7 +6826,10 @@ const ZH: Messages = {
   'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示这个会话最近的记录。',
+  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
+  'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
+  'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
+  'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.totals': (v) =>
