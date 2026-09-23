@@ -54,6 +54,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
+import { useScrollActions } from '../contexts/ScrollContext.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
@@ -262,12 +263,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const uiState = useUIState();
   const uiActions = useUIActions();
   const settings = useSettings();
+  const scrollActions = useScrollActions();
   // Mouse interactions (suggestion list + click-to-position cursor) are enabled
   // in alternate-screen mode (see RowMouseController's coordinate assumptions).
   const mouseTrackingEnabled = useMouseTrackingEnabled();
-  const mouseInteractionsEnabled =
-    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
-    mouseTrackingEnabled;
+  const isVpMode = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
+  const mouseInteractionsEnabled = isVpMode && mouseTrackingEnabled;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -1722,6 +1723,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
+          // In VP mode with empty input, scroll the conversation instead of
+          // navigating input history. This handles terminals that translate
+          // mouse wheel events to Up/Down arrow keys.
+          if (isVpMode && buffer.text.length === 0 && scrollActions) {
+            scrollActions.scrollBy(-1);
+            return true;
+          }
           // Two-step edge transition: snap cursor to col 0 before triggering history
           if (buffer.visualCursor[1] > 0) {
             buffer.move('home');
@@ -1737,6 +1745,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
+          // In VP mode with empty input, scroll the conversation instead of
+          // navigating input history. This handles terminals that translate
+          // mouse wheel events to Up/Down arrow keys.
+          if (isVpMode && buffer.text.length === 0 && scrollActions) {
+            scrollActions.scrollBy(1);
+            return true;
+          }
           // Two-step edge transition: snap cursor to end of line before triggering history
           const lastRowIdx = buffer.allVisualLines.length - 1;
           const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
@@ -1975,6 +1990,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       categoryTabsVisible,
       voiceInput,
       targetDir,
+      isVpMode,
+      scrollActions,
     ],
   );
 

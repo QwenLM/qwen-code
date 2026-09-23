@@ -130,9 +130,10 @@ const virtualIsStaticItem = (item: VpItem) =>
 
 interface MainContentProps {
   footerRef?: RefObject<DOMElement | null>;
+  scrollByRef?: React.MutableRefObject<((delta: number) => void) | null>;
 }
 
-export const MainContent = ({ footerRef }: MainContentProps) => {
+export const MainContent = ({ footerRef, scrollByRef }: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
   const { allExpanded: fullDetail } = useThoughtExpanded();
@@ -163,6 +164,18 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
   const selectionQueryRef = useRef<SelectionQuery | null>(null);
   const { menu: contextMenuOpen } = useContextMenu();
+
+  // Expose scrollBy to sibling components (e.g. InputPrompt) so bare
+  // Up/Down keys can scroll the conversation in VP mode when the input
+  // is empty. The ref is populated here but the ScrollContext.Provider
+  // lives in DefaultAppLayout so it wraps both MainContent and Composer.
+  useEffect(() => {
+    if (!scrollByRef) return;
+    scrollByRef.current = (delta: number) => scrollRef.current?.scrollBy(delta);
+    return () => {
+      scrollByRef.current = null;
+    };
+  }, [scrollByRef]);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {

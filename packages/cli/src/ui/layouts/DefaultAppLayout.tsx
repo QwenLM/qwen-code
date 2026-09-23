@@ -5,9 +5,13 @@
  */
 
 import type React from 'react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Box, type DOMElement } from 'ink';
 import { MainContent } from '../components/MainContent.js';
+import {
+  ScrollContext,
+  type ScrollActions,
+} from '../contexts/ScrollContext.js';
 import { UpdateNotification } from '../components/UpdateNotification.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
@@ -31,6 +35,13 @@ import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
   const footerRef = useRef<DOMElement>(null);
+  const scrollByRef = useRef<((delta: number) => void) | null>(null);
+  const scrollActions = useMemo<ScrollActions>(
+    () => ({
+      scrollBy: (delta: number) => scrollByRef.current?.(delta),
+    }),
+    [],
+  );
   const { refreshStatic } = useUIActions();
   const { activeView, agents } = useAgentViewState();
   const { columns: terminalWidth } = useTerminalSize();
@@ -79,9 +90,9 @@ export const DefaultAppLayout: React.FC = () => {
           </Box>
         </>
       ) : (
-        <>
+        <ScrollContext.Provider value={scrollActions}>
           {/* Main view: conversation history + main composer / dialogs */}
-          <MainContent footerRef={footerRef} />
+          <MainContent footerRef={footerRef} scrollByRef={scrollByRef} />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
@@ -156,7 +167,7 @@ export const DefaultAppLayout: React.FC = () => {
               />
             )}
           </Box>
-        </>
+        </ScrollContext.Provider>
       )}
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
