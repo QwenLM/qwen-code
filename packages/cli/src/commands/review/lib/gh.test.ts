@@ -26,6 +26,7 @@ import {
   ghWithInputRetried,
   ensureAuthenticated,
   isOwnerRepo,
+  ghApiAllNested,
 } from './gh.js';
 
 // Host targeting is code, not prose: the subcommands thread `--host` here,
@@ -431,5 +432,54 @@ describe('ghRaw() transient retry (buffer stderr)', () => {
     expect(ghRaw('pr', 'diff', '1')).toBe('ok');
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
     stderrSpy.mockRestore();
+  });
+});
+
+describe('ghApiAllNested() builds the paginated nested-array request', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  afterEach(() => setGhHost(undefined));
+
+  it('passes --paginate and the per-key jq, and decodes the streamed NDJSON', () => {
+    // presubmit.test.ts mocks this helper out entirely, so nothing in the suite
+    // pins the argv it actually builds — yet that argv IS the fix for the
+    // first-page-only CI-classification bug: a plain ghApiAll would concatenate
+    // raw `{<key>:[…]}` pages into unparseable output, and `gh api` has no
+    // `--slurp`. A refactor that dropped --paginate, projected a single object
+    // (`.key` not `.key[]`), or reached for `--slurp` must fail here.
+    mockExecFileSync.mockReturnValueOnce('{"name":"a"}\n{"name":"b"}\n');
+
+    const result = ghApiAllNested(
+      'repos/o/r/commits/sha/check-runs',
+      'check_runs',
+    );
+
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'gh',
+      [
+        'api',
+        '--paginate',
+        'repos/o/r/commits/sha/check-runs',
+        '--jq',
+        '.check_runs[]',
+      ],
+      expect.anything(),
+    );
+    expect(result).toEqual([{ name: 'a' }, { name: 'b' }]);
+  });
+
+  it('interpolates the caller-provided key into the jq projection', () => {
+    // The jq expression is templated on `key`, not hardcoded to check_runs: pin
+    // a second key so a regression that bakes in the first call site's key
+    // (silently mis-projecting other endpoints' nested arrays) goes red.
+    mockExecFileSync.mockReturnValueOnce('');
+
+    ghApiAllNested('repos/o/r/actions/workflows', 'workflows');
+
+    const argv = mockExecFileSync.mock.calls[0][1];
+    expect(argv).toContain('--jq');
+    expect(argv[argv.indexOf('--jq') + 1]).toBe('.workflows[]');
   });
 });
