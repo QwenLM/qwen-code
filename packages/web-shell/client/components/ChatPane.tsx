@@ -57,6 +57,11 @@ import type {
   EditorHandle,
 } from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
+import {
+  isModelSetupCommand,
+  resolveModelManagement,
+  type WebShellModelManagementOptions,
+} from '../modelManagement';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -222,6 +227,7 @@ export interface ChatPaneProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
+  modelManagement?: WebShellModelManagementOptions;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -274,6 +280,7 @@ export function ChatPane({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  modelManagement,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -578,6 +585,9 @@ export function ChatPane({
     },
     [onError],
   );
+  const modelManagementPolicy = resolveModelManagement(modelManagement);
+  const modelManagementRef = useRef(modelManagementPolicy);
+  modelManagementRef.current = modelManagementPolicy;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
   const pendingApproval = useMemo(
@@ -683,6 +693,11 @@ export function ChatPane({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   } = useQueuedPrompts({
+    getPromptDispatchError: (text) =>
+      !modelManagementRef.current.allowAdd &&
+      isModelSetupCommand(text, connectionRef.current.commands)
+        ? t('settings.models.addDisabled')
+        : undefined,
     connected: connection.status === 'connected',
     writeBlocked: connection.runtimeStopped,
     runtimeStopped: connection.runtimeStopped,
@@ -928,6 +943,16 @@ export function ChatPane({
       ) {
         return true;
       }
+      // Only when the host declines does the policy consume a model-setup
+      // command — below the runtimeStopped fence so a stopped runtime keeps
+      // the draft instead of toasting, and ahead of any daemon dispatch.
+      if (
+        !modelManagementRef.current.allowAdd &&
+        isModelSetupCommand(text, connectionRef.current.commands)
+      ) {
+        onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+        return true;
+      }
       const planCommand = trimmed.match(/^\/plan(?:\s+(.*))?$/is);
       const planOperation = planCommand
         ? parsePlanCommand(planCommand[1] ?? '', planMode)
@@ -958,6 +983,13 @@ export function ChatPane({
         )
           return false;
         trimmed = planOperation.prompt;
+        if (
+          !modelManagementRef.current.allowAdd &&
+          isModelSetupCommand(trimmed, connectionRef.current.commands)
+        ) {
+          onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+          return true;
+        }
       }
       if (!planOperation && /^\/goal(?:\s|$)/i.test(trimmed)) {
         // The same guard App.tsx applies before any slash handling: a control
@@ -1046,8 +1078,18 @@ export function ChatPane({
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
         let admitted = false;
-        const submit = () =>
-          actions
+        const submit = () => {
+          if (
+            !modelManagementRef.current.allowAdd &&
+            isModelSetupCommand(trimmed, connectionRef.current.commands)
+          ) {
+            onImageIngestionNotice?.(
+              'warning',
+              t('settings.models.addDisabled'),
+            );
+            return;
+          }
+          return actions
             .sendPrompt(trimmed, {
               submittedPrompt: text,
               ...(images && images.length ? { images } : {}),
@@ -1094,6 +1136,7 @@ export function ChatPane({
                 error,
               );
             });
+        };
         if (planOperation) {
           const owner = sessionOwnerGuard.capture();
           planPreparationRef.current = owner;
@@ -1350,16 +1393,22 @@ export function ChatPane({
     return localizeBuiltinDescriptions(
       mergeCommands(connection.commands ?? [], getLocalCommands(t)),
       t,
-    ).map((command) => {
-      const skillKey = skillDescriptionKey(command.name);
-      if (!skillKey) return command;
-      return {
-        ...command,
-        displayCategory: 'skill' as const,
-        description: t(skillKey),
-      };
-    });
-  }, [connection.commands, t]);
+    )
+      .filter(
+        (command) =>
+          modelManagementPolicy.allowAdd ||
+          !isModelSetupCommand(`/${command.name}`, connection.commands),
+      )
+      .map((command) => {
+        const skillKey = skillDescriptionKey(command.name);
+        if (!skillKey) return command;
+        return {
+          ...command,
+          displayCategory: 'skill' as const,
+          description: t(skillKey),
+        };
+      });
+  }, [connection.commands, modelManagementPolicy.allowAdd, t]);
   const skills = useMemo(() => {
     const commandsByName = new Map(
       commands.map((command) => [command.name.toLowerCase(), command]),

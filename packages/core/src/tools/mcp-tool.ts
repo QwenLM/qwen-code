@@ -36,7 +36,11 @@ import {
   getMaxInlineMediaBytes,
   TOOL_RESULT_MEDIA_REMEDY,
 } from '../core/inlineMediaLimit.js';
-import { boundImageBuffer, ImageViewError } from '../utils/image-view.js';
+import {
+  boundImageBuffer,
+  ImageViewError,
+  sniffBoundableImageMime,
+} from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   getAllMCPServerStatuses,
@@ -697,25 +701,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       // Wrap the raw CallToolResult into the Part[] format that the
       // existing transform/display functions expect.
-      const rawResponseParts = wrapMcpCallToolResultAsParts(
-        this.serverToolName,
-        callToolResult,
+      const rawResponseParts = await this.boundImages(
+        wrapMcpCallToolResultAsParts(this.serverToolName, callToolResult),
+        signal,
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(
-          rawResponseParts,
-          {
-            name: this.serverToolName,
-            args: this.params,
-          },
-          signal,
-        );
+        return await this.buildMcpToolError(rawResponseParts, {
+          name: this.serverToolName,
+          args: this.params,
+        });
       }
 
-      const transformedParts = await this.boundInlineParts(
+      const transformedParts = await this.clampInlineMedia(
         transformMcpContentToParts(rawResponseParts),
-        signal,
       );
       const truncated = await this.truncateTextParts(transformedParts);
       const fallbackText = getDisplayFromPartsWithPersistedOutput(
@@ -873,19 +872,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       if (isParentAbortOutcome(outcome)) {
         throw outcome.reason;
       }
-      const rawResponseParts = outcome;
+      const rawResponseParts = await this.boundImages(outcome, signal);
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(
-          rawResponseParts,
-          functionCalls[0],
-          signal,
-        );
+        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
       }
 
-      const transformedParts = await this.boundInlineParts(
+      const transformedParts = await this.clampInlineMedia(
         transformMcpContentToParts(rawResponseParts),
-        signal,
       );
       const truncated = await this.truncateTextParts(transformedParts);
 
@@ -913,7 +907,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private async buildMcpToolError(
     rawResponseParts: Part[],
     functionCall: FunctionCall,
-    signal: AbortSignal,
   ): Promise<ToolResult> {
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
@@ -921,7 +914,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     let persistedOutputFiles: string[] | undefined;
     if (imageContent) {
       const truncatedContent = await this.truncateTextParts(
-        await this.boundInlineParts(imageContent, signal),
+        await this.clampInlineMedia(imageContent),
       );
       llmContent = truncatedContent.parts;
       persistedOutputFiles = truncatedContent.persistedOutputFiles;
@@ -950,24 +943,27 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     };
   }
 
-  private async boundInlineParts(
-    parts: Part[],
+  private boundImages(
+    rawResponseParts: Part[],
     signal: AbortSignal,
   ): Promise<Part[]> {
-    return boundInlineImageParts(
-      parts,
+    return boundMcpImageBlocks(
+      rawResponseParts,
       signal,
       `${this.serverName}/${this.serverToolName}`,
-      await this.isOmniMediaDeliveryActive(),
     );
+  }
+
+  private async clampInlineMedia(parts: Part[]): Promise<Part[]> {
+    return clampMcpInlineMedia(parts, await this.isOmniMediaDeliveryActive());
   }
 
   /**
    * Whether the omni funnel (`processToolResultOmniMedia`) takes over this
-   * result's media. It uploads by reference under its own ceilings and bounds
-   * any image it declines to upload, so the inline clamp must not pre-empt it.
-   * `isOmniEnabled()` runs first so non-omni sessions skip the dynamic import,
-   * as in `fileUtils`.
+   * result's image, audio and video parts. It uploads by reference under its
+   * own ceilings and bounds any part it keeps inline, so the inline clamp must
+   * not pre-empt it. `isOmniEnabled()` runs first so non-omni sessions skip
+   * the dynamic import, as in `fileUtils`.
    */
   private async isOmniMediaDeliveryActive(): Promise<boolean> {
     if (!this.cliConfig?.isOmniEnabled?.()) return false;
@@ -1333,54 +1329,65 @@ function transformImageAudioBlock(
 }
 
 /**
- * Shrink oversized inline images to the same visual budget `read_file`
- * applies, so a full-resolution screenshot does not enter the conversation
- * verbatim. Images that already fit, and any the renderer cannot handle, are
- * forwarded unchanged; images still over the inline limit become a text
- * placeholder. `subject` names the server and tool in renderer errors, since
- * these bytes have no file path.
+ * Shrink oversized images in an MCP result to the same visual budget
+ * `read_file` applies, before the result is rendered into parts, so each
+ * envelope names the mime the model actually receives.
  *
- * Under omni delivery the inline limit is skipped: the funnel uploads the part
- * by reference or applies the same bound itself before keeping it inline.
+ * Admission and the resulting mime come from the bytes, not the server's
+ * label, which MCP makes optional and servers get wrong: an image block or
+ * resource blob whose magic bytes say JPEG, PNG or WebP is bounded, and one
+ * that already fits keeps its bytes but takes the sniffed mime. Anything
+ * else, including formats the renderer cannot output, never reaches it.
+ * `subject` names the server and tool in renderer errors, since these bytes
+ * have no file path.
  */
-async function boundInlineImageParts(
-  parts: Part[],
+async function boundMcpImageBlocks(
+  rawResponseParts: Part[],
   signal: AbortSignal,
   subject: string,
-  omniDeliveryActive: boolean,
 ): Promise<Part[]> {
-  // One ceiling read shared by the renderer and the clamp, so its adopt
-  // decision and the clamp cannot disagree within a single result.
+  const funcResponse = rawResponseParts?.[0]?.functionResponse;
+  const content = funcResponse?.response?.['content'];
+  if (!funcResponse || !Array.isArray(content)) return rawResponseParts;
+
   const inlineByteCeiling = getMaxInlineMediaBytes();
-  const boundedParts: Part[] = [];
-  for (const part of parts) {
-    const inline = part.inlineData;
-    if (!isImagePart(part) || !inline?.mimeType || !inline.data) {
-      boundedParts.push(part);
+  let changed = false;
+  const boundedContent: McpContentBlock[] = [];
+  // Sequential on purpose: one image in the renderer at a time.
+  for (const block of content as McpContentBlock[]) {
+    const media =
+      block.type === 'image'
+        ? { data: block.data, mimeType: block.mimeType }
+        : block.type === 'resource' && block.resource?.blob
+          ? { data: block.resource.blob, mimeType: block.resource.mimeType }
+          : undefined;
+    // 16 base64 characters decode to the 12 bytes the sniffer needs.
+    const sniffedMime =
+      typeof media?.data === 'string'
+        ? sniffBoundableImageMime(
+            Buffer.from(media.data.slice(0, 16), 'base64'),
+          )
+        : null;
+    if (!media || !sniffedMime) {
+      boundedContent.push(block);
       continue;
     }
-    let boundedPart = part;
+    let bounded: { data: string; mimeType: string } | undefined;
     try {
       const view = await boundImageBuffer(
-        Buffer.from(inline.data, 'base64'),
-        `${subject} ${inline.mimeType}`,
+        Buffer.from(media.data, 'base64'),
+        `${subject} ${sniffedMime}`,
         signal,
         inlineByteCeiling,
       );
-      if (view) {
-        boundedPart = {
-          inlineData: {
-            ...inline,
-            data: view.bytes.toString('base64'),
-            mimeType: view.mimeType,
-          },
-        };
-      }
+      bounded = view
+        ? { data: view.bytes.toString('base64'), mimeType: view.mimeType }
+        : { data: media.data, mimeType: sniffedMime };
     } catch (error) {
       if (!(error instanceof ImageViewError)) {
         throw error;
       }
-      const message = `Unable to bound MCP image from ${subject} (${inline.mimeType}): ${getErrorMessage(error)}`;
+      const message = `Unable to bound MCP image from ${subject} (${media.mimeType}): ${getErrorMessage(error)}`;
       // A missing renderer fails every image of every call, so surface it.
       if (error.code === 'renderer_unavailable') {
         debugLogger.warn(message);
@@ -1388,17 +1395,67 @@ async function boundInlineImageParts(
         debugLogger.debug(message);
       }
     }
-    boundedParts.push(
-      omniDeliveryActive
-        ? boundedPart
-        : clampInlineMediaPart(
-            boundedPart,
-            inlineByteCeiling,
-            TOOL_RESULT_MEDIA_REMEDY,
-          ),
+    // Unconfirmed bytes keep the server's label.
+    if (
+      !bounded ||
+      (bounded.data === media.data && bounded.mimeType === media.mimeType)
+    ) {
+      boundedContent.push(block);
+      continue;
+    }
+    changed = true;
+    boundedContent.push(
+      block.type === 'resource'
+        ? {
+            ...block,
+            resource: {
+              ...block.resource,
+              blob: bounded.data,
+              mimeType: bounded.mimeType,
+            },
+          }
+        : { ...block, ...bounded },
     );
   }
-  return boundedParts;
+  if (!changed) return rawResponseParts;
+  return [
+    {
+      ...rawResponseParts[0],
+      functionResponse: {
+        ...funcResponse,
+        response: { ...funcResponse.response, content: boundedContent },
+      },
+    },
+    ...rawResponseParts.slice(1),
+  ];
+}
+
+/**
+ * Replace inline media over the inline limit with a text placeholder: images
+ * the renderer could not bring under it, and audio or other blobs, which
+ * `read_file` likewise refuses above the limit. Under omni delivery image,
+ * audio and video parts are left to the funnel, which uploads them by
+ * reference or clamps what it keeps inline.
+ */
+function clampMcpInlineMedia(
+  parts: Part[],
+  omniDeliveryActive: boolean,
+): Part[] {
+  const inlineByteCeiling = getMaxInlineMediaBytes();
+  return parts.map((part) => {
+    const mimeType = part.inlineData?.mimeType;
+    if (
+      !part.inlineData ||
+      (omniDeliveryActive && /^(image|audio|video)\//.test(mimeType ?? ''))
+    ) {
+      return part;
+    }
+    return clampInlineMediaPart(
+      part,
+      inlineByteCeiling,
+      TOOL_RESULT_MEDIA_REMEDY,
+    );
+  });
 }
 
 function transformResourceBlock(
