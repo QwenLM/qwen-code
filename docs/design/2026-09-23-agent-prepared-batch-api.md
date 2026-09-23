@@ -7,7 +7,7 @@ low-level `qwen batch submit|status|fetch|cancel` transport from #11874.
 This document is the design contract for the workflow layer; the user-facing
 guide lives in `docs/users/features/batch.md`. A team explainer (Batch API
 traits, architecture diagrams of the three execution paths, the auto-collect
-proposal) is in
+design) is in
 [`2026-09-23-batch-api-overview.zh-CN.md`](./2026-09-23-batch-api-overview.zh-CN.md);
 first measured results are in
 [`docs/verification/batch-api/results-2026-09-23.md`](../verification/batch-api/results-2026-09-23.md).
@@ -68,7 +68,8 @@ The skill makes the model do the semantic work only:
    embeds full contents mechanically.
 3. Write one plan JSON to `.qwen/batch/plans/<slug>.json`.
 4. Submit by running `qwen batch run <plan>` in the shell, then report the
-   task id, estimate, and collect command verbatim.
+   task id, item count, frozen-settings line, estimate and any `[batch]`
+   warning verbatim; collection is automatic (see below).
 
 ### `qwen batch` workflow subcommands (deterministic executor)
 
@@ -297,7 +298,10 @@ Batch by invoking `/batch-api` — but it must not lie about money:
 - Manual end-to-end (fake HTTP server, isolated HOME, real built CLI):
   `run → collect (running) → collect --wait → delivered files → idempotent
 re-collect → list → failure → retry → held → resolve → delivered →
-cancel`. All checks pass; no real API is touched.
+cancel → clean`. All 27 checks pass
+  (`docs/verification/batch-api/workflow-e2e.mjs`); no real API is touched.
+  The fake server always answers `in_progress`, so the validation-rejection
+  path and interactive auto-collect are covered by unit tests only.
 - The existing `qwen batch submit|status|fetch|cancel` behavior is unchanged
   (its test suite passes unmodified).
 

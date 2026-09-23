@@ -66,11 +66,13 @@ context**: many independent single-turn requests, each dominated by its own
 content. Summarizing a thousand different files, re-labelling a dataset where
 the item text dwarfs the instruction. That is what `qwen batch` serves.
 
-Latency is the other half of the story. Measured from `in_progress` to
-`completed`: 596 s for a 3-line job, 1720 s for 24 lines, 3718 s for 1000 —
-and `status` can read unchanged for 10–30 minutes at a time while the job
-works (one 1000-line job sat at 889/1000 for 28 minutes, then finished
-1000/1000). Plan in tens of minutes to hours.
+Latency is the other half of the story, and it varies widely by model and
+time. In the 2026-09-14 probes, `in_progress` to `completed` took 596 s for a
+3-line job, 1720 s for 24 lines and 3718 s for 1000, and `status` could read
+unchanged for 10–30 minutes at a time (one 1000-line job sat at 889/1000 for
+28 minutes). In the 2026-09-23 tests a qwen-plus batch finished within
+seconds while a qwen3.7-plus batch queued for 53 minutes. Plan for anything
+from seconds to hours.
 
 Batch is therefore **not** a way to make an agent run cheaper. Routing an
 agent's own turns through it was measured and rejected: the prefix cache the
@@ -80,7 +82,9 @@ realtime.
 
 ## `qwen batch`
 
-Four subcommands: `submit`, `status`, `fetch`, `cancel`.
+Four transport subcommands: `submit`, `status`, `fetch`, `cancel` (the
+`/batch-api` workflow below adds `run`, `collect`, `retry`, `list`, `check`
+and `clean`).
 
 ### submit
 
@@ -190,6 +194,7 @@ sample, writes a plan to `.qwen/batch/plans/`, and submits it through:
 ```bash
 qwen batch run .qwen/batch/plans/<slug>.json
 # task translate-docs-20260923103000: 42 item(s), window 24h
+# model qwen-plus, thinking off, max output 8192 tokens (frozen from your current settings; retries reuse them)
 # ~180,000 in / ~190,000 out tokens (rough estimate); ...
 # batch job: batch_abc123
 # collect later with: qwen batch collect translate-docs-20260923103000
@@ -216,7 +221,7 @@ the `!` prefix (e.g. `!qwen batch collect <task-id>`) so no model turn is
 spent:
 
 ```bash
-qwen batch collect <task-id> [--wait]   # validate + write target files
+qwen batch collect <task-id> [--wait [--timeout <s>]] [--keep-remote]   # validate + write target files
 qwen batch list                          # every recorded task, with its project
 qwen batch retry <task-id>               # resubmit only the failed items
 qwen batch retry <task-id> --max-output-tokens 8192  # include truncated ones
@@ -276,8 +281,7 @@ yours and are never touched. The design contract for this workflow is
 
 A fake DashScope server and a regression script that drives the real CLI
 against it live in
-[`docs/verification/batch-api/`](https://github.com/QwenLM/qwen-code/pull/12297),
-which is landing as its own change:
+[`docs/verification/batch-api/`](../../verification/batch-api/README.md):
 
 ```bash
 bash docs/verification/batch-api/regression.sh

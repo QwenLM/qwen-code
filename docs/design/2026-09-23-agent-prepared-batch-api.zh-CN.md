@@ -5,7 +5,7 @@
 状态：与本文同步实现（2026-09-23），构建在 #11874 的底层
 `qwen batch submit|status|fetch|cancel` 传输能力之上。本文是工作流层的
 设计约定；面向用户的使用说明在 `docs/users/features/batch.md`。
-团队扫盲（Batch API 特点、三种执行方式的架构图、自动收取方案）见
+团队扫盲（Batch API 特点、三种执行方式的架构图、自动收取设计）见
 [`2026-09-23-batch-api-overview.zh-CN.md`](./2026-09-23-batch-api-overview.zh-CN.md)；
 首轮实测数据与结论见
 [`docs/verification/batch-api/results-2026-09-23.md`](../verification/batch-api/results-2026-09-23.md)。
@@ -54,7 +54,7 @@
    分析谁都不做：完整内容由执行器机械嵌入。
 3. 把计划 JSON 写到 `.qwen/batch/plans/<slug>.json`。
 4. 在 shell 中执行 `qwen batch run <plan>` 提交，然后原样转述任务 ID、
-   估算与收取命令。
+   条目数、冻结设置行、估算以及任何 `[batch]` 警告；收取是自动的（见下文）。
 
 ### `qwen batch` 工作流子命令（确定性执行器）
 
@@ -249,8 +249,9 @@
   `--wait` 退避、预算门禁。
 - 手工端到端（假 HTTP 服务器、隔离 HOME、真实构建产物 CLI）：
   `run → collect（运行中）→ collect --wait → 文件交付 → 幂等重收 →
-list → 失败 → 重试 → held → 解决 → 交付 → cancel`，全部通过；不触碰
-  真实 API。
+list → 失败 → 重试 → held → 解决 → 交付 → cancel → clean`，27 项断言全部
+  通过（`docs/verification/batch-api/workflow-e2e.mjs`）；不触碰真实 API。假服务器
+  总是返回 `in_progress`，校验被拒与交互式自动收取只由单元测试覆盖。
 - 既有 `qwen batch submit|status|fetch|cancel` 行为不变（原测试套件
   未修改并通过）。
 

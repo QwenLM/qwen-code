@@ -80,8 +80,15 @@ export interface BatchJob {
  */
 export function resolveEndpoint(
   env: Record<string, string | undefined> = process.env,
+  options: {
+    /** An interactive session's already-loaded settings; re-reading them
+     * from disk mid-session could even rewrite a half-edited file. */
+    settings?: ReturnType<typeof loadSettings>['merged'];
+    /** Where resolver warnings go; stderr would draw over a TUI. */
+    warn?: (message: string) => void;
+  } = {},
 ): BatchEndpoint {
-  const settings = loadSettings().merged;
+  const settings = options.settings ?? loadSettings().merged;
   const selectedAuthType =
     settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
   if (selectedAuthType !== AuthType.USE_OPENAI) {
@@ -114,8 +121,11 @@ export function resolveEndpoint(
   // The resolver's model/provider diagnostics go to stderr (never stdout:
   // submit prints exactly one line there) so a misroute is visible before
   // the upload, not hours later as a provider rejection.
+  const warn =
+    options.warn ??
+    ((message: string) => writeStderrLine(`warning: ${message}`));
   for (const warning of warnings ?? []) {
-    writeStderrLine(`warning: ${warning}`);
+    warn(warning);
   }
   return {
     apiKey,
@@ -603,12 +613,17 @@ const cancelCommand: CommandModule = {
 };
 
 /** Deps shared by the agent-prepared workflow subcommands. */
+// A session's auto-collector holds a task lock for a few seconds at most;
+// waiting beats failing a command the user or agent just ran.
+const LOCK_WAIT_MS = 15_000;
+
 const workflowDeps = (ep: BatchEndpoint): WorkflowDeps => ({
   ep,
   cwd: process.cwd(),
   env: process.env,
   out: writeStdoutLine,
   err: writeStderrLine,
+  lockWaitMs: LOCK_WAIT_MS,
 });
 
 const runWorkflowCommand: CommandModule = {
@@ -729,7 +744,12 @@ const cleanWorkflowCommand: CommandModule = {
   handler: (argv) =>
     run(async () => {
       await cleanTask(
-        { env: process.env, out: writeStdoutLine, err: writeStderrLine },
+        {
+          env: process.env,
+          out: writeStdoutLine,
+          err: writeStderrLine,
+          lockWaitMs: LOCK_WAIT_MS,
+        },
         argv['task-id'] as string,
         { force: argv['force'] as boolean },
       );
@@ -751,7 +771,7 @@ const checkWorkflowCommand: CommandModule = {
 
 const listWorkflowCommand: CommandModule = {
   command: 'list',
-  describe: 'List workflow tasks recorded under this project',
+  describe: 'List all recorded workflow tasks with their project',
   builder: (yargs) => yargs,
   handler: (argv) =>
     run(async () => {

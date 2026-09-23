@@ -183,6 +183,50 @@ describe('BatchTaskStore', () => {
     await expect(store.withLock(task.id, async () => 'ok')).resolves.toBe('ok');
   });
 
+  it('treats a lock whose content is not written yet as held', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const lock = path.join(path.dirname(store.fileOf(task.id)), 'lock');
+    // The file exists before its content does; a reader in that gap must
+    // not mistake it for a dead holder and steal it.
+    fs.writeFileSync(lock, '');
+    await expect(store.withLock(task.id, async () => 'ok')).rejects.toThrow(
+      /in use by another/,
+    );
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
+  it('never removes a lock that is no longer its own', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const lock = path.join(path.dirname(store.fileOf(task.id)), 'lock');
+    await store.withLock(task.id, async () => {
+      // Someone took over (e.g. after a stale check) while we worked.
+      fs.writeFileSync(lock, `${process.pid}\nother\nsuccessor\n`);
+    });
+    expect(fs.readFileSync(lock, 'utf8')).toContain('successor');
+  });
+
+  it('waits for a held lock when asked to', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const lock = path.join(path.dirname(store.fileOf(task.id)), 'lock');
+    fs.writeFileSync(lock, `${process.pid}\n${os.hostname()}\nholder\n`);
+    setTimeout(() => fs.rmSync(lock, { force: true }), 300);
+    await expect(
+      store.withLock(task.id, async () => 'ok', { waitMs: 5_000 }),
+    ).resolves.toBe('ok');
+  });
+
   it('never takes over a lock written on another host', async () => {
     const task = store.create(
       validatePlan(validPlan, 'plan.json'),

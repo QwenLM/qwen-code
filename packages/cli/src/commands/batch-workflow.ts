@@ -124,6 +124,9 @@ export interface WorkflowDeps {
   err: (line: string) => void;
   api?: WorkflowApi;
   sleep?: (ms: number) => Promise<void>;
+  /** How long a command waits for a task lock held by another process
+   * (typically a session's auto-collector) before giving up. */
+  lockWaitMs?: number;
 }
 
 const realSleep = (ms: number) =>
@@ -428,6 +431,22 @@ async function submitAttempt(
 const VALIDATION_POLL_MS = 5_000;
 const VALIDATION_POLLS = 6;
 
+function reportRejection(
+  deps: WorkflowDeps,
+  taskId: string,
+  job: BatchJob,
+): void {
+  const errors = jobErrorsOf(job);
+  deps.err(
+    `[batch] the provider rejected ${job.id} during validation` +
+      `${errors.length > 0 ? `: ${errors.join('; ')}` : ''}. Nothing was generated or billed.`,
+  );
+  deps.err(
+    `[batch] fix the cause (for example, a model without Batch support) before retrying; ` +
+      `\`qwen batch collect ${taskId}\` records the failure on the task.`,
+  );
+}
+
 /**
  * Wait out the validation window (~30s at most) so a batch the provider
  * rejects outright is reported now, not hours later by collect. Quiet when
@@ -438,7 +457,12 @@ async function reportEarlyRejection(
   taskId: string,
   created: BatchJob | undefined,
 ): Promise<void> {
-  if (!created || created.status !== 'validating') return;
+  if (!created) return;
+  if (created.status === 'failed') {
+    reportRejection(deps, taskId, created);
+    return;
+  }
+  if (created.status !== 'validating') return;
   const api = deps.api ?? liveApi;
   const sleep = deps.sleep ?? realSleep;
   for (let poll = 0; poll < VALIDATION_POLLS; poll++) {
@@ -450,15 +474,7 @@ async function reportEarlyRejection(
       return;
     }
     if (job.status === 'failed') {
-      const errors = jobErrorsOf(job);
-      deps.err(
-        `[batch] the provider rejected ${job.id} during validation` +
-          `${errors.length > 0 ? `: ${errors.join('; ')}` : ''}. Nothing was generated or billed.`,
-      );
-      deps.err(
-        `[batch] fix the cause (for example, a model without Batch support) before retrying; ` +
-          `\`qwen batch collect ${taskId}\` records the failure on the task.`,
-      );
+      reportRejection(deps, taskId, job);
       return;
     }
     if (job.status !== 'validating') return;
@@ -547,8 +563,10 @@ export async function runPlan(
     deps.err(`[batch] note: ${note}`);
   }
   deps.out(cost.text);
-  const job = await store.withLock(task.id, () =>
-    submitAttempt(deps, task, attempt, store, assembly),
+  const job = await store.withLock(
+    task.id,
+    () => submitAttempt(deps, task, attempt, store, assembly),
+    { waitMs: deps.lockWaitMs },
   );
   await reportEarlyRejection(deps, task.id, job);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
@@ -685,8 +703,10 @@ export async function collectTask(
   options: CollectOptions = {},
 ): Promise<CollectSummary> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
-  return store.withLock(taskId, () =>
-    collectLocked(deps, store, taskId, options),
+  return store.withLock(
+    taskId,
+    () => collectLocked(deps, store, taskId, options),
+    { waitMs: deps.lockWaitMs },
   );
 }
 
@@ -725,7 +745,10 @@ async function collectLocked(
     );
   }
 
-  for (const attempt of openAttempts) {
+  // One batch failing to collect (a download error, a provider hiccup) must
+  // not hide what the others delivered: collect each, report all, then fail.
+  const attemptFailures: string[] = [];
+  const collectAttempt = async (attempt: TaskAttempt): Promise<void> => {
     const batchId = attempt.batchId as string;
     // A collected attempt is fully local: re-reading it re-tries held
     // deliveries without asking the provider about a batch it may have
@@ -739,10 +762,24 @@ async function collectLocked(
             `${batchId} is ${job.status} (${job.request_counts?.completed ?? 0}/${job.request_counts?.total ?? attempt.itemIds.length}); ` +
               `re-run \`qwen batch collect ${taskId}\` later or add --wait.`,
           );
-          continue;
+          return;
         }
         job = await waitForSettled(deps, batchId, deadline);
       }
+    }
+
+    // Settled but its result file not published yet: collecting now would
+    // fail every item as "no result line" and invite a paid retry.
+    if (
+      job?.status === 'completed' &&
+      !job.output_file_id &&
+      !job.error_file_id &&
+      (job.request_counts?.completed ?? 0) > 0
+    ) {
+      deps.out(
+        `${batchId} is completed but its result file is not available yet; collect again shortly.`,
+      );
+      return;
     }
 
     if (job) {
@@ -914,6 +951,15 @@ async function collectLocked(
       settledNow += 1;
       store.save(task);
     }
+  };
+  for (const attempt of openAttempts) {
+    try {
+      await collectAttempt(attempt);
+    } catch (error) {
+      attemptFailures.push(
+        `${attempt.batchId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   const delivered = task.items.filter((item) => item.state === 'delivered');
@@ -964,7 +1010,7 @@ async function collectLocked(
       `resolve the held conflicts above, then re-run: qwen batch collect ${task.id}`,
     );
   }
-  return {
+  const summary: CollectSummary = {
     taskId: task.id,
     settled: settledNow,
     delivered: delivered.filter((item) => !deliveredBefore.has(item.id)),
@@ -973,6 +1019,17 @@ async function collectLocked(
     awaiting: running.length,
     jobErrors: settledErrors,
   };
+  if (attemptFailures.length > 0) {
+    for (const failure of attemptFailures) {
+      deps.out(`  could not collect ${failure}`);
+    }
+    // Callers that report progress (auto-collect) still get what changed.
+    throw Object.assign(
+      new Error(`collect incomplete: ${attemptFailures.join('; ')}`),
+      { summary },
+    );
+  }
+  return summary;
 }
 
 export interface RetryOptions {
@@ -986,7 +1043,11 @@ export async function retryTask(
   options: RetryOptions = {},
 ): Promise<void> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
-  await store.withLock(taskId, () => retryLocked(deps, store, taskId, options));
+  await store.withLock(
+    taskId,
+    () => retryLocked(deps, store, taskId, options),
+    { waitMs: deps.lockWaitMs },
+  );
 }
 
 async function retryLocked(
@@ -1162,42 +1223,46 @@ export interface CleanOptions {
  * be needed, unless forced.
  */
 export async function cleanTask(
-  deps: Pick<WorkflowDeps, 'env' | 'out' | 'err'>,
+  deps: Pick<WorkflowDeps, 'env' | 'out' | 'err' | 'lockWaitMs'>,
   taskId: string,
   options: CleanOptions = {},
 ): Promise<void> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
-  await store.withLock(taskId, async () => {
-    const task = store.load(taskId);
-    const open = task.attempts.filter(
-      (attempt) =>
-        isAmbiguous(attempt) ||
-        (attempt.submitState === 'created' && !attempt.collected),
-    );
-    if (open.length > 0 && !options.force) {
-      throw new Error(
-        `task ${taskId} has ${open.length} batch submission(s) that may still be running, billing, or holding uncollected results ` +
-          `(${open.map((attempt) => attempt.batchId ?? `attempt ${attempt.attempt}, unreconciled`).join(', ')}). ` +
-          `Collect or cancel first — deleting the record loses the only way to do either — or pass --force.`,
+  await store.withLock(
+    taskId,
+    async () => {
+      const task = store.load(taskId);
+      const open = task.attempts.filter(
+        (attempt) =>
+          isAmbiguous(attempt) ||
+          (attempt.submitState === 'created' && !attempt.collected),
       );
-    }
-    for (const attempt of open) {
-      deps.err(
-        `[batch] warning: ${attempt.batchId ?? `attempt ${attempt.attempt}`} was not cancelled; it may still run and bill.`,
+      if (open.length > 0 && !options.force) {
+        throw new Error(
+          `task ${taskId} has ${open.length} batch submission(s) that may still be running, billing, or holding uncollected results ` +
+            `(${open.map((attempt) => attempt.batchId ?? `attempt ${attempt.attempt}, unreconciled`).join(', ')}). ` +
+            `Collect or cancel first — deleting the record loses the only way to do either — or pass --force.`,
+        );
+      }
+      for (const attempt of open) {
+        deps.err(
+          `[batch] warning: ${attempt.batchId ?? `attempt ${attempt.attempt}`} was not cancelled; it may still run and bill.`,
+        );
+      }
+      const leftRemote = task.attempts.filter(
+        (attempt) => attempt.collected && !attempt.remoteCleaned,
       );
-    }
-    const leftRemote = task.attempts.filter(
-      (attempt) => attempt.collected && !attempt.remoteCleaned,
-    );
-    if (leftRemote.length > 0) {
-      deps.err(
-        `[batch] note: remote input/output files of ${leftRemote.map((attempt) => attempt.batchId).join(', ')} ` +
-          `were kept (--keep-remote) and are not deleted by clean.`,
-      );
-    }
-    store.remove(taskId);
-    deps.out(`removed local record of task ${taskId}`);
-  });
+      if (leftRemote.length > 0) {
+        deps.err(
+          `[batch] note: remote input/output files of ${leftRemote.map((attempt) => attempt.batchId).join(', ')} ` +
+            `were kept (--keep-remote) and are not deleted by clean.`,
+        );
+      }
+      store.remove(taskId);
+      deps.out(`removed local record of task ${taskId}`);
+    },
+    { waitMs: deps.lockWaitMs },
+  );
 }
 
 export async function cancelTask(
@@ -1205,7 +1270,9 @@ export async function cancelTask(
   taskId: string,
 ): Promise<void> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
-  await store.withLock(taskId, () => cancelLocked(deps, store, taskId));
+  await store.withLock(taskId, () => cancelLocked(deps, store, taskId), {
+    waitMs: deps.lockWaitMs,
+  });
 }
 
 async function cancelLocked(

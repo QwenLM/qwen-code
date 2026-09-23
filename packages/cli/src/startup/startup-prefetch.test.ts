@@ -743,6 +743,11 @@ describe('startupPrefetch', () => {
       notify: (message: string) => void;
     };
     expect(options).toMatchObject({ projectRoot: '/repo', mode: 'deliver' });
+    expect(
+      (
+        options as unknown as { resolveEndpoint: () => unknown }
+      ).resolveEndpoint(),
+    ).toMatchObject({ baseUrl: 'http://b' });
     // Notices go through the update-notice channel, deferred while streaming.
     options.notify('Batch task t: 2 result(s) delivered.');
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
@@ -779,5 +784,6 @@ describe('startupPrefetch', () => {
     await vi.dynamicImportSettled();
 
     expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
+    expect(mockStartBatchAutoCollect).toHaveBeenCalledTimes(1);
   });
 });

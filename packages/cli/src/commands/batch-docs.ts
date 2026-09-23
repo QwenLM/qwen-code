@@ -206,6 +206,18 @@ export function assembleRequests(
 
 // A path that does not exist yet has nothing to follow; the read that
 // comes next reports it by name.
+/**
+ * `p` is `root` or below it. Uses `path.relative`, so a root that already
+ * ends in a separator (`/`, `C:\\`) and a different Windows drive both work.
+ */
+export function isInsideRoot(root: string, p: string): boolean {
+  const relative = path.relative(root, p);
+  if (relative === '') return true;
+  if (path.isAbsolute(relative)) return false;
+  // `..foo` is a file inside the root; only a `..` segment leaves it.
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`);
+}
+
 function isRealPathInsideRoot(projectRoot: string, p: string): boolean {
   let real: string;
   try {
@@ -214,7 +226,7 @@ function isRealPathInsideRoot(projectRoot: string, p: string): boolean {
     return true;
   }
   const realRoot = fs.realpathSync(projectRoot);
-  return real === realRoot || real.startsWith(realRoot + path.sep);
+  return isInsideRoot(realRoot, real);
 }
 
 function resolveInsideRoot(
@@ -223,12 +235,7 @@ function resolveInsideRoot(
 ): string | undefined {
   if (path.isAbsolute(relative)) return undefined;
   const resolved = path.resolve(projectRoot, relative);
-  const rootWithSep = projectRoot.endsWith(path.sep)
-    ? projectRoot
-    : projectRoot + path.sep;
-  return resolved === projectRoot || resolved.startsWith(rootWithSep)
-    ? resolved
-    : undefined;
+  return isInsideRoot(projectRoot, resolved) ? resolved : undefined;
 }
 
 export interface OutputLine {
@@ -389,7 +396,7 @@ export function deliverResult(
   // Symlink escape: the parent chain must really live under the project.
   const realParent = fs.realpathSync(parent);
   const realRoot = fs.realpathSync(projectRoot);
-  if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep)) {
+  if (!isInsideRoot(realRoot, realParent)) {
     return {
       kind: 'held',
       reason: `target directory "${item.target}" resolves outside the project root`,
@@ -422,7 +429,17 @@ export function deliverResult(
     }
     // Filesystems without hard links: exclusive create still refuses to
     // overwrite, at the cost of atomicity.
-    fs.writeFileSync(targetPath, content, { flag: 'wx' });
+    try {
+      fs.writeFileSync(targetPath, content, { flag: 'wx' });
+    } catch (fallbackError) {
+      if ((fallbackError as NodeJS.ErrnoException).code === 'EEXIST') {
+        return {
+          kind: 'held',
+          reason: `target "${item.target}" appeared while delivering; kept both`,
+        };
+      }
+      throw fallbackError;
+    }
   } finally {
     fs.rmSync(tmp, { force: true });
   }

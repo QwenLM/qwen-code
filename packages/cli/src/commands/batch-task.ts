@@ -9,6 +9,7 @@
 // spent, so a crash between upload and create (or a terminal closed while
 // the provider works) never loses which remote objects exist and never
 // resubmits blindly. Pure bookkeeping — no network, no model.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -314,45 +315,61 @@ export class BatchTaskStore {
    * another host — a shared home directory — is never taken over, because
    * its process cannot be checked from here.
    */
-  async withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  async withLock<T>(
+    id: string,
+    fn: () => Promise<T>,
+    options: { waitMs?: number } = {},
+  ): Promise<T> {
     const lock = path.join(this.dirOf(id), 'lock');
     if (!fs.existsSync(path.dirname(lock))) {
       throw new Error(`no batch task "${id}" under ${this.homeDir}`);
     }
     const host = os.hostname();
-    for (let attempt = 0; ; attempt++) {
+    // Unique per acquisition, so release can tell our lock from a successor's.
+    const token = `${process.pid}\n${host}\n${crypto.randomUUID()}\n`;
+    const deadline = Date.now() + (options.waitMs ?? 0);
+    let tookOver = false;
+    for (;;) {
       try {
-        fs.writeFileSync(lock, `${process.pid}\n${host}\n`, { flag: 'wx' });
+        fs.writeFileSync(lock, token, { flag: 'wx' });
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        let holder: { pid: number; host?: string } = { pid: NaN };
-        try {
-          const [pid, holderHost] = fs
-            .readFileSync(lock, 'utf8')
-            .split('\n')
-            .map((part) => part.trim());
-          holder = { pid: Number(pid), host: holderHost || undefined };
-        } catch {
-          // Released between our write and read; try again.
-        }
-        const elsewhere = holder.host !== undefined && holder.host !== host;
-        if (attempt > 0 || elsewhere || isProcessAlive(holder.pid)) {
-          const who = Number.isNaN(holder.pid)
-            ? ''
-            : ` (pid ${holder.pid}${elsewhere ? ` on ${holder.host}` : ''})`;
-          throw new Error(
-            `task "${id}" is in use by another \`qwen batch\` process${who}; wait for it to finish. ` +
-              `If no such process is running, delete ${lock} and retry.`,
-          );
-        }
-        fs.rmSync(lock, { force: true });
       }
+      const content = readLock(lock);
+      if (content === undefined) continue; // released in between; try again
+      const [pidText, holderHost] = content
+        .split('\n')
+        .map((part) => part.trim());
+      const pid = Number(pidText);
+      // An empty or unparseable lock is one being written right now (the
+      // file exists before its content does): treat it as held. Only a
+      // well-formed lock from this host whose pid is gone is stale.
+      const wellFormed = /^\d+$/.test(pidText ?? '') && pid > 0;
+      const elsewhere = Boolean(holderHost) && holderHost !== host;
+      if (!tookOver && wellFormed && !elsewhere && !isProcessAlive(pid)) {
+        tookOver = true;
+        if (readLock(lock) === content) fs.rmSync(lock, { force: true });
+        continue;
+      }
+      if (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        continue;
+      }
+      const who = wellFormed
+        ? ` (pid ${pid}${elsewhere ? ` on ${holderHost}` : ''})`
+        : '';
+      throw new Error(
+        `task "${id}" is in use by another \`qwen batch\` process${who}. ` +
+          `An open qwen session collects batch tasks automatically and holds the lock only briefly — try again in a few seconds. ` +
+          `If no such process is running, delete ${lock} and retry.`,
+      );
     }
     try {
       return await fn();
     } finally {
-      fs.rmSync(lock, { force: true });
+      // Never remove a lock someone else took over after a stale check.
+      if (readLock(lock) === token) fs.rmSync(lock, { force: true });
     }
   }
 
@@ -389,7 +406,7 @@ export class BatchTaskStore {
     fs.writeFileSync(tmp, JSON.stringify(task, null, 2) + '\n', {
       mode: PRIVATE_FILE_MODE,
     });
-    fs.renameSync(tmp, file);
+    renameWithRetry(tmp, file);
   }
 
   list(): BatchTask[] {
@@ -427,6 +444,29 @@ export function refreshTaskStatus(task: BatchTask): void {
     task.status = 'submit-unknown';
   } else if (last?.submitState === 'created') {
     task.status = 'running';
+  }
+}
+
+function readLock(lock: string): string | undefined {
+  try {
+    return fs.readFileSync(lock, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+// Windows refuses to replace a file another process has open (the session's
+// auto-collector reads task files every minute); a moment later it works.
+function renameWithRetry(from: string, to: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (attempt >= 4 || (code !== 'EPERM' && code !== 'EBUSY')) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
   }
 }
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +16,7 @@ import {
   describeThinking,
   estimateTokens,
   freezeRequest,
+  isInsideRoot,
   parseOutputJsonl,
   sha256,
 } from './batch-docs.js';
@@ -346,6 +347,22 @@ describe('deliverResult', () => {
     expect(fs.readdirSync(path.join(root, 'docs', 'en'))).toEqual(['intro.md']);
   });
 
+  it('holds instead of failing when a target appears on a filesystem without hard links', () => {
+    const target = path.join(root, 'docs', 'en', 'intro.md');
+    const link = vi.spyOn(fs, 'linkSync').mockImplementation(() => {
+      // The target shows up between the existence check and the write.
+      fs.writeFileSync(target, 'written meanwhile');
+      throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    });
+    try {
+      const outcome = deliverResult(item(), content, root, sourceHash);
+      expect(outcome.kind).toBe('held');
+      expect(fs.readFileSync(target, 'utf8')).toBe('written meanwhile');
+    } finally {
+      link.mockRestore();
+    }
+  });
+
   it('is idempotent: an identical existing target still counts as delivered', () => {
     deliverResult(item(), content, root, sourceHash);
     const outcome = deliverResult(item(), content, root, sourceHash);
@@ -404,6 +421,25 @@ describe('deliverResult', () => {
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe('isInsideRoot', () => {
+  it('accepts the root and paths below it, including names starting with ..', () => {
+    expect(isInsideRoot('/proj', '/proj')).toBe(true);
+    expect(isInsideRoot('/proj', '/proj/a/b.md')).toBe(true);
+    expect(isInsideRoot('/proj', '/proj/..notes.md')).toBe(true);
+  });
+
+  it('rejects siblings, parents and prefix look-alikes', () => {
+    expect(isInsideRoot('/proj', '/project/a.md')).toBe(false);
+    expect(isInsideRoot('/proj', '/a.md')).toBe(false);
+    expect(isInsideRoot('/proj/sub', '/proj')).toBe(false);
+  });
+
+  it('works when the root itself ends in a separator', () => {
+    // `realRoot + sep` used to turn `/` into `//`, holding every target.
+    expect(isInsideRoot('/', '/proj/a.md')).toBe(true);
   });
 });
 

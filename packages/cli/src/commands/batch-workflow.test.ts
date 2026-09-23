@@ -370,6 +370,36 @@ describe('provider-side rejection', () => {
     expect(h.sleeps).toEqual([5_000]);
   });
 
+  it('reports a batch that create already returns as failed, without waiting', async () => {
+    const h = (harness = setup());
+    h.api.createBatch.mockImplementationOnce(
+      async (_ep: unknown, inputFileId: string) => {
+        const job = rejected('batch-1', inputFileId);
+        h.jobs.set('batch-1', job);
+        return job;
+      },
+    );
+    await runPlan(h.deps, h.planPath);
+    expect(h.err.join('\n')).toMatch(/rejected batch-1 during validation/);
+    expect(h.sleeps).toEqual([]);
+  });
+
+  it('gives up quietly after the validation window', async () => {
+    const h = (harness = setup());
+    h.api.createBatch.mockImplementationOnce(
+      async (_ep: unknown, inputFileId: string) => {
+        const job = jobOf('batch-1', 'validating', {
+          input_file_id: inputFileId,
+        });
+        h.jobs.set('batch-1', job);
+        return job;
+      },
+    );
+    await runPlan(h.deps, h.planPath);
+    expect(h.sleeps).toEqual(Array(6).fill(5_000));
+    expect(h.err.join('\n')).not.toMatch(/rejected/);
+  });
+
   it('stays quiet when validation passes', async () => {
     const h = (harness = setup());
     h.api.createBatch.mockImplementationOnce(
@@ -388,6 +418,58 @@ describe('provider-side rejection', () => {
 });
 
 describe('collectTask', () => {
+  it('waits for a completed batch whose result file is not published yet', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    const taskId = taskIdOf(h);
+    const job = h.jobs.get('batch-1') as BatchJob;
+    job.status = 'completed'; // counts say 2 completed, but no output file yet
+
+    await collectTask(h.deps, taskId);
+    let task = h.store.load(taskId);
+    expect(task.items.map((item) => item.state)).toEqual([
+      'submitted',
+      'submitted',
+    ]);
+    expect(task.attempts[0].collected).toBeUndefined();
+    expect(h.out.join('\n')).toMatch(/result file is not available yet/);
+
+    job.output_file_id = 'file-out-1';
+    h.files.set(
+      'file-out-1',
+      `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    );
+    await collectTask(h.deps, taskId);
+    task = h.store.load(taskId);
+    expect(task.items.every((item) => item.state === 'delivered')).toBe(true);
+  });
+
+  it('still reports what it delivered when another batch of the task fails to collect', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    const task = h.store.load(taskId);
+    // A second, still-open batch whose status query fails.
+    task.attempts.push({
+      attempt: 2,
+      itemIds: [],
+      submitState: 'created',
+      batchId: 'batch-gone',
+    });
+    h.store.save(task);
+
+    const error = (await collectTask(h.deps, taskId).catch(
+      (e: unknown) => e,
+    )) as Error & { summary?: { delivered: unknown[] } };
+    expect(error.message).toMatch(/collect incomplete: batch-gone/);
+    expect(error.summary?.delivered).toHaveLength(2);
+    expect(
+      fs.readFileSync(path.join(h.root, 'docs', 'en', 'a.md'), 'utf8'),
+    ).toBe('# A\n\nAlpha.');
+  });
+
   it('reports a running batch and downloads nothing without --wait', async () => {
     const h = (harness = setup());
     await runPlan(h.deps, h.planPath);

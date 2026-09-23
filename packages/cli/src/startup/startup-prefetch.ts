@@ -292,7 +292,11 @@ export function startPostRenderPrefetches(
         mode: batchAutoCollect,
         notify: (message) =>
           updateEventEmitter.emit('update-info', { message }),
-        resolveEndpoint: () => resolveEndpoint(),
+        resolveEndpoint: () =>
+          resolveEndpoint(process.env, {
+            settings: settings.merged,
+            warn: (message) => debugLogger.debug(message),
+          }),
         log: (message) => debugLogger.debug(message),
       });
     });

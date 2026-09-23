@@ -13,7 +13,7 @@ allowedTools:
 
 **Hard rule for this whole skill:** if any `qwen batch …` command fails, or
 the task turns out to be unsuitable, report what happened in a few lines and
-stop. Never fall back to doing the transform yourself in this session — the
+stop (the one exception, a plan-field error from `run`, is in §4). Never fall back to doing the transform yourself in this session — the
 user chose the half-price asynchronous path explicitly, and silently doing
 the work at full realtime price is exactly what they opted out of. Offering
 it as a choice ("I can do this realtime instead, at full price") is fine;
@@ -106,7 +106,8 @@ kebab-case task name) with the write_file tool:
 
 Rules:
 
-- `id` must match `[A-Za-z0-9][A-Za-z0-9_-]*` and be unique per item; it
+- `id` must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` (1–64 characters) and be
+  unique per item; it
   becomes part of the provider-side `custom_id`.
 - Paths are relative to the current working directory. Every `target` must
   be unique and must not overwrite an existing file — pick fresh output
@@ -136,10 +137,12 @@ Run exactly this with the shell tool:
 Then report to the user, verbatim from the command output: the task id, item
 count, the frozen model/thinking/output-limit line, the cost estimate, and
 any `[batch]` warning (a batch rejected during validation is reported here —
-relay it and stop). If the command fails, relay its error; fix the plan only
-when the error is about the plan itself, otherwise stop — never work around
-the executor by hand-crafting requests, calling the API directly, or doing
-the transform yourself.
+relay it and stop). The `collect later with` line is only the manual
+fallback: collection is automatic (§5). If the command fails, relay its error
+and stop. The single exception: when the error names a field of the plan
+file itself (an invalid id, a duplicate target, an unknown field), fix that
+field once and run again. Never work around the executor by hand-crafting
+requests, calling the API directly, or doing the transform yourself.
 
 ## 5. Collecting later
 

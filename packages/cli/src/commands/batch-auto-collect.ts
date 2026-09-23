@@ -10,6 +10,7 @@
 // polls the provider over plain HTTP and runs the same `collectTask` the CLI
 // runs — no model call, so waiting costs nothing. Retries are never
 // automatic: they bill again, so the notice only says how.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BatchEndpoint } from './batch.js';
@@ -25,6 +26,7 @@ import {
   type WorkflowApi,
 } from './batch-workflow.js';
 import { SETTLED_STATUSES, getBatchJob } from './batch-client.js';
+import { isInsideRoot } from './batch-docs.js';
 
 /** `deliver` collects and writes results; `notify` only says a task is ready. */
 export type BatchAutoCollectMode = 'deliver' | 'notify' | 'off';
@@ -35,7 +37,8 @@ export interface BatchAutoCollectOptions {
   mode: BatchAutoCollectMode;
   /** Shows one line in the session (an info notice). */
   notify: (message: string) => void;
-  /** Resolved lazily on the first task found; throwing disables polling. */
+  /** Resolved on each pass that has a task due; throwing postpones polling
+   * (and says so once). */
   resolveEndpoint: () => BatchEndpoint;
   log?: (message: string) => void;
   env?: Record<string, string | undefined>;
@@ -56,16 +59,21 @@ export interface BatchAutoCollector {
   stop(): void;
 }
 
-const samePath = (a: string, b: string) => {
-  const real = (p: string) => {
-    try {
-      return fs.realpathSync(p);
-    } catch {
-      return path.resolve(p);
-    }
-  };
-  return real(a) === real(b);
+const realPath = (p: string) => {
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync.native(p);
+  } catch {
+    resolved = path.resolve(p);
+  }
+  // Windows paths compare case-insensitively (`c:\` vs `C:\`).
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 };
+
+/** The task belongs to this session: its root is the session root or below
+ * it (the agent's shell may have run `qwen batch run` from a subdirectory). */
+const belongsTo = (sessionRoot: string, taskRoot: string) =>
+  isInsideRoot(realPath(sessionRoot), realPath(taskRoot));
 
 const isOpen = (task: BatchTask) =>
   task.attempts.some(
@@ -75,6 +83,9 @@ const isOpen = (task: BatchTask) =>
         attempt.batchId !== undefined &&
         !attempt.collected),
   );
+
+const endpointKey = (ep: BatchEndpoint) =>
+  `${ep.baseUrl} ${crypto.createHash('sha256').update(ep.apiKey).digest('hex').slice(0, 12)}`;
 
 const list = (names: string[]) =>
   names.slice(0, MAX_LISTED).join(', ') +
@@ -121,11 +132,18 @@ export function createBatchAutoCollector(
   const store = new BatchTaskStore(batchHomeDir(env));
   const nextPollAt = new Map<string, number>();
   const pollDelay = new Map<string, number>();
-  // Tasks that can never be collected from this session (another endpoint
-  // or key, unreadable record) or were already announced in notify mode.
-  const ignored = new Set<string>();
-  let endpoint: BatchEndpoint | undefined;
-  let disabled = options.mode === 'off';
+  // Task id -> endpoint key it could not be collected with (another
+  // endpoint or key). Retried once the session's endpoint changes.
+  const wrongEndpoint = new Map<string, string>();
+  // Batches already announced in notify mode; a later retry's new batch
+  // is announced again.
+  const announced = new Set<string>();
+  // One-time warnings: a submission that cannot be reconciled, and a
+  // session that cannot reach the Batch API at all.
+  const warnedAmbiguous = new Set<string>();
+  let warnedNoEndpoint = false;
+  let nextResolveAt = 0;
+  let stopped = options.mode === 'off';
 
   const backOff = (id: string) => {
     const delay = Math.min(
@@ -136,98 +154,151 @@ export function createBatchAutoCollector(
     nextPollAt.set(id, now() + delay);
   };
 
-  const readyInNotifyMode = async (
-    ep: BatchEndpoint,
-    task: BatchTask,
-  ): Promise<boolean> => {
-    for (const attempt of task.attempts) {
-      if (
-        attempt.submitState !== 'created' ||
-        !attempt.batchId ||
-        attempt.collected
-      ) {
-        continue;
-      }
-      const job = await (options.api?.getBatch ?? getBatchJob)(
-        ep,
-        attempt.batchId,
-      );
-      if (SETTLED_STATUSES.has(job.status)) return true;
+  const openBatchIds = (task: BatchTask) =>
+    task.attempts
+      .filter(
+        (attempt) =>
+          attempt.submitState === 'created' &&
+          attempt.batchId !== undefined &&
+          !attempt.collected,
+      )
+      .map((attempt) => attempt.batchId as string);
+
+  const warnIfAmbiguous = (taskId: string) => {
+    if (warnedAmbiguous.has(taskId)) return;
+    let task: BatchTask;
+    try {
+      task = store.load(taskId);
+    } catch {
+      return;
     }
-    return false;
+    if (!task.attempts.some(isAmbiguous)) return;
+    warnedAmbiguous.add(taskId);
+    options.notify(
+      `Batch task ${taskId} has a submission that could not be matched to a provider batch — it may exist and be billing. ` +
+        `Check with: qwen batch collect ${taskId}`,
+    );
+  };
+
+  const collectOne = async (ep: BatchEndpoint, task: BatchTask) => {
+    if (options.mode === 'notify') {
+      // Same refusal a collect would give: a batch is only visible to the
+      // account and region that created it.
+      const key = endpointKey(ep);
+      const pinned = task.endpoint
+        ? `${task.endpoint.baseUrl} ${task.endpoint.keyFingerprint}`
+        : key;
+      if (pinned !== key) {
+        throw new Error(
+          `task ${task.id} was submitted with another endpoint or key`,
+        );
+      }
+      for (const batchId of openBatchIds(task)) {
+        if (announced.has(batchId)) continue;
+        const job = await (options.api?.getBatch ?? getBatchJob)(ep, batchId);
+        if (SETTLED_STATUSES.has(job.status)) {
+          announced.add(batchId);
+          options.notify(
+            `Batch task ${task.id} has finished on the provider. Collect it with: qwen batch collect ${task.id}`,
+          );
+        }
+      }
+      return;
+    }
+    let summary: CollectSummary | undefined;
+    try {
+      summary = await collectTask(
+        {
+          ep,
+          cwd: task.projectRoot,
+          env,
+          out: () => {},
+          err: (line) => log(`batch auto-collect: ${line}`),
+          ...(options.api ? { api: options.api } : {}),
+        },
+        task.id,
+      );
+    } catch (error) {
+      // A partial collect still reports what it delivered.
+      summary = (error as { summary?: CollectSummary }).summary;
+      if (!summary) throw error;
+      log(`batch auto-collect: ${task.id}: ${String(error)}`);
+    }
+    const notice = describeCollect(summary);
+    if (notice) options.notify(notice);
   };
 
   const tick = async (): Promise<number> => {
-    if (disabled) return MAX_POLL_DELAY_MS;
+    if (stopped) return MAX_POLL_DELAY_MS;
     let tasks: BatchTask[];
     try {
       tasks = store
         .list()
         .filter(
           (task) =>
-            !ignored.has(task.id) &&
-            isOpen(task) &&
-            samePath(task.projectRoot, options.projectRoot),
+            isOpen(task) && belongsTo(options.projectRoot, task.projectRoot),
         );
     } catch (error) {
       log(`batch auto-collect: cannot read task records: ${String(error)}`);
       return IDLE_SCAN_MS;
     }
-    if (tasks.length === 0) return IDLE_SCAN_MS;
-
-    if (!endpoint) {
+    const due = tasks.filter(
+      (task) =>
+        (nextPollAt.get(task.id) ?? 0) <= now() &&
+        // Already told the user to reconcile by hand; polling it would only
+        // page through the provider's batch list every few minutes.
+        !warnedAmbiguous.has(task.id) &&
+        !(
+          options.mode === 'notify' &&
+          openBatchIds(task).every((batchId) => announced.has(batchId)) &&
+          !task.attempts.some(isAmbiguous)
+        ),
+    );
+    if (due.length > 0 && now() >= nextResolveAt) {
+      let ep: BatchEndpoint | undefined;
       try {
-        endpoint = options.resolveEndpoint();
+        // Resolved per pass, not cached: the user may switch keys or
+        // regions mid-session.
+        ep = options.resolveEndpoint();
       } catch (error) {
-        // No usable Batch credentials in this session: nothing here can be
-        // collected, and retrying would only repeat the same failure.
-        disabled = true;
-        log(`batch auto-collect disabled: ${String(error)}`);
-        return MAX_POLL_DELAY_MS;
-      }
-    }
-
-    for (const task of tasks) {
-      if ((nextPollAt.get(task.id) ?? 0) > now()) continue;
-      try {
-        if (options.mode === 'notify') {
-          if (await readyInNotifyMode(endpoint, task)) {
-            ignored.add(task.id);
-            options.notify(
-              `Batch task ${task.id} has finished on the provider. Collect it with: qwen batch collect ${task.id}`,
-            );
-            continue;
-          }
-        } else {
-          const summary = await collectTask(
-            {
-              ep: endpoint,
-              cwd: task.projectRoot,
-              env,
-              out: () => {},
-              err: (line) => log(`batch auto-collect: ${line}`),
-              ...(options.api ? { api: options.api } : {}),
-            },
-            task.id,
+        nextResolveAt = now() + MAX_POLL_DELAY_MS;
+        if (!warnedNoEndpoint) {
+          warnedNoEndpoint = true;
+          options.notify(
+            `${tasks.length} /batch-api task(s) of this project cannot be collected automatically: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
           );
-          const notice = describeCollect(summary);
-          if (notice) options.notify(notice);
-          if (summary.awaiting === 0) {
-            nextPollAt.delete(task.id);
-            pollDelay.delete(task.id);
-            continue;
-          }
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (/was submitted (to|with)/.test(message)) {
-          // Pinned to another endpoint or key; the user collects it after
-          // switching back. Not an error worth repeating every minute.
-          ignored.add(task.id);
-        }
-        log(`batch auto-collect: ${task.id}: ${message}`);
+        log(`batch auto-collect: no endpoint: ${String(error)}`);
       }
-      backOff(task.id);
+      if (ep) {
+        const key = endpointKey(ep);
+        for (const task of due) {
+          if (wrongEndpoint.get(task.id) === key) continue;
+          wrongEndpoint.delete(task.id);
+          let reconciled = true;
+          try {
+            await collectOne(ep, task);
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            if (/was submitted (to|with)/.test(message)) {
+              // Pinned to another endpoint or key: wait for the session to
+              // switch back instead of repeating the same refusal.
+              wrongEndpoint.set(task.id, key);
+              reconciled = false;
+            }
+            if (/is in use by another/.test(message)) {
+              // Another command (e.g. a `run` still submitting) holds the
+              // task; an `uploaded` attempt there is in flight, not lost.
+              reconciled = false;
+            }
+            log(`batch auto-collect: ${task.id}: ${message}`);
+          }
+          if (reconciled) warnIfAmbiguous(task.id);
+          backOff(task.id);
+        }
+      }
     }
 
     const pending = tasks
@@ -240,7 +311,7 @@ export function createBatchAutoCollector(
   return {
     tick,
     stop: () => {
-      disabled = true;
+      stopped = true;
     },
   };
 }

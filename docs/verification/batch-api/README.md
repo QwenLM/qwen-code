@@ -3,17 +3,16 @@
 配套 `docs/plans/2026-09-14-batch-api-feasibility.md` §6 的三个待测问题。
 脚本只打百炼接口，不碰仓库代码；跑完把 `out/*.result.json` 贴回来即可。
 
-**依赖**：`regression.sh` 与 `fake-dashscope.mjs` 驱动的是 `qwen batch` 命令本身，
-它由 [#11874](https://github.com/QwenLM/qwen-code/pull/11874) 引入。在 #11874
-合并之前，本目录里的四个线上探测（`00`–`03`，只依赖 `openai` SDK 与百炼接口）
-可以独立运行，`regression.sh` 则需要那个分支的 CLI。
+**依赖**：`regression.sh`、`fake-dashscope.mjs` 与 `workflow-e2e.mjs` 驱动的是
+`qwen batch` 命令本身（本 PR #12492 的构建产物）。四个线上探测（`00`–`03`，只依赖
+`openai` SDK 与百炼接口）可以独立运行。
 
 **`--batch` 已不存在。** headless 置换按下方「判定」表的第二行被否掉，已从 #11874
 移出（保存在 `archive/headless-batch-mode-11874`）。`regression.sh` 原有的
 R4/R5/R6/R8/R9 与 R7 的 SIGINT 部分随之删除；`fake-dashscope.mjs` 里
 `tools` / `failed` / `unpollable` 三个场景暂时保留但已无人驱动，若确认不再恢复可一并删掉。
 
-**已知待修（留给本 PR 自己的 review 轮）**：`00-plumbing.mjs` 默认的
+**已知待修（探针脚本本身，不影响 CLI）**：`00-plumbing.mjs` 默认的
 `batch-test-model` 跑不通——官方要求该模型的 `url`/`endpoint` 填
 `/v1/chat/ds-test`，而脚本硬编码 `/v1/chat/completions`，实测三行全拒
 （`mismatched_test_url`）；实跑改用 `qwen3.7-max` 才 PASS。
@@ -41,7 +40,8 @@ PR #12492 的后续提交未在本地运行过这个脚本，需要在可构建�
 首轮人工实测（小文档、qwen-plus）的数据与分析见
 [`results-2026-09-23.md`](./results-2026-09-23.md)，其第六节是本节的补充方法。
 
-对应设计 §10 阶段 B 与 §5.2 的两层比较。以下都**没有**做过；在跑完之前，任何
+对应早期方案（2026-09-22，未入库）里"阶段 B：真实文档闭环"与"两层比较"的要求，
+成本公式见设计约定 §6。以下都**没有**做过；在跑完之前，任何
 "省钱"都只是估算。**第 1 步写下的判定规则在跑之前冻结，看到结果后不许改。**
 
 ### 要回答的两个问题
@@ -128,9 +128,10 @@ PR #12492 的后续提交未在本地运行过这个脚本，需要在可构建�
 2. 照常审批 agent 写计划和执行 `qwen batch run`。`run` 打印的整段输出（任务 ID、
    冻结设置行、估算、盈亏平衡命中率）原样抄进记录表。**记下准备结束时间**
    （`run` 打印 `collect later with` 的时刻）。
-3. 等待期间不要在这个会话里做别的事（否则准备用量里会混进无关调用）。可以退出
-   会话。每隔一段时间执行 `qwen batch collect <task-id>`，记录**提交到可收取的
-   时长**。
+3. 等待期间不要在这个会话里做别的事（否则准备用量里会混进无关调用）。实测前在
+   settings 里设 `general.batchAutoCollect: "notify"`：会话会在批次结束时提示
+   "has finished on the provider"，以这一刻作为**提交到可收取的时长**，再手动执行
+   `qwen batch collect <task-id>`，避免自动收取把收取事件混进准备会话。
 4. 收取后：
    - 失败项：只允许一轮 `qwen batch retry <task-id>`（截断项加
      `--max-output-tokens`），记为补救；

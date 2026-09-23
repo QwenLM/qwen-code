@@ -42,7 +42,11 @@ interface Harness {
   env: Record<string, string>;
   jobs: Map<string, BatchJob>;
   files: Map<string, string>;
-  api: WorkflowApi & { getBatch: ReturnType<typeof vi.fn> };
+  api: WorkflowApi & {
+    getBatch: ReturnType<typeof vi.fn>;
+    createBatch: ReturnType<typeof vi.fn>;
+    listBatches: ReturnType<typeof vi.fn>;
+  };
   notices: string[];
   clock: { now: number };
 }
@@ -212,18 +216,96 @@ describe('batch auto-collect', () => {
     expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
   });
 
-  it('in notify mode says the task is ready once and writes nothing', async () => {
+  it('in notify mode says a batch is ready once, writes nothing, and announces a later retry', async () => {
     const h = setup();
     const taskId = await submit(h);
     settle(h, `${outputLine('a#1', '# 甲')}\n`);
     const ac = collector(h, 'notify');
     await ac.tick();
+    const polls = h.api.getBatch.mock.calls.length;
+    h.clock.now += 10 * 60_000;
+    await ac.tick(); // already announced: no provider call
+    const ready = `Batch task ${taskId} has finished on the provider. Collect it with: qwen batch collect ${taskId}`;
+    expect(h.notices).toEqual([ready]);
+    expect(h.api.getBatch.mock.calls.length).toBe(polls);
+    expect(fs.existsSync(path.join(h.root, 'out'))).toBe(false);
+    const store = new BatchTaskStore(h.home);
+    expect(store.load(taskId).attempts[0].collected).toBeUndefined();
+
+    // A retry in the same session is a new batch and is announced again.
+    const task = store.load(taskId);
+    task.attempts.push({
+      attempt: 2,
+      itemIds: ['b'],
+      submitState: 'created',
+      batchId: 'batch-2',
+    });
+    store.save(task);
+    h.jobs.set('batch-2', {
+      id: 'batch-2',
+      status: 'completed',
+      created_at: 2,
+    });
     h.clock.now += 10 * 60_000;
     await ac.tick();
+    expect(h.notices).toEqual([ready, ready]);
+  });
+
+  it('collects a task submitted from a subdirectory of the session root', async () => {
+    const h = setup();
+    await submit(h);
+    settle(h, `${outputLine('a#1', '# 甲')}\n${outputLine('b#1', '# 乙')}\n`);
+    await collector(h, 'deliver', { projectRoot: path.dirname(h.root) }).tick();
+    expect(h.notices).toHaveLength(1);
+  });
+
+  it('says once that a submission could not be reconciled, then stops polling it', async () => {
+    const h = setup();
+    h.api.createBatch.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('HTTP 502'), { status: 502 });
+    });
+    const taskId = await submit(h); // create answer lost; no batch exists
+    const ac = collector(h);
+    await ac.tick();
     expect(h.notices).toEqual([
-      `Batch task ${taskId} has finished on the provider. Collect it with: qwen batch collect ${taskId}`,
+      `Batch task ${taskId} has a submission that could not be matched to a provider batch — it may exist and be billing. Check with: qwen batch collect ${taskId}`,
     ]);
-    expect(fs.existsSync(path.join(h.root, 'out'))).toBe(false);
+    const lists = h.api.listBatches.mock.calls.length;
+    h.clock.now += 10 * 60_000;
+    await ac.tick();
+    expect(h.notices).toHaveLength(1);
+    expect(h.api.listBatches.mock.calls.length).toBe(lists);
+  });
+
+  it('does not mistake a submission still in flight elsewhere for a lost one', async () => {
+    const h = setup();
+    h.api.createBatch.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('HTTP 502'), { status: 502 });
+    });
+    const taskId = await submit(h);
+    // Another process (e.g. a `run` still submitting) holds the task.
+    const lock = path.join(h.home, 'tasks', taskId, 'lock');
+    fs.writeFileSync(lock, `${process.pid}\n${os.hostname()}\nrun\n`);
+    await collector(h).tick();
+    expect(h.notices).toEqual([]);
+  });
+
+  it('announces what a partial collect delivered', async () => {
+    const h = setup();
+    const taskId = await submit(h);
+    settle(h, `${outputLine('a#1', '# 甲')}\n${outputLine('b#1', '# 乙')}\n`);
+    const store = new BatchTaskStore(h.home);
+    const task = store.load(taskId);
+    task.attempts.push({
+      attempt: 2,
+      itemIds: [],
+      submitState: 'created',
+      batchId: 'batch-gone',
+    });
+    store.save(task);
+    await collector(h).tick();
+    expect(h.notices).toHaveLength(1);
+    expect(h.notices[0]).toMatch(/2 result\(s\) delivered/);
   });
 
   it('ignores tasks of other projects', async () => {
@@ -240,34 +322,48 @@ describe('batch auto-collect', () => {
     expect(h.api.getBatch).not.toHaveBeenCalled();
   });
 
-  it('leaves a task pinned to another key alone instead of retrying it', async () => {
+  it('leaves a task pinned to another key alone until the session switches back', async () => {
     const h = setup();
     await submit(h);
-    settle(h, `${outputLine('a#1', '# 甲')}\n`);
+    settle(h, `${outputLine('a#1', '# 甲')}\n${outputLine('b#1', '# 乙')}\n`);
     const log = vi.fn();
+    let apiKey = 'other-key';
     const ac = collector(h, 'deliver', {
-      resolveEndpoint: () => ({ ...h.ep, apiKey: 'other-key' }),
+      resolveEndpoint: () => ({ ...h.ep, apiKey }),
       log,
     });
     await ac.tick();
     h.clock.now += 10 * 60_000;
-    await ac.tick();
+    await ac.tick(); // same wrong key: not even attempted again
     expect(h.notices).toEqual([]);
     expect(h.api.getBatch).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledTimes(1);
+
+    apiKey = 'k'; // back on the key the task was submitted with
+    h.clock.now += 10 * 60_000;
+    await ac.tick();
+    expect(h.notices).toHaveLength(1);
+    expect(h.notices[0]).toMatch(/2 result\(s\) delivered/);
   });
 
-  it('stays quiet and offline without usable Batch credentials', async () => {
+  it('says once that it cannot collect without usable Batch credentials', async () => {
     const h = setup();
     await submit(h);
-    const ac = collector(h, 'deliver', {
-      resolveEndpoint: () => {
-        throw new Error('qwen batch needs an API key');
-      },
+    const resolveEndpoint = vi.fn(() => {
+      throw new Error('qwen batch needs an API key');
     });
+    const ac = collector(h, 'deliver', { resolveEndpoint });
     await ac.tick();
+    await ac.tick(); // same moment: not retried yet
+    expect(resolveEndpoint).toHaveBeenCalledTimes(1);
+    expect(h.notices).toEqual([
+      '1 /batch-api task(s) of this project cannot be collected automatically: qwen batch needs an API key',
+    ]);
+
+    h.clock.now += 6 * 60_000; // retried later, but not announced again
     await ac.tick();
-    expect(h.notices).toEqual([]);
+    expect(resolveEndpoint).toHaveBeenCalledTimes(2);
+    expect(h.notices).toHaveLength(1);
     expect(h.api.getBatch).not.toHaveBeenCalled();
   });
 
