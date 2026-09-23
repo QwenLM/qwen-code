@@ -6,12 +6,10 @@ import type {
   GroupSenderPolicy,
 } from '@qwen-code/channel-base';
 import {
-  parseChannelOutputMode,
-  resolvePrivatePolicy,
-} from '@qwen-code/channel-base';
-import {
   isValidRotationBound,
   isValidTurnCount,
+  parseChannelOutputMode,
+  resolvePrivatePolicy,
 } from '@qwen-code/channel-base';
 import {
   APPROVAL_MODES,
