@@ -964,12 +964,13 @@ for (const theme of THEMES) {
                 envResolvable: true,
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 default: 'allowlist',
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'open', label: 'Open' },
@@ -1070,7 +1071,7 @@ for (const theme of THEMES) {
               config: {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
-                senderPolicy: 'pairing',
+                privatePolicy: 'pairing',
                 groupPolicy: 'disabled',
                 sessionScope: 'user',
               },
@@ -1217,11 +1218,12 @@ for (const theme of THEMES) {
                 ],
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'open', label: 'Open' },

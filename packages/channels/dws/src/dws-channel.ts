@@ -671,7 +671,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
             ([conversationId, group]) =>
               conversationId !== '*' &&
               conversationId.trim().length > 0 &&
-              group.requireMention === false,
+              (group.requireMention ?? config.groups['*']?.requireMention) ===
+                false,
           )
           .map(
             ([conversationId]): DwsImSource => ({
@@ -683,7 +684,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       config.groupPolicy === 'disabled'
         ? []
         : [{ kind: 'at' }, ...groupSources];
-    if (config.dmPolicy !== 'disabled') imSources.push({ kind: 'direct' });
 
     if (
       config.approvalMode !== undefined &&
@@ -704,6 +704,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
     this.userInstructions = userInstructions;
     this.client = client ?? new DwsClient({ executable: 'dws', profile });
+    if (this.privatePolicy !== 'disabled') imSources.push({ kind: 'direct' });
     this.imStates = imSources.map((source) => ({
       source,
       restartAttempts: 0,
@@ -1413,7 +1414,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (!this.dmGate.check(envelope).allowed) return 'denied';
     const senderGate = this.senderGateFor(envelope);
     if (senderGate.isAllowed(delivery.senderId)) return 'allowed';
-    return senderGate === this.gate && this.config.senderPolicy === 'pairing'
+    return senderGate === this.gate && this.privatePolicy === 'pairing'
       ? 'unknown'
       : 'denied';
   }
@@ -1560,7 +1561,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         );
       }
     }
-    if (this.config.dmPolicy !== 'disabled') {
+    if (this.privatePolicy !== 'disabled') {
       try {
         const checkpoint = this.cursor.notificationCheckpoint ?? {
           startTime: Math.max(
@@ -2046,7 +2047,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
   private isImSourceEnabled(source: DwsImSource): boolean {
     return source.kind === 'direct'
-      ? this.config.dmPolicy !== 'disabled'
+      ? this.privatePolicy !== 'disabled'
       : this.config.groupPolicy !== 'disabled';
   }
 
@@ -2557,7 +2558,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     key: string,
     notification: DwsDocumentMentionNotification,
   ): Promise<void> {
-    if (this.config.dmPolicy === 'disabled') return;
+    if (this.privatePolicy === 'disabled') return;
     const notificationKey = documentNotificationKey(notification);
     if (this.cursor.processedMessages.includes(notificationKey)) {
       this.markProcessedMessage(key);
@@ -2776,7 +2777,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private async replayPendingDocumentNotifications(
     signal: AbortSignal,
   ): Promise<void> {
-    if (this.config.dmPolicy === 'disabled') return;
+    if (this.privatePolicy === 'disabled') return;
     for (const pending of [
       ...(this.cursor.pendingDocumentNotifications ?? []),
     ]) {

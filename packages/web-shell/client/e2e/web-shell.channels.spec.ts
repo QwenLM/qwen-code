@@ -216,12 +216,13 @@ test('creates and deletes a typed Channel configuration', async ({
             envResolvable: true,
           },
           {
-            key: 'senderPolicy',
-            label: 'Sender Policy',
+            key: 'privatePolicy',
+            label: 'Private Policy',
             kind: 'enum',
             required: true,
             default: 'pairing',
             options: [
+              { value: 'disabled', label: 'Disabled' },
               { value: 'pairing', label: 'Pairing' },
               { value: 'allowlist', label: 'Allowlist' },
               { value: 'open', label: 'Open' },
@@ -326,7 +327,7 @@ test('creates and deletes a typed Channel configuration', async ({
   await expect(page.getByLabel('Direct message policy')).toContainText(
     'Pairing',
   );
-  await expect(page.getByLabel('Allowed user IDs')).toHaveCount(0);
+  await expect(page.getByLabel('Allowed user IDs')).toBeVisible();
   await expect(
     page.getByRole('heading', { name: 'Conversation management' }),
   ).toBeVisible();
@@ -363,7 +364,7 @@ test('creates and deletes a typed Channel configuration', async ({
           config: {
             type: 'dingtalk',
             clientId: 'ding-client-id',
-            senderPolicy: 'pairing',
+            privatePolicy: 'pairing',
             groupPolicy: 'disabled',
             sessionScope: 'chat_thread',
           },
@@ -483,7 +484,7 @@ test('creates and deletes a typed Channel configuration', async ({
         config: {
           type: 'dingtalk',
           clientId: 'ding-client-id',
-          senderPolicy: 'allowlist',
+          privatePolicy: 'allowlist',
           allowedUsers: ['staff-a', 'staff-b'],
           groupPolicy: 'allowlist',
           sessionScope: 'chat_thread',

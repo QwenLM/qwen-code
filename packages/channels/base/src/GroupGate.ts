@@ -89,9 +89,10 @@ export class GroupGate {
       };
     }
 
-    // Per-group config, falling back to "*" defaults, then built-in defaults
-    const groupConfig = this.groups[envelope.chatId] || this.groups['*'] || {};
-    const requireMention = groupConfig.requireMention ?? true;
+    const requireMention =
+      this.groups[envelope.chatId]?.requireMention ??
+      this.groups['*']?.requireMention ??
+      true;
 
     if (requireMention && !envelope.isMentioned && !envelope.isReplyToBot) {
       return { allowed: false, reason: 'mention_required' };
