@@ -952,6 +952,59 @@ describe('ChannelEditorDialog', () => {
     });
   });
 
+  it('edits who can talk in groups and the session operators', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK_WITH_ACCESS,
+      fields: [
+        ...DINGTALK_WITH_ACCESS.fields,
+        { key: 'operators', label: 'Session Operators', kind: 'string-list' },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, onSave });
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+
+    expect(fieldByLabel('Who can talk in groups')).toBeNull();
+    await selectOption('Group policy', 'Pairing');
+    expect(fieldByLabel('Who can talk in groups')?.textContent).toContain(
+      'Any group member',
+    );
+    await selectOption('Group policy', 'Open');
+    expect(fieldByLabel('Who can talk in groups')?.textContent).toContain(
+      'Same as direct messages',
+    );
+    expect(inputByLabel('Allowed group member IDs')).toBeNull();
+
+    await selectOption('Who can talk in groups', 'Listed members only');
+    await act(async () => {
+      setInputValue(inputByLabel('Allowed group member IDs')!, 'alice, bob');
+      setInputValue(inputByLabel('Session operators')!, 'admin');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          groupPolicy: 'open',
+          operators: ['admin'],
+          groups: {
+            '*': { senders: 'allowlist', allowedUsers: ['alice', 'bob'] },
+          },
+        }),
+      }),
+    );
+  });
+
   it('explains that pairing requests appear after a new Channel is saved', async () => {
     await renderDialog();
 
