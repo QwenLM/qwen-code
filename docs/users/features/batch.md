@@ -206,6 +206,7 @@ qwen batch list                          # every recorded task, with its project
 qwen batch retry <task-id>               # resubmit only the failed items
 qwen batch retry <task-id> --max-output-tokens 8192  # include truncated ones
 qwen batch check                         # verify setup; nothing is billed
+qwen batch clean <task-id>               # delete the local record (cancels nothing)
 qwen batch cancel --task <task-id>       # partial results are still billed
 ```
 
@@ -233,14 +234,26 @@ batch list instead of resubmitting — a duplicate submission would bill twice.
 Only one `qwen batch` command works on a task at a time; a second one exits
 with an "in use" message.
 
-Cost estimates are token-based unless you provide unit prices via
+Cost estimates are token-based unless you provide realtime list prices via
 `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` and `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`
-(a plan's `maxCostUsd` is an estimate gate, not a cap on the bill; without
-prices a plan that sets it is refused). A run freezes your current sampling
+(and, ideally, where you got them via `QWEN_BATCH_PRICE_SOURCE`, e.g. the
+pricing page URL and the date you checked it — it is recorded with the task).
+With prices set, `run` also states the realtime cache-hit rate above which
+realtime generation would have been cheaper; it cannot know your actual hit
+rate, and neither figure includes the preparation spent in your session.
+`collect` totals Batch usage across all attempts and marks it **incomplete**
+when a result carried no usage, rather than counting it as zero. A plan's
+`maxCostUsd` is an estimate gate, not a cap on the bill (without prices a
+plan that sets it is refused). A run freezes your current sampling
 parameters, output limit and thinking mode, so Batch runs the way your
-realtime session does, and retries reuse them. Batch
-usage is recorded in the task ledger, separate from the interactive session's
-cache statistics. The design contract for this workflow is
+realtime session does, and retries reuse them. Batch usage is recorded in
+the task ledger, separate from the interactive session's cache statistics.
+
+`qwen batch clean <task-id>` deletes a task's local record. It cancels
+nothing and deletes no remote file, and it refuses while a batch may still
+be running or holds uncollected results (the record is the only way to
+collect or reconcile them) unless you pass `--force`. Delivered files are
+yours and are never touched. The design contract for this workflow is
 [`docs/design/2026-09-23-agent-prepared-batch-api.md`](../design/2026-09-23-agent-prepared-batch-api.md).
 
 ## Verifying locally without an API key

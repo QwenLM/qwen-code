@@ -22,10 +22,11 @@ R4/R5/R6/R8/R9 与 R7 的 SIGINT 部分随之删除；`fake-dashscope.mjs` 里
 
 ## 工作流 E2E（`/batch-api` 的确定性执行层）
 
-`workflow-e2e.mjs` 验证 agent-prepared 工作流（`qwen batch run|collect|retry|list`、
+`workflow-e2e.mjs` 验证 agent-prepared 工作流（`qwen batch check|run|collect|retry|list|clean`、
 `cancel --task`）：自带假 Batch API、隔离 `HOME`，驱动构建产物 `dist/cli.js`
-走完整链路——提交、运行中收取、`--wait` 收取、文件交付、幂等重收、截断失败、
-失败项重试、目标冲突 held、解决后交付、任务取消，共 22 项断言。
+走完整链路——预检、提交、运行中收取、`--wait` 收取、文件交付、幂等重收（不重下载、
+不重删远端）、截断失败、截断项不带更高上限时被跳过、提高上限后重试、目标冲突 held、
+解决后交付、任务取消、清理（未收取时拒绝），共 27 项断言。
 
 ```sh
 npm run build && npm run bundle
@@ -33,6 +34,26 @@ node docs/verification/batch-api/workflow-e2e.mjs "$(pwd)/dist/cli.js"
 ```
 
 不需要网络与真实凭证；与上面四个线上探针（需要 `DASHSCOPE_API_KEY`）互补。
+PR #12492 的后续提交未在本地运行过这个脚本，需要在可构建的机器上重跑并回贴结果。
+
+## 阶段 B：真实付费闭环（待执行，会产生费用）
+
+对应设计 §10 阶段 B。以下都**没有**做过，任何"省钱"结论在这之前都只是估算。
+先冻结样本和质量规则再跑，不要看到结果后调整门槛。
+
+1. **准备**：选一组 20–50 篇独立文档（例如 `docs/zh` 下的若干篇），写好术语表和
+   质量抽查规则（抽查比例、判定标准）。设置 `QWEN_BATCH_INPUT_PRICE_PER_1M_USD`、
+   `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`，并用 `QWEN_BATCH_PRICE_SOURCE` 记下价格页
+   URL 与核对日期。
+2. **Batch 路径**：交互会话里 `/batch-api <任务>`，全程记录：准备阶段主会话的
+   token 用量（`/stats` 或会话 JSONL，执行器看不到这部分）、`run` 输出的估算与
+   盈亏点、`collect` 输出的 Batch 用量、等待时长、失败/held 项和人工补救次数。
+3. **实时对照**：同一模型、同一冻结设置（`qwen batch check` 显示的那组）、同一
+   样本，用普通 `/batch` 或逐篇实时完成，记录总 token（含缓存命中）与质量抽查。
+4. **账单核对**：以控制台账单为准，对比两条路径的完整费用（准备 + 生成 + 补救），
+   与 `run` 的估算、盈亏点比较。
+5. **回贴**：把以上数字、质量抽查结果、用户介入次数写进本目录 `results-stage-b.md`；
+   结论按设计 §10 标注"更省 / 收益未确认 / 更贵"，不外推到其他任务类型。
 
 ## 准备
 

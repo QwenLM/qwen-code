@@ -462,6 +462,23 @@ try {
     /still billed/.test(cancelOut.stdout),
   );
 
+  // 10. clean: refuses while the cancelled batch is uncollected; a collected
+  // task goes without touching the provider or the delivered files
+  const cleanRefused = await run(project, env, ['clean', taskId4]);
+  check(
+    'clean refuses a task whose batch is not collected',
+    cleanRefused.code !== 0 && /--force/.test(cleanRefused.stderr),
+    cleanRefused.stderr,
+  );
+  const cleanOut = await run(project, env, ['clean', taskId]);
+  check(
+    'clean removes a collected task and keeps its delivered files',
+    /removed local record/.test(cleanOut.stdout) &&
+      !fs.existsSync(path.join(home, 'tasks', taskId)) &&
+      fs.existsSync(path.join(project, 'docs', 'en', 'a.md')),
+    cleanOut.stdout + cleanOut.stderr,
+  );
+
   const failed = results.filter(([, ok]) => !ok);
   console.log(
     `\n${results.length - failed.length}/${results.length} checks passed`,

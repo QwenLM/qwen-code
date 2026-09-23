@@ -38,6 +38,7 @@ import {
   retryTask,
   cancelTask,
   checkReadiness,
+  cleanTask,
   type WorkflowDeps,
 } from './batch-workflow.js';
 import type { GenerationConfigLike } from './batch-docs.js';
@@ -703,6 +704,34 @@ const retryWorkflowCommand: CommandModule = {
     }),
 };
 
+const cleanWorkflowCommand: CommandModule = {
+  command: 'clean <task-id>',
+  describe:
+    "Delete a workflow task's local record (cancels nothing; refuses while a batch may be running)",
+  builder: (yargs) =>
+    yargs
+      .positional('task-id', {
+        describe: 'Task id',
+        type: 'string',
+        demandOption: true,
+      })
+      .option('force', {
+        describe:
+          'Delete even if a batch may still be running or uncollected (it is not cancelled)',
+        type: 'boolean',
+        default: false,
+      }),
+  // Local only: no endpoint or credentials needed.
+  handler: (argv) =>
+    run(async () => {
+      await cleanTask(
+        { env: process.env, out: writeStdoutLine, err: writeStderrLine },
+        argv['task-id'] as string,
+        { force: argv['force'] as boolean },
+      );
+    }),
+};
+
 const checkWorkflowCommand: CommandModule = {
   command: 'check',
   describe:
@@ -742,6 +771,7 @@ export const batchCommand: CommandModule = {
       .command(retryWorkflowCommand)
       .command(listWorkflowCommand)
       .command(checkWorkflowCommand)
+      .command(cleanWorkflowCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},

@@ -67,14 +67,15 @@ The skill makes the model do the semantic work only:
 
 ### `qwen batch` workflow subcommands (deterministic executor)
 
-| Command                   | Behavior                                                                                 |
-| ------------------------- | ---------------------------------------------------------------------------------------- |
-| `run <plan>`              | Validate plan → assemble → estimate → budget gate → submit → record                      |
-| `collect <task-id>`       | Reconcile → poll (optional `--wait`) → download → validate → deliver → report            |
-| `retry <task-id>`         | Resubmit only `failed` items as a new attempt (`--max-output-tokens` for truncated ones) |
-| `check`                   | Verify credentials/endpoint/Batch route and show what `run` would freeze; nothing billed |
-| `list`                    | List recorded tasks with progress                                                        |
-| `cancel --task <task-id>` | Cancel the task's active batch (partials are still billed)                               |
+| Command                   | Behavior                                                                                     |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| `run <plan>`              | Validate plan → assemble → estimate → budget gate → submit → record                          |
+| `collect <task-id>`       | Reconcile → poll (optional `--wait`) → download → validate → deliver → report                |
+| `retry <task-id>`         | Resubmit only `failed` items as a new attempt (`--max-output-tokens` for truncated ones)     |
+| `check`                   | Verify credentials/endpoint/Batch route and show what `run` would freeze; nothing billed     |
+| `clean <task-id>`         | Delete the local record; cancels nothing, refuses while a batch may be open unless `--force` |
+| `list`                    | List recorded tasks with progress                                                            |
+| `cancel --task <task-id>` | Cancel the task's active batch (partials are still billed)                                   |
 
 `run` prints the task id and exits — waiting never burns agent turns.
 `collect` is safe to run any number of times: everything already local is
@@ -150,6 +151,21 @@ Design invariants:
   every retry reuses them. A Batch-only default would make the cost/quality
   comparison against realtime meaningless. A configured reasoning effort
   that has no verified Batch equivalent is reported as a note, not guessed.
+
+- **Accounting states its gaps.** Usage is summed across all attempts from
+  the result files; a line without usage makes the total explicitly
+  _incomplete_, never a silent zero. With prices set, `run` records their
+  source (`QWEN_BATCH_PRICE_SOURCE`) and states the break-even realtime
+  cache-hit rate — where `0.5·(I+O) − 0.8·h·I` reaches zero, the §6 model
+  with the implicit-cache price at 20% of list — instead of claiming a
+  saving. Preparation in the interactive
+  session is not measured by the executor; every estimate and report says
+  so rather than implying a full-workflow figure.
+- **Lock takeover only when release is certain.** The lock records pid and
+  host; it is taken over only when written on this host by a pid that no
+  longer exists. A reused pid can only cause a (safe) refusal, and a lock
+  from another host is never taken over; the message names the file to
+  delete by hand.
 
 ## 4. Plan schema (v1)
 

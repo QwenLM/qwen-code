@@ -10,6 +10,7 @@
 // the provider works) never loses which remote objects exist and never
 // resubmits blindly. Pure bookkeeping — no network, no model.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
@@ -160,6 +161,8 @@ export interface TaskAttempt {
     promptTokens: number;
     completionTokens: number;
     requests: number;
+    /** Result lines that carried no usage: the totals are a lower bound. */
+    missing?: number;
   };
   remoteCleaned?: boolean;
   /** Output limit this attempt ran with when a retry raised it. */
@@ -200,6 +203,8 @@ export interface BatchTask {
     outputTokens: number;
     inputPricePer1MUsd?: number;
     outputPricePer1MUsd?: number;
+    /** Where the operator's prices came from (URL, date), as given. */
+    priceSource?: string;
   };
 }
 
@@ -291,32 +296,51 @@ export class BatchTaskStore {
     fs.rmSync(this.dirOf(id), { recursive: true, force: true });
   }
 
+  exists(id: string): boolean {
+    return fs.existsSync(this.fileOf(id));
+  }
+
   /**
    * Run `fn` holding the task's lock. Two concurrent `retry`s would both
    * submit (and bill) the same failed items; two `collect`s would race on
-   * the same downloads. A lock left by a crashed process is taken over.
+   * the same downloads.
+   *
+   * A stale lock is taken over only when its release is certain: written on
+   * this host by a pid that no longer exists. A reused pid can only make us
+   * refuse wrongly (safe, and the message says how to clear it); a lock from
+   * another host — a shared home directory — is never taken over, because
+   * its process cannot be checked from here.
    */
   async withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const lock = path.join(this.dirOf(id), 'lock');
     if (!fs.existsSync(path.dirname(lock))) {
       throw new Error(`no batch task "${id}" under ${this.homeDir}`);
     }
+    const host = os.hostname();
     for (let attempt = 0; ; attempt++) {
       try {
-        fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
+        fs.writeFileSync(lock, `${process.pid}\n${host}\n`, { flag: 'wx' });
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        let holder = NaN;
+        let holder: { pid: number; host?: string } = { pid: NaN };
         try {
-          holder = Number(fs.readFileSync(lock, 'utf8'));
+          const [pid, holderHost] = fs
+            .readFileSync(lock, 'utf8')
+            .split('\n')
+            .map((part) => part.trim());
+          holder = { pid: Number(pid), host: holderHost || undefined };
         } catch {
           // Released between our write and read; try again.
         }
-        if (attempt > 0 || isProcessAlive(holder)) {
+        const elsewhere = holder.host !== undefined && holder.host !== host;
+        if (attempt > 0 || elsewhere || isProcessAlive(holder.pid)) {
+          const who = Number.isNaN(holder.pid)
+            ? ''
+            : ` (pid ${holder.pid}${elsewhere ? ` on ${holder.host}` : ''})`;
           throw new Error(
-            `task "${id}" is in use by another \`qwen batch\` process` +
-              `${Number.isNaN(holder) ? '' : ` (pid ${holder})`}; wait for it to finish.`,
+            `task "${id}" is in use by another \`qwen batch\` process${who}; wait for it to finish. ` +
+              `If no such process is running, delete ${lock} and retry.`,
           );
         }
         fs.rmSync(lock, { force: true });

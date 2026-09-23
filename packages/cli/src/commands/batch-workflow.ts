@@ -67,8 +67,15 @@ const WORKFLOW_MAX_LINE_BYTES = 1 * 1024 * 1024;
 // supplies unit prices — a hardcoded table would go stale against the
 // provider's pricing page.
 const BATCH_PRICE_FACTOR = 0.5;
+// DashScope bills an implicit-cache hit at 20% of the input list price
+// (docs/users/features/batch.md). Only used to say at which realtime cache
+// hit rate Batch stops being cheaper — never to claim an actual saving.
+const REALTIME_CACHED_INPUT_FACTOR = 0.2;
 const ENV_PRICE_INPUT = 'QWEN_BATCH_INPUT_PRICE_PER_1M_USD';
 const ENV_PRICE_OUTPUT = 'QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD';
+// Free text naming where the prices came from (page URL, date checked);
+// recorded with the task so an old estimate can be judged later.
+const ENV_PRICE_SOURCE = 'QWEN_BATCH_PRICE_SOURCE';
 
 export interface WorkflowApi {
   uploadJsonl(
@@ -208,13 +215,41 @@ function costLine(
         `for a monetary estimate (Batch bills successful requests at 50% of realtime list)`,
     };
   }
-  const costUsd =
-    ((inputTokens * inputPrice + outputTokens * outputPrice) / 1_000_000) *
-    BATCH_PRICE_FACTOR;
+  const inputList = (inputTokens * inputPrice) / 1_000_000;
+  const outputList = (outputTokens * outputPrice) / 1_000_000;
+  const costUsd = (inputList + outputList) * BATCH_PRICE_FACTOR;
+  const source = env[ENV_PRICE_SOURCE]?.trim();
   return {
-    text: `${tokens}; estimated Batch cost ≈ $${costUsd.toFixed(4)} (estimate only — the provider bill is authoritative)`,
+    text:
+      `${tokens}; estimated Batch cost ≈ $${costUsd.toFixed(4)} ` +
+      `(prices: ${source || `source not recorded — set ${ENV_PRICE_SOURCE}`}; estimate only — the provider bill is authoritative). ` +
+      breakEvenText(inputList, outputList),
     costUsd,
   };
+}
+
+/**
+ * Batch saves `0.5·(I+O) − (1−r)·h·I` against realtime generation of the
+ * same requests, where h is the realtime cache-hit rate — unknown here, so
+ * report the h at which the saving reaches zero instead of a saving.
+ * Preparation in the interactive session is not measured and not included.
+ */
+function breakEvenText(inputList: number, outputList: number): string {
+  const unmeasured =
+    'Excludes the preparation spent in the interactive session (not measured).';
+  if (inputList <= 0) {
+    return `Cheaper than realtime generation at any cache-hit rate. ${unmeasured}`;
+  }
+  const breakEven =
+    ((1 - BATCH_PRICE_FACTOR) * (inputList + outputList)) /
+    ((1 - REALTIME_CACHED_INPUT_FACTOR) * inputList);
+  if (breakEven >= 1) {
+    return `Generation is cheaper than realtime at any cache-hit rate. ${unmeasured}`;
+  }
+  return (
+    `Generation is cheaper than realtime only if realtime would hit the cache for less than ` +
+    `${Math.floor(breakEven * 100)}% of input (implicit-cache price assumed at ${REALTIME_CACHED_INPUT_FACTOR * 100}% of list). ${unmeasured}`
+  );
 }
 
 function enforceBudget(plan: BatchPlan, cost: { costUsd?: number }): void {
@@ -439,6 +474,9 @@ export async function runPlan(
     outputTokens: assembly.outputTokens,
     inputPricePer1MUsd: unitPrice(deps.env, ENV_PRICE_INPUT),
     outputPricePer1MUsd: unitPrice(deps.env, ENV_PRICE_OUTPUT),
+    ...(deps.env[ENV_PRICE_SOURCE]?.trim()
+      ? { priceSource: deps.env[ENV_PRICE_SOURCE]?.trim() }
+      : {}),
   };
   store.save(task);
 
@@ -523,17 +561,18 @@ interface CollectOptions {
   keepRemote?: boolean;
 }
 
+/** Undefined when the line carries no usable usage — never a silent zero. */
 const usageOfBody = (
   body: unknown,
-): { promptTokens: number; completionTokens: number } => {
+): { promptTokens: number; completionTokens: number } | undefined => {
   const usage = (body as { usage?: Record<string, unknown> } | undefined)
     ?.usage;
-  const prompt = Number(usage?.['prompt_tokens'] ?? 0);
-  const completion = Number(usage?.['completion_tokens'] ?? 0);
-  return {
-    promptTokens: Number.isFinite(prompt) ? prompt : 0,
-    completionTokens: Number.isFinite(completion) ? completion : 0,
-  };
+  const prompt = Number(usage?.['prompt_tokens']);
+  const completion = Number(usage?.['completion_tokens']);
+  if (!Number.isFinite(prompt) || !Number.isFinite(completion)) {
+    return undefined;
+  }
+  return { promptTokens: prompt, completionTokens: completion };
 };
 
 /** Poll until settled or the collect-wide `deadline` (epoch ms) passes —
@@ -635,7 +674,12 @@ async function collectLocked(
     }
 
     const seen = new Set<string>();
-    const usage = { promptTokens: 0, completionTokens: 0, requests: 0 };
+    const usage = {
+      promptTokens: 0,
+      completionTokens: 0,
+      requests: 0,
+      missing: 0,
+    };
     const reportMalformed = (message: string) =>
       deps.err(`[batch] attempt ${attempt.attempt}: skipping ${message}`);
     if (attempt.outputPath && fs.existsSync(attempt.outputPath)) {
@@ -665,9 +709,13 @@ async function collectLocked(
         // neither double-counts nor erases it.
         if (line.response?.body !== undefined) {
           const perRequest = usageOfBody(line.response.body);
-          usage.promptTokens += perRequest.promptTokens;
-          usage.completionTokens += perRequest.completionTokens;
           usage.requests += 1;
+          if (perRequest) {
+            usage.promptTokens += perRequest.promptTokens;
+            usage.completionTokens += perRequest.completionTokens;
+          } else {
+            usage.missing += 1;
+          }
         }
         // Only the item's latest attempt may move it. Replaying an older
         // attempt's failure while a retry runs would otherwise re-open it
@@ -730,7 +778,14 @@ async function collectLocked(
         item.lastError = 'no result line for this request in the settled batch';
       }
     }
-    attempt.usage = usage;
+    attempt.usage =
+      usage.missing > 0
+        ? usage
+        : {
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            requests: usage.requests,
+          };
     refreshTaskStatus(task);
     store.save(task);
 
@@ -775,11 +830,26 @@ async function collectLocked(
   for (const item of failed) {
     deps.out(`  failed: ${item.id} — ${item.lastError}`);
   }
-  const usage = task.attempts.at(-1)?.usage;
-  if (usage && usage.requests > 0) {
+  const total = {
+    promptTokens: 0,
+    completionTokens: 0,
+    requests: 0,
+    missing: 0,
+  };
+  for (const attempt of task.attempts) {
+    if (!attempt.usage) continue;
+    total.promptTokens += attempt.usage.promptTokens;
+    total.completionTokens += attempt.usage.completionTokens;
+    total.requests += attempt.usage.requests;
+    total.missing += attempt.usage.missing ?? 0;
+  }
+  if (total.requests > 0) {
     deps.out(
-      `latest attempt usage: ${usage.promptTokens.toLocaleString()} in / ${usage.completionTokens.toLocaleString()} out tokens across ${usage.requests} request(s) ` +
-        `(Batch billing; kept out of the interactive session's cache statistics)`,
+      `Batch usage, all attempts: ${total.promptTokens.toLocaleString()} in / ${total.completionTokens.toLocaleString()} out tokens across ${total.requests} request(s)` +
+        (total.missing > 0
+          ? ` — INCOMPLETE: ${total.missing} request(s) reported no usage, so these totals are a lower bound`
+          : '') +
+        `. Kept out of the interactive session's cache statistics; preparation in the session is not included.`,
     );
   }
   if (failed.length > 0) {
@@ -964,6 +1034,56 @@ export async function listTasks(deps: WorkflowDeps): Promise<void> {
         `${latest?.batchId ? `\tbatch ${latest.batchId}` : ''}\tupdated ${task.updatedAt}\t${task.projectRoot}`,
     );
   }
+}
+
+export interface CleanOptions {
+  /** Delete even though a batch may still be running or uncollected. */
+  force?: boolean;
+}
+
+/**
+ * Delete a task's local record. Local only: nothing is cancelled and no
+ * remote file is deleted, and the record is the only way to collect results
+ * or reconcile an ambiguous submission — so refuse while either could still
+ * be needed, unless forced.
+ */
+export async function cleanTask(
+  deps: Pick<WorkflowDeps, 'env' | 'out' | 'err'>,
+  taskId: string,
+  options: CleanOptions = {},
+): Promise<void> {
+  const store = new BatchTaskStore(batchHomeDir(deps.env));
+  await store.withLock(taskId, async () => {
+    const task = store.load(taskId);
+    const open = task.attempts.filter(
+      (attempt) =>
+        isAmbiguous(attempt) ||
+        (attempt.submitState === 'created' && !attempt.collected),
+    );
+    if (open.length > 0 && !options.force) {
+      throw new Error(
+        `task ${taskId} has ${open.length} batch submission(s) that may still be running, billing, or holding uncollected results ` +
+          `(${open.map((attempt) => attempt.batchId ?? `attempt ${attempt.attempt}, unreconciled`).join(', ')}). ` +
+          `Collect or cancel first — deleting the record loses the only way to do either — or pass --force.`,
+      );
+    }
+    for (const attempt of open) {
+      deps.err(
+        `[batch] warning: ${attempt.batchId ?? `attempt ${attempt.attempt}`} was not cancelled; it may still run and bill.`,
+      );
+    }
+    const leftRemote = task.attempts.filter(
+      (attempt) => attempt.collected && !attempt.remoteCleaned,
+    );
+    if (leftRemote.length > 0) {
+      deps.err(
+        `[batch] note: remote input/output files of ${leftRemote.map((attempt) => attempt.batchId).join(', ')} ` +
+          `were kept (--keep-remote) and are not deleted by clean.`,
+      );
+    }
+    store.remove(taskId);
+    deps.out(`removed local record of task ${taskId}`);
+  });
 }
 
 export async function cancelTask(

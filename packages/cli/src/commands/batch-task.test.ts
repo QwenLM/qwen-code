@@ -183,6 +183,21 @@ describe('BatchTaskStore', () => {
     await expect(store.withLock(task.id, async () => 'ok')).resolves.toBe('ok');
   });
 
+  it('never takes over a lock written on another host', async () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const lock = path.join(path.dirname(store.fileOf(task.id)), 'lock');
+    // Its pid cannot be checked from here, dead-looking or not.
+    fs.writeFileSync(lock, '2147483646\nsome-other-host\n');
+    await expect(store.withLock(task.id, async () => 'ok')).rejects.toThrow(
+      /on some-other-host.*delete/,
+    );
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
   it('takes over a lock left by a process that no longer exists', async () => {
     const task = store.create(
       validatePlan(validPlan, 'plan.json'),

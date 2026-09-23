@@ -152,3 +152,7 @@ Tell the user:
   (already-finished requests are still billed).
 - A task is tied to the endpoint and API key it was submitted with; after
   switching accounts or regions, switch back to collect it.
+- `qwen batch clean <task-id>` deletes the local record once it is no
+  longer needed; it cancels nothing.
+- Estimates never include what this session spent preparing; do not
+  describe the Batch estimate as the task's total cost or as a saving.

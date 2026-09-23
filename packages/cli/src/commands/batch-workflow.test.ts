@@ -15,6 +15,7 @@ import {
   cancelTask,
   listTasks,
   checkReadiness,
+  cleanTask,
   type WorkflowApi,
   type WorkflowDeps,
 } from './batch-workflow.js';
@@ -776,6 +777,101 @@ describe('frozen request parameters', () => {
     );
     expect(h.api.uploadJsonl).not.toHaveBeenCalled();
     expect(h.store.list()).toHaveLength(0);
+  });
+});
+
+describe('usage and cost reporting', () => {
+  it('marks usage incomplete instead of counting a missing usage as zero', async () => {
+    const noUsage = JSON.stringify({
+      custom_id: 'b#1',
+      response: {
+        status_code: 200,
+        body: {
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: { role: 'assistant', content: '# B\n\nBeta.' },
+            },
+          ],
+        },
+      },
+    });
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${noUsage}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).attempts[0].usage).toEqual({
+      promptTokens: 100,
+      completionTokens: 50,
+      requests: 2,
+      missing: 1,
+    });
+    expect(h.out.join('\n')).toMatch(
+      /INCOMPLETE: 1 request\(s\) reported no usage/,
+    );
+  });
+
+  it('records the price source and states the break-even cache-hit rate', async () => {
+    const h = (harness = setup({ expectedOutputTokensPerItem: 1 }));
+    h.deps.env = {
+      ...h.deps.env,
+      QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
+      QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD: '6',
+      QWEN_BATCH_PRICE_SOURCE: 'pricing page, checked 2026-09-22',
+    };
+    await runPlan(h.deps, h.planPath);
+    const text = h.out.join('\n');
+    expect(text).toMatch(/prices: pricing page, checked 2026-09-22/);
+    // Input-dominated: Batch loses once realtime would cache most input.
+    expect(text).toMatch(
+      /only if realtime would hit the cache for less than \d+% of input/,
+    );
+    expect(text).toMatch(/preparation .*\(not measured\)/);
+    expect(h.store.load(taskIdOf(h)).estimate?.priceSource).toBe(
+      'pricing page, checked 2026-09-22',
+    );
+  });
+
+  it('says so when the price source is not recorded', async () => {
+    const h = (harness = setup());
+    h.deps.env = {
+      ...h.deps.env,
+      QWEN_BATCH_INPUT_PRICE_PER_1M_USD: '2',
+      QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD: '6',
+    };
+    await runPlan(h.deps, h.planPath);
+    expect(h.out.join('\n')).toMatch(/source not recorded/);
+  });
+});
+
+describe('cleanTask', () => {
+  it('refuses while a batch may still be running, and removes it when forced', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    const taskId = taskIdOf(h);
+    await expect(cleanTask(h.deps, taskId)).rejects.toThrow(/batch-1/);
+    expect(h.store.exists(taskId)).toBe(true);
+    await cleanTask(h.deps, taskId, { force: true });
+    expect(h.store.exists(taskId)).toBe(false);
+    expect(h.err.join('\n')).toMatch(/batch-1 was not cancelled/);
+    expect(h.api.cancelBatch).not.toHaveBeenCalled();
+  });
+
+  it('removes a collected task without touching the provider', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const calls = h.api.getBatch.mock.calls.length;
+    await cleanTask(h.deps, taskId);
+    expect(h.store.list()).toHaveLength(0);
+    expect(h.api.getBatch.mock.calls.length).toBe(calls);
+    // Delivered files are the user's; clean never touches them.
+    expect(fs.existsSync(path.join(h.root, 'docs', 'en', 'a.md'))).toBe(true);
   });
 });
 
