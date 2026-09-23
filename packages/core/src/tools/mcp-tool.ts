@@ -953,7 +953,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     };
   }
 
-  private boundInlineParts(
+  private async boundInlineParts(
     parts: Part[],
     signal: AbortSignal,
   ): Promise<Part[]> {
@@ -961,7 +961,30 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       parts,
       signal,
       `${this.serverName}/${this.serverToolName}`,
+      await this.isOmniMediaDeliveryActive(),
     );
+  }
+
+  /**
+   * Whether the omni funnel will take this result's media BY REFERENCE.
+   *
+   * `CoreToolScheduler` runs `processToolResultOmniMedia` over the parts this
+   * tool returns, converting inline base64 into `oss://` fileData under omni's
+   * own ceilings (128 MiB per tool result, 1 GiB per file) without decoding
+   * them. Both withholding clamps in `boundInlineImageParts` protect the INLINE
+   * path — its decoder's source cap and its request-size budget — so leaving
+   * them armed here replaces an image omni could have delivered with a text
+   * placeholder.
+   *
+   * Same rule and same gate shape as the 100 MB source cap in `fileUtils`:
+   * cheap `isOmniEnabled()` BEFORE the dynamic import, so a non-omni session
+   * never pays the module load and the import never touches the filesystem
+   * behind a mock-fs suite.
+   */
+  private async isOmniMediaDeliveryActive(): Promise<boolean> {
+    if (!this.cliConfig?.isOmniEnabled?.()) return false;
+    const omni = await this.cliConfig.loadOmniMediaReader();
+    return omni.isOmniDeliveryActive(this.cliConfig);
   }
 
   /**
@@ -1339,11 +1362,20 @@ const MCP_MEDIA_REMEDY =
  * `subject` names the server and tool the bytes came from. It is the only way
  * to tell configured MCP servers apart in a bounding failure, since these bytes
  * have no file path to label them with.
+ *
+ * `omniDeliveryActive` reports that the omni funnel will convert this result's
+ * media into `oss://` fileData and upload it BY REFERENCE, under ceilings far
+ * above either limit below. Both withholding clamps exist to protect the inline
+ * path, so both are exempted together — dropping only the pre-decode one would
+ * merely move the placeholder: the renderer rejects >100 MiB with
+ * `source_too_large`, the catch forwards the part unchanged, and the trailing
+ * inline clamp withholds it anyway.
  */
 async function boundInlineImageParts(
   parts: Part[],
   signal: AbortSignal,
   subject: string,
+  omniDeliveryActive: boolean,
 ): Promise<Part[]> {
   // One ceiling read shared by both guards below, so the renderer's adopt
   // decision and the trailing clamp cannot disagree within a single result.
@@ -1375,31 +1407,36 @@ async function boundInlineImageParts(
       continue;
     }
     const { mimeType, data } = inline;
-    // The gate above also admits untyped resource blobs, whose real format is
-    // only known once the renderer sniffs them. This guard runs before that, so
-    // it must not describe a non-image as an image: pick the wording from what
-    // is actually known here.
-    const labelledImage = isImagePart(part);
-    const sourceLimitedPart = clampInlineMediaPart(
-      part,
-      IMAGE_MAX_SOURCE_BYTES,
-      labelledImage
-        ? {
-            // This is the decoder's source cap, not the inline-media limit, and
-            // the bytes exist only in this tool result — no `@file` can supply
-            // them. Say so instead of borrowing the default wording.
-            limitLabel: 'image source limit',
-            remedy:
-              'Ask the user to resize or compress the image, or return it as a resource link instead of inline bytes.',
-          }
-        : {
-            limitLabel: 'source limit',
-            remedy: 'Ask the user to have the tool return a smaller payload.',
-          },
-    );
-    if (sourceLimitedPart !== part) {
-      boundedParts.push(sourceLimitedPart);
-      continue;
+    // This cap protects the overview DECODER, so — exactly as in `fileUtils` —
+    // it only applies when the bytes will actually reach it. Under omni
+    // delivery they are uploaded by reference and never decoded here.
+    if (!omniDeliveryActive) {
+      // The gate above also admits untyped resource blobs, whose real format is
+      // only known once the renderer sniffs them. This guard runs before that,
+      // so it must not describe a non-image as an image: pick the wording from
+      // what is actually known here.
+      const labelledImage = isImagePart(part);
+      const sourceLimitedPart = clampInlineMediaPart(
+        part,
+        IMAGE_MAX_SOURCE_BYTES,
+        labelledImage
+          ? {
+              // This is the decoder's source cap, not the inline-media limit,
+              // and the bytes exist only in this tool result — no `@file` can
+              // supply them. Say so instead of borrowing the default wording.
+              limitLabel: 'image source limit',
+              remedy:
+                'Ask the user to resize or compress the image, or return it as a resource link instead of inline bytes.',
+            }
+          : {
+              limitLabel: 'source limit',
+              remedy: 'Ask the user to have the tool return a smaller payload.',
+            },
+      );
+      if (sourceLimitedPart !== part) {
+        boundedParts.push(sourceLimitedPart);
+        continue;
+      }
     }
     let boundedPart = part;
     try {
@@ -1447,9 +1484,12 @@ async function boundInlineImageParts(
     }
     // Only what ends up being an image is subject to the inline limit: an
     // untyped blob the renderer could not decode is forwarded exactly as the
-    // server sent it.
+    // server sent it. Under omni delivery neither is — the inline ceiling is
+    // the inline path's request-size budget, and omni uploads by reference.
     boundedParts.push(
-      isImagePart(boundedPart) ? clampToInlineLimit(boundedPart) : boundedPart,
+      isImagePart(boundedPart) && !omniDeliveryActive
+        ? clampToInlineLimit(boundedPart)
+        : boundedPart,
     );
   }
   return boundedParts;

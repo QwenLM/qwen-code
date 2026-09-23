@@ -923,6 +923,127 @@ describe('DiscoveredMCPTool', () => {
       expect(placeholder.text).not.toContain('resize or compress the image');
     });
 
+    describe('omni delivery exemption', () => {
+      // Both withholding clamps are the INLINE path's protection. When omni
+      // delivery is active, `CoreToolScheduler` converts these same parts into
+      // `oss://` fileData and uploads them BY REFERENCE under its own ceilings
+      // (128 MiB per tool result, 1 GiB per file) without decoding them, so
+      // withholding here would replace an image `main` delivered with a text
+      // placeholder.
+      const omniStub = (deliveryActive: boolean, omniEnabled = true) => {
+        const isOmniDeliveryActive = vi.fn(() => deliveryActive);
+        const loadOmniMediaReader = vi.fn(async () => ({
+          isOmniDeliveryActive,
+        }));
+        const config = {
+          isOmniEnabled: vi.fn(() => omniEnabled),
+          loadOmniMediaReader,
+          getTruncateToolOutputThreshold: () => 1000,
+          getTruncateToolOutputLines: () => 50,
+          getUsageStatisticsEnabled: () => false,
+          isTrustedFolder: () => true,
+          storage: { getProjectTempDir: () => '/tmp/test-project' },
+        } as any;
+        return { config, loadOmniMediaReader, isOmniDeliveryActive };
+      };
+
+      const toolWith = (config: any) =>
+        new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined, // trust
+          undefined, // nameOverride
+          config,
+        );
+
+      // Shrink BOTH clamp ceilings to 1 byte so any inline part would be
+      // withheld if either clamp still ran — the sibling tests' technique,
+      // standing in for a real >100 MiB base64 payload.
+      const shrinkBothClamps = () => {
+        const realClamp = inlineMediaLimit.clampInlineMediaPart;
+        return vi
+          .spyOn(inlineMediaLimit, 'clampInlineMediaPart')
+          .mockImplementation((part, limitBytes, placeholderOptions) =>
+            realClamp(part, Math.min(limitBytes ?? 1, 1), placeholderOptions),
+          );
+      };
+
+      const oversizedImageResponse = () => {
+        mockCallTool.mockResolvedValue([
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                content: [
+                  { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+                ],
+              },
+            },
+          },
+        ] as Part[]);
+      };
+
+      it('delivers an over-limit image to omni instead of withholding it', async () => {
+        const clamp = shrinkBothClamps();
+        // The decoder still rejects a >100 MiB source, so the part reaches the
+        // trailing clamp unchanged: exempting ONLY the pre-decode clamp would
+        // withhold it there instead, which is why this asserts both.
+        vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValue(
+          new imageView.ImageViewError(
+            'source_too_large',
+            `Image exceeds the 100 MB source limit: ${serverName}/${serverToolName} image/png`,
+          ),
+        );
+        oversizedImageResponse();
+        const { config, isOmniDeliveryActive } = omniStub(true);
+
+        const result = await toolWith(config)
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        expect(isOmniDeliveryActive).toHaveBeenCalledWith(config);
+        expect(clamp).not.toHaveBeenCalled();
+        expect(result.llmContent).toEqual([
+          {
+            text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
+          },
+          { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+        ]);
+      });
+
+      it('still withholds an over-limit image when omni delivery is inactive', async () => {
+        const clamp = shrinkBothClamps();
+        oversizedImageResponse();
+        const { config } = omniStub(false);
+
+        const result = await toolWith(config)
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        expect(clamp).toHaveBeenCalled();
+        const placeholder = (result.llmContent as Part[])[1]!;
+        expect(placeholder.text).toContain('image source limit');
+      });
+
+      it('does not load the omni module when omni is disabled', async () => {
+        // The cheap gate must run BEFORE the dynamic import: that import
+        // touches the filesystem, which breaks mock-fs suites and costs a
+        // module load for every non-omni user.
+        shrinkBothClamps();
+        oversizedImageResponse();
+        const { config, loadOmniMediaReader } = omniStub(true, false);
+
+        await toolWith(config)
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        expect(loadOmniMediaReader).not.toHaveBeenCalled();
+      });
+    });
+
     it('never sends a non-image inline part to the renderer', async () => {
       const bound = vi.spyOn(imageView, 'boundImageBuffer');
       mockCallTool.mockResolvedValue([
