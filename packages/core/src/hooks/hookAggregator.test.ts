@@ -1560,14 +1560,55 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.reason).toBe('gate says block');
     });
 
-    const nonGatingEvents: HookEventName[] = [
+    it.each([
       HookEventName.UserPromptSubmit,
       HookEventName.UserPromptExpansion,
+    ])(
+      '%s on a blocking outcome with no payload synthesizes a deny',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [blockingResult(eventName, undefined)],
+          eventName,
+        );
+        expect(result.finalOutput?.decision).toBe('deny');
+        expect(result.finalOutput?.reason).toBe(
+          'Hook exited with a blocking error',
+        );
+      },
+    );
+
+    it.each([
+      HookEventName.UserPromptSubmit,
+      HookEventName.UserPromptExpansion,
+    ])(
+      '%s on a blocking outcome keeps the payload reason and message',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [
+            blockingResult(eventName, {
+              reason: 'not allowed',
+              systemMessage: 'gate says no',
+            }),
+          ],
+          eventName,
+        );
+        expect(result.finalOutput?.decision).toBe('deny');
+        expect(result.finalOutput?.reason).toBe('not allowed');
+        expect(result.finalOutput?.systemMessage).toBe('gate says no');
+      },
+    );
+
+    const nonGatingEvents: HookEventName[] = [
+      HookEventName.PostToolUseFailure,
+      HookEventName.Notification,
       HookEventName.SessionStart,
       HookEventName.SessionEnd,
+      HookEventName.SessionDelete,
       HookEventName.SubagentStart,
       HookEventName.MessageDisplay,
-      HookEventName.Notification,
+      HookEventName.PreCompact,
+      HookEventName.PostCompact,
+      HookEventName.PermissionDenied,
       HookEventName.InstructionsLoaded,
     ];
 
@@ -1599,5 +1640,26 @@ describe('HookAggregator', () => {
         );
       },
     );
+
+    it('PostToolUse stays a stop-request-only lane and a blocking exit 2 does not deny it', () => {
+      const empty = aggregator.aggregateResults(
+        [blockingResult(HookEventName.PostToolUse, undefined)],
+        HookEventName.PostToolUse,
+      );
+      expect(empty.finalOutput).toBeUndefined();
+
+      const payload = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PostToolUse, {
+            systemMessage: 'a message only, no deny',
+          }),
+        ],
+        HookEventName.PostToolUse,
+      );
+      expect(payload.finalOutput?.decision).toBe('allow');
+      expect(payload.finalOutput?.systemMessage).toBe(
+        'a message only, no deny',
+      );
+    });
   });
 });

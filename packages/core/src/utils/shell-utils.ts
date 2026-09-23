@@ -2400,9 +2400,11 @@ export function resolveCommandPath(
       if (!result) return { path: null, error: undefined };
       const first = result.split(/\r?\n/)[0]?.trim();
       if (!first) return { path: null, error: undefined };
-      const resolved = path.isAbsolute(first)
+      // `path` follows the host platform; this arm must resolve Windows paths
+      // on any host so the win32 resolution stays testable off Windows.
+      const resolved = path.win32.isAbsolute(first)
         ? first
-        : path.resolve(probeCwd, first);
+        : path.win32.resolve(probeCwd, first);
       accessSync(resolved, fsConstants.X_OK);
       return { path: resolved, error: undefined };
     } else {

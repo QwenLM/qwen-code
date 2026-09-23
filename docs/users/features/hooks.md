@@ -508,12 +508,14 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 | Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                                                                                                                                                                                    |
 
 Exit code `2` refuses the action wherever the event's consumer reads a decision:
-`PreToolUse` and `PermissionRequest` refuse the tool call and the todo events refuse the
-transition. `Stop` and `SubagentStop` treat a blocking decision as a request to keep the run
+`PreToolUse` and `PermissionRequest` refuse the tool call, the todo events refuse the
+transition, and `UserPromptSubmit` and `UserPromptExpansion` refuse the prompt or the
+expansion. `Stop` and `SubagentStop` treat a blocking decision as a request to keep the run
 going, `PostToolBatch` folds one into its own stop request, and `PostToolUse` and
 `PostToolUseFailure` read only a stop request, so a decision there does not undo the call.
-Every other event (`UserPromptSubmit`, `UserPromptExpansion`, `SessionStart`, `SessionEnd`,
-`SubagentStart`, `MessageDisplay`, `Notification`, `InstructionsLoaded`) reads no deny at
+Every other event (`SessionStart`, `SessionEnd`, `SessionDelete`, `SubagentStart`,
+`MessageDisplay`, `Notification`, `InstructionsLoaded`, `PreCompact`, `PostCompact`,
+`PermissionDenied`, `StopFailure`) reads no deny at
 all: a blocking outcome there leaves `finalOutput` as the original payload or undefined.
 
 Adding plain text to the model context applies only to a command hook's `stdout`. An HTTP hook's response body is read as JSON only when its `Content-Type` is `application/json`; any other non-empty body becomes a `systemMessage` on every event. An HTTP hook that adds context must return JSON with `hookSpecificOutput.additionalContext`.

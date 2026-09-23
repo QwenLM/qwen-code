@@ -53,7 +53,18 @@ function isStopRequestThatBlocks(
 
 type DenyShapeFn = (output: HookOutput, reason: string) => HookOutput;
 
-const DENY_SHAPE: Partial<Record<HookEventName, DenyShapeFn>> = {
+// The prompt lanes read a top-level deny decision only.
+const denyDecision: DenyShapeFn = (output, reason) => ({
+  ...output,
+  decision: 'deny',
+  reason,
+});
+
+// A blocking exit 2 has to land in the field the event's consumer reads, so
+// every lane is either shaped or audited as decision-free (null). The record
+// is total over HookEventName on purpose: a lane missing here fails to compile
+// instead of silently failing open.
+const DENY_SHAPE: Record<HookEventName, DenyShapeFn | null> = {
   PermissionRequest: (output, reason) => {
     const specific = { ...(output.hookSpecificOutput ?? {}) };
     const previous = specific['decision'];
@@ -99,6 +110,21 @@ const DENY_SHAPE: Partial<Record<HookEventName, DenyShapeFn>> = {
     continue: false,
     stopReason: reason,
   }),
+  UserPromptSubmit: denyDecision,
+  UserPromptExpansion: denyDecision,
+  PostToolUse: null,
+  PostToolUseFailure: null,
+  Notification: null,
+  SessionStart: null,
+  SessionEnd: null,
+  SessionDelete: null,
+  MessageDisplay: null,
+  SubagentStart: null,
+  PreCompact: null,
+  PostCompact: null,
+  PermissionDenied: null,
+  StopFailure: null,
+  InstructionsLoaded: null,
 };
 
 /**
