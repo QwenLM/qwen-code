@@ -7,6 +7,8 @@
 实现基线：`feature/managed-agents-p0-p8` 的 `51cb9977f8b1`，以及本文描述的
 P3 工作区变更
 
+补充状态：§17 是 Linux/Kubernetes Hosted 运行约束的设计补充，尚未实现或验收；前述参考实现与本地测试声明不覆盖该节。固定设计源为 [code_agent@1478e7b](https://github.com/doudouOUC/code_agent/tree/1478e7b632eb237bc3f40ea574ce90782e1cf4c3/qwen-code/feature/managed-agents)，集成参考为 draft `bad721f22fcd8cfad9ec22e98f69fec75b20b6f0`，本次核对的本地源码为 `f5088d2e`，三者不能混同。本轮只落文档，不部署或修改实现；第5项配额与计费不纳入，租户信任分级及强隔离运行时选型暂缓。
+
 ## 1. 问题
 
 Java 管控面通过 HTTP 调用 Tool-only Runtime。因此，在 Java 重启后复用
@@ -261,6 +263,8 @@ Runtime instance ID、lease ID 和 epoch 必须与持久 seed 匹配。它不能
 `release` 必须幂等，并且只允许条件删除 handle 精确标识的资源。adapter 绝不能
 删除同名 replacement。
 
+上述 `CompletionStage<Void>` 完成及 `NOT_FOUND` 观测不构成进程停止证明。Kubernetes API 对象缺失/终态与原节点上的实际进程、写通道分别核验。严格 Hosted profile 的停止、卸载和同卷转授门槛见[§17](#hosted-runtime-profile)，不能从这两个返回值推导物理卷可释放。
+
 ## 8. Broker 生命周期
 
 ```mermaid
@@ -277,6 +281,8 @@ stateDiagram-v2
     DRAINING --> RELEASED: 条件释放成功或资源已不存在
     DRAINING --> RECOVERY_BLOCKED: 条件释放冲突
 ```
+
+此图描述原 P3 binding 记录的生命周期，不是 CSI 卷占用状态机。`RELEASED` 或 API 条件删除受理不能作为旧写者退出、结果/history 已提交或 Workspace 可转授的证据；严格 Hosted profile 还必须满足 §17 的独立物理占用屏障。
 
 reconcile 本身是 operation gate，不新增持久 binding 状态，以保持状态机精简。
 进程内重新构造的 `RuntimeBinding` 会记录当前 `attestation_generation`，并保持
@@ -421,6 +427,8 @@ identity 幂等调用 `prepare`。
 活跃 Runtime Session 或 execution 的空闲 binding；否则 binding 保持 `LOST`，
 并明确阻塞恢复。
 
+以上是原 P3 参考恢复路径，不是严格 Hosted 同卷自动接管的完整条件。即使数据库里没有活跃 execution，原 idle Pod 也可能仍热挂载 Workspace。§17 的占用、停止/隔离、history 和卸载核验必须先完成；新 generation 不能绕过它们。原执行的查询或取消不得走重新 `prepare`、新 Runtime acquire/provision 或 execute；离线只读账本和原 ID 取消须按[UNKNOWN 对账契约](managed-agent-recovery-operations.zh-CN.md#unknown-reconciliation)单独接线，不把原 P3 按需恢复等同于这项已实现能力。
+
 ## 12. Spring 集成
 
 Runtime Broker 继续作为 `managed-agent-server` 的嵌入组件；本设计不要求增加单独
@@ -538,3 +546,71 @@ operation generation 为键输出结构化指标和日志：
 
 不能记录 Runtime token、解密 seed、原始工作目录或 tenant identifier。endpoint
 默认不记录，或者只记录脱敏后的 host 类型和端口。
+
+<a id="hosted-runtime-profile"></a>
+
+## 17. Hosted 运行与物理卷交接补充（待实现）
+
+### 17.1 归属与开放边界
+
+目标为 Java 控制面＋qwen serve sidecar、Session 独占 Runtime Pod、CSI 独占 Workspace 卷。Java 管产品 ACL、Workspace 与 Broker 事实；qwen 是模型历史/checkpoint 的唯一权威；Runtime 产出原物理执行证据。复用现有 repository、短事务 CAS、operation/Action、gate、SecretHandle 与资源 owner，不增加第二执行 authority、通用工作流或 MQ。
+
+当前本地实现有持久 binding/执行记录与条件 Pod 删除，但没有完整持久 Session→权威 Workspace→物理卷绑定；全局 PVC/cwd 配置不构成该映射。按 Session 生成的 request key 也不提供跨 Session 同卷互斥。参考 Kubernetes drain/release 不能证明全部后代退出及 CSI 卸载；动态 ACL、完整远端 activation、无旁读 Harness、恢复/删除闭包均仍需接线验收。因此 §2/§15 的既有测试不能作为本 profile 已开放的证明。
+
+### 17.2 物理存储身份与持久占用
+
+- 首版一个 Workspace 使用一个可写 CSI 卷，要求支持 **ReadWriteOncePod（RWOP）**。RWO 仅限制单节点，不能替代单 Pod 约束；RWOP 自身也不证明分区旧写者已停止。[Kubernetes access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)
+- 受信 Registry 解析冲突键 `storage backend 域 + CSI driver + volumeHandle`。volumeHandle 是不透明标识，不按路径或大小写归一。另保存 cluster、PV UID、PVC UID、绑定关系及核验来源；这些是证据，不能加入冲突键使同卷分锁。客户端不能自报物理身份。
+- 同卷目录、挂载路径、Workspace 别名、不同 Session/tenant/generation 使用同一占用。平台必须封住绕过注册的挂载；重复 PV alias 无法可靠识别时拒绝注册。同卷 Git worktree 仍冲突；首版不做目录级并发，不增加 worktree 创建能力。
+- 既有 Java Workspace/Broker 存储保存占用：物理键、holder Session/turn、原 operation/binding、占用代际与 CAS revision、phase、blockedReason、结果/history/停止/卸载证明引用。状态为 `reserved → active → draining → released`；阻塞不清 holder。状态推进需同一占用身份、revision 与所需证据，不持数据库事务跨 RPC。
+- 占用 lease 只确定协调者。过期后新控制者接管调查责任，不自动取得卷写权。无人访问过卷的 reservation 也须证明旧协调者不可能迟到挂载/准入，才能释放；丢 claim/grant ACK 只按原 operation 查询与重试，不另造 holder。
+
+### 17.3 准入、轮次和跨 Session 交接
+
+1. 模型先提交原工具意图，Java 验证持久 Workspace 绑定并预留整卷占用。可以提前准备不挂 Workspace 的环境；第一次可能访问卷的初始化、history bind、prepare 或读取前必须取得占用。
+2. Broker 核验原 Runtime 身份、真实挂载、ContextBinding 与占用代际，完成已协商的 gate 安装后才开放工具。数据库新 revision 不会自动阻止旧 Shell 或迟到挂载，实际入口必须受控。
+3. 同一占用覆盖首次快照、审批、工具执行、结果及必要资源持久收件、实际模型消费和 history/checkpoint 提交。审批期间不释放卷后携旧快照继续；详情见[工具与历史](managed-agent-tools-history.zh-CN.md#csi-volume-serialization)。
+4. 轮末先封新派发，再排空所属进程及后代、关闭输出、核对结果/history。可为同 Session 保留 idle Pod；跨 Session 请求必须先取得可信停止及正常卸载/必要存储交接证明，再 CAS 转授。不允许两个 Session 的 Runtime 同时热挂载同卷。
+5. 无工具推理不取卷。等待其他 Session 的卷只显示 Workspace 屏障，不为尚未派发的等待者制造执行 UNKNOWN。首版 H 共享写 child 不开放，不借父锁，也不允许父持锁等待同卷 child。
+
+### 17.4 分区与证据门槛
+
+| 情况           | 允许的下一步                                                                                             | 不足以证明                                                                              |
+| -------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 正常 drain     | 原可信监督者确认进程/cgroup 全部退出、输出关闭；结合结果/history 提交及正常 CSI 卸载后条件交接           | 只收到取消 ACK、根 PID 退出或 Pod 删除请求成功                                          |
+| 节点/网络分区  | 保留 holder 与 blocked；可验证的原节点物理 fencing，或后端可靠撤销旧写通道后，再核对卷、原执行和 history | NotReady、force-delete、API 对象消失、VolumeAttachment 消失、lease 到期或 DB epoch 增加 |
+| 原执行 UNKNOWN | 按原 execution/phase 核查可信回执；只有合格证据及恢复闭包满足才推进                                      | 停止/隔离不证明外部 API 副作用未发生；accepted_unresolved 不解锁                        |
+
+物理节点/存储隔离与 `process stopped` 分别记录作用域，不能伪造进程退出。[强删 Pod 不等待节点确认](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination-forced)；[强制 detach 风险](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#forced-storage-detach-on-timeout)必须在目标 CSI/平台验证。工具不能修改集群 force-detach 开关。不能排除旧写通道或不安全重新挂载的平台，不开放自动接管。即使存储安全，原外部执行未知也不能继续原模型或跳过 history 结算。
+
+### 17.5 通用安全约束与未验收项
+
+- Hosted 首版只启用已验收 Read/Write/Edit/foreground Shell，Workspace 操作全部在 Runtime。new、spawn、restore/resume 一律拒绝未验收 Hooks、MCP、后台任务、client callback、auto-local/Legacy fallback。更广的本地工具设计不扩大此 allowlist。
+- Harness 不挂 Workspace；启动配置从不可变 Bundle 加载。compaction 附件只来自已提交结果或正式 Runtime 读取。路径 realpath/stat、settings/MCP discovery 等也不能旁读 Workspace；Harness 自有持久状态经既定存储接口访问。相同路径不等于相同环境内容。
+- Pod 必须实际执行 Restricted admission：non-root、禁止提权、drop ALL、seccomp、禁止 hostPath/hostNetwork/privileged；额外只读 rootfs，明确唯一允许的可写挂载。不只检查模板。[Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
+- Runtime 不挂 KubeAPI service-account token，不持模型或服务管理员凭据。Java provisioner 使用最小 RBAC；服务身份不能继承给用户 Shell，须核验进程、`/proc`、环境变量、挂载与文件权限边界。现有通过 boot Secret/环境传入身份的做法不自动满足该隔离。
+- SecretHandle 仍检查 scope/purpose/audience/generation/期限及当前授权，handle 不是 bearer。需要第三方凭据的网络工具优先使用已有受控外部代理，本轮不新增通用 credential proxy；代理能力缺失或 Shell 可读控制身份时，相关工具保持关闭。
+- NetworkPolicy 默认拒绝，在真实 CNI 核验；外网只走明确受控出口。L3/L4、TLS 工作负载身份、应用 ACL 分别验证，代理检查目的地、方法、路径、重定向及凭据注入。代理环境变量不能证明直连、IPv6、DNS、UDP/QUIC 或 metadata 旁路已封。[NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
+- 日志不记录 Prompt、参数、完整路径、密钥或原始输出；授权隔离诊断单独管理，业务数据即使不含模型凭据也受保护。
+
+以上是通用加固，不是恶意多租户隔离认证。租户信任分级、gVisor/Kata 选型暂缓，不默认接受任一信任模型；同 UID 控制层访问、凭据可见性等未证明安全的路径保留为未验收项。
+
+### 17.6 实现接缝、阶段与验收
+
+后续核对 upstream 后，在 RuntimeBrokerService/JDBC repositories 加占用与证据化释放；KubernetesRuntimeProvisioner 核验 RWOP、真实存储身份及停止/卸载；managed-tool-runtime/managed-tool-protocol 接最终准入；managed-tool-session、hosted-harness-profile、broker-managed-runtime-provider 接 history、无旁路恢复和惰性挂载。不假定 draft 文件全部已合入。严格 Tool v2/attestation v2 不原地扩字段，新增依据使用[控制协议](managed-agent-control-protocol.zh-CN.md)的版本化 envelope、成对 TS/Java schema 与一致性测试，旧 peer 不支持则拒绝。
+
+- C/E＋W0＋必要 F：单卷占用、正常交接、通用安全、原执行查询与丢 ACK/失联阻塞；任何 ACL 入口开放时同时满足[撤权](managed-agent-control-protocol.zh-CN.md#dynamic-authorization)门槛，不等公共 D。
+- D：案件、撤权/删除完成度公开投影和兼容；内部证据规则不依赖 UI。
+- G/W1/O4：完整 RestoreSet、安全水位、跨故障域恢复及备份删除，见[存储事件架构](2026-09-20-managed-agent-storage-event-architecture.zh-CN.md#restore-set)；验收前不开启。
+- H：共享写 child 等后置。本篇原 P3 编号不等于补充路线图的同名阶段。
+
+| 用例                 | 必须成功                                                               | 必须拒绝或阻塞                                               |
+| -------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------ |
+| 卷身份与并行         | 独立物理卷正常并行，同卷串行                                           | alias、目录、tenant、generation 不拆锁；未知绑定拒绝         |
+| 跨 Session 交接      | 原 writer 退出、history 提交、卸载后新 holder 可工作；无工具推理不等卷 | idle 热挂载或审批旧快照不得直接转授；父锁等待同卷 child 拒绝 |
+| claim/grant/ACK 丢失 | 原 operation 幂等收敛一个 holder                                       | 迟到 RPC 不新建第二持有者或绕过 CAS/gate                     |
+| 分区与后代           | 有效隔离及原结算证明后可安全推进                                       | force-delete、根退出、detach/lease 到期不能单独放行          |
+| Harness 内容与凭据   | Runtime/已提交附件及授权代理可用                                       | 同路径不同内容不旁读；Shell 不继承身份；旁路出口拒绝         |
+| ACL 与原执行         | 当前合法任务和原 ID 系统结算可用                                       | 三阶段不混同；UNKNOWN 结案不解卷，撤权用户不可读             |
+
+每项都有成功与拒绝路径，全部 blocked 不算通过。本轮未运行 Java/TS 或真实 MySQL/Kubernetes/CSI 验收；H2、fake API 及模板检查不能替代目标平台证据。

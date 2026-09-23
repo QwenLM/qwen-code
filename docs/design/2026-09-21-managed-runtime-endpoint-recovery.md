@@ -7,6 +7,8 @@ Status: Implemented in the reference stack; real-cluster validation pending
 Implementation checkout: `feature/managed-agents-p0-p8` at `51cb9977f8b1`
 plus the P3 working-tree change described here
 
+Supplement status: Section 17 defines proposed Linux/Kubernetes Hosted constraints; implementation and validation are pending. Earlier reference-implementation and test claims do not cover that section. The fixed design source is [code_agent@1478e7b](https://github.com/doudouOUC/code_agent/tree/1478e7b632eb237bc3f40ea574ce90782e1cf4c3/qwen-code/feature/managed-agents), the draft integration reference is `bad721f22fcd8cfad9ec22e98f69fec75b20b6f0`, and the local source inspected for this supplement is `f5088d2e`; these are distinct baselines. This change only updates documentation, not implementation or deployment. Item 5, quotas and billing, is excluded; tenant trust tiers and strong-isolation runtime selection remain deferred.
+
 ## 1. Problem
 
 The Java control plane calls a Tool-only Runtime over HTTP. Reusing a Runtime
@@ -288,6 +290,8 @@ credential from the decrypted seed. An identity mismatch is `CONFLICT`.
 `release` is idempotent and conditionally deletes only the resource identified
 by the handle. An adapter must never delete a same-name replacement.
 
+Neither completion of this `CompletionStage<Void>` nor a `NOT_FOUND` observation proves process termination. Verify Kubernetes API object absence/terminal state separately from actual processes and write channels on the original node. The strict Hosted profile requires the stop, unmount, and same-volume handover barriers in [Section 17](#hosted-runtime-profile); neither return value releases physical-volume occupancy.
+
 ## 8. Broker lifecycle
 
 ```mermaid
@@ -304,6 +308,8 @@ stateDiagram-v2
     DRAINING --> RELEASED: conditional release confirmed or resource absent
     DRAINING --> RECOVERY_BLOCKED: conditional release conflict
 ```
+
+This diagram describes the original P3 binding-record lifecycle, not CSI volume occupancy. `RELEASED` or acceptance of a conditional API deletion does not prove writer termination, result/history commit, or Workspace handover eligibility. The strict Hosted profile also requires the independent physical-occupancy barrier in Section 17.
 
 Reconciliation itself is an operation gate, not a new durable binding state.
 This keeps the state machine small. A locally reconstructed `RuntimeBinding`
@@ -475,6 +481,8 @@ implemented automatic replacement is limited to an idle binding with no active
 Runtime Session or execution; otherwise the binding stays `LOST` and recovery
 is explicitly blocked.
 
+These are original P3 reference recovery behaviors, not the complete conditions for strict Hosted same-volume takeover. An idle Pod may still have a hot Workspace mount even when the database has no active execution. Section 17 occupancy, stop/isolation, history, and unmount checks must precede handover; a new generation cannot bypass them. Querying or cancelling an original execution must not rerun `prepare`, acquire/provision a new Runtime, or execute. Wire offline read-only ledger access and original-ID cancellation separately under the [UNKNOWN reconciliation contract](managed-agent-recovery-operations.md#unknown-reconciliation); P3 on-demand recovery does not establish that capability.
+
 ## 12. Spring integration
 
 The Runtime Broker remains an embedded component of
@@ -606,3 +614,71 @@ provisioner kind, placement-domain hash, and operation generation:
 Do not log Runtime tokens, decrypted seeds, raw working directories, or tenant
 identifiers. Endpoint logging is disabled by default or reduced to a redacted
 host-class and port.
+
+<a id="hosted-runtime-profile"></a>
+
+## 17. Hosted Operation and Physical-Volume Handover Supplement (Proposed)
+
+### 17.1 Ownership and enablement boundary
+
+The target uses a Java control plane plus a qwen serve sidecar, a Session-exclusive Runtime Pod, and an exclusive CSI Workspace volume. Java owns product ACL, Workspace, and Broker facts; qwen alone owns model history/checkpoints; Runtime produces original physical-execution evidence. Reuse existing repositories, short CAS transactions, operation/Action, gates, SecretHandle, and resource owners. Do not introduce another execution authority, generic workflow service, or MQ.
+
+The inspected local implementation has durable binding/execution records and conditional Pod deletion, but lacks the complete durable Session → authoritative Workspace → physical-volume binding. Global PVC/cwd configuration does not provide that mapping. A Session-specific request key does not serialize the same volume across Sessions. Reference Kubernetes drain/release does not prove descendant termination and CSI unmount. Dynamic ACL, complete remote activation, a Harness without local Workspace reads, and recovery/deletion closure still require integration and validation. Tests in Sections 2/15 therefore do not establish this profile's enablement.
+
+### 17.2 Physical storage identity and durable occupancy
+
+- The first profile gives each Workspace one writable CSI volume and requires **ReadWriteOncePod (RWOP)** support. RWO limits nodes, not Pods; RWOP itself does not prove that a partitioned old writer stopped. [Kubernetes access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)
+- A trusted Registry resolves the conflict key `storage backend domain + CSI driver + volumeHandle`. Treat volumeHandle as opaque, without path or case normalization. Separately retain cluster, PV UID, PVC UID, binding relationships, and verification sources as evidence; adding them to split the same volume into separate locks is forbidden. Clients cannot assert physical identity.
+- Directories, mount paths, Workspace aliases, and different Sessions/tenants/generations on the same volume share one occupancy. The platform must prevent unregistered mount bypasses; reject registration when duplicate PV aliases cannot be reliably identified. Git worktrees on that volume still conflict. No directory-level concurrency or new worktree-creation feature is introduced.
+- Existing Java Workspace/Broker storage persists the physical key, holder Session/turn, original operation/binding, occupancy generation and CAS revision, phase, blockedReason, and result/history/stop/unmount proof references. States are `reserved → active → draining → released`; blocking retains the holder. Transitions require the same occupancy identity, revision, and necessary evidence; never hold a database transaction across RPC.
+- An occupancy lease selects the coordinator only. After expiry a new controller assumes investigation, not volume write rights. Releasing even an unused reservation requires proof that the old coordinator cannot mount/admit late work. Lost claim/grant ACKs are reconciled and retried under the original operation, not a new holder.
+
+### 17.3 Admission, turns, and cross-Session handover
+
+1. The model first submits the original tool intent; Java verifies the durable Workspace binding and reserves whole-volume occupancy. Environment preparation without a Workspace mount may run ahead. Occupancy is required before initialization, history bind, prepare, or any read that might access the volume.
+2. Broker verifies original Runtime identity, actual mounts, ContextBinding, and occupancy generation, then installs the negotiated gate before enabling tools. A new database revision does not stop an old Shell or a delayed mount; real admission points must be controlled.
+3. One occupancy covers the initial snapshot, approval, execution, durable receipt of results and required resources, actual model consumption, and history/checkpoint commit. Never release during approval and later execute against a stale snapshot; see [tools and history](managed-agent-tools-history.md#csi-volume-serialization).
+4. At turn end fence new dispatch, drain owned processes and descendants, close output, and reconcile results/history. An idle Pod may remain for the same Session. Another Session requires trusted termination and normal unmount/necessary storage handover evidence before CAS reassignment. Two Sessions' Runtimes cannot keep the same volume hot-mounted simultaneously.
+5. No-tool inference takes no volume occupancy. A waiting Session reports a Workspace barrier, not a fabricated execution UNKNOWN for undispatched work. Shared-write children remain deferred to H; neither borrow the parent lock nor wait for a same-volume child while holding it.
+
+### 17.4 Partitions and evidence barriers
+
+| Situation                  | Permitted next step                                                                                                                                                                          | Insufficient evidence                                                                                          |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Normal drain               | Trusted original supervision proves all processes/cgroup exited and output closed; result/history commit and normal CSI unmount permit conditional handover                                  | Cancel ACK, root PID exit, or Pod deletion request acceptance alone                                            |
+| Node/network partition     | Retain holder and blocked state; after verifiable original-node physical fencing or reliable backend revocation of the old write channel, verify the volume, original execution, and history | NotReady, force-delete, API object absence, VolumeAttachment disappearance, lease expiry, or a higher DB epoch |
+| Original execution UNKNOWN | Inspect trusted receipts by original execution/phase; advance only with qualified evidence and complete recovery closure                                                                     | Stop/isolation does not prove external API side effects never occurred; accepted_unresolved does not unlock    |
+
+Record the scope of physical node/storage isolation separately from `process stopped`; do not fabricate process exit. [Forced Pod deletion does not wait for node confirmation](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination-forced). Validate [forced-detach risks](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#forced-storage-detach-on-timeout) on the target CSI/platform. Tools must not change cluster force-detach settings. A platform unable to exclude old write channels or unsafe remounts cannot enable automatic takeover. Storage safety alone does not allow the original model to continue with an unknown external execution or skip history settlement.
+
+### 17.5 Common security requirements and unvalidated boundaries
+
+- Hosted initially enables only validated Read/Write/Edit/foreground Shell; all Workspace operations run in Runtime. New, spawn, and restore/resume paths reject unvalidated Hooks, MCP, background jobs, client callbacks, and auto-local/Legacy fallback. Broader local-tool designs do not extend this allowlist.
+- Harness has no Workspace mount; startup configuration comes from an immutable Bundle. Compaction attachments come only from committed results or formal Runtime reads. Path realpath/stat and settings/MCP discovery cannot read Workspace locally either. Harness-owned durable state uses the existing storage interfaces. Identical paths do not imply identical environment content.
+- Enforce Restricted admission in practice: non-root, no privilege escalation, drop ALL capabilities, seccomp, no hostPath/hostNetwork/privileged containers; additionally require a read-only rootfs and explicitly allowed writable mounts. Template inspection alone is insufficient. [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
+- Runtime mounts no KubeAPI service-account token and holds no model or service-admin credentials. Java provisioner has minimum RBAC. User Shell must not inherit the Runtime service identity; verify process, `/proc`, environment, mount, and file-permission boundaries. The current boot Secret/environment identity mechanism does not establish that isolation.
+- SecretHandle still checks scope/purpose/audience/generation/expiry and current authorization; a handle is not a bearer. Network tools needing third-party credentials should use an existing controlled external proxy. This change adds no generic credential-proxy product. Keep affected tools disabled when the proxy is absent or Shell can read the control identity.
+- Default-deny NetworkPolicy must be verified in the real CNI, with external traffic through explicit controlled egress only. Independently validate L3/L4 controls, TLS workload identity, and application ACL. The proxy checks destinations, methods, paths, redirects, and credential injection. Proxy environment variables do not prove that direct, IPv6, DNS, UDP/QUIC, or metadata bypasses are closed. [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
+- Logs exclude Prompt, arguments, full paths, secrets, and raw output. Manage authorized isolated diagnostics separately. Business data remains protected even without model credentials.
+
+These are common hardening requirements, not certification for hostile multi-tenancy. Tenant trust tiers and gVisor/Kata selection remain deferred; no trust model is implicitly accepted. Same-UID control access and credential visibility remain unvalidated wherever their safety has not been demonstrated.
+
+### 17.6 Implementation seams, phases, and acceptance
+
+After checking upstream evolution, add occupancy and evidence-based release to RuntimeBrokerService/JDBC repositories; verify RWOP, actual storage identity, stop and unmount in KubernetesRuntimeProvisioner; wire final admission in managed-tool-runtime/managed-tool-protocol; connect history, bypass-free recovery, and lazy mounting in managed-tool-session, hosted-harness-profile, and broker-managed-runtime-provider. Do not assume every draft file has merged. Do not extend strict Tool v2/attestation v2 in place. New evidence uses the [control protocol](managed-agent-control-protocol.md)'s versioned envelope, paired TS/Java schemas, and consistency tests; reject unsupported old peers.
+
+- C/E + W0 + necessary F: volume occupancy, normal handover, common security, original-execution query, and accurate blocking on lost ACKs/disconnection. Every ACL-controlled entry must meet [revocation](managed-agent-control-protocol.md#dynamic-authorization) requirements when enabled, without waiting for public D.
+- D: public projections and compatibility for cases and revocation/deletion completion; internal evidence rules do not depend on UI delivery.
+- G/W1/O4: complete RestoreSet, safety watermarks, cross-failure-domain recovery, and backup deletion; see [storage/event architecture](2026-09-20-managed-agent-storage-event-architecture.md#restore-set). Keep disabled until validated.
+- H: shared-write children and other extensions are deferred. Original P3 numbering in this document is distinct from supplement roadmap phases.
+
+| Case                            | Required success                                                                                   | Required rejection or blocking                                                                                  |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Volume identity and concurrency | Independent physical volumes run concurrently; the same volume serializes                          | Aliases, directories, tenants, and generations cannot split locks; reject unknown bindings                      |
+| Cross-Session handover          | A new holder works after writer exit, history commit, and unmount; no-tool inference does not wait | No transfer with idle hot mounts or stale approval snapshots; reject parent-lock waits for same-volume children |
+| Lost claim/grant/ACK            | Original operation converges idempotently on one holder                                            | Late RPCs cannot create a second holder or bypass CAS/gates                                                     |
+| Partitions and descendants      | Valid isolation and original settlement evidence allow safe progress                               | Force-delete, root exit, detach, or lease expiry alone cannot permit handover                                   |
+| Harness content and credentials | Runtime/committed attachments and authorized proxies work                                          | No same-path local reads, Shell credential inheritance, or bypass egress                                        |
+| ACL and original execution      | Current authorized tasks and original-ID system settlement work                                    | Do not conflate three revocation stages; UNKNOWN case closure does not unlock or restore revoked reads          |
+
+Every case needs success and rejection paths; blocking everything does not pass. This documentation change ran no Java/TS or real MySQL/Kubernetes/CSI acceptance tests. H2, fake APIs, and template checks do not replace target-platform evidence.

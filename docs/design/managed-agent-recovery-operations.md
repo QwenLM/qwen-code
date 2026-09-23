@@ -1,115 +1,215 @@
-# Managed Runtime：持久回执、平台与运行验收
+# Managed Runtime: Durable Receipts, Platforms, and Operational Acceptance
 
-更新日期：2026-09-10；源码基线 `a836081466`。本文补齐全量目标中的 worker/daemon 重启、远端执行、平台和容量设计，配合[存储契约](managed-agent-session-storage.md)、[私有门禁](managed-agent-control-protocol.md)及[coordinator](managed-agent-coordinator.md)。这些增强尚未实现；首个交付仍先保证原 coordinator/worker 存活时替换 Harness，后续按本稿扩大能力。
+[English](managed-agent-recovery-operations.md) | [简体中文](managed-agent-recovery-operations.zh-CN.md)
 
-## 1. 当前事实与选定后端
+<a id="managed-runtime持久回执平台与运行验收"></a>
 
-当前 ManagedToolRuntime 的 invocation/started prompt 保存在内存，最多 1024 个 invocation、1 MiB 进度；worker 在父 IPC 断开后退出，activator 会清理 outputRoot。因而现有 status 或本地 Map 不能证明跨 worker 重启的执行结论。原工具参数、确认、Hook、history bind/checkpoint 都可能产生工作，恢复保护不能只记录 execute。
+Updated: 2026-09-23. The original 2026-09-10 design used source baseline `a836081466`; its worker/daemon restart, remote execution, platform, and capacity obligations remain. This document complements [storage](managed-agent-session-storage.md), [private gates](managed-agent-control-protocol.md), and the [coordinator](managed-agent-coordinator.md). Initial recovery covers Harness replacement while the original coordinator/worker survive; expanded guarantees require their own implementation and evidence.
 
-全量实现新增 `RuntimeReceiptStore`，由原执行环境持有，路径在可信 runtimeBaseDir 下 `managed-runtime/receipts/<bindingId>/`，不放临时 outputRoot；由绑定 owner 独占写入。它只记录物理调用事实，不成为 Session/turn 的第二权威。所有资源具有原 invocation、phase、digest 和 retention pin；所属 authority 的 acceptance ACK 作为物理账本收件证明保存：Session scope 使用 CommitReceipt，无 Session workspace scope 使用 workspace 控制 receipt。
+| Reference                                                                                                                                                                     | Status and use                                                                                     |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| [code_agent@1478e7b632eb237bc3f40ea574ce90782e1cf4c3](https://github.com/doudouOUC/code_agent/tree/1478e7b632eb237bc3f40ea574ce90782e1cf4c3/qwen-code/feature/managed-agents) | Fixed supplemental design source, not an implementation/verification claim.                        |
+| `bad721f22fcd8cfad9ec22e98f69fec75b20b6f0`                                                                                                                                    | Draft integration reference; not presumed fully merged or identical to local files.                |
+| `f5088d2e`                                                                                                                                                                    | Local implementation baseline examined here; concrete recovery gaps are identified in §1 and §3.1. |
 
-Runtime 生命周期分为 worker（执行与服务）、持久 receipt store（历史）与 process owner（实际命令）三部分。默认本地 daemon 重启可停止旧 worker，结果仍从 receipt store 读取；不要求保活旧 worker 才能保存已完成结果。真正保活的执行环境可以按下面的认证 attach 协议接管；旧进程是否存活必须实际核验。
+This revision changes documentation only: no code, schemas, configuration, plans, deployment, or remote changes, and no real-system validation or tests. The UNKNOWN case lifecycle, evidence-based tightening, offline read separation, and trusted-timing/Hosted guarantees below remain proposed implementation requirements. Supplemental item 5 (quotas/billing) is excluded; original capacity and performance contracts remain. Strong-isolation and tenant-trust choices are deferred without assuming trusted tenants.
 
-## 2. 操作账本与恢复分类
+<a id="1-当前事实与选定后端"></a>
 
-工具 phase 使用稳定 `phaseOperationId=(InvocationBinding, phase, effectRevision)`，内容摘要包含原 args/capability/policy/media/Hook revision。此处 effectRevision 是冻结的效果输入版本，不是重领 gate 的 operationRevision。工具顶层 phase 限于 begin_turn/history_bind/checkpoint/prepare/confirm/pre_hook/execute/post_hook/model_bridge/result_publish；模型 bridge 的模型事实由 Harness 提交，Runtime 只记录请求/接受答复。
+## 1. Current facts and selected backend
 
-| 持久记录             | 内容与写入时机                                                                                  | 崩溃后的解释                                                                                         |
-| -------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| intent               | phaseOperationId、输入 ref、原 lease/generation、gate revision                                  | 在任何可能的该阶段效果前同步；只有 intent 无 dispatch 且完整账本/owner证明时，才可能证明该阶段未开始 |
-| dispatch_started     | 原生开始标记、process owner ref 或本地执行序号                                                  | 在进入可能有副作用的原生函数前同步；记录完成后到实际开始之间崩溃也算 unknown，不猜测为未执行         |
-| phase_settled        | native status、原错误/Hook结果、输出/备份refs、实际进程结算证明                                 | 先保全结果/资源再同步；允许幂等重交付，禁止再次运行原阶段                                            |
-| accepted             | 按 scope 的 Session CommitReceipt 或 workspace 控制 receipt、已接收资源清单/父 history revision | 单独保存，ACK丢失查原Session；不能据接受一个结果就释放整个有子任务的binding                          |
-| released / tombstone | 已结算phase集合、最终资源pin、关闭原因和owner证明                                               | 只有资源闭包安全才release；调用ID/输入摘要留在Session可恢复历史内，不因缓存TTL重用ID                 |
+The original baseline stores ManagedToolRuntime invocation/started-prompt state in memory, bounded at 1024 invocations and 1 MiB progress; worker exits after parent IPC loss and activator removes outputRoot. Such status/Maps cannot establish outcomes across worker restart. Arguments, confirmation, Hooks, history bind/checkpoint can all perform work; recording only execute is insufficient. At local `f5088d2e`, durable Broker execution records and provider-specific recovery also exist (see [Endpoint recovery](2026-09-21-managed-runtime-endpoint-recovery.md)); these do not supply a universal per-phase Runtime ledger or prove every pending effect. Do not turn the historical memory-only observation into a claim that all current Broker state is volatile.
 
-统一接口：`recordIntent`、`markDispatched`、`commitPhysicalResult`、`readOriginal`、`ackAccepted`、`releasePins`、`sealBinding`。ackAccepted 必须按原 scope 核验收件者及其 receipt 类型，不能跨用 Session/工作区回执。readOriginal 返回封闭 union：`not_started_proven`（附完整前缀及原owner已隔离证明）、`running_attached`、`settled`、`unknown`、`corrupt`。404/Map空/日志不存在绝不等于 not_started_proven。
+The full design adds `RuntimeReceiptStore`, held by the original execution environment under trusted runtimeBaseDir at `managed-runtime/receipts/<bindingId>/`, not temporary outputRoot, with exclusive binding-owner writes. It records only physical invocation facts, never a second Session/turn authority. Every resource retains original invocation, phase, digest, and retention pin. Authority acceptance ACK is stored as receipt-of-delivery evidence: Session scope uses CommitReceipt; Sessionless workspace scope uses a workspace control receipt.
 
-模型外维护和领域发送使用[私有协议](managed-agent-control-protocol.md)的 OperationGrant；物理账本 key 对应 `(SessionKey,effectId,phase,effectRevision)`，不虚构 ManagedToolInvocationReference。grant 重领不换 phaseOperationId；已持久效果只重交付，未知不重跑。Runtime 账本和有外部 I/O 的领域发送器使用同一 intent/dispatch/settled 分类，各自保留真实执行 owner。
+Runtime lifecycle separates worker (execution/service), durable receipt store (history), and process owner (actual commands). Default local daemon restart may stop the worker while results remain readable from the receipt store; retaining completed results does not require a live old worker. A genuinely surviving execution environment can use authenticated attach below; actual old-process liveness must be verified.
 
-无 Session 的工作区维护采用 WorkspaceOperationGrant，物理 key 为 `(WorkspaceKey,generation,effectId,phase,effectRevision)`；所属 workspace 控制 owner 持久化操作元数据并持有恢复入口，不创建假的 Session 日志。与 Session operation 共用相同账本格式的 scope 分型、限额、资源 pin 和撤权规则；读者不能把两种 key 混用。
+<a id="2-操作账本与恢复分类"></a>
 
-prepare/build、确认和 Hook 也使用同样 phase 规则。不同阶段不能共用一个“工具执行过”布尔值；改参后有新 revision，旧确认不能批准新参数。原结果仍保留原 toolUseId、缓存更新和 Hook 事实。重复 pre/post Hook 默认只查询；远端系统无幂等能力时 unknown 不自动补跑。
+## 2. Operation ledger and recovery classification
 
-### 领域 phase 的注册与身份
+Tool phases use stable `phaseOperationId=(InvocationBinding, phase, effectRevision)`. The content digest includes original args/capability/policy/media/Hook revisions. effectRevision freezes effect inputs; it is not gate-reclaim operationRevision. Top-level tool phases are restricted to begin_turn/history_bind/checkpoint/prepare/confirm/pre_hook/execute/post_hook/model_bridge/result_publish. Harness commits model-bridge model facts; Runtime records only request/answer acceptance.
 
-上面的工具顶层枚举不限制无工具的领域调用。domain/version 选择固定 phase schema，Runtime/领域发送器只接受已注册阶段及该阶段的输入类型；不是把 phase 设为任意字符串。领域的 `effectId` 为实际单次效果的稳定 ID（hookExecutionId、delivery segmentId、MCP request operationId、维护计划的步骤 ID），始终能反查父 operationId。`effectRevision` 固定该阶段参数/目标/前置证明；`operationRevision` 是 authority 条件更新/领取 gate 的控制版本，重领不改变 effectId/effectRevision。改参数必须有明确的新效果意图，不能覆盖未知原效果。
+| Durable record       | Contents and write timing                                                                                     | Interpretation after crash                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| intent               | phaseOperationId, input ref, original lease/generation, gate revision                                         | Synchronize before any possible phase effect; intent without dispatch proves non-start only with complete ledger/owner evidence                  |
+| dispatch_started     | Native start marker, process owner ref or local execution sequence                                            | Synchronize before native code that may cause effects; a crash between this record and actual start is still unknown, not inferred non-execution |
+| phase_settled        | Native status, original errors/Hook results, output/backup refs, actual process-settlement proof              | Preserve results/resources before synchronization; permit idempotent redelivery, never rerun the phase                                           |
+| accepted             | Scope-specific Session CommitReceipt or workspace control receipt, accepted resources/parent history revision | Store separately; lost ACK queries original Session; accepting one result cannot release a binding with outstanding children                     |
+| released / tombstone | Settled phases, final resource pins, close reason, owner proof                                                | Release only after safe reference closure; invocation IDs/input digests remain in Session recoverable history, not reused after cache TTL        |
 
-| 注册域                                    | v1 实际 phase 与结果                                                                                                                                                                                            |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| config_install / workspace_initialization | source_read（只读）、stage_view、install_view、enable_view、retire_view；初始化的 filesystem/registry/context/curator/watch 作为固定 component 分型；每项含原 config/root revision 与完整 receipt               |
-| skill_activation                          | args_write、args_clear；正文/permission/Hook/model selector 的逻辑事实经 Session domain，不伪造 Runtime phase                                                                                                   |
-| mcp_configuration / mcp_operation         | connect、discover_tools、discover_resources、discover_prompts、resource_read、prompt_get、subscribe、unsubscribe、disconnect；tool_call 仍是工具 invoke 的 execute，原请求 ID 不因 transport 重建变化           |
-| hook_execution                            | command、http、prompt_bridge、registered_handler；具体 hookExecutionId/ordinal/inputRevision 固定，模型事实由有资格 Harness 提交                                                                                |
-| channel_delivery                          | send_segment、edit_segment、query_receipt、revoke_message；adapter 未支持的 phase 拒绝，不能重发代替 query                                                                                                      |
-| child_run / memory_job                    | launch、attach、cancel、drain；memory 的 scaffold、write、index、cursor、metadata 单独记结果，实际工具写入仍引用其原 invocation，不同时重复派发                                                                 |
-| 历史/产物/工作区维护                      | prepare_backup、stage_file、apply_file、undo_file、copy_resource、publish_manifest、delete_owned、git_command、publish_artifact；路径/步骤由已提交计划的封闭 action union 决定，按每文件/分段稳定 effectId 记录 |
+Interfaces: `recordIntent`, `markDispatched`, `commitPhysicalResult`, `readOriginal`, `ackAccepted`, `releasePins`, `sealBinding`. ackAccepted checks original scope, recipient, and receipt type; Session/workspace receipts are not interchangeable. readOriginal returns the closed union `not_started_proven` (complete prefix and original-owner isolation proof), `running_attached`, `settled`, `unknown`, `corrupt`. A 404, empty Map, or missing journal is never not_started_proven. The ledger's accepted means durable delivery acceptance, not the business-case reason accepted_unresolved in §3.1.
 
-纯逻辑 schedule/Goal/parent acceptance 提交不创造物理 phase；一旦派发 child/工具/发送器，引用对应原效果 ID。工具定义中的混合阶段是 `execute` 下的已声明 segment（例如 fetch/model_bridge/file_publish），子 segment 使用独立 effectId 与输入摘要并汇总为一个原 tool receipt；新增工具版本必须同时注册其封闭 stage schema，不容许 Harness 自报阶段绕过实际 owner。
+Non-model maintenance/domain delivery uses [OperationGrant](managed-agent-control-protocol.md); physical ledger key is `(SessionKey,effectId,phase,effectRevision)`, without a fabricated ManagedToolInvocationReference. Reclaiming a grant does not change phaseOperationId. Durable effects are redelivered, unknown effects are not replayed. Runtime ledgers and external-I/O domain senders share intent/dispatch/settled classification while retaining their actual execution owner.
 
-## 3. 重启和接管流程
+Sessionless workspace maintenance uses WorkspaceOperationGrant and physical key `(WorkspaceKey,generation,effectId,phase,effectRevision)`. Workspace control owner persists operation metadata and owns recovery, without fake Session journals. Share scope-discriminated ledger format, limits, resource pins, and revocation rules with Session operations; readers cannot mix the keys.
 
-1. daemon 启动先取得 authority writer，读取未结算binding/phase及原process refs，暂停相应 Session 的新 activation；不在扫描完成前启动 cron/Goal/通知。
-2. 若原worker仍服务：通过认证的 runtime endpoint、binding incarnation、lease、cwd/root/config摘要和私有capability核对身份，安装门禁高水位，接管原status/cancel/结果。不能仅凭旧端口或PID attach。
-3. 若worker已经退出：新reader仅打开原receipt store，核验独占/封存和资源完整性。settled 重交付Session；没有dispatch且有未开始证明的阶段才允许新受控派发；started无终态保持unknown。
-4. 本地文件阶段可增加工具专用reconciler，例如核对已准备的原前像/后像、备份和持久事务阶段；只能输出有证据的已成功/未开始/可修复，不能对任意Shell命令用文件存在推定成功。
-5. 外部API、MCP、Shell等非事务操作结果不明时提交 recovery_blocked。用户可继续查询、取消原工作、导出诊断、关闭待处理会话，或另开新任务；“重新执行”必须是显式新命令/新调用ID，并显示原未知操作仍可能生效。原成功/未知记录不能被人工确认覆盖为“未执行”。
-6. 结算和资源恢复先于模型下一步。旧调用迟到结果始终经原binding校验接收；新worker绝不以同cwd替换原owner的结果归属。
+prepare/build, confirmation, and Hooks use the same phase rules. One “tool ran” boolean cannot represent different phases. Changed arguments require a new revision; old confirmation cannot approve them. Original results retain toolUseId, cache updates, and Hook facts. Repeated pre/post Hook defaults to query only; unknown is not automatically rerun when a remote system lacks idempotency.
 
-新进程的启动不证明旧进程停止。未知物理工作保持持久风险状态，但已明确退出的worker不永久占用活进程槽；容量与未决事实分别计数。管理员移除workspace不删除原收件端和恢复记录。
+<a id="领域-phase-的注册与身份"></a>
 
-## 4. 原进程所有权与平台
+### Domain phase registration and identity
 
-`ProcessOwnerRef` 包含 backend、hostId、boot/incarnation、ownerId、PID+startIdentity、作用域、执行phase及原生句柄/组身份摘要；不把PID单独作为可取消的目标。统一接口为 `spawnOwned`、`cancelOwned`、`inspectOwned`、`waitExited`，结果区分 exited/no_effect_proven/running/unknown/unsupported。
+The tool-level enumeration does not restrict tool-free domain calls. domain/version selects a fixed phase schema; Runtime/domain senders accept only registered phases and their input types, not arbitrary phase strings. Domain `effectId` identifies an actual one-shot effect (hookExecutionId, delivery segmentId, MCP request operationId, maintenance step ID) and resolves to its parent operationId. `effectRevision` freezes phase parameters/target/prerequisite evidence; `operationRevision` controls authority CAS/gate claim. Reclaiming does not change effectId/effectRevision. Changed arguments require explicit new effect intent and cannot overwrite an unknown original effect.
 
-| 平台/profile   | 目标后端                                                                                                                       | 允许声明的保证                                                                                                                    |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| macOS 本地     | 保留现有 detached 进程组、PID开始身份和组观测；原生工具使用共同 owned-command                                                  | 证明已观测所属进程组退出；ps失败/PID复用/脱离组未知保持unknown；不是恶意进程安全沙箱                                              |
-| Linux 普通本地 | 同一进程组后端；具备委派权限时选 cgroup v2 owner，所有派生进程启动即在该cgroup                                                 | cgroup.kill后核对cgroup.events populated=0及实际输出关闭；无权限保留明确的进程组profile，不声称具有cgroup隔离                     |
-| Windows 本地   | 增加受控原生 launcher：CreateProcess挂起→加入禁止breakaway的Job Object→登记owner→恢复线程；取消使用Job，查询实际成员与管道结束 | 设置KILL_ON_JOB_CLOSE，不能只靠Node AbortError或根PID。Job分配/嵌套失败在恢复线程前拒绝；原生helper未安装/未验收时继续unsupported |
-| 远端/容器      | 环境worker提供相同receipt/gate/process owner能力并声明backend                                                                  | 只承诺已证明的profile；容器运行不自动证明本地文件持久或外部请求撤销                                                               |
+| Registered domain                         | v1 phases and results                                                                                                                                                                                                             |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| config_install / workspace_initialization | source_read (read-only), stage_view, install_view, enable_view, retire_view; initialization uses fixed filesystem/registry/context/curator/watch component variants; each includes original config/root revision and full receipt |
+| skill_activation                          | args_write, args_clear; logical body/permission/Hook/model-selector facts use Session domain, not fake Runtime phases                                                                                                             |
+| mcp_configuration / mcp_operation         | connect, discover_tools, discover_resources, discover_prompts, resource_read, prompt_get, subscribe, unsubscribe, disconnect; tool_call remains tool invoke execute; transport reconstruction does not change original request ID |
+| hook_execution                            | command, http, prompt_bridge, registered_handler; fixed hookExecutionId/ordinal/inputRevision; eligible Harness submits model facts                                                                                               |
+| channel_delivery                          | send_segment, edit_segment, query_receipt, revoke_message; unsupported adapter phase is rejected, not resent instead of queried                                                                                                   |
+| child_run / memory_job                    | launch, attach, cancel, drain; memory scaffold, write, index, cursor, metadata have separate results; actual tool writes reference original invocations without duplicate dispatch                                                |
+| History/artifact/workspace maintenance    | prepare_backup, stage_file, apply_file, undo_file, copy_resource, publish_manifest, delete_owned, git_command, publish_artifact; committed plan's closed action union fixes paths/steps; stable effectId per file/segment         |
 
-以上Windows方案基于Job的进程归属和关闭语义；通知可能丢失，因此以查询和管道关闭共同核对，不能仅等待一条通知。某些外部创建进程方式并不自动归Job，需专门适配或声明unsupported。[Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[AssignProcessToJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-assignprocesstojobobject)
+Pure logical schedule/Goal/parent acceptance commits create no physical phase. Dispatching children/tools/senders references original effect IDs. Mixed tool stages are declared `execute` segments (for example fetch/model_bridge/file_publish), with separate effectId/input digest aggregated into one original tool receipt. New tool versions must register closed stage schemas; Harness cannot invent phases to bypass the actual owner. This retained broad domain design does not enable unaccepted Hosted Hooks/MCP/background work; [control profile restrictions](managed-agent-control-protocol.md) still apply.
 
-Linux cgroup设计采用内核定义的层级存活计数与终止入口；不要求普通用户为了首版Managed必须取得管理员权限。[Linux cgroup v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)
+<a id="3-重启和接管流程"></a>
 
-首版存储profile为具备可验证文件身份和文件/目录同步的本地文件系统。macOS/Linux按原writer加强事务验证；Windows选定原生适配 `openIdentity/flushFile/publishNoReplace/replaceOwned/verifySealed`：以卷与文件ID及独占句柄验证身份，staging 与目标必须同卷，写完整文件后 FlushFileBuffers；发布用带 WRITE_THROUGH 的 MoveFileExW（no-replace 不设 REPLACE_EXISTING），受控替换另核验目标旧身份并持有原锁。禁止跨卷 COPY_ALLOWED 模拟原子提交，目录项/重命名耐久性须以实际NTFS配置的故障证据认证，不能凭该flag宣称任意设备断电安全；未达到存储契约则整个强耐久profile返回unsupported，而非降低ACK语义。网络盘、FUSE或无法提供identity/sync的挂载准确拒绝该profile；不靠平台名称猜保证。
+## 3. Restart and takeover
 
-Windows 的文件 flush 和移动操作按原生 API 的能力使用，设计中的身份/发布适配仍需实现与故障验证。[FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)、[MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
+1. On daemon startup, acquire the authority writer, read unsettled bindings/phases/original process refs, and pause affected Sessions' new activations. Do not start cron/Goal/notifications before this scan completes.
+2. If the original worker serves requests, authenticate endpoint, binding incarnation, lease, cwd/root/config digests, and private capability; install gate high-water marks and take over original status/cancel/results. An old port or PID alone cannot authorize attach.
+3. If worker exited, a new reader opens only the original receipt store, checking exclusivity/sealing and resource integrity. Redeliver settled results to Session. Only a phase with no dispatch and complete non-start proof may later receive separately authorized controlled dispatch; the query itself never dispatches. started without terminal evidence remains unknown.
+4. Tool-specific reconcilers may inspect prepared original file pre/post-images, backups, and durable transaction stages. They return only evidenced success/non-start/repairability; file existence does not prove arbitrary Shell success. A repair is a separately authorized effect, not a hidden read side effect.
+5. Unknown external API/MCP/Shell/non-transactional outcomes commit recovery_blocked. Subject to current permissions, users may query/cancel original work, export diagnostics, close the pending Session, or start an explicit new task. “Rerun” requires a new command/call ID and warning that the old unknown operation may still take effect; it cannot bypass the old volume barrier. Human confirmation cannot overwrite original success/unknown as non-execution.
+6. Settlement and resource restoration precede any next model step, which also requires current authorization and an open lifecycle. Late original results always validate the original binding; a new worker with the same cwd cannot replace result ownership.
 
-## 5. 远端协议与凭据
+Starting a new process does not prove the old process stopped. Unknown physical work remains a durable risk, while a proven-exited worker need not occupy a live-process slot forever. Capacity and unresolved facts are counted separately; neither frees Workspace occupancy. Administrative workspace removal does not delete the original restricted receipt/recovery records outside their controlled retention/deletion lifecycle.
 
-**阶段归属：** 远端 Runtime 与跨主机挑战属于 R5/F8，不是默认切换的前置条件。R2～R4 只使用本地 profile；未启用 remote provider 时本节的握手能力不参与装配，缺少它也不影响本地 Managed 的准入与恢复。写在这里是为了让本地 gate 的时窗与身份规则从一开始就兼容跨主机场景，不是把跨主机作为交付范围。
+<a id="unknown-reconciliation"></a>
 
-复用现有RemoteManagedRuntimeProvider的可信endpoint和token入口，新增私有capability的协商，不新增面向模型的地址。endpoint由服务端配置绑定，禁用携带凭据的跨origin重定向；TLS验证默认必需，HTTP仅允许显式本机/受控开发配置。工具参数、Hook输出和网页内容不能更换endpoint、租户或凭据。
+### 3.1 UNKNOWN reconciliation cases (proposed, not implemented)
 
-跨主机的gate不直接比较两边墙钟。Runtime生成一次性install/renew挑战并从挑战创建时启动本地单调倒计时；authority在该挑战上条件提交grant/renewal，经已认证私有连接返回 challengeId/runtimeIncarnation/SessionKey/grantRevision/commitDigest；Runtime核对响应身份及剩余时窗后开启或续期，迟到应答不能把期限重新从收到时间开始计算。下一epoch仍必须取得原Runtime revoke/stage屏障；联系不上则不发新工作，超期本身不证明旧副作用结束。相同挑战重复只返原ACK，binding重启后旧挑战失效。所有资格仍由authority和Runtime各自的单调版本共同约束。
+Keep three independent dimensions:
 
-本地profile保持既有60秒租期/20秒续租设计，远端使用同一上限但扣除挑战已经消耗的时间；挑战在10秒control deadline内未完成就失效并重新申请，不能续开被revoke的epoch。网络分区可以停止新派发并继续交付已开始结果，不从另一Runtime重跑。
+| Dimension          | Authority and allowed transition                                                                                          | Forbidden inference                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Physical execution | Original trusted receipt or qualified reconciler may add a proven determination to UNKNOWN, preserving prior observations | A human choice, timeout, case closure, or Pod deletion is not a result             |
+| Business case      | Java records `OPEN → INVESTIGATING → CLOSED`; close reason is `verified` or `accepted_unresolved`                         | Neither reason is a physical execution status or automatic SETTLED transition      |
+| Resources/recovery | Independently verify process stop/isolation, result/history delivery, and Workspace occupancy                             | Case closure does not release pins/volume or authorize original model continuation |
 
-当前同进程Session client与完整Harness继续适用；若未来Session authority独立部署，后端必须提供同等CAS、单writer、幂等和持久ACK，禁止两个authority分别使用本地文件授予同一Session。Kubernetes/VM的部署模板、调度产品和SaaS多租户平台不属于本次daemon替换交付；其适配需实现上述已定义的能力接口。
+`accepted_unresolved` means only acceptance of unresolved business risk: physical status stays **UNKNOWN**, never SETTLED; create no success/error/not_started tool result, unlock no Workspace, and do not continue the original model context. An explicit new task still obeys the original physical-volume barrier. `verified` is also only a case closure reason: physical determination must first pass its own evidence validation and original receipt acceptance; any later legal continuation additionally needs lifecycle/ACL, result/history/checkpoint, and resource gates. Closing a case alone advances none of them. Conflict may reopen a CLOSED case through an audited CAS to INVESTIGATING, preserving closure history.
 
-## 6. 容量、观测和性能门槛
+**Evidence binding and validation.** A case refers to the original executionCallId/invocation, phaseOperationId/phase/effectRevision, args/input digest, runtimeBindingId/incarnation, lease and workspace/runtime generation, plus original operation/scope. Store immutable evidence references and content digests, validator identity and rule version, evidence submitter and authorized validating actor, case/CAS revision, validation decision/reason, and audit time. The configured validator must check original owner provenance, full identity/input match, completeness and integrity, and its registered tool/phase-specific rules. The model or uploading user cannot choose an arbitrary validator or set a physical result. Human notes, screenshots, and uploads are unverified materials, not proof; no raw diagnostics become trusted merely because an owner/admin uploaded them.
 
-容量沿现有daemon/Bridge配置，分开登记workspace、Session、activation、host、Runtime、未决phase和临时/持久资源。coordinator在全局共享预算上预留，不为legacy/Managed各开一套上限；provider lazy prepare并在真实退出后归还容量。新实现不自动把现有workspace上限扩大。
+`not_started_proven` requires a complete, verified ledger prefix through the relevant sealed/admission boundary, showing no dispatch for the original phase, **and** proof that the old owner is isolated from any further effect. Missing rows, partial/restored logs, an empty Map, timeout, 404, Pod exit, or an existing file cannot establish this. A dispatch_started record without a terminal result remains unknown even if the process later stops. Stop/isolation evidence does not prove external effects never happened.
 
-`ManagedExecutionMetrics` 采用固定低基数字段：engine、entry kind、phase、outcome、platform/profile；session/prompt/activation/invocation ID 只放结构化trace，避免指标高基数。记录admission/commit/queue/TTFT/model/tool/approval wait/recovery/drain耗时、活对象计数、保留资源bytes、失败原因、late/duplicate receipt和blocked状态。没有测量值输出unknown，不用0表示缺失；不记prompt正文、工具参数、密钥、完整路径或模型思考内容。
+**Authorization and commit.** Separately authorize case open/investigate/close/risk acceptance, evidence validation, original-ID cancellation, and raw-diagnostic access against actual product ACL. owner/admin status is not automatic physical-result certification authority. Default diagnostics are redacted; receipt contents and exports obey current read permission. Use existing operation/Action authorization, idempotency, queries, and controlled domain records, with conditional case revisions and an audit trail; do not hold a DB transaction across Runtime RPC or create a parallel execution ledger. The current public Command union has no case command. A future closed case schema and capability must explicitly register allowed operations/transitions and producer/consumer validation; no arbitrary JSON, arbitrary append, or manual tool-terminal mutation.
 
-以下是待验收的默认切换门槛，不是已测得SLO：同机、同构建设置、同自有模型响应夹具，以legacy基线比较，预热20次，正式至少200轮并重复3组；排除供应商波动后，Managed入口/编排TTFT p95额外开销不超过max(100ms,legacy的20%)，无工具吞吐不低于legacy的90%，相同并发稳定RSS不高于legacy的125%。1/8/32会话分别测，若有效限额低于32按实际限额测并明确范围，不能为过测试升限额。
+**Late evidence.** For the same original identity and result digest, return the original acceptance receipt idempotently, including after business closure. Different digests or contradictory evidence for the same original effect preserve both immutable candidates and provenance, record conflict, and remain blocked; never last-writer-wins. Different binding/generation evidence cannot settle the original call. Authorized investigation may reopen the case, not erase the old fact. Closed/deleted Sessions may receive original verified results through restricted system channels for accounting/cleanup, but no late arrival wakes the model or restores a revoked user's read access; see [dynamic authorization](managed-agent-control-protocol.md#dynamic-authorization).
 
-恢复读10,000事件（正文用refs）的p95目标≤2s；耐久提交小事务p95≤50ms，仅对符合该磁盘profile的测试机设门槛。30分钟稳定运行及100次create/close、reload和故障循环后，owner计数回基线、无自有子进程/端口残留，静默10分钟后RSS相对第一次稳定点增长≤10%；超出进入分析而非加timeout掩盖。实测硬件/OS/fs/Node版本、trace和误差随报告提交。未达门槛时保持默认关闭，按测量定位后修正实现或经明确方案修订改变门槛。
+**Original execution query/cancel.** The proposed query path must work offline from the durable original execution/phase ledger, independently of a live Runtime Session, with an explicit unknown/corrupt/incomplete response. It is read-only: never create/provision a new Runtime, reacquire a writable workspace, rerun prepare, or call execute to answer a query. Optional online observation can contact only the authenticated original owner and only its read-only status endpoint. Persist cancellation against the same original executionCallId/phase/binding/generation and send only original-ID cancel when that owner is reachable; otherwise retain pending/unknown, not cancellation success. Cancellation creates neither a replacement Runtime nor a new execution. Storage unavailability blocks observation rather than constructing an empty successful snapshot. Receipt acceptance is a separately authorized write, not a query side effect.
 
-## 7. 运行验收矩阵
+**Local implementation gap, not a completed fix.** At `f5088d2e`, [RuntimeBrokerService](../../packages/sdk-java/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeBrokerService.java) exposes `resolveUnknownExecution`: `CONFIRMED_NOT_EXECUTED` constructs a not_started result, and the alternative constructs an error with accepted_unknown before repository resolution. The [execution record](../../packages/sdk-java/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/ToolExecutionRecord.java) permits resolution into SETTLED. This manual enumeration path must be tightened in a future implementation, not wrapped as a generic operational-success API. Current getExecution/cancelExecution go through requireExecution, which rejects UNKNOWN and depends on requireSession/execution.start; the pure durable offline-query/cancel separation above is a target, not claimed current behavior. This document changes none of these methods or schemas.
 
-| 编号 | 必测动作与判断                                                                                                             |
-| ---- | -------------------------------------------------------------------------------------------------------------------------- |
-| O01  | 每个物理phase的intent/dispatch/settled/Session ACK窗口中断；已完成不重跑，未知准确blocked，未开始须附证明                  |
-| O02  | 分别杀Harness、worker、daemon，保留/删除临时outputRoot；持久已提交资源可恢复，丢失唯一资源不能报成功                       |
-| O03  | 新旧epoch并发、墙钟偏差、续租迟到、挑战重放、网络分区；无新越权派发，原回执仍可结算                                        |
-| O04  | macOS/Linux进程组、Linux委派cgroup、Windows Job分别验证孙进程/根退出/ID复用/观测失败；不能互借平台通过结果                 |
-| O05  | shared host与多个workspace代际混合关闭；只回收自有资源，old generation清理不触碰new generation                             |
-| O06  | 1/8/32会话及性能/循环门槛，慢订阅/大媒体/磁盘压力；统计同时核对物理进程、authority及客户端，不用单个active Map证明全局空闲 |
-| O07  | 不支持的profile、旧协议worker、错误信任/凭据、重定向、错tenant；在创建/派发前准确拒绝，不降级重跑                          |
+| Check                | Accept path required                                                                                                      | Reject path required                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Evidence             | Original authenticated settled receipt or registered reconciler evidence can establish its bounded physical determination | Human upload/admin choice, wrong digest/binding/generation, incomplete prefix, or 404 cannot prove non-start  |
+| Case closure         | Authorized accepted_unresolved closes only business case; verified closure follows validated evidence                     | Neither closure synthesizes a result, SETTLED, volume unlock, or original model continuation                  |
+| Late receipt         | Same original ID/digest returns original receipt; valid late result remains available to authorized system settlement     | Conflicting candidates both retained and blocked; no new-generation settlement or closed-Session wake         |
+| Offline query/cancel | Durable original record is readable while Runtime is down; reachable original work receives original-ID cancel            | No Runtime provision, prepare, execute, or revoked-user diagnostic read; unreachable cancel never claims stop |
 
-## 8. 具体施工接缝
+These are future positive/negative acceptance cases. No tests or live reconciliation were run in this revision.
 
-Core ManagedToolRuntime/owned-command/owned-process-group、managed-tool-file-history、Invocation reference与gate适配；CLI managed-tool-session、Runtime provider/worker routes、worker launcher/activator与registry drain；Session authority和coordinator的恢复/cleanup路径；平台原生helper与测试夹具；既有telemetry/tracing接入。先有持久phase与strict reader，再支持重启读取与工具专用reconciler，最后开放该恢复profile；不是仅把内存Map写到磁盘就宣称可恢复所有副作用。
+<a id="4-原进程所有权与平台"></a>
+
+## 4. Original process ownership and platforms
+
+`ProcessOwnerRef` contains backend, hostId, boot/incarnation, ownerId, PID+startIdentity, scope, execution phase, and native-handle/group identity digest. PID alone is not a cancellation target. Interfaces: `spawnOwned`, `cancelOwned`, `inspectOwned`, `waitExited`; outcomes distinguish exited/no_effect_proven/running/unknown/unsupported.
+
+| Platform/profile     | Target backend                                                                                                                                                | Permitted guarantee                                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local macOS          | Retain detached process groups, PID start identity, group observation; native tools share owned-command                                                       | Observed owned-group exit only; ps failure, PID reuse, unknown group escape remain unknown; not a malicious-process sandbox                                           |
+| Ordinary local Linux | Same process-group backend; use cgroup v2 owner with delegation, all descendants enter that cgroup at spawn                                                   | After cgroup.kill verify cgroup.events populated=0 and actual output closure; without delegation keep an explicit process-group profile, not a cgroup-isolation claim |
+| Local Windows        | Controlled native launcher: suspended CreateProcess → non-breakaway Job Object → owner registration → resume; Job cancellation, actual member and pipe checks | KILL_ON_JOB_CLOSE; not just Node AbortError/root PID. Reject Job assignment/nesting failure before resume; missing/unaccepted native helper remains unsupported       |
+| Remote/container     | Environment worker supplies equivalent receipt/gate/process-owner capabilities and declares backend                                                           | Only evidenced profiles; running in a container does not prove local-file durability or external-request cancellation                                                 |
+
+The Windows design relies on Job membership/close semantics. Notifications may be lost, so combine queries and pipe closure rather than waiting for one notification. Some externally created processes do not automatically join the Job; adapt them explicitly or report unsupported. [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects), [AssignProcessToJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-assignprocesstojobobject).
+
+Linux uses kernel-defined hierarchical liveness counts and termination interfaces. Ordinary users need not obtain administrator privileges for initial Managed support. [Linux cgroup v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html).
+
+The first storage profile is a local filesystem with verifiable file identity and file/directory synchronization. macOS/Linux strengthen transaction validation around the existing writer. Windows uses proposed native `openIdentity/flushFile/publishNoReplace/replaceOwned/verifySealed`: verify volume/file IDs and exclusive handles, require staging/target on the same volume, and FlushFileBuffers after full writes. Publish via MoveFileExW with WRITE_THROUGH (no REPLACE_EXISTING for no-replace); controlled replacement also checks old target identity while holding its lock. Never use cross-volume COPY_ALLOWED to simulate atomic commit. Directory-entry/rename durability needs fault evidence on the actual NTFS configuration; the flag does not prove arbitrary-device power-loss safety. If storage semantics fail, the entire strong-durability profile is unsupported, without weakened ACKs. Reject network filesystems, FUSE, and mounts lacking identity/sync for this profile; platform names are not evidence.
+
+Windows flush/move use native API capabilities; proposed identity/publication adapters still require implementation and fault verification. [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers), [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw).
+
+### 4.1 Stop proof is not Workspace release
+
+Keep the existing process-owner/cgroup/receipt mechanisms, not a replacement “Pod deleted” boolean. Under the proposed Linux/Kubernetes, Session-exclusive Runtime Pod and CSI Workspace profile, Pod API delete success, force-delete, NotReady, lease expiry, or disappearance of VolumeAttachment **alone never proves the old writer stopped**. See [Kubernetes forced termination](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination-forced). A new DB epoch or another Pod with the same cwd cannot stop old Shell descendants.
+
+Normal handoff requires trusted evidence of the original processes/cgroup exiting and output closing, result/resource acceptance and history/checkpoint settlement, then normal unmount and the required storage handoff before Workspace occupancy CAS release/transfer. Stop evidence alone neither settles an external effect nor releases the volume. During partition retain the original holder and blocked state unless verifiable old-node physical fencing or reliable storage-backend revocation of the old write channel establishes isolation; even then verify volume/history before transfer. Report the scope of isolation evidence separately, not as fabricated process exit. Occupancy leases coordinate controllers, not automatic physical-volume release. Detailed identity and handoff rules are owned by [tools/history](managed-agent-tools-history.md); backup/retention/deletion rules by [storage](managed-agent-session-storage.md). Execution-environment hardening belongs to [Endpoint recovery §17](2026-09-21-managed-runtime-endpoint-recovery.md).
+
+| Check          | Accept path required                                                                                                         | Reject path required                                                                                 |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Normal handoff | Original cgroup/owner exit plus output closure, accepted history/resources, and verified unmount permit conditional transfer | Pod API delete or lease expiry alone never frees occupancy                                           |
+| Partition      | Verified old-write-channel isolation and subsequent volume/history checks permit only their evidenced handoff                | Unknown old writer keeps holder/blocked; stop proof alone cannot turn execution UNKNOWN into success |
+
+These are future platform acceptance conditions, not live-cluster results.
+
+<a id="5-远端协议与凭据"></a>
+
+## 5. Remote protocol and credentials
+
+**Delivery stage:** remote Runtime and cross-host challenges remain R5/F8 in the original daemon roadmap, not prerequisites for the local default switch. R2–R4 use the local profile. Without an enabled remote provider these handshake capabilities do not participate in wiring and their absence does not disable local admission/recovery. This section makes local gate windows/identity compatible with later cross-host work; it does not silently expand local delivery. The supplemental Hosted target must independently meet its stricter gates before opening.
+
+Reuse RemoteManagedRuntimeProvider's trusted endpoint/token entry and add private capability negotiation, not model-facing addresses. Server configuration binds endpoints. Disable credential-bearing cross-origin redirects; TLS verification is required by default, with HTTP only in explicit loopback/controlled development configurations. Tool arguments, Hook outputs, and web content cannot change endpoint, tenant, or credentials. Reuse scoped SecretHandle rules and Hosted restrictions in the [control protocol](managed-agent-control-protocol.md); a local tenant partition is not product ACL identity.
+
+Cross-host gates never compare the two wall clocks directly. Runtime generates a one-use install/renew challenge and starts its local monotonic countdown **at challenge creation**. Authority conditionally commits grant/renewal for that challenge and returns challengeId/runtimeIncarnation/SessionKey/grantRevision/commitDigest over the authenticated private connection. Runtime checks identity and remaining window before enable/renew; late responses cannot restart the lifetime at receipt. A next epoch still requires the original Runtime revoke/stage barrier; if unreachable, do not dispatch new work. Expiry alone does not end old effects. Duplicate challenges return only original ACKs; binding restart invalidates old challenges. Authority and Runtime monotonic versions jointly constrain all eligibility.
+
+Local profile retains the existing 60-second lease/20-second renewal design; remote uses the same upper bound minus time already consumed by the challenge. A challenge not completed within its 10-second control deadline expires and must be requested again; renewal cannot reopen a revoked epoch. Partition can stop new dispatch while permitting scoped original-result delivery, never rerun on another Runtime. Challenge messages require versioned control-envelope/capability negotiation; leave Tool v2, InvocationContextV1, and attestation v2 unchanged and reject unsupported peers, rather than inserting a challenge into strict attestation.
+
+Existing in-process Session client and full Harness remain applicable. A separately deployed future authority must provide equivalent CAS, single writer, idempotency, and durable ACKs; two authorities cannot grant the same Session from separate local files. Kubernetes/VM deployment templates, scheduler products, and a SaaS multi-tenant platform remain outside the original daemon-replacement delivery; adapters must implement the declared interfaces. The Hosted supplement defines acceptance obligations, not a claim that deployment or production multi-tenant security is complete.
+
+<a id="trusted-control-timing"></a>
+
+### 5.1 Trusted control timing and offline revocation
+
+The 60/20/10 values are admission bounds and renewal/deadline settings, not process termination guarantees. The proposed strict profile must demonstrate a trusted elapsed-time source tied to Runtime incarnation, with suspend/resume, VM pause, clock rollback, and restart accounted for. Use a verified suspend-inclusive monotonic source or invalidate the gate before any post-resume admission when elapsed time cannot be established. Merely using a wall clock, Node timer, or a monotonic clock that pauses during suspension is not evidence. After any async wait, actual native admission rechecks the remaining bound and current gate/permission evidence; a delayed timer callback never extends eligibility. Lost timing/gate state fails closed.
+
+The response to a challenge may use only the remainder of the original at-most-60-second window. The 10-second challenge deadline is checked when accepting a response, not just by a scheduled timeout callback. The 20-second renewal cadence is not permission to execute through an expired lease. A fresh challenge cannot resurrect a revoked epoch or discard staged high-water marks; successful renewal requires the actual current ACL authority, matching original binding/generation, and a still-eligible gate.
+
+**Conditional offline bound:** only if no stale ACL revision can renew permission and the elapsed-time behavior is verified, new dispatch using old offline rights is bounded by the original gate's remaining lifetime, at most 60 seconds. Otherwise no such bound may be claimed and the strict profile stays disabled/blocked. Loss of contact is not immediate global revocation: the control plane reports execution revocation pending until original-gate barrier ACKs or valid expiry evidence establish dispatch fencing. Keep `ACL committed`, `dispatch fenced`, and `process stopped` separate as specified in [dynamic authorization](managed-agent-control-protocol.md#dynamic-authorization). Admission expiry never proves already admitted processes stopped, external effects were undone, or a Workspace volume can unlock.
+
+| Check           | Accept path required                                                        | Reject path required                                                                    |
+| --------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Timely renewal  | Current-ACL response inside 10 seconds uses only remaining original window  | Response past deadline or after revoke cannot renew; no reset on arrival                |
+| Suspend/restart | Verified elapsed time or closed-before-resume gate prevents stale admission | Paused timer, clock rollback, or lost incarnation cannot preserve old rights            |
+| Offline bound   | Valid unexpired original gate allows only its remaining qualified window    | No stale-ACL renewal, new-Runtime replay, stop-SLA claim, or expiry-based volume unlock |
+
+Timing and partition evidence must be obtained in later implementation acceptance; this revision performs no such experiments.
+
+<a id="6-容量观测和性能门槛"></a>
+
+## 6. Capacity, observability, and performance gates
+
+Retain existing daemon/Bridge capacity configuration, separately tracking workspace, Session, activation, host, Runtime, pending phases, and temporary/durable resources. Coordinator reserves global shared budgets, not separate legacy/Managed limits. Provider prepares lazily and returns live capacity only after actual exit. No automatic increase of workspace limits. This preserves the original operational contract, not the excluded supplemental quota/billing design.
+
+`ManagedExecutionMetrics` uses fixed low-cardinality fields: engine, entry kind, phase, outcome, platform/profile. session/prompt/activation/invocation IDs belong only in structured traces. Record admission/commit/queue/TTFT/model/tool/approval wait/recovery/drain latency, live-object counts, retained bytes, failure reasons, late/duplicate receipts, and blocked state. Missing measurements are unknown, not zero. Do not log prompt bodies, tool arguments, secrets, full paths, raw outputs, or model reasoning. Diagnostic business data still requires authorization even when it contains no model credentials.
+
+The following remain proposed default-switch gates, not measured SLOs: same machine/build settings/owned model-response fixture against legacy, 20 warmups, at least 200 measured rounds repeated in 3 groups. Excluding provider variability, additional Managed entry/orchestration TTFT p95 must not exceed max(100ms,20% of legacy); no-tool throughput must be at least 90% of legacy and steady RSS at the same concurrency no more than 125%. Measure 1/8/32 Sessions separately; if actual limits are below 32, test the allowed limit and disclose scope, never raise limits to pass.
+
+Recovery reads of 10,000 events (bodies in refs) target p95 ≤2s; small durable transactions target p95 ≤50ms only on test machines meeting the disk profile. After 30 minutes steady operation and 100 create/close, reload, and fault cycles, owner counts return to baseline with no owned child processes/ports left; after 10 quiet minutes, RSS growth relative to the first steady point is ≤10%. Investigate excess rather than hiding it with timeouts. Reports must include hardware/OS/fs/Node versions, traces, and uncertainty. Keep default off if gates fail; fix implementation based on measurements or explicitly revise the design thresholds.
+
+<a id="7-运行验收矩阵"></a>
+
+## 7. Operational acceptance matrix
+
+| ID  | Required action and judgment                                                                                                                                                                  |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| O01 | Interrupt every physical phase around intent/dispatch/settled/Session ACK; completed work never reruns, unknown is blocked, non-start requires proof                                          |
+| O02 | Kill Harness, worker, and daemon separately; retain/remove temporary outputRoot; durable committed resources recover, missing unique resources never report success                           |
+| O03 | Concurrent old/new epochs, wall-clock skew, late renewal, challenge replay, partition; no unauthorized new dispatch, original receipts can still settle                                       |
+| O04 | Independently verify grandchildren, root exit, identity reuse, and observation failure on macOS/Linux groups, delegated Linux cgroups, and Windows Jobs; no borrowing another platform's pass |
+| O05 | Mixed shutdown of shared host and multiple workspace generations; reclaim only owned resources, old-generation cleanup never touches new generation                                           |
+| O06 | 1/8/32 Sessions, performance/cycle gates, slow subscribers, large media, disk pressure; reconcile physical processes, authority, and clients, not one active Map as proof of global idleness  |
+| O07 | Unsupported profiles, old-protocol workers, invalid trust/credentials, redirects, wrong tenant; reject before creation/dispatch, no downgrade replay                                          |
+
+Supplemental §3.1/§4.1/§5.1 matrices add paired success/rejection paths for cases, stopping, and timing. All-blocked behavior is not a pass. H2 or fake Kubernetes evidence cannot replace real MySQL/Kubernetes/CSI semantics. No acceptance tests or performance measurements were run in this documentation revision.
+
+<a id="8-具体施工接缝"></a>
+
+## 8. Implementation seams
+
+Core ManagedToolRuntime/owned-command/owned-process-group, managed-tool-file-history, Invocation references and gate adapters; CLI managed-tool-session, Runtime provider/worker routes, worker launcher/activator and registry drain; Session authority/coordinator recovery and cleanup; native platform helpers/fixtures; existing telemetry/tracing. Establish durable phases and strict readers first, then restart reads and tool-specific reconcilers, and only then open the recovery profile. Persisting a memory Map alone cannot recover every effect.
+
+Future supplemental implementation reuses RuntimeBrokerService, execution/binding repositories, and KubernetesRuntimeProvisioner for original-ID offline observation, case CAS/audit, and evidence-based stop/handoff. It must narrow the manual resolveUnknownExecution path, serialize Runtime revoke/final admission with post-await revalidation, and register versioned control schemas without modifying strict v2 payloads. Product ACL rules live in the [control protocol](managed-agent-control-protocol.md#dynamic-authorization), Workspace occupancy/history in [tools/history](managed-agent-tools-history.md), and backup/retention/deletion in [storage](managed-agent-session-storage.md). These are implementation obligations only, not edits to a delivery plan or assertions of completed integration.
