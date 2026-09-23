@@ -1348,7 +1348,7 @@ export function ArtifactPanel({
           />
         ) : activeTab.kind === 'turn_calls' ? (
           <TurnCallsPanel
-            key={activeTab.turnId}
+            key={`${activeTab.sessionId}:${workspaceCwd}`}
             turnId={activeTab.turnId}
             ownerSessionId={activeTab.sessionId}
             recordId={activeTab.recordId}

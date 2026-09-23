@@ -626,6 +626,8 @@ const {
       onDismissFollowup: vi.fn(),
     },
     testState: {
+      turnChoices:
+        [] as import('@qwen-code/sdk/daemon').DaemonSessionTurnIndexEntry[],
       ownerVersion: 0,
       recoveryVersion: 0,
       prompt: 'hello',
@@ -889,8 +891,15 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
     usePromptStatus: () => 'idle',
     useTurnNavigationState: () => ({
-      indexPages: new Map(),
+      mode: 'ready',
+      totalTurns: testState.turnChoices.length,
+      effectiveTurnCount: testState.turnChoices.length,
+      indexPages: new Map([[0, { turns: testState.turnChoices }]]),
       provisionalTurns: [],
+    }),
+    useTurnNavigationStore: () => ({
+      refreshHead: vi.fn(),
+      loadOrdinal: vi.fn(),
     }),
     useSettings: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
       testState.latestSettingsHookOptions = options;
@@ -3762,6 +3771,9 @@ describe('task activity key', () => {
         },
       ],
     });
+    testState.turnChoices = (
+      await mockWorkspace.client.getSessionTurnIndexPage('session-1', {})
+    ).turns.map((turn, ordinal) => ({ ...turn, ordinal }));
     mockWorkspace.client.getSessionToolCalls.mockImplementation(
       (_sessionId: string, turnId: string) =>
         Promise.resolve({
@@ -11083,6 +11095,7 @@ function makePlanPermissionBlock() {
 }
 
 beforeEach(() => {
+  testState.turnChoices = [];
   // Split persistence uses sessionStorage; clear it so one test's split doesn't
   // auto-restore into the next test's App mount.
   try {

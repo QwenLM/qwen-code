@@ -34,7 +34,7 @@ the standalone `main.tsx` explicitly enables it.
 Document/export mode remains unchanged. The live block ID identifies a running
 turn until its persisted record is available. A historical viewport passes the
 user record UUID from its own blocks; its page-local ID must never be matched
-against the unrelated live projection. A single dock tab retargets on selection.
+against the unrelated live projection. A single dock tab retargets on selection. Injected goal/runtime cards and empty scheduled messages share the panel’s anchor predicate and have no entry.
 Persist the durable user record ID or stable prompt ID in the existing
 session-scoped dock state, restoring the open state, selected tab and selected
 turn after reload. Live tabs acquire the record ID when it arrives. If live
@@ -50,7 +50,7 @@ through the next ordinary prompt boundary so results and timing after a visible
 scheduled or realtime prompt still pair with their original calls. Replay the bounded segment
 once, then filter starts, updates and timing by that ownership. Reuse `projectTrajectoryWindow` and `buildTrajectory`
 in the client to correlate tool timing and status. Mid-turn instructions and
-notifications do not split a user turn; visible scheduled prompts follow the
+notifications, goal runtime text and goal-control cards do not split a user turn; visible scheduled prompts follow the
 same boundary as the left navigation. Partial replay, cursor failures and
 response/page ceilings produce explicit errors; they must not masquerade as
 empty or complete data. The route is persisted-workspace scoped and uses the
@@ -91,11 +91,11 @@ does not shrink when the path is truncated and opens a separate dock tab.
 It retains the shared workspace ownership and file-availability checks.
 Agent rows use the existing summary replay projection: omit child events and
 embedded full result text when a structured task summary replaces it, preserve
-plain failure diagnostics, retain identity/status/timing, and open the existing
+failure diagnostics even when a structured task result is present, retain identity/status/timing, and open the existing
 agent detail tab on click to load the full subagent transcript. Edit/write results reuse the message area’s diff extraction and
 view, falling back to raw results when no diff is recorded. Valid JSON arguments and results
 are identified before display truncation and reuse the message Markdown renderer
-with a formatted JSON code fence, including truncated long JSON; other
+with a JSON code fence, including truncated long JSON. JSON strings retain their original number lexemes and duplicate keys; other
 results remain plain text. Diff rendering takes precedence.
 
 **Duration and status.** Prefer the daemon’s recorded duration, including zero
@@ -121,7 +121,7 @@ remain readable without inventing a start from their batch-log timestamp.
 
 The ACP Session execution path also emits its measured start and duration in
 live tool metadata and telemetry. The SDK preserves these fields so the live
-clock uses the server start and completion freezes at the recorded duration.
+clock stays in the browser receipt-time domain and completion freezes at the recorded duration. Never subtract a server timestamp from the browser clock: remote hosts may have clock skew. After reconnecting, the running estimate starts at receipt and may undercount until the recorded duration arrives.
 
 Unavailable timing is an em dash; pending calls have no timer. Recorded
 cancellation overrides a generic failed replay block. Completed means the tool
@@ -131,32 +131,33 @@ reported completion, not that a business operation succeeded.
 collapsed. Use regular font weight at 11px. Identify MCP calls by the existing
 `mcp_invocation` preview or resolved `mcp__` tool name. Generic `tool_call`
 wrappers resolve their actual name and arguments from the input, including
-when matching replay timing.
+when matching replay timing. Timing accepts either the original wrapper name or the resolved name, while rejecting unrelated tool names and subagent collisions. A wrapper-generated title must not override the resolved description.
 
 **Shell sections.** The branch incorporates PR #12311’s structured shell result
 contract. In Tool calls, Arguments contains only the command string; Result
 contains only the version-1 output (including an authoritative empty output).
 Remaining invocation arguments and execution metadata are grouped under an
 initially collapsed Other disclosure. Live output uses the existing segment
-parser; legacy strings remain text unless they are valid JSON, in which case the shared Markdown JSON renderer formats them. Unknown result versions use their text fallback rather than interpreting their fields. Existing display bounds
+parser; legacy strings remain text unless they are valid JSON, in which case the shared Markdown renderer highlights their original JSON text. Unknown result versions use their text fallback rather than interpreting their fields. Existing display bounds
 still apply. This integration is verified with unit tests/build/typecheck only;
 fresh live backend verification remains pending.
 
-**Identity, errors and rendering.** The turn index reads `daemonPromptId` from the user record immediately; terminal records remain a fallback for older sessions. This lets the selector merge a persisted prompt with its live admission before completion. An unresolved prompt and a failed prompt-index refresh show distinct retryable notices outside the listbox; neither is reported as an empty turn. Successful prompt-index loads are reused until navigation identities or snapshots change or Refresh is requested. Freshly loaded entries take precedence over the navigation snapshot present when that request began; a later navigation snapshot can update them. The response envelope includes `v: 1`; incomplete replay returns `tool_calls_replay_incomplete`. The scan budget includes later records needed to pair results across scheduled/realtime boundaries, and its limit error names that scan rather than a single page.
+**Identity, errors and rendering.** The turn index reads `daemonPromptId` from the user record immediately; terminal records remain a fallback for older sessions. This lets the selector merge a persisted prompt with its live admission before completion. An unresolved prompt and a failed prompt-index refresh show distinct retryable notices outside the listbox; neither is reported as an empty turn. The prompt picker shares the left navigation store, its bounded page cache, snapshot validation and error state. A keyboard-accessible window renders at most twelve options and fetches only missing visible pages. Switching prompts does not recreate the cache; Refresh reloads its head. The response envelope includes `v: 1`; incomplete replay returns `tool_calls_replay_incomplete`. The scan budget includes later records needed to pair results across scheduled/realtime boundaries, and its limit error names that scan rather than a single page.
 
-Rows use tool-call IDs across live and persisted projections, preserving expansion. Both paths compute nesting from the same retained parent chain. Row rendering is memoized, and collapsed rows do not serialize arguments/results or parse shell details. Missing filter types reset to All tools. File descriptions use the resolved workspace path, and status icons are decorative beside their visible labels.
+Rows use tool-call IDs across live and persisted projections, preserving expansion. Retained live children stay directly under their recorded parent instead of moving to the end of the list. Both paths compute nesting from the same retained parent chain. Row rendering and expanded detail computation are memoized, and collapsed rows do not serialize arguments/results or parse shell details. Diff output also respects the display length limit and shows a truncation notice. Missing filter types reset to All tools. File descriptions use the resolved workspace path, and status icons are decorative beside their visible labels.
 
 The ACP post-approval notification carries the tool name, approved arguments and measured start time, so running rows have their command and description before completion. Failure to deliver this informational notification is logged and does not prevent execution; cancellation is checked after delivery. Tests cover notification rejection, historical viewport UUID forwarding, nonempty agent results reduced to summaries, zero durations and scheduler starts on success, error and cancellation.
 
 ## Files
 
-- `TurnCallsPanel`, its styles/tests, and `loadTurnCalls`: rendering, live merging,
+- `TurnCallsPanel`, `TurnCallPromptSelect`, their styles/tests, and `loadTurnCalls`: rendering, live merging,
   history loading and verification.
 - `turnCallsContext`, `MessageItem`, `MessageTimestamp`, `App`, `ArtifactPanel`:
   entry and dock wiring.
 - `TranscriptViewport`, `useTranscriptViewport`: historical record identity.
 - `toolFormatting` and tests: ignore blank/non-string descriptions.
 - `toolClassification`, `transcriptToMessages`: shared tool identity and argument projection, including chat messages.
+- `session-tool-calls` and workspace/SSH session routing: persisted reads, summary projection and route ownership.
 - `i18n`: English and Chinese labels.
 - Core scheduler/telemetry, ACP replay, SDK timing reader and trajectory: retain
   the measured call start across recording and replay.
@@ -181,10 +182,13 @@ correctness. Results are recorded in
 
 ## Risks and limits
 
+- The tool-calls API requires a daemon build that includes this route. Older daemons produce an explicit load error; the prompt picker honors the existing `session_turn_navigation` capability. No separate capability is introduced.
+- Dock restoration stores durable identities and up to 160 characters of the prompt label in browser localStorage, alongside the existing dock state.
+
 - Agent children are omitted from the summary list; opening the agent uses
   the existing detail page to fetch its complete transcript.
 - A shell script remains one call even if it invokes multiple APIs.
-- Legacy live calls without server timing use client-observed elapsed time,
+- Running live calls use client-observed elapsed time,
   which can undercount after reconnecting.
 - Server-side replay is capped at 100 pages of 250 records and 32 MiB for the retained replay segment and response;
   exceeding them fails explicitly. The public tool-calls API has no pagination.
@@ -207,7 +211,7 @@ Historical calls are fetched once on selection from a workspace-scoped
 returns the complete selected turn's calls and recorded timing. Reuse existing
 transcript snapshot/replay readers internally with explicit size-limit errors;
 never return a silently truncated list. Honor resolved workspace ownership,
-archive coordination, active-chain boundaries and existing redaction.
+archive coordination, active-chain boundaries and existing redaction. SSH workspace GET requests reach the same persisted-session reader; unsupported write methods remain rejected.
 
 While the selected prompt is running, render the Message transcript store
 directly and do not request historical calls or poll. Keep live rows while a
@@ -215,8 +219,7 @@ single history read after settlement is pending. Switching to an older prompt
 during another prompt's run still uses the history endpoint. Discard stale
 responses after selection/session changes. Current provisional prompts must
 remain selectable before their persistent index mapping arrives. The turn-index
-endpoint defaults to its tail page: both the selector and prompt-ID recovery walk
-backward in the same snapshot to include early prompts in long sessions.
+endpoint defaults to its tail page: the picker loads visible ordinal ranges through the shared store, while recovery of a missing durable ID walks backward within one snapshot. This recovery is not performed for any admitted running or queued prompt.
 
 Acceptance: clicked prompt is preselected, Select precedes the count, no All
 prompt option, historical switching loads exactly the selected prompt, running

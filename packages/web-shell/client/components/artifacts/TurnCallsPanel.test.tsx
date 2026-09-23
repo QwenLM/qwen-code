@@ -18,6 +18,7 @@ const {
   loadCalls,
   fileActions,
   navigation,
+  navigationStore,
   prompt,
 } = vi.hoisted(() => ({
   transcript: { blocks: [] as unknown[] },
@@ -34,7 +35,15 @@ const {
   loadCalls: vi.fn(),
   fileActions: { stat: vi.fn() },
   prompt: { status: 'idle' },
+  navigationStore: {
+    refreshHead: vi.fn(),
+    loadOrdinal: vi.fn(),
+    listeners: new Set<() => void>(),
+  },
   navigation: {
+    mode: 'ready',
+    error: undefined as { operation: string; message: string } | undefined,
+    totalTurns: 0,
     indexPages: new Map<
       number,
       { snapshot?: string; turns: DaemonSessionTurnIndexEntry[] }
@@ -53,13 +62,36 @@ vi.mock('./loadTurnCalls', async (importOriginal) => ({
   loadTurnCalls: loadCalls,
 }));
 
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useTranscriptBlocks: () => transcript.blocks,
-  useWorkspace: () => ({ client, status: 'connected' }),
-  useConnection: () => connection,
-  usePromptStatus: () => prompt.status,
-  useTurnNavigationState: () => navigation,
-}));
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
+  const { useReducer, useEffect } = await import('react');
+  return {
+    useTranscriptBlocks: () => transcript.blocks,
+    useWorkspace: () => ({ client, status: 'connected' }),
+    useConnection: () => connection,
+    usePromptStatus: () => prompt.status,
+    useTurnNavigationState: () => {
+      const [, update] = useReducer((n: number) => n + 1, 0);
+      useEffect(() => {
+        navigationStore.listeners.add(update);
+        return () => {
+          navigationStore.listeners.delete(update);
+        };
+      }, []);
+      const totalTurns = Math.max(
+        navigation.totalTurns,
+        ...[...navigation.indexPages.values()].flatMap((page) =>
+          page.turns.map((turn) => turn.ordinal + 1),
+        ),
+      );
+      return {
+        ...navigation,
+        totalTurns,
+        effectiveTurnCount: totalTurns + navigation.provisionalTurns.length,
+      };
+    },
+    useTurnNavigationStore: () => navigationStore,
+  };
+});
 
 vi.mock('./useArtifactWorkspaceTarget', () => ({
   useArtifactWorkspaceTarget: () => ({ actions: fileActions }),
@@ -75,7 +107,33 @@ const { loadTurnCalls: realLoadTurnCalls } =
 beforeEach(() => {
   client.workspaceByCwd.mockReturnValue(client);
   prompt.status = 'idle';
+  navigation.mode = 'ready';
+  navigation.error = undefined;
+  navigation.totalTurns = 0;
   navigation.indexPages.clear();
+  const loadIndex = async (start?: number) => {
+    try {
+      const page = await client.getSessionTurnIndexPage(connection.sessionId, {
+        limit: 100,
+        ...(start !== undefined ? { start } : {}),
+      });
+      navigation.indexPages = new Map(
+        start === undefined ? [] : navigation.indexPages,
+      );
+      navigation.indexPages.set(page.start, page);
+      navigation.totalTurns = page.totalTurns;
+      navigation.error = undefined;
+    } catch {
+      navigation.error = { operation: 'index', message: 'unavailable' };
+    }
+    navigationStore.listeners.forEach((listener) => listener());
+  };
+  navigationStore.refreshHead.mockReset().mockImplementation(() => loadIndex());
+  navigationStore.loadOrdinal
+    .mockReset()
+    .mockImplementation((ordinal: number) =>
+      loadIndex(Math.floor(ordinal / 100) * 100),
+    );
   navigation.provisionalTurns = [];
   loadCalls.mockReset().mockImplementation(realLoadTurnCalls);
   client.getSessionToolCalls.mockReset();
@@ -847,8 +905,8 @@ it('keeps long JSON arguments and results in bounded Markdown code blocks', () =
   }
 });
 
-function mockLongPromptIndex() {
-  const turns = Array.from({ length: 300 }, (_, index) => ({
+function mockLongPromptIndex(count = 300) {
+  const turns = Array.from({ length: count }, (_, index) => ({
     ordinal: index,
     turnId: `record-${index + 1}`,
     promptId: `prompt-${index + 1}`,
@@ -868,28 +926,34 @@ function mockLongPromptIndex() {
   );
 }
 
-it('loads early prompt options when the initial index response is the tail page', async () => {
+it('loads only the visible prompt page and supports keyboard navigation to early prompts', async () => {
   connection.sessionId = 'session';
   transcript.blocks = [];
-  mockLongPromptIndex();
+  mockLongPromptIndex(5000);
+  await navigationStore.refreshHead();
   loadCalls.mockResolvedValue([]);
   await act(async () => {
-    render(<TurnCallsPanel turnId="record-300" recordId="record-300" />);
+    render(<TurnCallsPanel turnId="record-5000" recordId="record-5000" />);
   });
   await act(async () => {
     container!
       .querySelector<HTMLButtonElement>('[aria-label="Prompt"]')!
       .click();
   });
-  const options = [...document.body.querySelectorAll('[role="option"]')];
-  expect(options).toHaveLength(300);
-  expect(options[0]?.textContent).toBe('Prompt 1');
-  expect(options.at(-1)?.textContent).toBe('Prompt 300');
-  expect(client.getSessionTurnIndexPage).toHaveBeenCalledWith('session', {
-    snapshot: 'frozen-index',
-    start: 0,
-    limit: 50,
-  });
+  expect(document.querySelectorAll('[role="option"]').length).toBeLessThan(20);
+  expect(client.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    document
+      .querySelector('[role="listbox"]')!
+      .dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Home', bubbles: true }),
+      ),
+  );
+  expect(document.querySelector('[role="option"]')?.textContent).toBe(
+    'Prompt 1',
+  );
+  expect(client.getSessionTurnIndexPage).toHaveBeenCalledTimes(2);
+  expect(navigationStore.loadOrdinal).toHaveBeenCalledWith(0);
 });
 
 it('restores an early prompt identity beyond the initial tail index page', async () => {
@@ -961,7 +1025,7 @@ it('recognizes an MCP invocation inside tool_call', () => {
   );
 });
 
-it('uses the server start for a running call after reconnect and keeps timing on completion', async () => {
+it('uses the browser clock after reconnect and server timing on completion', async () => {
   vi.useFakeTimers();
   const start = new Date(2026, 8, 21, 10, 30, 0).getTime();
   vi.setSystemTime(start + 4000);
@@ -983,21 +1047,21 @@ it('uses the server start for a running call after reconnect and keeps timing on
     <TurnCallsPanel turnId="old-user-id" promptId="prompt-1" />,
     'zh-CN',
   );
-  expect(view.querySelector('[aria-label="耗时：4s"]')).not.toBeNull();
+  expect(view.querySelector('[aria-label="耗时：0ms"]')).not.toBeNull();
   act(() => {
     view
-      .querySelector('[aria-label="耗时：4s"]')
+      .querySelector('[aria-label="耗时：0ms"]')
       ?.dispatchEvent(new Event('pointermove', { bubbles: true }));
     vi.advanceTimersByTime(300);
   });
   expect(
-    view.querySelector('[aria-label="耗时：4s"]')?.getAttribute('data-slot'),
+    view.querySelector('[aria-label="耗时：0ms"]')?.getAttribute('data-slot'),
   ).toBeNull();
   expect(document.querySelector('[role="tooltip"]')).toBeNull();
   act(() => {
     vi.advanceTimersByTime(1700);
   });
-  expect(view.querySelector('[aria-label="耗时：6s"]')).not.toBeNull();
+  expect(view.querySelector('[aria-label="耗时：2s"]')).not.toBeNull();
   transcript.blocks = [
     user,
     toolBlock({
@@ -1507,14 +1571,14 @@ it('puts prompt selection before the count without All and loads only the select
     {
       turnId: 'record-2',
       promptId: 'prompt-2',
-      ordinal: 2,
+      ordinal: 1,
       kind: 'prompt',
       label: 'Second prompt',
     },
     {
       turnId: 'record-1',
       promptId: 'prompt-1',
-      ordinal: 1,
+      ordinal: 0,
       kind: 'prompt',
       label: 'First prompt',
     },
@@ -1692,7 +1756,7 @@ it('refreshes historical calls and prompt labels once while retaining the select
       {
         turnId: 'record-1',
         promptId: 'prompt-1',
-        ordinal: 1,
+        ordinal: 0,
         kind: 'prompt',
         label: 'Updated prompt label',
       },
@@ -1701,7 +1765,7 @@ it('refreshes historical calls and prompt labels once while retaining the select
   const cachedTurn: DaemonSessionTurnIndexEntry = {
     turnId: 'record-1',
     promptId: 'prompt-1',
-    ordinal: 1,
+    ordinal: 0,
     kind: 'prompt',
     label: 'Selected prompt',
   };
@@ -1740,6 +1804,7 @@ it('refreshes historical calls and prompt labels once while retaining the select
   expect(container?.querySelector('[aria-label="提示词"]')?.textContent).toBe(
     'Updated prompt label',
   );
+  navigation.indexPages = new Map(navigation.indexPages);
   navigation.indexPages.set(0, {
     snapshot: 'newer-snapshot',
     turns: [{ ...cachedTurn, label: 'New navigation label' }],
@@ -1862,7 +1927,15 @@ it('merges admitted and indexed prompt identities and reuses the successful inde
   ];
   navigation.indexPages.set(0, {
     snapshot: 'before-completion',
-    turns: [{ ordinal: 0, turnId: 'r1', kind: 'prompt', label: 'Same prompt' }],
+    turns: [
+      {
+        ordinal: 0,
+        turnId: 'r1',
+        promptId: 'p1',
+        kind: 'prompt',
+        label: 'Same prompt',
+      },
+    ],
   });
   client.getSessionTurnIndexPage.mockResolvedValue({
     snapshot: 's',
@@ -1878,6 +1951,7 @@ it('merges admitted and indexed prompt identities and reuses the successful inde
       },
     ],
   });
+  navigation.provisionalTurns = [];
   const view = render(<TurnCallsPanel turnId="u1" promptId="p1" />);
   const trigger = view.querySelector<HTMLButtonElement>(
     '[aria-label="Prompt"]',
@@ -1889,7 +1963,7 @@ it('merges admitted and indexed prompt identities and reuses the successful inde
   );
   await act(async () => trigger.click());
   expect(document.querySelectorAll('[role="option"]')).toHaveLength(1);
-  expect(client.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+  expect(client.getSessionTurnIndexPage).not.toHaveBeenCalled();
 });
 
 it('preserves expanded state when a call settles into a different projection block', async () => {
@@ -1968,4 +2042,198 @@ it('resets a vanished filter and does not restore it when that tool returns', as
   );
   expect(view.querySelectorAll('li')).toHaveLength(2);
   expect(trigger.textContent).toBe('全部工具');
+});
+
+it('preserves JSON number lexemes and duplicate keys in Markdown', () => {
+  const output = '{"id":12345678901234567890,"n":1e400,"zero":-0,"a":1,"a":2}';
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({ id: 'tool', toolCallId: 'call', rawOutput: output }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  act(() => view.querySelector<HTMLButtonElement>('li > button')!.click());
+  expect(view.querySelector('pre code')?.textContent?.trim()).toBe(output);
+});
+
+it('keeps an earlier admitted prompt live while another prompt is queued', async () => {
+  connection.sessionId = 'session';
+  prompt.status = 'waiting';
+  transcript.blocks = [];
+  navigation.provisionalTurns = ['first', 'second'].map((promptId) => ({
+    promptId,
+    provisionalId: promptId,
+    label: promptId,
+  }));
+  await act(async () =>
+    render(<TurnCallsPanel turnId="first" promptId="first" />),
+  );
+  expect(client.getSessionTurnIndexPage).not.toHaveBeenCalled();
+  expect(client.getSessionToolCalls).not.toHaveBeenCalled();
+  expect(container?.querySelector('[role="alert"]')).toBeNull();
+});
+
+it.each([3600000, -3600000])(
+  'does not mix a server clock offset of %s with browser elapsed time',
+  (offset) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10000000);
+    prompt.status = 'streaming';
+    transcript.blocks = [
+      userBlock('u1', 1),
+      toolBlock({
+        id: 'tool',
+        toolCallId: 'call',
+        status: 'in_progress',
+        startedAt: 9996000 + offset,
+        clientReceivedAt: 9996000,
+        updatedAt: 10000000,
+      }),
+    ];
+    const view = render(<TurnCallsPanel turnId="u1" />);
+    expect(
+      view
+        .querySelector('[aria-label^="Elapsed:"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Elapsed: 4s');
+  },
+);
+
+it.each(['goal_runtime', 'goal_control'])(
+  'keeps calls after an injected %s message',
+  (source) => {
+    const rows = collectTurnCallRows(
+      [
+        userBlock('u1', 1),
+        toolBlock({ id: 'first', toolCallId: 'first' }),
+        Object.assign(userBlock('goal', 2), { meta: { source } }),
+        toolBlock({ id: 'second', toolCallId: 'second' }),
+      ],
+      'u1',
+    );
+    expect(rows.map((row) => row.block.toolCallId)).toEqual([
+      'first',
+      'second',
+    ]);
+  },
+);
+
+it('does not turn an unrelated history navigation failure into an index alert', async () => {
+  connection.sessionId = 'session';
+  navigation.error = { operation: 'older', message: 'history unavailable' };
+  transcript.blocks = [];
+  loadCalls.mockResolvedValue([]);
+  await act(async () =>
+    render(<TurnCallsPanel turnId="record" recordId="record" />),
+  );
+  expect(container?.querySelector('[role="alert"]')).toBeNull();
+});
+
+it('keeps retained live children beside their recorded parent after settlement', async () => {
+  connection.sessionId = 'session';
+  const parent = toolBlock({
+    id: 'parent',
+    toolCallId: 'parent',
+    toolName: 'agent',
+    rawInput: { description: 'Parent' },
+  });
+  const child = toolBlock({
+    id: 'child',
+    toolCallId: 'child',
+    toolName: 'read_file',
+    parentToolCallId: 'parent',
+    rawInput: { description: 'Child' },
+  });
+  const later = toolBlock({
+    id: 'later',
+    toolCallId: 'later',
+    toolName: 'glob',
+    rawInput: { description: 'Later' },
+  });
+  transcript.blocks = [
+    Object.assign(userBlock('u1', 1), { sourceRecordIds: ['r1'] }),
+    parent,
+    child,
+    later,
+  ];
+  loadCalls.mockResolvedValue([
+    { block: parent, depth: 0 },
+    { block: later, depth: 0 },
+  ]);
+  await act(async () => render(<TurnCallsPanel turnId="u1" recordId="r1" />));
+  const rows = [
+    ...container!.querySelectorAll<HTMLElement>(
+      '[data-web-shell-turn-calls] > li',
+    ),
+  ];
+  expect(
+    rows.map((row) => row.textContent?.match(/Parent|Child|Later/)?.[0]),
+  ).toEqual(['Parent', 'Child', 'Later']);
+  expect(
+    rows.map((row) => row.style.getPropertyValue('--turn-call-depth')),
+  ).toEqual(['0', '1', '0']);
+});
+
+it('drops saved rows when the durable record changes and its replacement fails', async () => {
+  connection.sessionId = 'session';
+  transcript.blocks = [];
+  loadCalls.mockResolvedValue([
+    { block: toolBlock({ id: 'old', toolCallId: 'old' }), depth: 0 },
+  ]);
+  await act(async () =>
+    render(<TurnCallsPanel turnId="same-block" recordId="old-record" />),
+  );
+  expect(container?.querySelectorAll('li')).toHaveLength(1);
+  loadCalls.mockRejectedValue(new Error('unavailable'));
+  await act(async () =>
+    root?.render(
+      <I18nProvider language="en">
+        <TurnCallsPanel turnId="same-block" recordId="new-record" />
+      </I18nProvider>,
+    ),
+  );
+  expect(container?.querySelectorAll('li')).toHaveLength(0);
+  expect(container?.querySelector('[role="alert"]')).not.toBeNull();
+});
+
+it('does not reserialize expanded results on clock ticks', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(5000);
+  const toJSON = vi.fn(() => ({ answer: 42 }));
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'tool',
+      toolCallId: 'call',
+      status: 'in_progress',
+      rawOutput: { toJSON },
+    }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  act(() => view.querySelector<HTMLButtonElement>('li > button')!.click());
+  expect(toJSON).toHaveBeenCalledTimes(1);
+  act(() => vi.advanceTimersByTime(2000));
+  expect(toJSON).toHaveBeenCalledTimes(1);
+});
+
+it('bounds large file diffs with an explicit truncation notice without serializing the unused result', () => {
+  const toJSON = vi.fn(() => ({ unused: 'result' }));
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'edit',
+      toolCallId: 'edit',
+      toolName: 'edit',
+      rawOutput: {
+        fileDiff: '@@ -0,0 +1,3000 @@\n' + '+line\n'.repeat(3000),
+        toJSON,
+      },
+    }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  act(() => view.querySelector<HTMLButtonElement>('li > button')!.click());
+  expect(
+    view.querySelector('[aria-label="File diff"]')!.textContent!.length,
+  ).toBeLessThan(6000);
+  expect(view.textContent).toContain('Diff truncated');
+  expect(toJSON).not.toHaveBeenCalled();
 });

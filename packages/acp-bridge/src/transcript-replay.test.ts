@@ -3147,3 +3147,69 @@ describe('ui_telemetry timing frames', () => {
     ]);
   });
 });
+
+it('keeps raw wrapper timings attached to distinct replay ids across snapshots', () => {
+  const initial = createTranscriptReplayMachine({ includeTiming: true });
+  const calls = ['first', 'second'].flatMap((uuid) =>
+    updates(
+      initial,
+      record(uuid, 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'duplicate',
+                name: 'tool_call',
+                args: { name: 'mcp__server__lookup', arguments: {} },
+              },
+            },
+          ],
+        },
+      }),
+    ),
+  );
+  expect(calls).toMatchObject([
+    { toolCallId: 'duplicate' },
+    { toolCallId: 'duplicate:2' },
+  ]);
+  const resumed = createTranscriptReplayMachine({
+    includeTiming: true,
+    initialState: JSON.parse(JSON.stringify(initial.snapshot())),
+  });
+  const timings = [800, 900].flatMap((durationMs, index) =>
+    updates(
+      resumed,
+      record(`timing-${index}`, 'system', {
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': EVENT_TOOL_CALL,
+            call_id: 'duplicate',
+            function_name: 'tool_call',
+            status: 'cancelled',
+            duration_ms: durationMs,
+          },
+        },
+      }),
+    ),
+  );
+  expect(timings).toMatchObject([
+    { _meta: { timing: { callId: 'duplicate', durationMs: 800 } } },
+    { _meta: { timing: { callId: 'duplicate:2', durationMs: 900 } } },
+  ]);
+});
+
+it('marks goal runtime text as injected within the existing turn', () => {
+  const machine = createTranscriptReplayMachine();
+  expect(
+    updates(
+      machine,
+      record('goal', 'user', {
+        subtype: 'goal_runtime',
+        systemPayload: { displayText: 'Continue the goal' },
+        message: { role: 'user', parts: [{ text: 'Continue the goal' }] },
+      }),
+    ),
+  ).toMatchObject([{ _meta: { source: 'goal_runtime' } }]);
+});

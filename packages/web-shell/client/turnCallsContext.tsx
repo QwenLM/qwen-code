@@ -13,6 +13,16 @@ export type OpenTurnCalls = (
 
 const TurnCallsContext = createContext<OpenTurnCalls | undefined>(undefined);
 
+export function isTurnCallsPrompt(source: unknown, text: string): boolean {
+  return (
+    source !== 'background_notification' &&
+    source !== 'mid_turn_message_injected' &&
+    source !== 'goal_runtime' &&
+    source !== 'goal_control' &&
+    (source !== 'cron' || text.trim().length > 0)
+  );
+}
+
 export function TurnCallsProvider({
   onOpen,
   children,

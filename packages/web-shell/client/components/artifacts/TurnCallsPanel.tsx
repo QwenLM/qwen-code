@@ -3,7 +3,6 @@ import {
   useEffect,
   useCallback,
   useMemo,
-  useRef,
   useState,
   type CSSProperties,
 } from 'react';
@@ -25,7 +24,6 @@ import {
 import type {
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
-  DaemonSessionTurnIndexEntry,
 } from '@qwen-code/sdk/daemon';
 import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
@@ -75,8 +73,9 @@ import {
 } from '../ui/tooltip';
 import { formatTimestamp } from '../MessageTimestamp';
 import { loadTurnCalls, toolCallDepths } from './loadTurnCalls';
-import type { OpenTurnCalls } from '../../turnCallsContext';
+import { isTurnCallsPrompt, type OpenTurnCalls } from '../../turnCallsContext';
 import styles from './TurnCallsPanel.module.css';
+import { TurnCallPromptSelect } from './TurnCallPromptSelect';
 
 /**
  * Strong ceiling for a single expanded field. Tool arguments and results can be
@@ -95,17 +94,10 @@ export interface TurnCallRow {
   live?: true;
 }
 
-const INJECTED_SOURCES = new Set([
-  'background_notification',
-  'mid_turn_message_injected',
-]);
-
 function isPromptStart(block: DaemonTranscriptBlock): boolean {
-  if (block.kind !== 'user') return false;
-  const source = String(block.meta?.['source'] ?? '');
   return (
-    !INJECTED_SOURCES.has(source) &&
-    (source !== 'cron' || block.text.trim().length > 0)
+    block.kind === 'user' &&
+    isTurnCallsPrompt(block.meta?.['source'], block.text)
   );
 }
 
@@ -183,7 +175,8 @@ function safeJson(value: unknown): string {
 function ToolCallDetail({ text }: { text: string }) {
   const json = useMemo(() => {
     try {
-      return JSON.stringify(JSON.parse(text), null, 2);
+      JSON.parse(text);
+      return text;
     } catch {
       return undefined;
     }
@@ -248,209 +241,6 @@ function shellDetails(tool: ACPToolCall) {
       ? truncateText(stringifyValue(other), MAX_DETAIL_LENGTH)
       : '',
   };
-}
-
-function TurnCallPromptSelect({
-  turnId,
-  recordId,
-  promptId,
-  label,
-  workspaceCwd,
-  refreshKey,
-  onSelect,
-  onLoadError,
-}: {
-  turnId: string;
-  recordId?: string;
-  promptId?: string;
-  label?: string;
-  workspaceCwd?: string;
-  refreshKey: number;
-  onSelect?: OpenTurnCalls;
-  onLoadError: (failed: boolean) => void;
-}) {
-  const { t } = useI18n();
-  const { client: daemonClient } = useWorkspace();
-  const connection = useConnection();
-  const { sessionId } = connection;
-  const cwd = connection.workspaceCwd ?? workspaceCwd;
-  const client = useMemo(
-    () => (cwd ? daemonClient.workspaceByCwd(cwd) : undefined),
-    [daemonClient, cwd],
-  );
-  const navigation = useTurnNavigationState();
-  const [open, setOpen] = useState(false);
-  const refreshed = useRef(0);
-  const navigationKey = [...navigation.indexPages.values()]
-    .flatMap((page) => [
-      page.snapshot,
-      ...page.turns.map((turn) => turn.turnId),
-    ])
-    .concat(navigation.provisionalTurns.map((turn) => turn.promptId))
-    .join('\0');
-  const [loaded, setLoaded] = useState<{
-    sessionId: string;
-    owner: object;
-    turns: DaemonSessionTurnIndexEntry[];
-    refreshKey: number;
-    navigationKey: string;
-  }>();
-  useEffect(() => {
-    if (!sessionId) return;
-    if (
-      loaded &&
-      loaded.owner === client &&
-      loaded.sessionId === sessionId &&
-      loaded.refreshKey === refreshKey &&
-      loaded.navigationKey === navigationKey
-    )
-      return;
-    if (!open && refreshed.current === refreshKey) return;
-    refreshed.current = refreshKey;
-    if (!client) {
-      onLoadError(true);
-      return;
-    }
-    let current = true;
-    onLoadError(false);
-    void (async () => {
-      let page = await client.getSessionTurnIndexPage(sessionId, {
-        limit: 250,
-      });
-      const turns = [...page.turns];
-      for (let count = 1; page.start > 0; count += 1) {
-        if (!current) return;
-        if (!page.turns.length || count >= 100)
-          throw new Error('Turn index loading limit exceeded');
-        page = await client.getSessionTurnIndexPage(sessionId, {
-          snapshot: page.snapshot,
-          start: Math.max(0, page.start - 250),
-          limit: Math.min(250, page.start),
-        });
-        turns.unshift(...page.turns);
-      }
-      if (current)
-        setLoaded({
-          sessionId,
-          owner: client,
-          turns,
-          refreshKey,
-          navigationKey,
-        });
-    })().catch(() => {
-      if (current) onLoadError(true);
-    });
-    return () => {
-      current = false;
-    };
-  }, [client, sessionId, open, refreshKey, navigationKey, loaded, onLoadError]);
-  const choices = useMemo(() => {
-    const indexed = new Map(
-      (loaded && loaded.sessionId === sessionId && loaded.owner === client
-        ? loaded.turns
-        : []
-      ).map((turn) => [turn.turnId, turn]),
-    );
-    for (const page of navigation.indexPages.values()) {
-      for (const turn of page.turns) {
-        if (
-          loaded?.navigationKey !== navigationKey ||
-          !indexed.has(turn.turnId)
-        )
-          indexed.set(turn.turnId, turn);
-      }
-    }
-    const choices: Array<{
-      value: string;
-      turnId: string;
-      recordId?: string;
-      promptId?: string;
-      label: string;
-    }> = [...indexed.values()]
-      .sort((a, b) => a.ordinal - b.ordinal)
-      .map((turn) => ({
-        value: `record:${turn.turnId}`,
-        turnId: turn.turnId,
-        recordId: turn.turnId,
-        promptId: turn.promptId,
-        label: turn.label,
-      }));
-    for (const turn of navigation.provisionalTurns) {
-      if (choices.some((entry) => entry.promptId === turn.promptId)) continue;
-      choices.push({
-        value: `prompt:${turn.promptId}`,
-        turnId: turn.blockId ?? turn.provisionalId,
-        recordId: undefined,
-        promptId: turn.promptId,
-        label: turn.label,
-      });
-    }
-    return choices;
-  }, [
-    loaded,
-    sessionId,
-    client,
-    navigation.indexPages,
-    navigation.provisionalTurns,
-    navigationKey,
-  ]);
-  const selected = choices.find((entry) =>
-    recordId
-      ? entry.recordId === recordId
-      : promptId && entry.promptId === promptId,
-  ) ?? {
-    value: recordId
-      ? `record:${recordId}`
-      : promptId
-        ? `prompt:${promptId}`
-        : `block:${turnId}`,
-    turnId,
-    recordId,
-    promptId,
-    label: label || t('turnCalls.prompt'),
-  };
-  const options = choices.some((entry) => entry.value === selected.value)
-    ? choices
-    : [...choices, selected];
-  return (
-    <Select
-      value={selected.value}
-      open={open}
-      onOpenChange={setOpen}
-      onValueChange={(value) => {
-        const choice = options.find((entry) => entry.value === value);
-        if (choice)
-          onSelect?.(
-            choice.turnId,
-            choice.recordId,
-            choice.promptId,
-            choice.label,
-          );
-      }}
-    >
-      <SelectTrigger
-        size="sm"
-        className="min-w-0 max-w-64 text-foreground"
-        aria-label={t('turnCalls.prompt')}
-        title={selected.label}
-      >
-        <SelectValue>
-          <span className="truncate">{selected.label}</span>
-        </SelectValue>
-      </SelectTrigger>
-      <SelectContent position="popper" align="start" className="max-w-80">
-        {options.map((choice) => (
-          <SelectItem
-            key={choice.value}
-            value={choice.value}
-            title={choice.label}
-          >
-            <span className="block max-w-64 truncate">{choice.label}</span>
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
 }
 
 export function TurnCallsPanel({
@@ -523,6 +313,10 @@ export function TurnCallsPanel({
     !idle &&
     Boolean(
       (user && user.id === latestUser?.id) ||
+        (selectedPromptId &&
+          navigation.provisionalTurns.some(
+            (turn) => turn.promptId === selectedPromptId,
+          )) ||
         (!user && selectedPromptId && latestPromptId === selectedPromptId),
     );
   const [saved, setSaved] = useState<{
@@ -634,6 +428,7 @@ export function TurnCallsPanel({
     const savedRows =
       saved &&
       saved.turnId === turnId &&
+      (!selectedRecordId || saved.recordId === selectedRecordId) &&
       saved.sessionId === sessionId &&
       saved.owner === client
         ? saved.rows
@@ -659,8 +454,40 @@ export function TurnCallsPanel({
         recordedStatus: saved?.recordedStatus,
       });
     }
-    return [...merged.values()];
-  }, [blocks, user, saved, turnId, selectedPromptId, sessionId, client]);
+    const children = new Map<string, TurnCallRow[]>();
+    const roots: TurnCallRow[] = [];
+    for (const row of merged.values()) {
+      const parentId = row.block.parentToolCallId;
+      if (parentId && merged.has(parentId)) {
+        const siblings = children.get(parentId) ?? [];
+        siblings.push(row);
+        children.set(parentId, siblings);
+      } else roots.push(row);
+    }
+    const ordered: TurnCallRow[] = [];
+    const seen = new Set<string>();
+    const stack = roots.reverse();
+    while (stack.length) {
+      const row = stack.pop()!;
+      const id = row.block.toolCallId;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ordered.push(row);
+      for (const child of (children.get(id) ?? []).reverse()) stack.push(child);
+    }
+    // Malformed parent cycles must not hide calls.
+    for (const [id, row] of merged) if (!seen.has(id)) ordered.push(row);
+    return ordered;
+  }, [
+    blocks,
+    user,
+    saved,
+    turnId,
+    selectedRecordId,
+    selectedPromptId,
+    sessionId,
+    client,
+  ]);
   const typedRows = useMemo(
     () =>
       rows.map((row) => {
@@ -721,7 +548,6 @@ export function TurnCallsPanel({
     <section className={styles.panel} aria-label={t('turnCalls.title')}>
       <div className="flex min-w-0 items-center gap-2 pb-2">
         <TurnCallPromptSelect
-          turnId={turnId}
           recordId={selectedRecordId}
           promptId={promptId}
           label={
@@ -730,7 +556,6 @@ export function TurnCallsPanel({
             (user?.kind === 'user' ? user.text : undefined)
           }
           onSelect={onSelectPrompt}
-          workspaceCwd={cwd}
           refreshKey={retry}
           onLoadError={setIndexError}
         />
@@ -776,7 +601,7 @@ export function TurnCallsPanel({
       <ul className={styles.list} data-web-shell-turn-calls>
         {visibleRows.map((row) => (
           <TurnCallRowItem
-            key={row.block.toolCallId}
+            key={`${turnId}:${row.block.toolCallId}`}
             {...row}
             workspaceCwd={cwd}
             onOpenFile={onOpenFile}
@@ -806,7 +631,7 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const status = recordedStatus ?? block.status;
-  const tool = daemonToolBlockToToolCall(block, false);
+  const tool = useMemo(() => daemonToolBlockToToolCall(block, false), [block]);
   const name =
     tool.toolName !== 'unknown'
       ? localizeToolDisplayName(tool.toolName, t)
@@ -826,7 +651,6 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
   const editTool = /^(edit|editfile|write|write_file|writefile)$/.test(
     tool.toolName.toLowerCase(),
   );
-  const diff = expanded && editTool ? extractDiff(tool) : '';
   const explicitDescription = tool.args?.description;
   const description = truncateText(
     sanitizeControlChars(
@@ -836,17 +660,29 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     2000,
   );
   const isShell = isShellToolName(tool.toolName);
-  const shell = expanded && isShell ? shellDetails(tool) : undefined;
-  const argumentsText = expanded
-    ? shell
-      ? shell.command
-      : stringifyValue(block.rawInput)
-    : '';
-  const resultText = expanded
-    ? shell
-      ? shell.output
-      : stringifyValue(block.rawOutput ?? block.content)
-    : '';
+  const { diff, shell, argumentsText, resultText } = useMemo(() => {
+    if (!expanded) return { diff: '', argumentsText: '', resultText: '' };
+    const diff = editTool ? extractDiff(tool) : '';
+    const shell = isShell ? shellDetails(tool) : undefined;
+    return {
+      diff,
+      shell,
+      argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
+      resultText: diff
+        ? ''
+        : shell
+          ? shell.output
+          : stringifyValue(block.rawOutput ?? block.content),
+    };
+  }, [
+    expanded,
+    editTool,
+    isShell,
+    tool,
+    block.rawInput,
+    block.rawOutput,
+    block.content,
+  ]);
   const hasDetails = Boolean(
     isShell ||
       block.rawInput != null ||
@@ -857,15 +693,15 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
   );
   const running = status === 'in_progress' || status === 'running';
   const terminal = isTerminalStatus(status);
-  const startedAt =
-    recordedStart ?? (live ? block.clientReceivedAt : undefined);
+  const startedAt = live ? block.clientReceivedAt : undefined;
   const hasLiveClock = startedAt !== undefined && startedAt > 0;
   const now = useSharedNow(Boolean(running && hasLiveClock));
   const duration =
-    durationMs ?? (running ? now : block.updatedAt) - (startedAt ?? 0);
+    durationMs ??
+    Math.max(0, (running ? now : block.updatedAt) - (startedAt ?? 0));
   const elapsed =
     running || terminal
-      ? durationMs !== undefined || (hasLiveClock && duration > 0)
+      ? durationMs !== undefined || hasLiveClock
         ? duration < 1000
           ? `${Math.round(duration)}ms`
           : formatDurationMs(duration)
@@ -995,7 +831,14 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
                 {t('turnCalls.result')}
               </div>
               {diff ? (
-                <DiffView diff={diff} />
+                <>
+                  <DiffView diff={diff.slice(0, MAX_DETAIL_LENGTH)} />
+                  {diff.length > MAX_DETAIL_LENGTH && (
+                    <p className="text-xs text-muted-foreground">
+                      {t('gitDiff.truncated')}
+                    </p>
+                  )}
+                </>
               ) : (
                 <ToolCallDetail
                   text={

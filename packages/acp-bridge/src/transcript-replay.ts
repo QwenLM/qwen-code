@@ -932,7 +932,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 }
               : record.subtype === 'cron'
                 ? { extra: { source: 'cron' } }
-                : {}),
+                : record.subtype === 'goal_runtime'
+                  ? { extra: { source: 'goal_runtime' } }
+                  : {}),
           }),
         );
         yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
@@ -1126,8 +1128,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           this.pendingToolCalls.set(callId, {
             callId,
             toolName,
-            ...(toolName === 'tool_call' && typeof args['name'] === 'string'
-              ? { resolvedToolName: args['name'] }
+            ...(toolName === 'tool_call' &&
+            typeof args['name'] === 'string' &&
+            args['name'].trim()
+              ? { resolvedToolName: args['name'].trim() }
               : {}),
             sourceRecordId: record.uuid,
             ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
@@ -1523,7 +1527,8 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       if (recordedId !== timing.callId || pending.timingMatched) continue;
       if (
         timing.toolName !== undefined &&
-        (pending.resolvedToolName ?? pending.toolName) !== timing.toolName
+        pending.toolName !== timing.toolName &&
+        pending.resolvedToolName !== timing.toolName
       )
         continue;
       this.pendingToolCalls.set(pending.callId, {

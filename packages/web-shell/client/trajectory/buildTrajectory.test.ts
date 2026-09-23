@@ -613,3 +613,37 @@ describe('buildTrajectory', () => {
     ).toHaveLength(250);
   });
 });
+
+it.each(['tool_call', 'mcp__server__lookup', 'wrong_tool'])(
+  'matches wrapper timing name %s without accepting unrelated tools',
+  (toolName) => {
+    const { rows } = buildTrajectory([
+      block(
+        toolBlock('wrapped', {
+          toolName: 'tool_call',
+          rawInput: { name: 'mcp__server__lookup', arguments: {} },
+        }),
+      ),
+      toolTiming('wrapped', { toolName, durationMs: 0 }),
+    ]);
+    expect(rows.find((row) => row.kind === 'tool')?.timing?.durationMs).toBe(
+      toolName === 'wrong_tool' ? undefined : 0,
+    );
+  },
+);
+
+it.each(['goal_runtime', 'goal_control'])(
+  'keeps %s within the existing turn',
+  (source) => {
+    const { rows, turns } = buildTrajectory([
+      block(textBlock('user')),
+      block(toolBlock('first')),
+      block(textBlock('user', { meta: { source } })),
+      block(toolBlock('second')),
+    ]);
+    expect(turns).toHaveLength(1);
+    expect(
+      rows.filter((row) => row.kind === 'tool').map((row) => row.turnIndex),
+    ).toEqual([1, 1]);
+  },
+);

@@ -114,9 +114,6 @@ function metricsOf(
   }
   if (row.kind === 'tool') {
     const parts: string[] = [];
-    // A tool frame carries only a duration — the tool logger stamps a whole
-    // batch at the batch's end, so there is no honest per-tool start time and
-    // nothing to derive one from.
     if (row.timing) parts.push(formatDuration(row.timing.durationMs));
     if (row.subagentSummary) {
       const { requests, tools, requestMs } = row.subagentSummary;

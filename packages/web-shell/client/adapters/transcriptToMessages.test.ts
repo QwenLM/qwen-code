@@ -6006,6 +6006,7 @@ it('projects generic tool wrappers into real names and arguments in chat message
   );
   expect(message?.role === 'tool_group' && message.tools[0]).toMatchObject({
     toolName: 'mcp__server__lookup',
+    title: 'mcp__server__lookup',
     args: { query: 'value' },
   });
 });

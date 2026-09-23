@@ -176,9 +176,10 @@ export async function readSessionToolCalls({
       transcript?.sourceRecordIds?.includes(turnId);
     if (!ownTool && !ownTiming && !anchor) continue;
     const output = update['rawOutput'];
-    // Structured agent content duplicates the full nested result. Plain failures
-    // have no summary rawOutput, so their diagnostic content must survive.
+    // Successful agent content duplicates the nested result; failures carry
+    // diagnostics that are not present in the structured summary.
     const projected =
+      update['status'] === 'completed' &&
       typeof output === 'object' &&
       output !== null &&
       'type' in output &&

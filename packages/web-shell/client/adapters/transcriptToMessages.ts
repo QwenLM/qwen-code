@@ -1616,11 +1616,13 @@ export function daemonToolBlockToToolCall(
     block.status === 'canceled';
   const forceBackgroundPending =
     isBackgroundAgent && (!safeToolProjection || !isComplete);
+  const toolName =
+    resolveToolCallName(block.toolName, block.rawInput) || 'unknown';
 
   return {
     callId: block.toolCallId,
-    toolName: resolveToolCallName(block.toolName, block.rawInput) || 'unknown',
-    title: block.title,
+    toolName,
+    title: block.title === block.toolName ? toolName : block.title,
     status:
       (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
       (block.status as DaemonMessageToolCallStatus) ||

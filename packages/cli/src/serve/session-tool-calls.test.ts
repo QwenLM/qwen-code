@@ -480,38 +480,50 @@ it.each(['cron', 'realtime_message'] as const)(
   },
 );
 
-it('keeps agent failure diagnostics when there is no structured summary output', async () => {
-  await write([
-    record('turn-1'),
-    call('agent-call', 'agent-1', 'agent', { description: 'inspect' }),
-    record('agent-error', {
-      type: 'tool_result',
-      message: {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'agent-1',
-              name: 'agent',
-              response: { error: 'Agent launch failed' },
+it.each([false, true])(
+  'keeps agent failure diagnostics with structured summary=%s',
+  async (structured) => {
+    await write([
+      record('turn-1'),
+      call('agent-call', 'agent-1', 'agent', { description: 'inspect' }),
+      record('agent-error', {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { error: 'Agent launch failed' },
+              },
             },
-          },
-        ],
-      },
-      toolCallResult: {
-        callId: 'agent-1',
-        responseParts: [],
-        error: { message: 'Agent launch failed' },
-        status: 'error',
-      },
-    }),
-  ]);
-  const events = await read();
-  expect(events.map((event) => event.data)).toContainEqual(
-    expect.objectContaining({ toolCallId: 'agent-1', status: 'failed' }),
-  );
-  expect(JSON.stringify(events)).toContain('Agent launch failed');
-});
+          ],
+        },
+        toolCallResult: {
+          callId: 'agent-1',
+          responseParts: [],
+          error: { message: 'Agent launch failed' },
+          status: 'error',
+          ...(structured
+            ? {
+                resultDisplay: {
+                  type: 'task_execution',
+                  status: 'failed',
+                  terminateReason: 'error',
+                },
+              }
+            : {}),
+        },
+      }),
+    ]);
+    const events = await read();
+    expect(events.map((event) => event.data)).toContainEqual(
+      expect.objectContaining({ toolCallId: 'agent-1', status: 'failed' }),
+    );
+    expect(JSON.stringify(events)).toContain('Agent launch failed');
+  },
+);
 
 it('rejects an oversized replay segment before materializing its events', async () => {
   await write([record('turn-1'), call('later', 'later', 'read_file')]);

@@ -43,7 +43,7 @@ import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
-import { useOpenTurnCalls } from '../turnCallsContext';
+import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
 
 interface MessageItemProps {
   message: Message;
@@ -393,7 +393,11 @@ export const MessageItem = memo(function MessageItem({
   // A turn's identity is its leading user message's id, so the entry is
   // available as soon as the turn exists — including while it is still running.
   const turnCallsTurnId =
-    openTurnCalls && message.role === 'user' ? message.id : undefined;
+    openTurnCalls &&
+    message.role === 'user' &&
+    isTurnCallsPrompt(message.source, message.content)
+      ? message.id
+      : undefined;
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
@@ -527,6 +531,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'user' &&
         prev.content === next.content &&
+        prev.source === next.source &&
         stableImagesEqual(prev.images, next.images)
       );
     case 'assistant':
