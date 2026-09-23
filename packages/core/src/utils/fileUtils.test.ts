@@ -1498,6 +1498,18 @@ describe('fileUtils', () => {
         allowedNames: ['read_file'],
         hint: '',
       },
+      {
+        // Same narrowing through the bridge route: the session declares
+        // tool_search and tool_call, but the narrowed agent has neither
+        // half, so the guidance must not advertise the bridge.
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', 'tool_search', 'tool_call'],
+        deferred: ['zoom_image'],
+        bindings: ['zoom_image'],
+        allowedNames: ['read_file'],
+        hint: '',
+      },
       ...[
         ['read_file', 'exec', 'tool_search', 'tool_call'],
         ['read_file', 'exec', 'zoom_image'],

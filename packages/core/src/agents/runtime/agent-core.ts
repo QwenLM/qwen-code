@@ -1744,7 +1744,19 @@ export class AgentCore {
         (forNestedBinding &&
           isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
           configuredAllowlist.includes(ToolNames.EXEC) &&
-          getToolExposure(toolName) === 'code-mode-callable')
+          getToolExposure(toolName) === 'code-mode-callable' &&
+          // Once the configured list mentions MCP at all, an MCP name must
+          // pass the raw-identity match instead of the exec carve-out —
+          // the same rule the executionAllowedTools branch applies below.
+          (!toolName.startsWith('mcp__') ||
+            !configuredAllowlist.some((name) => name.startsWith('mcp__')) ||
+            this.matchesMcpAllowlist(
+              toolName,
+              new Set(
+                configuredAllowlist.filter((name) => !name.includes('*')),
+              ),
+              configuredAllowlist.filter((name) => name.includes('*')),
+            )))
       );
     }
     if (
@@ -1775,9 +1787,24 @@ export class AgentCore {
       return false;
     }
 
-    // Match MCP patterns against the registry's raw server/tool identity.
-    // Comparing provider-sanitized prefixes can merge distinct server names
-    // such as "repo.bad" and "repo/bad", so it is unsafe for an allowlist.
+    return this.matchesMcpAllowlist(
+      toolName,
+      this.executionAllowedExactTools!,
+      this.executionAllowedMcpPatterns!,
+    );
+  }
+
+  /**
+   * Matches an MCP tool name against allowlist entries using the registry's
+   * raw server/tool identity. Comparing provider-sanitized prefixes can merge
+   * distinct server names such as "repo.bad" and "repo/bad", so it is unsafe
+   * for an allowlist.
+   */
+  private matchesMcpAllowlist(
+    toolName: string,
+    exact: ReadonlySet<string>,
+    patterns: readonly string[],
+  ): boolean {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
@@ -1794,14 +1821,11 @@ export class AgentCore {
     const serverToolName = registeredTool.serverToolName;
     const serverPattern = `mcp__${serverName}`;
     const rawToolName = `${serverPattern}__${serverToolName}`;
-    if (
-      this.executionAllowedExactTools?.has(serverPattern) ||
-      this.executionAllowedExactTools?.has(rawToolName)
-    ) {
+    if (exact.has(serverPattern) || exact.has(rawToolName)) {
       return true;
     }
 
-    return this.executionAllowedMcpPatterns!.some((pattern) => {
+    return patterns.some((pattern) => {
       if (pattern === 'mcp__*') {
         return true;
       }
