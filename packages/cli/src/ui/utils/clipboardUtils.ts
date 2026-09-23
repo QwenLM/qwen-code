@@ -346,6 +346,9 @@ export async function clipboardHasImage(
     return clipboard.hasFormat('image');
   } catch (error) {
     debugLogger.error('Error checking clipboard for image:', error);
+    // The module resolved but the call threw, so "no image" and "unreachable
+    // clipboard backend" would otherwise be indistinguishable to the caller.
+    onUnavailable?.();
     return false;
   }
 }
