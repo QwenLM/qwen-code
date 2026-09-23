@@ -12,6 +12,9 @@ const retry = document.querySelector('#retry');
 const logs = document.querySelector('#logs');
 const update = document.querySelector('#update');
 const version = document.querySelector('#version');
+const macosTitlebar = document.querySelector('#macos-titlebar-drag-region');
+
+macosTitlebar.hidden = window.__QWEN_CODE_MACOS_TITLEBAR__ !== true;
 
 let currentWorkspace = '';
 let snapshotOverrideStatus;

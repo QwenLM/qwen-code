@@ -62,6 +62,31 @@ describe('bundled review skill', () => {
     expect(body).toContain('decided stop with no composed artifact');
   });
 
+  it('rules an unplanned declarer under the eighth coverage failure, not a ninth', () => {
+    // `check-coverage` names a declarer whose chunk id the plan does not
+    // carry in the SAME `ERROR:` line as the planned ones, so the skill's
+    // eight rulings still cover everything the gate prints.
+    const body = skillBody();
+    expect(body).toContain(
+      'It reports eight failures, and they are not the same:',
+    );
+    // INSIDE the eighth bullet, not a bullet of its own — a ninth bullet
+    // would be a ninth failure with nothing in the gate to match it.
+    const eighth = body
+      .split('\n')
+      .find((l) => l.startsWith('- **Chunks declared uncoverable**'));
+    expect(eighth).toContain(
+      'The same line also names a declarer whose chunk id this plan does not carry',
+    );
+    expect(eighth).toContain(
+      'it is listed by that id but is no chunk of this plan',
+    );
+    expect(eighth).toContain(
+      'if you relay it in `uncoverableChunks`, write the bare `chunk <id>`',
+    );
+    expect(eighth).toContain('under the same ruling.');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice
@@ -725,6 +750,61 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'Findings the convergence posture deferred stay out the same way',
     );
+  });
+
+  it('rules the selection-drift line as a disclosure that owes no mid-round repair', () => {
+    // Both commands print it as a NOTE and exit 0, so without a ruling the
+    // orchestrator has two readings and both are wrong: ignore it, or act on
+    // its text — "re-capture the diff and re-plan" is Step 1, and rewriting
+    // the plan mid-round moves the mtime every prompt record and transcript
+    // of the round is fenced on.
+    const body = skillBody();
+    expect(body).toContain(
+      '**The coverage report may also carry `selectionDrift`**',
+    );
+    expect(body).toContain('It is a disclosure, not a ninth failure');
+    // Each phrase below occurs ONCE in the corpus — a pin on words another
+    // ruling also uses ("it owes **no relaunch**") stays green with this
+    // paragraph deleted.
+    expect(body).toContain('this NOTE owes no relaunch and no repair round');
+    expect(body).toContain(
+      '**Do not re-capture or re-plan mid-round**, whatever the line says.',
+    );
+    // …and it must not have been turned into a gate along the way.
+    expect(body).toContain('it moves no exit code, it caps nothing');
+    // The causes have different repairs; the ruling must not flatten them
+    // back into "the diff moved".
+    expect(body).toContain('an unreadable file may never have moved');
+    // Step 6 describes the NOTE lines beside the FIXes as withheld builds;
+    // the drift NOTE is the other kind, and that paragraph has to say so.
+    expect(body).toContain(
+      'One other `NOTE:` can sit there — `selection drift:`, ruled in Step 3D: a disclosure that posts no gap and owes nothing this round.',
+    );
+    // The causes, kept apart: flattened to "the diff moved" the ruling sends
+    // every one of them to the same repair.
+    expect(body).toContain(
+      "the diff file changed, was replaced or is gone; it could not be read; or the plan's chunk list or recorded identity does not match, or is not something this build can read",
+    );
+    for (const phrase of [
+      'It is a disclosure, not a ninth failure',
+      'this NOTE owes no relaunch and no repair round',
+      '**Do not re-capture or re-plan mid-round**, whatever the line says.',
+      // Report-only, in the skill's own words: flipped to "it is part of
+      // `ok`" the paragraph above stayed green.
+      'it is not part of `ok`, it moves no exit code, it caps nothing',
+      // A NOTE from both commands — the skill performs FIX lines.
+      '`compose-review` prints `NOTE: selection drift: …` beside its FIX lines',
+      // The positive instruction, and the reason that makes it one.
+      "Finish the round against the plan as written, and relay the line's own words in the terminal report",
+      "the plan file's mtime is the epoch every prompt record and transcript of this round is fenced on",
+      'an unreadable file may never have moved',
+      // Who records it, which command says it how, and why it only reports.
+      'every capture command records in the plan what the plan was computed from',
+      '`check-coverage` prints `NOTE: <what it found>`',
+      'The check has never fired on a real run; that is why it only reports',
+    ]) {
+      expect(body.split(phrase)).toHaveLength(2);
+    }
   });
 
   it('pins the composed body budget and its trim order', () => {

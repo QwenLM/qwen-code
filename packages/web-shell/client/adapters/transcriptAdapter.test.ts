@@ -89,10 +89,39 @@ describe('extractPendingPermission', () => {
         }),
       ]);
       expect(permission?.contentIsInput).toBeUndefined();
+      expect(permission?.content).toEqual(
+        content[0].type === 'diff'
+          ? content
+          : [{ type: 'text', text: 'Explicit explanation' }],
+      );
       expect(JSON.stringify(permission?.content)).not.toContain(
         'privateParameter',
       );
     }
+  });
+
+  it('escapes control characters in diff previews', () => {
+    const permission = extractPendingPermission([
+      genericPermission({
+        content: [
+          {
+            type: 'diff',
+            path: 'safe\u202e.txt',
+            oldText: 'old\u202e',
+            newText: 'new\u202e',
+          },
+        ],
+      }),
+    ]);
+
+    expect(permission?.content).toEqual([
+      {
+        type: 'diff',
+        path: 'safe\\u202e.txt',
+        oldText: 'old\\u202e',
+        newText: 'new\\u202e',
+      },
+    ]);
   });
 
   it('does not turn toolCall metadata into a parameter preview', () => {

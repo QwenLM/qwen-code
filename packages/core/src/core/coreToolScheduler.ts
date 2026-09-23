@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isShellResultDisplay,
+  shellResultText,
+} from '../utils/shell-result.js';
 import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -583,6 +587,11 @@ export type ErroredToolCall = {
   request: ToolCallRequestInfo;
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -593,6 +602,11 @@ export type SuccessfulToolCall = {
   tool: AnyDeclarativeTool;
   response: ToolCallResponseInfo;
   invocation: AnyToolInvocation;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -631,6 +645,11 @@ export type CancelledToolCall = {
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
   invocation?: AnyToolInvocation;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -1964,6 +1983,9 @@ export class CoreToolScheduler {
             status: 'success',
             response: auxiliaryData as CoreToolCallResponseInfo,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as SuccessfulToolCall;
         }
@@ -1977,6 +1999,9 @@ export class CoreToolScheduler {
             tool: toolInstance,
             response: auxiliaryData as CoreToolCallResponseInfo,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as ErroredToolCall;
         }
@@ -2076,6 +2101,9 @@ export class CoreToolScheduler {
             status: 'cancelled',
             response,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as CancelledToolCall;
         }
@@ -5271,11 +5299,11 @@ export class CoreToolScheduler {
           ],
           values: () => [
             ...toolResultPartDiagnosticValues(response.responseParts),
-            ...(typeof response.resultDisplay === 'string'
+            ...(shellResultText(response.resultDisplay) !== undefined
               ? [
                   {
                     representation: 'display' as const,
-                    value: response.resultDisplay,
+                    value: shellResultText(response.resultDisplay)!,
                   },
                 ]
               : []),
@@ -5711,11 +5739,14 @@ export class CoreToolScheduler {
           const getProducerInputValues = () =>
             (producerInputValues ??= [
               ...toolResultPartDiagnosticValues(producerToolResult?.llmContent),
-              ...(typeof producerToolResult?.returnDisplay === 'string'
+              ...(shellResultText(producerToolResult?.returnDisplay) !==
+              undefined
                 ? [
                     {
                       representation: 'display' as const,
-                      value: producerToolResult.returnDisplay,
+                      value: shellResultText(
+                        producerToolResult?.returnDisplay,
+                      )!,
                     },
                   ]
                 : []),
@@ -5724,11 +5755,11 @@ export class CoreToolScheduler {
           const getProducerOutputValues = () =>
             (producerOutputValues ??= [
               ...toolResultPartDiagnosticValues(response.responseParts),
-              ...(typeof response.resultDisplay === 'string'
+              ...(shellResultText(response.resultDisplay) !== undefined
                 ? [
                     {
                       representation: 'display' as const,
-                      value: response.resultDisplay,
+                      value: shellResultText(response.resultDisplay)!,
                     },
                   ]
                 : []),
@@ -6631,6 +6662,7 @@ export class CoreToolScheduler {
         }
 
         const error = new Error(errorMessage);
+        // Match createErrorResponse's legacy string fallback, including failure-hook context.
         let errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
@@ -6640,7 +6672,9 @@ export class CoreToolScheduler {
           typeof toolResult.returnDisplay === 'string'
             ? undefined
             : this.compactResultDisplayForInteractiveHistory(
-                toolResult.returnDisplay,
+                isShellResultDisplay(toolResult.returnDisplay)
+                  ? { ...toolResult.returnDisplay, text: errorMessage }
+                  : toolResult.returnDisplay,
               ),
         );
         if (errorPersistedOutputFiles !== undefined) {
