@@ -68,8 +68,8 @@ Both bridge tools are hidden, deferred reminders and the incomplete-bridge
 warning are skipped, and on the session surface `tools.eager` /
 `tools.visible` do not reduce those nested schemas. Callable tools remain
 available through `exec`. An AgentCore surface (subagent, headless agent,
-arena) narrows the nested binding set by its own allowlist, so a tool demoted
-by `tools.eager` has no nested binding there.
+arena) excludes tools hidden by `tools.eager` from its nested bindings and
+applies the agent allowlist rules below.
 
 Nested bindings prefer an exact canonical JavaScript name over names rewritten
 to that property. Other collisions retain canonical-name ordering; omitted
@@ -77,9 +77,11 @@ bindings remain absent from nested signatures and are never advertised as
 reachable through `exec`.
 
 Filtered subagent declarations preserve the same mode. The agent's `tools`
-list narrows its direct surface. Explicit ordinary-tool execution entries
-narrow the nested set, while an inherited or explicitly allowed `exec` carries
-all surviving code-mode-callable bindings.
+list narrows its direct surface. Agent allowlists that do not grant `exec`
+narrow nested bindings. Inheriting or explicitly granting `exec` keeps all
+otherwise admitted ordinary code-mode-callable bindings. An execution
+allowlist that mentions any MCP tool additionally restricts MCP bindings to
+matching exact names or server patterns.
 
 ## Constraints and risks
 

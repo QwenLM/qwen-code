@@ -1686,7 +1686,9 @@ export async function processSingleFileContent(
                     ?.getDeferredToolSummary()
                     .some((tool) => tool.name === 'zoom_image'));
             let zoomHint = '';
-            if (zoomAvailable) {
+            // An agent's target allowlist does not identify its declared
+            // direct, bridge, or exec routes. Do not advertise session routes.
+            if (zoomAvailable && ambientAllowedNames === undefined) {
               const toolName = useNestedZoom
                 ? 'tools.zoom_image'
                 : 'zoom_image';

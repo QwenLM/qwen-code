@@ -1498,6 +1498,23 @@ describe('fileUtils', () => {
         allowedNames: ['read_file'],
         hint: '',
       },
+      ...[
+        ['read_file', 'exec', 'tool_search', 'tool_call'],
+        ['read_file', 'exec', 'zoom_image'],
+        ['read_file', 'exec'],
+      ].flatMap((declared) =>
+        [[], ['read_file'], ['read_file', 'zoom_image']].map(
+          (allowedNames) => ({
+            codeModeOnly: false,
+            toolMode: ToolMode.CodeMode,
+            declared,
+            deferred: ['zoom_image'],
+            bindings: ['zoom_image'],
+            allowedNames,
+            hint: '',
+          }),
+        ),
+      ),
     ])(
       'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
       async ({

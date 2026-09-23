@@ -437,8 +437,12 @@ export interface QueryOptions {
    * tool is unavailable. CodeModeOnly hides both bridge tools, includes
    * callable deferred tools' full schemas in exec, and skips deferred
    * reminders and this warning; on the session surface tools.eager does not
-   * make those nested tools unreachable or reduce their schema tokens, while
-   * agent surfaces narrow the nested binding set by their own allowlists.
+   * make those nested tools unreachable or reduce their schema tokens.
+   * Agent allowlists that do not grant `exec` narrow nested bindings.
+   * Inheriting or explicitly granting `exec` keeps all otherwise admitted
+   * ordinary code-mode-callable bindings. An execution allowlist that
+   * mentions any MCP tool additionally restricts MCP bindings to matching
+   * exact names or server patterns.
    * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -514,8 +518,12 @@ export interface QueryOptions {
    *   both bridge tools, includes callable deferred tools' full schemas
    *   in exec, and skips deferred reminders and this warning; on the
    *   session surface tools.eager does not make those nested tools
-   *   unreachable or reduce their schema tokens, while agent surfaces
-   *   narrow the nested binding set by their own allowlists.
+   *   unreachable or reduce their schema tokens.
+   *   Agent allowlists that do not grant `exec` narrow nested bindings.
+   *   Inheriting or explicitly granting `exec` keeps all otherwise admitted
+   *   ordinary code-mode-callable bindings. An execution allowlist that
+   *   mentions any MCP tool additionally restricts MCP bindings to matching
+   *   exact names or server patterns.
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`

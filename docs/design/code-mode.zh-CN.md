@@ -61,16 +61,17 @@ CodeModeOnly。
 schema 的嵌套工具附上签名。在 `code_mode_only` 中，所有嵌套声明集中在 `exec`
 描述中；两个桥接工具都被隐藏，延迟提醒和桥接不完整的警告被跳过。在会话层，
 `tools.eager` 和 `tools.visible` 不会减少这些嵌套 schema，仍可调用的工具继续
-通过 `exec` 使用。AgentCore 层（subagent、headless agent、arena）会按自身的
-allowlist 收窄嵌套绑定集合，因此被 `tools.eager` 降级的工具在该层没有嵌套绑定。
+通过 `exec` 使用。AgentCore 层（subagent、headless agent、arena）会从嵌套绑定中
+排除被 `tools.eager` 隐藏的工具，并应用下文的智能体 allowlist 规则。
 
 嵌套绑定优先保留与 JavaScript 属性精确一致的规范名称，再考虑改写为该属性的
 名称。其他碰撞沿用规范名称字典序；被省略的绑定不出现在嵌套签名中，
 也不会被警告描述为可通过 `exec` 调用。
 
 经过过滤的子智能体声明沿用相同模式。智能体的 `tools` 列表会收窄直接调用面。
-显式列出的普通工具执行项（`executionAllowedTools`）会收窄嵌套集合；继承或显式
-允许的 `exec` 则携带所有仍可用的 code-mode-callable binding。
+未授权 `exec` 的智能体 allowlist 会收窄嵌套绑定；继承或显式允许 `exec` 时，
+会保留所有通过其他准入检查的普通 code-mode-callable binding。若执行 allowlist
+包含任一 MCP 工具项，MCP 绑定还必须匹配其中的精确工具名或服务器模式。
 
 ## 约束与风险
 
