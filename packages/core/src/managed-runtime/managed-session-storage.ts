@@ -41,6 +41,10 @@ export interface ManagedSessionActivationState {
   readonly phase: string;
   /** The horizon the install recorded; a release restates it unchanged. */
   readonly expiresAt: number;
+  /** Renewal count of the current activation; 0 for the install itself. */
+  readonly renewalSeq: number;
+  /** The install evidence a renewal must restate; null on old logs. */
+  readonly installRef: ManagedSessionDurableRef | null;
 }
 
 export interface ManagedSessionCommittedTransaction {
@@ -76,6 +80,16 @@ export interface ManagedSessionJournalReader {
 }
 
 /**
+ * The commit position a writer pins when sealing a Managed journal: the last
+ * committed sequence and the digest-chain head at that point. A takeover
+ * authenticates the scanned log against this proof before advancing it.
+ */
+export interface ManagedSessionCommitProof {
+  readonly lastCommitSequence: number;
+  readonly committedPrefixHash: string;
+}
+
+/**
  * Physical writer for one Managed Session journal.
  *
  * A semantic transaction is handed to the store as one batch. The local JSONL
@@ -92,7 +106,12 @@ export interface ManagedSessionJournalHandle
       | 'BLOCKED_EXECUTION';
     readonly detailCode: string;
   }): Promise<void>;
-  seal(): Promise<void>;
+  seal(commit: ManagedSessionCommitProof): Promise<void>;
+  /**
+   * The commit proof this handle took over from a sealed writer, when it did.
+   * Durable stores keep the proof server-side and omit it here.
+   */
+  readonly takeoverCommitProof?: ManagedSessionCommitProof;
   /** Abandons an unsuccessful open without publishing a handoff boundary. */
   abort(): Promise<void>;
 }
@@ -124,6 +143,9 @@ export function managedSessionActivationStateFrom(
     workerId: event.payload['workerId'] as string,
     phase: event.payload['phase'] as string,
     expiresAt: event.payload['expiresAt'] as number,
+    renewalSeq: (event.payload['renewalSeq'] as number | undefined) ?? 0,
+    installRef:
+      (event.payload['installRef'] as ManagedSessionDurableRef | null) ?? null,
   };
 }
 

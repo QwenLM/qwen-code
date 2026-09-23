@@ -2891,6 +2891,138 @@ describe('SessionWriterLease', () => {
     await replacement.release();
   });
 
+  describe('managed lock schema 3', () => {
+    const managedSchema = { schemaVersion: 3 as const, formatVersion: 1 };
+    const commitProof = {
+      last_commit_sequence: 7,
+      committed_prefix_hash: 'a'.repeat(64),
+    };
+
+    it('pins the format version into active and sealed records', async () => {
+      const fixture = await createFixture('managed-schema-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        schema_version: 3,
+        state: 'active',
+        format_version: 1,
+      });
+
+      await lease.appendJsonLine({ record: 'managed' });
+      await lease.sealForHandoff(commitProof);
+
+      const sealed = JSON.parse(await fs.readFile(lockPath, 'utf8'));
+      expect(sealed).toMatchObject({
+        schema_version: 3,
+        state: 'sealed',
+        format_version: 1,
+        last_commit_sequence: 7,
+        committed_prefix_hash: 'a'.repeat(64),
+      });
+      expect(sealed.transcript.sha256).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('refuses to seal a managed lease without the commit proof', async () => {
+      const fixture = await createFixture('managed-seal-proof-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const activeRaw = await fs.readFile(lockPath, 'utf8');
+
+      await expect(lease.sealForHandoff()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(activeRaw);
+      // A failed seal is terminal for the lease; the active lock is left for
+      // the owning process, which this test then abandons.
+      await lease.release().catch(() => undefined);
+    });
+
+    it('blocks a baseline writer from a sealed managed lock', async () => {
+      const fixture = await createFixture('managed-takeover-guard-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      await expect(
+        SessionWriterLease.acquire(fixture.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          takeoverPolicy: 'certified',
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    });
+
+    it('hands the sealed commit proof to a certified managed takeover', async () => {
+      const fixture = await createFixture('managed-takeover-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: managedSchema,
+      });
+      expect(replacement.ownerId).not.toBe(first.ownerId);
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      expect(replacement.writesManagedLockRecords).toBe(true);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        schema_version: 3,
+        state: 'active',
+        owner_id: replacement.ownerId,
+      });
+      await replacement.release();
+    });
+
+    it('does not reclaim a stale managed lock for a baseline writer', async () => {
+      const fixture = await createFixture('managed-stale-session');
+      const owner = startLeaseProcess();
+      expect(
+        await requestChild(owner, {
+          type: 'acquire',
+          options: { ...fixture.options, lockSchema: managedSchema },
+        }),
+      ).toMatchObject({ ok: true });
+      owner.kill('SIGKILL');
+      await waitForClose(owner);
+
+      await expect(
+        SessionWriterLease.acquire(fixture.options),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+
+      const managed = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      expect(managed.writesManagedLockRecords).toBe(true);
+      await managed.release();
+    });
+  });
+
   it('waits for an accepted append before sealing the transcript', async () => {
     const fixture = await createFixture('sealed-append-race-session');
     const lease = await SessionWriterLease.acquire(fixture.options);

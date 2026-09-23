@@ -174,6 +174,7 @@ export * from './managed-runtime/managed-session-records.js';
 export * from './managed-runtime/managed-session-resources.js';
 export * from './managed-runtime/http-managed-session-store.js';
 export type {
+  ManagedSessionCommitProof,
   ManagedSessionCommittedTransaction,
   ManagedSessionJournalHandle,
   ManagedSessionJournalReader,

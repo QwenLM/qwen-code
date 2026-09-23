@@ -236,6 +236,56 @@ describe('managed session assembly', () => {
     ).rejects.toThrow();
   });
 
+  it('seals with the commit proof and reopens through a certified takeover', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    await session.sink.write(record({ uuid: 'rec-user-1' }));
+    await session.close();
+
+    const lockPath = path.join(
+      workspace.runtimeBaseDir,
+      'tmp',
+      'session-writer-locks',
+      `${encodeURIComponent(sessionId)}.lock`,
+    );
+    const sealed = JSON.parse(await fs.readFile(lockPath, 'utf8'));
+    expect(sealed).toMatchObject({
+      schema_version: 3,
+      state: 'sealed',
+      format_version: 1,
+    });
+    expect(sealed.last_commit_sequence).toBeGreaterThan(0);
+    expect(sealed.committed_prefix_hash).toMatch(/^[0-9a-f]{64}$/);
+
+    const reopened = await open(workspace, { create: false });
+    expect(await reopened.sink.project()).toHaveLength(1);
+    await reopened.close();
+  });
+
+  it('refuses to advance a log whose sealed commit proof was tampered with', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    await session.sink.write(record({ uuid: 'rec-user-1' }));
+    await session.close();
+
+    // The commit proof is not covered by the transcript hash, so editing the
+    // lock passes the takeover's byte proof and reaches the authority, which
+    // must refuse instead of advancing from an unproven position.
+    const lockPath = path.join(
+      workspace.runtimeBaseDir,
+      'tmp',
+      'session-writer-locks',
+      `${encodeURIComponent(sessionId)}.lock`,
+    );
+    const sealed = JSON.parse(await fs.readFile(lockPath, 'utf8'));
+    sealed.last_commit_sequence = sealed.last_commit_sequence + 1;
+    await fs.writeFile(lockPath, JSON.stringify(sealed), { mode: 0o600 });
+
+    await expect(open(workspace, { create: false })).rejects.toThrow(
+      /does not match the sealed writer proof/,
+    );
+  });
+
   it('does not hold the writer when opening fails', async () => {
     const workspace = await createWorkspace();
 

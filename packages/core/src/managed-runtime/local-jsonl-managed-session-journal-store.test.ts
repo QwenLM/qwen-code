@@ -68,7 +68,10 @@ describe('local JSONL Managed Session journal store', () => {
       engineRecords: 1,
       lastRecordUuid: 'record-2',
     });
-    await handle.seal();
+    await handle.seal({
+      lastCommitSequence: 0,
+      committedPrefixHash: '0'.repeat(64),
+    });
   });
 
   it('releases a writer acquired by an aborted open', async () => {

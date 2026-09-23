@@ -19,6 +19,39 @@ import type {
   ManagedSessionKey,
 } from './managed-session-records.js';
 import { ManagedSessionRecordError } from './managed-session-records.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
+
+/**
+ * Keeps the installed activation's horizon ahead of a reader while the worker
+ * is alive. The install stamps a fixed expiry, so without renewal a session
+ * that outlives its lease reads as abandoned behind a live writer lock.
+ * Renewal failures are retried on the next tick: a durable write failure
+ * already fences new appends, so the timer only logs.
+ */
+function startActivationRenewal(
+  authority: LocalManagedSessionAuthority,
+  leaseDurationMs: number,
+): { stop: () => void } {
+  const intervalMs = Math.max(Math.floor(leaseDurationMs / 3), 1);
+  const timer = setInterval(() => {
+    authority.renewActivation({ leaseDurationMs }).catch((error: unknown) => {
+      debugLogger.debug(
+        'Managed Session activation renewal failed',
+        describeRenewalError(error),
+      );
+    });
+  }, intervalMs);
+  timer.unref();
+  return {
+    stop: () => clearInterval(timer),
+  };
+}
+
+function describeRenewalError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export interface OpenManagedSessionOptions {
   readonly runtimeBaseDir: string;
@@ -133,6 +166,11 @@ export async function openManagedSession(
       resources,
       ...(options.create === undefined ? {} : { create: options.create }),
       ...(options.requireNew === true ? { requireNew: true } : {}),
+      // A takeover proves the sealed writer's commit position before this
+      // authority may advance the log.
+      ...(journal.takeoverCommitProof === undefined
+        ? {}
+        : { expectedCommitProof: journal.takeoverCommitProof }),
     });
   } catch (cause) {
     // An adopted writer is not ours to end: releasing it would pull the lease
@@ -163,6 +201,11 @@ export async function openManagedSession(
     activation,
   }));
 
+  const renewal = startActivationRenewal(
+    authority,
+    options.activationLeaseDurationMs,
+  );
+
   return {
     authority,
     resources,
@@ -182,12 +225,13 @@ export async function openManagedSession(
     },
     // Sealing is the at-rest barrier, but only the lease's owner may end it.
     // A call that owns the whole lifecycle also records the boundary, or the
-    // activation would read as abandoned.
-    close: adopted
-      ? async () => undefined
-      : async () => {
-          await authority.releaseActivation();
-          await authority.close();
-        },
+    // activation would read as abandoned. An adopted lease still stops the
+    // renewal it started; only the lease itself stays with its owner.
+    close: async () => {
+      renewal.stop();
+      if (adopted) return;
+      await authority.releaseActivation();
+      await authority.close();
+    },
   };
 }

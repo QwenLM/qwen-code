@@ -63,6 +63,7 @@ import {
   SessionTranscriptChangedError,
   SessionWriterLostError,
   SessionWriterUnavailableError,
+  type SessionWriterCommitProof,
   type SessionWriterLease,
 } from './session-writer-lease.js';
 import type {
@@ -1460,6 +1461,7 @@ export class ChatRecordingService {
    * instead of straight into the transcript.
    */
   private managedSink?: ManagedSessionRecordWriter;
+  private managedCommitProof?: SessionWriterCommitProof;
 
   /** Binds the controlled sink; a Managed session must be bound before writing. */
   bindManagedSink(sink: ManagedSessionRecordWriter): void {
@@ -1797,9 +1799,15 @@ export class ChatRecordingService {
     }
   }
 
-  close(options?: { handoff?: boolean }): Promise<void> {
+  close(options?: {
+    handoff?: boolean;
+    managedCommitProof?: SessionWriterCommitProof;
+  }): Promise<void> {
     if (options?.handoff) {
       this.handoffRequested = true;
+    }
+    if (options?.managedCommitProof) {
+      this.managedCommitProof = options.managedCommitProof;
     }
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
@@ -1851,8 +1859,9 @@ export class ChatRecordingService {
       // Releasing deletes the lock, which would leave a Managed log with no
       // at-rest barrier at all: a legacy writer could then acquire it and
       // append, and the authority would refuse to reopen the log afterwards.
+      // A Managed seal also pins the authority's commit proof into the lock.
       if (this.handoffRequested || this.managedSink) {
-        await lease?.sealForHandoff();
+        await lease?.sealForHandoff(this.managedCommitProof);
       } else {
         await lease?.release();
       }

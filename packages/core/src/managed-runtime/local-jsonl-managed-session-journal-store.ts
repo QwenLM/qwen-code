@@ -6,10 +6,14 @@
 
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
-import { ManagedSessionRecordError } from './managed-session-records.js';
+import {
+  ManagedSessionRecordError,
+  MANAGED_SESSION_FORMAT_VERSION,
+} from './managed-session-records.js';
 import {
   emptyManagedSessionJournalScan,
   scanManagedSessionJournal,
+  type ManagedSessionCommitProof,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
   type ManagedSessionJournalStore,
@@ -42,6 +46,13 @@ export class LocalJsonlManagedSessionJournalStore
         sessionId: this.options.sessionId,
         transcriptPath: this.options.transcriptPath,
         takeoverPolicy: 'certified',
+        // A Managed writer pins its log format into the lock: baseline
+        // binaries refuse the unknown schema, which is the write barrier
+        // that keeps this log off legacy writers.
+        lockSchema: {
+          schemaVersion: 3,
+          formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+        },
       }));
     return new LocalJsonlManagedSessionJournalHandle(
       lease,
@@ -101,8 +112,20 @@ export class LocalJsonlManagedSessionJournalHandle
     }
   }
 
-  seal(): Promise<void> {
-    return this.lease.sealForHandoff();
+  seal(commit: ManagedSessionCommitProof): Promise<void> {
+    return this.lease.sealForHandoff({
+      last_commit_sequence: commit.lastCommitSequence,
+      committed_prefix_hash: commit.committedPrefixHash,
+    });
+  }
+
+  get takeoverCommitProof(): ManagedSessionCommitProof | undefined {
+    const proof = this.lease.takeoverCommitProof;
+    if (proof === undefined) return undefined;
+    return {
+      lastCommitSequence: proof.last_commit_sequence,
+      committedPrefixHash: proof.committed_prefix_hash,
+    };
   }
 
   async abort(): Promise<void> {

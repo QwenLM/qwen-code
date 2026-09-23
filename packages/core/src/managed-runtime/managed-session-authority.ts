@@ -46,6 +46,7 @@ import {
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
   type ManagedSessionActivationState,
+  type ManagedSessionCommitProof,
   type ManagedSessionCommitReceipt,
   type ManagedSessionCommittedTransaction,
   type ManagedSessionJournalHandle,
@@ -221,6 +222,9 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
   }
 }
 
+/** The digest-chain head of a log that has no commit marker yet. */
+const EMPTY_COMMIT_PREFIX_HASH = '0'.repeat(64);
+
 /**
  * A crash between the last event and its commit marker. The remedy is to
  * truncate the tail under an exclusive writer, which needs a lease capability
@@ -273,6 +277,13 @@ export interface OpenManagedSessionAuthorityOptions {
   /** Reject an existing header instead of reopening it through a create path. */
   readonly requireNew?: boolean;
   readonly now?: () => number;
+  /**
+   * The commit proof the sealed predecessor pinned into its writer lock. When
+   * supplied, the scanned log must match it exactly: a mismatch means the log
+   * drifted after the seal, and the session stays blocked rather than
+   * continuing from an unproven state.
+   */
+  readonly expectedCommitProof?: ManagedSessionCommitProof;
   /** Required only for domain records, whose bodies live in resources. */
   readonly resources?: ManagedSessionResourceStore;
 }
@@ -379,6 +390,18 @@ export class LocalManagedSessionAuthority {
       );
     }
     const scan = await journal.read();
+    if (options.expectedCommitProof !== undefined) {
+      const expected = options.expectedCommitProof;
+      const actualHash = scan.lastMarkerDigest ?? EMPTY_COMMIT_PREFIX_HASH;
+      if (
+        scan.committed !== expected.lastCommitSequence ||
+        actualHash !== expected.committedPrefixHash
+      ) {
+        throw new ManagedSessionConflictError(
+          `session log commit position ${scan.committed}/${actualHash} does not match the sealed writer proof ${expected.lastCommitSequence}/${expected.committedPrefixHash}.`,
+        );
+      }
+    }
     if (scan.uncommitted > 0) {
       throw new ManagedSessionUncommittedTailError(
         `session log ends with ${scan.uncommitted} uncommitted record(s); truncation under an exclusive writer is required before appending.`,
@@ -493,7 +516,19 @@ export class LocalManagedSessionAuthority {
       sessionId: options.sessionId,
       transcriptPath: options.transcriptPath,
       takeoverPolicy: 'certified',
+      lockSchema: {
+        schemaVersion: 3,
+        formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+      },
     });
+  }
+
+  /** The commit position the current log stands at, for sealing or proofs. */
+  get commitProof(): ManagedSessionCommitProof {
+    return {
+      lastCommitSequence: this.committed,
+      committedPrefixHash: this.lastMarkerDigest ?? EMPTY_COMMIT_PREFIX_HASH,
+    };
   }
 
   /**
@@ -506,7 +541,7 @@ export class LocalManagedSessionAuthority {
    * stays closed to writers that do not know how to take it over.
    */
   async close(): Promise<void> {
-    await this.journal.seal();
+    await this.journal.seal(this.commitProof);
   }
 
   static async recoverUncommittedTail(options: {
@@ -1445,6 +1480,38 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * Extends the current activation's horizon without changing its identity.
+   *
+   * The install stamps a fixed horizon, so a long-lived worker must renew or a
+   * reader eventually sees an expired activation behind a live writer lock.
+   * Renewal keeps the activation's id and epoch — it is not a handoff — and a
+   * released or missing activation has nothing left to renew.
+   */
+  async renewActivation(input: {
+    readonly leaseDurationMs: number;
+  }): Promise<ManagedSessionActivationState | undefined> {
+    if (this.recoveryBlocked) return undefined;
+    const current = this.activation;
+    if (current === undefined || current.phase !== 'active') {
+      return undefined;
+    }
+    const renewalSeq = current.renewalSeq + 1;
+    await this.commitActivation({
+      activationId: current.activationId,
+      epoch: current.epoch,
+      workerId: current.workerId,
+      phase: 'active',
+      leaseDurationMs: input.leaseDurationMs,
+      expiresAt: this.now() + input.leaseDurationMs,
+      installRef: current.installRef,
+      boundaryRef: null,
+      operation: 'renewActivation',
+      renewalSeq,
+    });
+    return this.activation;
+  }
+
+  /**
    * Records that the current activation stopped advancing the session.
    *
    * Without it a reader cannot tell a holder that finished from one that
@@ -1507,18 +1574,24 @@ export class LocalManagedSessionAuthority {
     readonly installRef: ManagedSessionDurableRef | null;
     readonly boundaryRef: ManagedSessionDurableRef | null;
     readonly operation: string;
+    readonly renewalSeq?: number;
   }): Promise<void> {
+    // A renewal repeats the install's phase under the same activation, so it
+    // needs its own command and event identity or the log's idempotency and
+    // event-id uniqueness would reject it as a duplicate of the install.
+    const renewalSuffix =
+      input.renewalSeq === undefined ? '' : `:renewal:${input.renewalSeq}`;
     await this.appendExecutionEvent(
       {
         operation: input.operation,
-        commandId: `${input.activationId}:${input.phase}`,
+        commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,
         sessionKey: this.sessionKey,
         contentDigest: this.header.definitionRef.digest,
       },
       (sequence) => ({
         v: MANAGED_SESSION_FORMAT_VERSION,
         sequence,
-        eventId: `activation:${input.activationId}:${input.phase}`,
+        eventId: `activation:${input.activationId}:${input.phase}${renewalSuffix}`,
         sessionKey: this.sessionKey,
         kind: 'activation.changed',
         occurredAt: this.now(),
@@ -1537,6 +1610,9 @@ export class LocalManagedSessionAuthority {
           expiresAt: input.expiresAt,
           installRef: input.installRef,
           boundaryRef: input.boundaryRef,
+          ...(input.renewalSeq === undefined
+            ? {}
+            : { renewalSeq: input.renewalSeq }),
         },
       }),
       { class: 'coordinator' },

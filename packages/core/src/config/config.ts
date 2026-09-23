@@ -358,6 +358,7 @@ import type {
   ManagedSessionKey,
 } from '../managed-runtime/managed-session-records.js';
 import {
+  MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
 } from '../managed-runtime/managed-session-records.js';
@@ -4946,6 +4947,17 @@ export class Config {
         takeoverPolicy: this.managedSessionLogEnabled
           ? 'certified'
           : this.sessionWriterTakeoverPolicy,
+        // A Managed writer pins its log format into the lock record (schema
+        // 3): baseline binaries refuse the unknown schema instead of writing
+        // into a Managed log, and sealing pins the authority's commit proof.
+        ...(this.managedSessionLogEnabled
+          ? {
+              lockSchema: {
+                schemaVersion: 3 as const,
+                formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+              },
+            }
+          : {}),
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
@@ -12226,6 +12238,19 @@ export class Config {
     try {
       await this.chatRecordingService?.close({
         handoff: this.sessionWriterHandoffRequested,
+        // The recorder seals the adopted lease, so the authority's commit
+        // proof has to reach that seal through it. Computed after the release
+        // boundary above, so the sealed proof covers the final record.
+        ...(managedSession === undefined
+          ? {}
+          : {
+              managedCommitProof: {
+                last_commit_sequence:
+                  managedSession.authority.commitProof.lastCommitSequence,
+                committed_prefix_hash:
+                  managedSession.authority.commitProof.committedPrefixHash,
+              },
+            }),
       });
     } catch (error) {
       failures.push(error);

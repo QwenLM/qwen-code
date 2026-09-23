@@ -512,7 +512,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         expiresAt: 'timeOrNull',
         installRef: 'refOrNull',
         boundaryRef: 'refOrNull',
+        renewalSeq: 'sequence',
       },
+      optional: ['renewalSeq'],
     },
     'model.attempt': {
       fields: {

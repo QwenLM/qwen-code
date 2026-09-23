@@ -21,6 +21,7 @@ import {
 
 const LEGACY_LOCK_SCHEMA_VERSION = 1;
 const LOCK_SCHEMA_VERSION = 2;
+const MANAGED_LOCK_SCHEMA_VERSION = 3;
 const MALFORMED_RETRY_COUNT = 3;
 const MALFORMED_RETRY_DELAY_MS = 50;
 const CLAIMED_PRIMARY_WAIT_ATTEMPTS = 20;
@@ -269,14 +270,52 @@ interface SealedSessionWriterLockRecord extends SessionWriterOwnerRecord {
   transcript: SealedTranscriptProof;
 }
 
+/**
+ * The commit position a Managed authority pins into its sealed lock. A new
+ * authority compares it against the scanned log before accepting a takeover,
+ * so a seal proof never silently adopts a log that drifted after sealing.
+ */
+export interface SessionWriterCommitProof {
+  last_commit_sequence: number;
+  committed_prefix_hash: string;
+}
+
+interface ActiveManagedSessionWriterLockRecord
+  extends SessionWriterOwnerRecord {
+  schema_version: typeof MANAGED_LOCK_SCHEMA_VERSION;
+  state: 'active';
+  format_version: number;
+}
+
+interface SealedManagedSessionWriterLockRecord
+  extends SessionWriterOwnerRecord {
+  schema_version: typeof MANAGED_LOCK_SCHEMA_VERSION;
+  state: 'sealed';
+  sealed_at: string;
+  format_version: number;
+  last_commit_sequence: number;
+  committed_prefix_hash: string;
+  transcript: SealedTranscriptProof;
+}
+
+type ManagedSessionWriterLockRecord =
+  | ActiveManagedSessionWriterLockRecord
+  | SealedManagedSessionWriterLockRecord;
+
 type SessionWriterLockRecord =
   | LegacySessionWriterLockRecord
   | ActiveSessionWriterLockRecord
-  | SealedSessionWriterLockRecord;
+  | SealedSessionWriterLockRecord
+  | ManagedSessionWriterLockRecord;
 
 type ActiveLockRecord =
   | LegacySessionWriterLockRecord
-  | ActiveSessionWriterLockRecord;
+  | ActiveSessionWriterLockRecord
+  | ActiveManagedSessionWriterLockRecord;
+
+type SealedLockRecord =
+  | SealedSessionWriterLockRecord
+  | SealedManagedSessionWriterLockRecord;
 
 export interface AcquireSessionWriterLeaseOptions {
   runtimeBaseDir: string;
@@ -286,6 +325,17 @@ export interface AcquireSessionWriterLeaseOptions {
   qwenVersion?: string | null;
   reclaimPolicy?: 'local' | 'never';
   takeoverPolicy?: 'never' | 'certified';
+  /**
+   * Write lock records in the Managed schema (3), pinning the log format the
+   * writer speaks. Old binaries report the unknown schema as malformed and
+   * refuse to write, which is the barrier that keeps a Managed log closed to
+   * them. Sealing such a lease requires the authority's commit proof, and a
+   * sealed schema-3 lock may only be taken over by a schema-3 acquirer.
+   */
+  lockSchema?: {
+    readonly schemaVersion: 3;
+    readonly formatVersion: number;
+  };
   onOwnershipAcquired?: (lease: SessionWriterLease) => void;
 }
 
@@ -293,7 +343,7 @@ type ExistingLockState =
   | { kind: 'missing' }
   | { kind: 'live'; record: ActiveLockRecord; raw: string }
   | { kind: 'stale'; record: ActiveLockRecord; raw: string }
-  | { kind: 'sealed'; record: SealedSessionWriterLockRecord; raw: string }
+  | { kind: 'sealed'; record: SealedLockRecord; raw: string }
   | { kind: 'malformed' };
 
 interface TranscriptFingerprint {
@@ -460,14 +510,30 @@ function isLockRecord(value: unknown): value is SessionWriterLockRecord {
   if (record['schema_version'] === LEGACY_LOCK_SCHEMA_VERSION) {
     return record['state'] === undefined;
   }
-  if (record['schema_version'] !== LOCK_SCHEMA_VERSION) return false;
-  if (record['state'] === 'active') return true;
-  return (
-    record['state'] === 'sealed' &&
-    typeof record['sealed_at'] === 'string' &&
-    Number.isFinite(Date.parse(record['sealed_at'])) &&
-    isSealedTranscriptProof(record['transcript'])
-  );
+  if (record['schema_version'] === LOCK_SCHEMA_VERSION) {
+    if (record['state'] === 'active') return true;
+    return (
+      record['state'] === 'sealed' &&
+      typeof record['sealed_at'] === 'string' &&
+      Number.isFinite(Date.parse(record['sealed_at'])) &&
+      isSealedTranscriptProof(record['transcript'])
+    );
+  }
+  if (record['schema_version'] === MANAGED_LOCK_SCHEMA_VERSION) {
+    if (!isManagedFormatVersion(record['format_version'])) return false;
+    if (record['state'] === 'active') return true;
+    return (
+      record['state'] === 'sealed' &&
+      typeof record['sealed_at'] === 'string' &&
+      Number.isFinite(Date.parse(record['sealed_at'])) &&
+      isSealedTranscriptProof(record['transcript']) &&
+      Number.isSafeInteger(record['last_commit_sequence']) &&
+      (record['last_commit_sequence'] as number) >= 0 &&
+      typeof record['committed_prefix_hash'] === 'string' &&
+      /^[0-9a-f]{64}$/.test(record['committed_prefix_hash'])
+    );
+  }
+  return false;
 }
 
 function parseLockRecord(raw: string): SessionWriterLockRecord | null {
@@ -485,6 +551,27 @@ function isActiveLockRecord(
   return (
     record.schema_version === LEGACY_LOCK_SCHEMA_VERSION ||
     record.state === 'active'
+  );
+}
+
+function isManagedFormatVersion(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 1;
+}
+
+function isManagedLockRecord(
+  record: SessionWriterLockRecord,
+): record is ManagedSessionWriterLockRecord {
+  return record.schema_version === MANAGED_LOCK_SCHEMA_VERSION;
+}
+
+function isValidCommitProof(value: unknown): value is SessionWriterCommitProof {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proof = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(proof['last_commit_sequence']) &&
+    (proof['last_commit_sequence'] as number) >= 0 &&
+    typeof proof['committed_prefix_hash'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(proof['committed_prefix_hash'])
   );
 }
 
@@ -1128,7 +1215,7 @@ async function closeTranscriptProof(proof: OpenTranscriptProof): Promise<void> {
 }
 
 function assertSealedProofMatches(
-  sealed: SealedSessionWriterLockRecord,
+  sealed: SealedLockRecord,
   relativePath: string,
   proof: OpenTranscriptProof,
 ): void {
@@ -1621,6 +1708,8 @@ export class SessionWriterLease {
   private lockFileIdentity: { dev: bigint; ino: bigint } | undefined;
   private readonly retiredPath: string;
   private readonly claimPath: string;
+  private readonly managedFormatVersion: number | undefined;
+  private takenOverCommitProof: SessionWriterCommitProof | undefined;
 
   private constructor(
     private readonly lockPath: string,
@@ -1631,6 +1720,9 @@ export class SessionWriterLease {
     this.sessionId = options.sessionId;
     this.runtimeBaseDir = options.runtimeBaseDir;
     this.transcriptPath = options.transcriptPath;
+    this.managedFormatVersion = isManagedLockRecord(lockRecord)
+      ? lockRecord.format_version
+      : undefined;
     this.lockRecordRaw = JSON.stringify(lockRecord);
     this.retiredPath = `${lockPath}.released.${encodeURIComponent(this.ownerId)}`;
     this.claimPath = `${lockPath}.claim`;
@@ -1641,6 +1733,21 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError();
     }
     return this.expectedTranscriptState.exists;
+  }
+
+  /**
+   * The commit proof a sealed Managed lock carried when this lease took it
+   * over. The accepting authority verifies its scanned log against this before
+   * advancing the session; absent when the lease did not take over a Managed
+   * seal.
+   */
+  get takeoverCommitProof(): SessionWriterCommitProof | undefined {
+    return this.takenOverCommitProof;
+  }
+
+  /** Whether this lease writes Managed (schema 3) lock records. */
+  get writesManagedLockRecords(): boolean {
+    return this.managedFormatVersion !== undefined;
   }
 
   static async acquire(
@@ -1707,8 +1814,14 @@ export class SessionWriterLease {
 
     const processStartIdentity = await readProcessStartIdentity(process.pid);
     const pidNamespaceId = readPidNamespaceId();
-    const lockRecord: ActiveSessionWriterLockRecord = {
-      schema_version: LOCK_SCHEMA_VERSION,
+    const lockSchema = normalizedOptions.lockSchema;
+    const lockRecord: ActiveLockRecord = {
+      ...(lockSchema === undefined
+        ? { schema_version: LOCK_SCHEMA_VERSION }
+        : {
+            schema_version: MANAGED_LOCK_SCHEMA_VERSION,
+            format_version: lockSchema.formatVersion,
+          }),
       state: 'active',
       session_id: normalizedOptions.sessionId,
       owner_id: randomUUID(),
@@ -1761,6 +1874,19 @@ export class SessionWriterLease {
           lockRecord,
           normalizedOptions,
         );
+      }
+      // A Managed lock may only be continued by a writer that speaks its
+      // schema: reclaiming or taking it over with a baseline writer would
+      // silently downgrade the record and drop the sealed commit proof.
+      if (
+        isManagedLockRecord(state.record) &&
+        normalizedOptions.lockSchema === undefined
+      ) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            'Session writer lock uses a schema this acquire cannot continue',
+          ),
+        });
       }
       if (normalizedOptions.reclaimPolicy === 'never') {
         throw new SessionWriterConflictError();
@@ -1845,9 +1971,22 @@ export class SessionWriterLease {
   private static async takeOverSealed(
     lockPath: string,
     observed: Extract<ExistingLockState, { kind: 'sealed' }>,
-    lockRecord: ActiveSessionWriterLockRecord,
+    lockRecord: ActiveLockRecord,
     options: AcquireSessionWriterLeaseOptions,
   ): Promise<SessionWriterLease> {
+    // A sealed Managed lock carries the authority's commit proof; continuing
+    // it with a baseline writer would drop that proof and downgrade the
+    // record, so only a schema-3 acquirer may take it over.
+    if (
+      isManagedLockRecord(observed.record) &&
+      options.lockSchema === undefined
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          'Sealed session writer lock uses a schema this acquire cannot continue',
+        ),
+      });
+    }
     const relativePath = getTranscriptRelativePath(
       options.runtimeBaseDir,
       options.transcriptPath,
@@ -1900,6 +2039,12 @@ export class SessionWriterLease {
         options,
         proof.state,
       );
+      if (isManagedLockRecord(observed.record)) {
+        lease.takenOverCommitProof = {
+          last_commit_sequence: observed.record.last_commit_sequence,
+          committed_prefix_hash: observed.record.committed_prefix_hash,
+        };
+      }
       await releaseTransitionClaim(claimPath, claimRaw);
       claimAcquired = false;
       await removeExactRecord(retiredPath, observed.raw).catch((error) => {
@@ -2566,10 +2711,17 @@ export class SessionWriterLease {
     return this.terminalPromise;
   }
 
-  sealForHandoff(): Promise<void> {
+  /**
+   * Seals the writer for a later certified takeover. A lease writing Managed
+   * (schema 3) records must seal with the authority's commit proof; a
+   * baseline lease ignores it.
+   */
+  sealForHandoff(commitProof?: SessionWriterCommitProof): Promise<void> {
     if (this.terminalOperation === 'release') return this.release();
     this.terminalOperation = 'seal';
-    this.terminalPromise ??= this.runExclusive(() => this.sealForHandoffOnce());
+    this.terminalPromise ??= this.runExclusive(() =>
+      this.sealForHandoffOnce(commitProof),
+    );
     return this.terminalPromise;
   }
 
@@ -2652,7 +2804,9 @@ export class SessionWriterLease {
     await directory?.handle.close().catch(() => undefined);
   }
 
-  private async sealForHandoffOnce(): Promise<void> {
+  private async sealForHandoffOnce(
+    commitProof?: SessionWriterCommitProof,
+  ): Promise<void> {
     if (this.released) return;
     const ownedRecord = await this.readOwnedLockForRelease();
     if (!this.expectedTranscriptState) {
@@ -2663,18 +2817,42 @@ export class SessionWriterLease {
       this.transcriptPath,
     );
     const proof = await openTranscriptProof(this.transcriptPath);
-    const sealedRecord: SealedSessionWriterLockRecord = {
-      ...ownedRecord,
-      schema_version: LOCK_SCHEMA_VERSION,
-      state: 'sealed',
-      sealed_at: new Date().toISOString(),
-      transcript: {
-        relative_path: relativePath,
-        exists: proof.state.exists,
-        byte_length: proof.state.byteLength,
-        sha256: proof.sha256,
-      },
+    const transcriptProof: SealedTranscriptProof = {
+      relative_path: relativePath,
+      exists: proof.state.exists,
+      byte_length: proof.state.byteLength,
+      sha256: proof.sha256,
     };
+    let sealedRecord: SealedLockRecord;
+    if (this.managedFormatVersion === undefined) {
+      sealedRecord = {
+        ...ownedRecord,
+        schema_version: LOCK_SCHEMA_VERSION,
+        state: 'sealed',
+        sealed_at: new Date().toISOString(),
+        transcript: transcriptProof,
+      };
+    } else {
+      // A Managed seal must pin the commit position the authority flushed;
+      // without it a takeover could adopt a log that drifted after sealing.
+      if (!isValidCommitProof(commitProof)) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            'Managed session writer seal requires the commit proof',
+          ),
+        });
+      }
+      sealedRecord = {
+        ...ownedRecord,
+        schema_version: MANAGED_LOCK_SCHEMA_VERSION,
+        state: 'sealed',
+        sealed_at: new Date().toISOString(),
+        format_version: this.managedFormatVersion,
+        last_commit_sequence: commitProof.last_commit_sequence,
+        committed_prefix_hash: commitProof.committed_prefix_hash,
+        transcript: transcriptProof,
+      };
+    }
     const sealedRaw = JSON.stringify(sealedRecord);
     const sealedCandidatePath = `${this.lockPath}.sealed-candidate.${encodeURIComponent(
       this.ownerId,

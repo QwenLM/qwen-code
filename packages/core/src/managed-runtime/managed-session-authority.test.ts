@@ -471,6 +471,8 @@ describe('managed session authority activation fences', () => {
       workerId: 'worker-1',
       phase: 'active',
       expiresAt: 2,
+      renewalSeq: 0,
+      installRef: ref(),
     });
     await opened.release();
   });
@@ -487,6 +489,8 @@ describe('managed session authority activation fences', () => {
       workerId: 'worker-1',
       phase: 'active',
       expiresAt: 2,
+      renewalSeq: 0,
+      installRef: ref(),
     });
     await reopened.release();
   });
@@ -674,6 +678,127 @@ describe('managed session authority activation fences', () => {
     ).rejects.toThrow(ManagedSessionConflictError);
     expect(await readLines(fixture)).toEqual(before);
     await opened.release();
+  });
+
+  describe('activation renewal', () => {
+    async function openRenewable(fixture: Fixture, now: () => number) {
+      const lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: fixture.runtimeBaseDir,
+        sessionId: fixture.sessionId,
+        transcriptPath: fixture.transcriptPath,
+      });
+      try {
+        const authority = await LocalManagedSessionAuthority.open({
+          lease,
+          sessionKey: sessionKeyFor(fixture),
+          cwd: '/workspace',
+          version: 'test',
+          now,
+          resources: LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: fixture.runtimeBaseDir,
+            sessionKey: sessionKeyFor(fixture),
+          }),
+          create: {
+            definitionRef: ref('managed-definition'),
+            rootSnapshotRef: ref('managed-root'),
+            createdBy: 'daemon',
+          },
+        });
+        return { authority, release: () => lease.release() };
+      } catch (error) {
+        await lease.release().catch(() => undefined);
+        throw error;
+      }
+    }
+
+    it('extends the horizon without changing the activation identity', async () => {
+      const fixture = await createFixture();
+      let now = 1_000_000;
+      const opened = await openRenewable(fixture, () => now);
+      const installed = await opened.authority.installActivation({
+        activationId: 'act-renew',
+        workerId: 'worker-1',
+        leaseDurationMs: 60_000,
+      });
+      expect(opened.authority.currentActivation).toMatchObject({
+        activationId: 'act-renew',
+        epoch: installed.epoch,
+        phase: 'active',
+        expiresAt: 1_060_000,
+        renewalSeq: 0,
+      });
+
+      now = 1_050_000;
+      const renewed = await opened.authority.renewActivation({
+        leaseDurationMs: 60_000,
+      });
+      expect(renewed).toMatchObject({
+        activationId: 'act-renew',
+        epoch: installed.epoch,
+        phase: 'active',
+        expiresAt: 1_110_000,
+        renewalSeq: 1,
+      });
+
+      now = 1_100_000;
+      await opened.authority.renewActivation({ leaseDurationMs: 60_000 });
+      expect(opened.authority.currentActivation).toMatchObject({
+        activationId: 'act-renew',
+        epoch: installed.epoch,
+        expiresAt: 1_160_000,
+        renewalSeq: 2,
+      });
+      await opened.release();
+    });
+
+    it('recovers the renewed horizon from a cold reopen', async () => {
+      const fixture = await createFixture();
+      let now = 1_000_000;
+      const opened = await openRenewable(fixture, () => now);
+      await opened.authority.installActivation({
+        activationId: 'act-renew',
+        workerId: 'worker-1',
+        leaseDurationMs: 60_000,
+      });
+      now = 1_050_000;
+      await opened.authority.renewActivation({ leaseDurationMs: 60_000 });
+      await opened.release();
+
+      const reopened = await openAuthority(fixture, { create: false });
+      expect(reopened.authority.currentActivation).toMatchObject({
+        activationId: 'act-renew',
+        phase: 'active',
+        expiresAt: 1_110_000,
+        renewalSeq: 1,
+      });
+      await reopened.release();
+    });
+
+    it('does not renew a released activation', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      await opened.authority.installActivation({
+        activationId: 'act-renew',
+        workerId: 'worker-1',
+        leaseDurationMs: 60_000,
+      });
+      await opened.authority.releaseActivation();
+
+      await expect(
+        opened.authority.renewActivation({ leaseDurationMs: 60_000 }),
+      ).resolves.toBeUndefined();
+      expect(opened.authority.currentActivation?.phase).toBe('released');
+      await opened.release();
+    });
+
+    it('does not renew when no activation was ever installed', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      await expect(
+        opened.authority.renewActivation({ leaseDurationMs: 60_000 }),
+      ).resolves.toBeUndefined();
+      await opened.release();
+    });
   });
 
   it('records a tool_call request and recovers the trusted decision', async () => {
