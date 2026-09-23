@@ -14127,6 +14127,20 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(message).toContain(HOOK_CONTEXT);
   });
 
+  it('caps oversized failure-hook context without touching the body', async () => {
+    // `error.message` reaches telemetry and the session record, which the
+    // batch budget does not bound.
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext: 'h'.repeat(200_000),
+    });
+
+    expect(message.startsWith(`${FAILURE_BODY}\n\nh`)).toBe(true);
+    expect(message.length).toBeLessThan(
+      FAILURE_BODY.length + 2 * DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+    );
+  });
+
   it.each([ToolErrorType.EXECUTION_FAILED, ToolErrorType.EXECUTION_TIMEOUT])(
     'preserves %s execution when cancellation arrives during failure postprocessing',
     async (errorType) => {

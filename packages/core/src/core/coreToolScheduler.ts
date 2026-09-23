@@ -6666,12 +6666,12 @@ export class CoreToolScheduler {
           );
         }
 
-        // The body is bounded; now the deferred hook context, mirroring the
-        // success path's step 2. Not re-bounded afterwards: the timeout branch
-        // appends its context to the response part with no second pass either,
-        // and a hook author's own context is their sizing decision.
+        // The body is bounded; now the deferred hook context. It is capped on its
+        // own: re-bounding the assembled string would truncate the producer's
+        // body again, and `error.message` also reaches telemetry and the session
+        // record, which the batch budget does not bound.
         if (failureHookAdditionalContext) {
-          errorMessage += `\n\n${failureHookAdditionalContext}`;
+          errorMessage += `\n\n${failureHookAdditionalContext.slice(0, errorGateThreshold)}`;
         }
 
         const error = new Error(errorMessage);
