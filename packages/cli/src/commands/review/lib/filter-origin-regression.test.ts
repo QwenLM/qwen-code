@@ -607,6 +607,87 @@ describe('filter origin regressions (real Git)', () => {
     },
   );
 
+  it.each(['discovered', 'configured'])(
+    'R7-2: refuses a forged common-dir marker at the %s-root entrance',
+    (entrance) => {
+      const repo = join(dir, 'main');
+      const linked = join(dir, 'linked');
+      const name = 'dotfiles/gitconfig';
+      const payload = join(repo, name);
+      init(
+        repo,
+        ...(entrance === 'configured'
+          ? ['--separate-git-dir', join(dir, 'admin.git')]
+          : []),
+      );
+      mkdirSync(dirname(payload));
+      git(repo, 'config', '--file', payload, TEAM, 'cat');
+      git(repo, 'add', name);
+      git(repo, 'commit', '-qm', 'tracked filter');
+      git(repo, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+      const common = discover(linked, '--git-common-dir');
+      const gitDir = discover(linked, '--git-dir');
+      git(linked, 'config', '--global', 'include.path', gitPath(payload));
+      git(linked, 'config', 'include.path', gitPath(payload));
+      if (entrance === 'configured') {
+        git(linked, 'config', 'core.worktree', gitPath(repo));
+        rmSync(join(repo, '.git'));
+        const discovery = spawnSync('git', ['rev-parse', '--git-common-dir'], {
+          cwd: dirname(payload),
+          encoding: 'utf8',
+          env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
+        });
+        expect(discovery.error).toBeUndefined();
+        expect(discovery.status).toBe(128);
+        expect(discovery.stderr).toMatch(/^fatal: not a git repository/);
+      }
+      expect(filterCommandsIn(common, gitDir, linked)).toEqual(refusedTeam);
+      expect(checkoutFilterCommands(linked)).toEqual([TEAM]);
+
+      const root = join(common, 'info');
+      const marker = join(root, '.git');
+      mkdirSync(root, { recursive: true });
+      git(
+        linked,
+        'config',
+        '--file',
+        join(common, 'config'),
+        'core.worktree',
+        gitPath(root),
+      );
+      expect(existsSync(marker)).toBe(false);
+      expect(filterCommandsIn(common, gitDir, linked)).toEqual(refusedTeam);
+      expect(checkoutFilterCommands(linked)).toEqual([TEAM]);
+
+      writeFileSync(marker, `gitdir: ${gitPath(common)}\n`);
+      expect(
+        normalize(git(common, 'rev-parse', '--resolve-git-dir', marker)),
+      ).toBe(common);
+      if (entrance === 'discovered') {
+        expect(discover(dirname(payload), '--git-common-dir')).toBe(common);
+        expect(discover(dirname(payload), '--show-toplevel')).toBe(root);
+      }
+      expect(discover(linked, '--show-toplevel')).toBe(linked);
+      expect(
+        git(
+          linked,
+          `--git-dir=${common}`,
+          `--work-tree=${repo}`,
+          'ls-files',
+          '--error-unmatch',
+          '--',
+          name,
+        ),
+      ).toBe(name);
+      expect(git(linked, 'config', '--includes', '--get', TEAM)).toBe('cat');
+
+      expect
+        .soft(filterCommandsIn(common, gitDir, linked))
+        .toEqual(refusedTeam);
+      expect.soft(checkoutFilterCommands(linked)).toEqual([TEAM]);
+    },
+  );
+
   it.each(['native', 'included'])(
     'R7 control: preserves a legitimate %s global filter with relative core.worktree',
     (kind) => {

@@ -1362,6 +1362,10 @@ export function filterCommandsIn(
       ? resolve(commonDir, configuredWorktreeRead.value)
       : null;
   const rootNamesGitDir = (root: string, expectedGitDir: string): boolean => {
+    // The writable admin directory cannot corroborate its own worktree key.
+    if (adminRealpaths.some((admin) => isSubpath(admin, pathIdentity(root)))) {
+      return false;
+    }
     const marker = gitOutput(
       commonDir,
       ['rev-parse', '--resolve-git-dir', join(root, '.git')],
