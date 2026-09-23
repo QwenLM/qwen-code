@@ -1229,6 +1229,8 @@ async function runOverridePath(
         denies: await subagentMgr.resolveToolNames(
           augmented.disallowedTools ?? [],
         ),
+        toolAliasesFor: (toolName) =>
+          config.getToolRegistry().getPermissionAliases?.(toolName),
         schema: opts.schema !== undefined,
       });
     } catch (error) {

@@ -681,7 +681,7 @@ describe('createMemoryScopedAgentConfig', () => {
       await expect(
         delegated.getToolRegistrationStatus(ToolNames.WEB_FETCH),
       ).resolves.toBe('disabled');
-      expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH);
+      expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH, undefined);
 
       const noBase = permissionManager(
         createMemoryScopedAgentConfig({} as Config, projectRoot),

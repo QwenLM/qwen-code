@@ -1464,10 +1464,20 @@ describe('matchesRule', () => {
   it('matches a legacy dotted MCP server rule against provider-safe names', () => {
     const rule = parseRule('mcp__zybio.db');
 
+    // Production supplies the tool's own `permissionAliases` with the
+    // evaluation; the alias carries the raw spelling the registered name
+    // lost (#10199).
     expect(
       matchesRule(
         rule,
         normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
       ),
     ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
@@ -1486,6 +1496,13 @@ describe('matchesRule', () => {
       matchesRule(
         rule,
         normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
       ),
     ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
@@ -1925,9 +1942,14 @@ describe('PermissionManager', () => {
       );
       pm2.initialize();
 
+      // Production supplies the tool's own `permissionAliases` with the
+      // evaluation; the alias carries the raw spelling the registered name
+      // lost (#10199). For this name the legacy reduction is lossless, so
+      // the alias equals the raw spelling.
       expect(
         await pm2.evaluate({
           toolName: providerSafeName,
+          toolAliases: [legacyName],
         }),
       ).toBe('deny');
     });

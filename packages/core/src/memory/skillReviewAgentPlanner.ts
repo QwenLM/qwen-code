@@ -254,18 +254,22 @@ export function createSkillScopedAgentConfig(
         : 'default';
       return mergePermissionDecision(scopedDecision, baseDecision);
     },
-    async isToolEnabled(toolName: string): Promise<boolean> {
+    async isToolEnabled(
+      toolName: string,
+      toolAliases?: readonly string[],
+    ): Promise<boolean> {
       if (isScopedTool(toolName)) return true;
-      if (basePm) return basePm.isToolEnabled(toolName);
+      if (basePm) return basePm.isToolEnabled(toolName, toolAliases);
       return true;
     },
     async getToolRegistrationStatus(
       toolName: string,
+      toolAliases?: readonly string[],
     ): Promise<ToolRegistrationStatus> {
       if (isScopedTool(toolName)) return 'registered';
       if (basePm) {
         return typeof basePm.getToolRegistrationStatus === 'function'
-          ? basePm.getToolRegistrationStatus(toolName)
+          ? basePm.getToolRegistrationStatus(toolName, toolAliases)
           : Promise.resolve('registered' as ToolRegistrationStatus);
       }
       return 'registered';

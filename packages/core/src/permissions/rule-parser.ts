@@ -1592,10 +1592,13 @@ const PROVIDER_NAME_HASH_LENGTH = 8;
  * string the registering party chooses, so a server registered under the
  * provider-safe key `foo_bar` can name a tool `evil_<hash of
  * "mcp__foo.bar__evil">`, register verbatim with no alias to contradict it, and
- * satisfy this check against a rule for the *different* server `foo.bar`. What
- * this closes is the accidental collision — a `foo.bar` rule no longer reaches
- * every `foo_bar` tool uncrafted — not a deliberate adversary; registry-backed
- * ambiguity filtering would be needed for that and is out of scope (#10199).
+ * would satisfy this check against a rule for the *different* server
+ * `foo.bar`. That forgery is why callers run this fallback only when the tool
+ * advertised at least one permission alias (`aliasAdvertised` in
+ * {@link matchesMcpPattern}): a verbatim provider-safe registration publishes
+ * none, so the crafted name never reaches here, while every tool whose raw
+ * name was genuinely unsafe — the registrations this fallback exists for —
+ * advertises one.
  *
  * Returns false for prefixes that are already provider-safe (the caller's
  * literal comparison decides those) and for names whose sanitized form was
@@ -1650,11 +1653,26 @@ function isNormalizedFromRawPrefix(
  * does not match at all; whether that removes a restriction depends on the
  * rule's semantics — fail-closed on `allow` (the tool falls back to `ask`),
  * fail-open on `deny`/`ask` rules and on `disallowedTools` blocklists.
+ *
+ * `aliasAdvertised` gates the hash-verification fallback: it may run only for
+ * a tool that advertised at least one permission alias. Every hash-suffixed
+ * registration comes from a provider-unsafe raw name, and such a tool always
+ * advertises an alias; a tool with NO alias registered verbatim under a
+ * provider-safe name the server picked itself, so the suffix in it proves
+ * nothing — `stableToolNameHash` is an unkeyed FNV-1a over a string the
+ * registering party chooses, and without this gate a server registered under
+ * the provider-safe key `foo_bar` can name a tool `evil_<hash of
+ * "mcp__foo.bar__evil">` and satisfy the verification against a rule for the
+ * *different* server `foo.bar` (#10199). Requiring an advertised alias keeps
+ * the fallback for the tools it exists for (unsafe raw names, e.g. a
+ * colon-spelled server whose alias lost the server segment) and denies it to
+ * verbatim registrations whose tail merely imitates a hash.
  */
 export function matchesMcpPattern(
   pattern: string,
   toolName: string,
   rawToolName?: string,
+  aliasAdvertised = false,
 ): boolean {
   if (pattern === toolName) {
     return true;
@@ -1697,7 +1715,7 @@ export function matchesMcpPattern(
     }
     return (
       matchesPrefixLiterally(prefix) ||
-      isNormalizedFromRawPrefix(toolName, prefix)
+      (aliasAdvertised && isNormalizedFromRawPrefix(toolName, prefix))
     );
   }
 
@@ -1713,11 +1731,46 @@ export function matchesMcpPattern(
     const serverPrefix = `${pattern}__`;
     return (
       matchesPrefixLiterally(serverPrefix) ||
-      isNormalizedFromRawPrefix(toolName, serverPrefix)
+      (aliasAdvertised && isNormalizedFromRawPrefix(toolName, serverPrefix))
     );
   }
 
   return false;
+}
+
+/**
+ * Pick the alias that serves as the tool's raw identity for prefix matching,
+ * or `undefined` when no alias can vouch for it.
+ *
+ * `DiscoveredMCPTool.permissionAliases` publishes
+ * `generateLegacyMcpToolName('mcp__<server>__<tool>')`, *not* the raw
+ * spelling: a second lossy reduction that keeps `.` and `-`, maps every other
+ * character to `_`, and middle-truncates names over 63 characters. The strict
+ * arm — the alias's own normalization is the registered name — therefore only
+ * fires when that legacy reduction was itself lossless. The relaxed arm
+ * accepts an alias whose *server* segment equals the rule's server segment
+ * verbatim: prefix matching only needs the server segment intact, and the
+ * segment comes from the registered server name, so a colliding server
+ * (`foo_bar` answering a rule for `foo.bar`) cannot produce one. The tool
+ * segment may still be legacy-reduced (`my+tool` → `my_tool`, or a name over
+ * 63 chars middle-truncated); that costs exactness only inside the matched
+ * server's own tool list, which the rule already covers.
+ */
+function resolveRawMcpIdentity(
+  ruleToolName: string,
+  canonicalCtxToolName: string,
+  toolAliases: readonly string[] | undefined,
+): string | undefined {
+  if (!toolAliases?.length) {
+    return undefined;
+  }
+  const ruleServerSegment = ruleToolName.split('__')[1];
+  return toolAliases.find(
+    (alias) =>
+      normalizeMcpToolName(alias) === canonicalCtxToolName ||
+      (ruleServerSegment !== undefined &&
+        alias.split('__')[1] === ruleServerSegment),
+  );
 }
 
 /**
@@ -1726,11 +1779,25 @@ export function matchesMcpPattern(
  * {@link matchesMcpPattern}); every other tool matches only its exact name.
  * One predicate for every place that applies a deny list to a tool pool, so the
  * declaration filter and the callers that predict it cannot disagree.
+ *
+ * `toolAliases` is the tool's own advertised `permissionAliases`; deny lists
+ * are fail-open on a lost match, so every reachable caller resolves them from
+ * the registry rather than matching on the registered name alone.
  */
-export function matchesToolPattern(pattern: string, toolName: string): boolean {
-  return toolName.startsWith('mcp__')
-    ? matchesMcpPattern(pattern, toolName)
-    : pattern === toolName;
+export function matchesToolPattern(
+  pattern: string,
+  toolName: string,
+  toolAliases?: readonly string[],
+): boolean {
+  if (!toolName.startsWith('mcp__')) {
+    return pattern === toolName;
+  }
+  return matchesMcpPattern(
+    pattern,
+    toolName,
+    resolveRawMcpIdentity(pattern, toolName, toolAliases),
+    toolAliases !== undefined && toolAliases.length > 0,
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1804,24 +1871,18 @@ export function matchesRule(
       (toolAliases ?? []).some(
         (alias) => rule.toolName === resolveToolName(alias),
       );
-    // `DiscoveredMCPTool.permissionAliases` publishes
-    // `generateLegacyMcpToolName('mcp__<server>__<tool>')`, *not* the raw
-    // spelling: a second lossy reduction that keeps `.` and `-`, maps every
-    // other character to `_`, and middle-truncates names over 63 characters.
-    // The alias below is therefore found only when that legacy reduction was
-    // itself lossless. When it was not (an out-of-set character in either
-    // segment, or a raw name over 63 chars) no alias normalizes to the
-    // registered name, and a legacy server or wildcard rule is left with the
-    // registered spelling alone — which cannot recover an unsafe raw tail, so
-    // the rule stops matching its own server's tool. Carrying the raw identity
-    // losslessly at the source is the fix for that and is a wider change than
-    // this matcher (#10199).
-    const rawMcpToolName = (toolAliases ?? []).find(
-      (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,
+    const rawMcpToolName = resolveRawMcpIdentity(
+      rule.toolName,
+      canonicalCtxToolName,
+      toolAliases,
     );
     const matchesMcpName =
-      matchesMcpPattern(rule.toolName, canonicalCtxToolName, rawMcpToolName) ||
-      matchesLegacyExactName;
+      matchesMcpPattern(
+        rule.toolName,
+        canonicalCtxToolName,
+        rawMcpToolName,
+        toolAliases !== undefined && toolAliases.length > 0,
+      ) || matchesLegacyExactName;
     if (!matchesMcpName) {
       return false;
     }

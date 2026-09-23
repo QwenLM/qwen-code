@@ -669,7 +669,7 @@ describe('skill-scoped shim registration-gate delegation (#10075)', () => {
     await expect(
       delegated.getToolRegistrationStatus(ToolNames.WEB_FETCH),
     ).resolves.toBe('disabled');
-    expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH);
+    expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH, undefined);
 
     const noBase = scopedPmWithBase(undefined);
     await expect(

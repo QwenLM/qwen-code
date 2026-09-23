@@ -92,6 +92,12 @@ export interface AgentToolNarrowingInput {
    * Entries may be MCP patterns.
    */
   readonly denies: readonly string[];
+  /**
+   * Resolves a registered tool's advertised permission aliases (the MCP
+   * legacy spellings), so a deny written in a legacy spelling still covers
+   * the tool it names (#10199). Denies are fail-open on a lost match.
+   */
+  readonly toolAliasesFor?: (toolName: string) => readonly string[] | undefined;
   /** Whether the agent answers through `structured_output`. */
   readonly schema: boolean;
 }
@@ -120,7 +126,9 @@ export function narrowAgentTools(input: AgentToolNarrowingInput): string[] {
 
   const allowed = bounded.filter(
     (name) =>
-      !input.denies.some((pattern) => matchesToolPattern(pattern, name)),
+      !input.denies.some((pattern) =>
+        matchesToolPattern(pattern, name, input.toolAliasesFor?.(name)),
+      ),
   );
   if (allowed.length === 0) {
     throw new Error(
