@@ -161,9 +161,6 @@ export function AgentCreatePage({
   const [hooks, setHooks] = useState(
     agent?.hooks ? JSON.stringify(agent.hooks, null, 2) : '',
   );
-  const [workspaceCreateMethod, setWorkspaceCreateMethod] = useState<
-    'model' | 'manual'
-  >('manual');
   const [generationOpen, setGenerationOpen] = useState(false);
   const [generationPrompt, setGenerationPrompt] = useState('');
   const [generatedDescription, setGeneratedDescription] = useState('');
@@ -577,59 +574,6 @@ export function AgentCreatePage({
     }
   }
 
-  if (workspaceAgentMode && !workspaceCreateMethod) {
-    return (
-      <div className="flex w-full max-w-3xl flex-col gap-6">
-        <div>
-          <h1 className="text-xl font-semibold text-balance">Create Agent</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Give this workspace a durable teammate. Each task gets its own
-            conversation while the Agent keeps the same identity.
-          </p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Button
-            type="button"
-            variant="outline"
-            className="h-auto justify-start p-5 text-left"
-            onClick={() => {
-              setWorkspaceCreateMethod('model');
-              setGenerationOpen(true);
-            }}
-          >
-            <SparklesIcon className="size-5 self-start" />
-            <span>
-              <strong className="block">Build with AI</strong>
-              <span className="mt-1 block whitespace-normal text-xs text-muted-foreground">
-                Recommended. Describe the teammate you need, then review the
-                generated role and instructions.
-              </span>
-            </span>
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="h-auto justify-start p-5 text-left"
-            onClick={() => setWorkspaceCreateMethod('manual')}
-          >
-            <span>
-              <strong className="block">Configure manually</strong>
-              <span className="mt-1 block whitespace-normal text-xs text-muted-foreground">
-                Set the Agent name, durable instructions, model, and task
-                concurrency yourself.
-              </span>
-            </span>
-          </Button>
-        </div>
-        <div>
-          <Button type="button" variant="outline" onClick={onCancel}>
-            {t('common.cancel')}
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="flex w-full max-w-5xl flex-col gap-6">
       <div className="flex items-start justify-between gap-4">
@@ -683,17 +627,9 @@ export function AgentCreatePage({
             <TabsTrigger value="prompt">
               {t('agent.detail.systemPrompt')}
             </TabsTrigger>
-            {!workspaceAgentMode ? (
-              <>
-                <TabsTrigger value="tools">
-                  {t('agent.detail.tools')}
-                </TabsTrigger>
-                <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
-                <TabsTrigger value="hooks">
-                  {t('agent.detail.hooks')}
-                </TabsTrigger>
-              </>
-            ) : null}
+            <TabsTrigger value="tools">{t('agent.detail.tools')}</TabsTrigger>
+            <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
+            <TabsTrigger value="hooks">{t('agent.detail.hooks')}</TabsTrigger>
           </TabsList>
         )}
 
@@ -946,11 +882,6 @@ export function AgentCreatePage({
         {!workspaceAgentMode && (
           <TabsContent value="prompt" className="pt-4">
             <Field>
-              {workspaceAgentMode && (
-                <FieldLabel htmlFor="agent-prompt">
-                  系统提示词 · 职责与协作方式
-                </FieldLabel>
-              )}
               <Textarea
                 id="agent-prompt"
                 aria-label={t('agent.create.prompt')}
@@ -961,9 +892,7 @@ export function AgentCreatePage({
                 className="min-h-80 max-h-[60vh] overflow-y-auto"
               />
               <FieldDescription>
-                {workspaceAgentMode
-                  ? '这是智能体的核心工作指令：定义它的职责、如何协作和输出什么。上面的描述只是列表简介，不能代替这里的指令。'
-                  : t('agent.create.promptHelp')}
+                {t('agent.create.promptHelp')}
               </FieldDescription>
             </Field>
           </TabsContent>

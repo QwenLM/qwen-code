@@ -1046,7 +1046,6 @@ export function WebShellSidebar({
   );
   const [sessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
-  const [agentsNavExpanded, setAgentsNavExpanded] = useState(false);
   // Reset before commit so effects that key bookkeeping by the raw source
   // cannot observe a hidden switch with channel state and default catalogs.
   if (!showSessionSourceSwitch && sessionSource !== 'default') {
@@ -5668,45 +5667,13 @@ export function WebShellSidebar({
                       type="button"
                       title={t('agents.title')}
                       aria-label={t('agents.title')}
-                      aria-expanded={agentsNavExpanded}
-                      onClick={() => {
-                        if (collapsed) onOpenAgents('agents');
-                        else setAgentsNavExpanded((value) => !value);
-                      }}
+                      onClick={() => onOpenAgents('agents')}
                     >
                       <span className={styles.navIcon}>
                         <BotIcon size={16} strokeWidth={1.2} />
                       </span>
                       {!collapsed && <span>{t('agents.title')}</span>}
-                      {!collapsed && (
-                        <span className="ml-auto" aria-hidden="true">
-                          {agentsNavExpanded ? '▾' : '▸'}
-                        </span>
-                      )}
                     </button>
-                    {!collapsed && agentsNavExpanded && (
-                      <div
-                        className="ml-7 flex flex-col border-l border-border pl-2"
-                        aria-label="智能体导航"
-                      >
-                        {(['agents', 'tasks', 'runtime'] as const).map(
-                          (view) => (
-                            <button
-                              key={view}
-                              type="button"
-                              className={styles.pluginButton}
-                              onClick={() => onOpenAgents(view)}
-                            >
-                              {view === 'agents'
-                                ? '智能体列表'
-                                : view === 'tasks'
-                                  ? '任务看板'
-                                  : '执行主机'}
-                            </button>
-                          ),
-                        )}
-                      </div>
-                    )}
                   </div>
                 )}
               {projectFeaturesEnabled && primaryNavItems.has('plugins') && (

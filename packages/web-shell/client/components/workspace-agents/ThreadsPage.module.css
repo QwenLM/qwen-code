@@ -17,15 +17,6 @@
   border-block-end: 1px solid var(--border);
 }
 
-.title {
-  min-width: 0;
-  color: var(--foreground);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.35;
-  outline: none;
-}
-
 .headerActions,
 .formActions {
   display: flex;
@@ -36,14 +27,6 @@
 .viewTabs {
   display: flex;
   gap: 2px;
-}
-
-.createForm {
-  display: grid;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
 }
 
 .field {

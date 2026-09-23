@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useI18n } from '../../i18n';
+import { AddRuntimeDialog, type JoinToken } from './add-runtime-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
 import { PlusIcon } from 'lucide-react';
 
@@ -56,14 +58,11 @@ export interface ThreadsPageProps {
     provider: 'qwen' | 'codex';
     allowHttp: boolean;
   }) => Promise<boolean>;
-  initialCreateTask?: boolean;
   hideNavigation?: boolean;
   createError?: string;
   agents: readonly WorkspaceAgentSummaryView[];
   threads: readonly ThreadSummaryView[];
-  runtime?: WorkspaceAgentRuntimeView;
   runtimes?: readonly WorkspaceAgentRuntimeView[];
-  hostEnrollment?: AgentHostEnrollmentView;
   view: AgentWorkspaceView;
   onViewChange: (view: AgentWorkspaceView) => void;
   onOpenThread: (threadId: string) => void;
@@ -72,11 +71,8 @@ export interface ThreadsPageProps {
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
   onOpenAgentBuilder?: () => void;
   onOpenDefinitions?: () => void;
-  onCreateHostEnrollment?: (
-    serverUrl: string,
-    provider: 'qwen' | 'codex',
-    allowHttp?: boolean,
-  ) => void;
+  /** Issues a single-use join token for the Add runtime dialog. */
+  onCreateJoinToken?: () => Promise<JoinToken>;
   hostServerUrl?: string;
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => Promise<boolean> | void;
@@ -86,7 +82,6 @@ export interface ThreadsPageProps {
   onPreviewThread?: (assignee?: string) => void;
   createPreview?: readonly RoutingPreviewTarget[];
   pending?: boolean;
-  loading?: boolean;
 }
 
 export interface WorkspaceAgentSummaryView {
@@ -128,11 +123,6 @@ export interface WorkspaceAgentRuntimeView {
   sessionCount?: number;
   runningTaskCount?: number;
   queuedTaskCount?: number;
-}
-
-export interface AgentHostEnrollmentView {
-  command: string;
-  expiresAt: number;
 }
 
 export type AgentWorkspaceView = 'agents' | 'tasks' | 'runtime';
@@ -236,9 +226,7 @@ function Group({
 export function ThreadsPage({
   agents,
   threads,
-  runtime,
   runtimes,
-  hostEnrollment,
   view,
   onViewChange,
   hideNavigation = false,
@@ -248,7 +236,7 @@ export function ThreadsPage({
   onUpdateAgent,
   onOpenAgentBuilder,
   onOpenDefinitions,
-  onCreateHostEnrollment,
+  onCreateJoinToken,
   onConnectRemoteHost,
   hostServerUrl,
   capabilities,
@@ -256,27 +244,18 @@ export function ThreadsPage({
   workspaceCwd,
   workspaces,
   onWorkspaceChange,
-  initialCreateTask,
   createError,
   onPreviewThread,
   createPreview,
   pending,
-  loading,
 }: ThreadsPageProps) {
   const groups = useMemo(() => groupThreads(threads), [threads]);
-  const runtimeEntries = runtimes ?? (runtime ? [runtime] : []);
-  const [creating, setCreating] = useState<'thread' | undefined>(
-    initialCreateTask ? 'thread' : undefined,
-  );
+  const runtimeEntries = runtimes ?? [];
+  const [creating, setCreating] = useState<'thread'>();
   const [configuring, setConfiguring] = useState<string>();
   const [openAgentId, setOpenAgentId] = useState<string>();
-  const [addingHost, setAddingHost] = useState(false);
-  const [hostMethod, setHostMethod] = useState<'existing' | 'command'>(
-    'existing',
-  );
-  const [hostConnected, setHostConnected] = useState(false);
-  const [hostLocation, setHostLocation] = useState('local');
-  const [allowHostHttp, setAllowHostHttp] = useState(false);
+  const { t } = useI18n();
+  const [addingRuntime, setAddingRuntime] = useState(false);
   const [taskAssignee, setTaskAssignee] = useState('');
   const statusLabels: Record<string, string> = {
     online: '在线',
@@ -370,7 +349,7 @@ export function ThreadsPage({
     <div className={styles.page}>
       <header className={styles.pageHeader}>
         {!hideNavigation && (
-          <nav className={styles.viewTabs} aria-label="协作管理">
+          <nav className={styles.viewTabs} aria-label={t('agents.title')}>
             {(['agents', 'tasks', 'runtime'] as const).map((item) => (
               <Button
                 key={item}
@@ -379,11 +358,7 @@ export function ThreadsPage({
                 aria-pressed={view === item}
                 onClick={() => openView(item)}
               >
-                {item === 'agents'
-                  ? '智能体'
-                  : item === 'tasks'
-                    ? '任务'
-                    : '执行主机'}
+                {t(`collab.tabs.${item}`)}
               </Button>
             ))}
           </nav>
@@ -391,24 +366,24 @@ export function ThreadsPage({
         <div className={styles.headerActions}>
           {view === 'agents' && onOpenDefinitions ? (
             <Button variant="ghost" size="sm" onClick={onOpenDefinitions}>
-              角色模板
+              {t('collab.agent.roles')}
             </Button>
           ) : null}
           {view === 'agents' && onOpenAgentBuilder ? (
             <Button variant="outline" size="sm" onClick={onOpenAgentBuilder}>
               <PlusIcon data-icon="inline-start" />
-              新建智能体
+              {t('collab.agent.new')}
             </Button>
           ) : null}
-          {view === 'runtime' && onCreateHostEnrollment ? (
+          {view === 'runtime' && onCreateJoinToken ? (
             <Button
               variant="outline"
               size="sm"
               disabled={pending}
-              onClick={() => setAddingHost((value) => !value)}
+              onClick={() => setAddingRuntime(true)}
             >
               <PlusIcon data-icon="inline-start" />
-              接入主机
+              {t('collab.runtime.addTitle')}
             </Button>
           ) : null}
           {view === 'tasks' ? (
@@ -421,18 +396,14 @@ export function ThreadsPage({
               }}
             >
               <PlusIcon data-icon="inline-start" />
-              新建任务
+              {t('collab.thread.new')}
             </Button>
           ) : null}
         </div>
       </header>
       <div className={styles.pageBody}>
         <p className="mb-5 text-sm text-muted-foreground">
-          {view === 'agents'
-            ? '智能体是可重复使用的协作身份。设置职责和执行主机后，分配任务或在对话中 @它，即可开始工作。'
-            : view === 'tasks'
-              ? '任务承载具体工作。在共享对话中派单、交流进展、补充要求，最后由人验收。'
-              : '执行主机负责实际运行 Qwen Code 或 Codex。一个主机可以承载多个智能体；接入主机后，还需把智能体分配到它。'}
+          {t(`collab.tabs.${view}Hint`)}
         </p>
         <Dialog
           open={view === 'tasks' && creating === 'thread'}
@@ -871,7 +842,7 @@ export function ThreadsPage({
           ) : null}
         </section>
 
-        {loading && threads.length === 0 ? null : groups.length === 0 ? (
+        {groups.length === 0 ? (
           <div className={styles.emptyState} hidden={view !== 'tasks'}>
             {/* An empty screen is an invitation, not a shrug. */}
             <p className={styles.emptyLead}>还没有任务。</p>
@@ -888,222 +859,6 @@ export function ThreadsPage({
           ))
         )}
 
-        {view === 'runtime' && addingHost && (
-          <div className="flex flex-wrap gap-2" aria-label="接入方式">
-            <Button
-              variant={hostMethod === 'existing' ? 'secondary' : 'ghost'}
-              onClick={() => setHostMethod('existing')}
-            >
-              连接已有 Qwen Serve
-            </Button>
-            <Button
-              variant={hostMethod === 'command' ? 'secondary' : 'ghost'}
-              onClick={() => setHostMethod('command')}
-            >
-              尚未启动服务？生成命令
-            </Button>
-          </div>
-        )}
-        {view === 'runtime' && addingHost && hostMethod === 'existing' && (
-          <form
-            className={styles.enrollmentCard}
-            onSubmit={async (event) => {
-              event.preventDefault();
-              const form = event.currentTarget;
-              const data = new FormData(form);
-              setHostConnected(false);
-              const connected = await onConnectRemoteHost?.({
-                remoteUrl: String(data.get('remoteUrl')),
-                remoteToken: String(data.get('remoteToken')),
-                remoteCwd: String(data.get('remoteCwd')),
-                serverUrl: String(data.get('callbackUrl')),
-                provider: data.get('provider') === 'codex' ? 'codex' : 'qwen',
-                allowHttp: allowHostHttp,
-              });
-              if (connected) {
-                setHostConnected(true);
-                const tokenInput = form.elements.namedItem('remoteToken');
-                if (tokenInput instanceof HTMLInputElement)
-                  tokenInput.value = '';
-              }
-            }}
-          >
-            <strong>连接已有服务 · 无需另开终端启动 Host</strong>
-            <p className={styles.configNote}>
-              复用已运行的 Qwen
-              Serve，为当前项目接入执行机器。连接后，再把智能体分配到这台机器。
-            </p>
-            <label>
-              远程服务地址
-              <input
-                className={styles.field}
-                name="remoteUrl"
-                type="url"
-                required
-                placeholder="http://远程机器:端口"
-              />
-            </label>
-            <label>
-              远程服务凭证
-              <input
-                className={styles.field}
-                name="remoteToken"
-                type="password"
-                autoComplete="off"
-                required
-                placeholder="远程 Qwen Serve 的访问 token"
-              />
-            </label>
-            <label>
-              远程执行目录
-              <input
-                className={styles.field}
-                name="remoteCwd"
-                required
-                placeholder="/home/user/project（已注册并授权的远程工作区）"
-              />
-            </label>
-            <label>
-              执行程序
-              <select className={styles.field} name="provider">
-                <option value="qwen">Qwen Code</option>
-                <option value="codex">Codex CLI（远程需已安装并登录）</option>
-              </select>
-            </label>
-            <label>
-              当前协调端的回连地址
-              <input
-                className={styles.field}
-                name="callbackUrl"
-                type="url"
-                required
-                placeholder="http://本机局域网IP:4170"
-              />
-            </label>
-            <p className={styles.configNote}>
-              回连地址指当前项目所在的服务，不是上方远程服务。必须能从远程机器访问；远程机器上的
-              127.0.0.1 不指向你的电脑。本地和远程的项目目录不会自动同步。
-            </p>
-            <label>
-              <input
-                type="checkbox"
-                checked={allowHostHttp}
-                onChange={(event) => setAllowHostHttp(event.target.checked)}
-              />{' '}
-              允许 HTTP（仅可信演示网络，凭证和任务将明文传输）
-            </label>
-            <p className={styles.configNote}>
-              两端需支持在线主机接入并启用协作功能。当前连接随服务进程运行；重启后需重新连接。不会接管已打开的
-              Codex App 窗口。
-            </p>
-            <Button type="submit" disabled={pending || !onConnectRemoteHost}>
-              {pending ? '正在连接…' : '连接服务'}
-            </Button>
-            {hostConnected && (
-              <p role="status">
-                服务已确认连接。下方机器列表会显示状态；创建智能体时可在“在哪里运行”中选择它。
-              </p>
-            )}
-          </form>
-        )}
-        {view === 'runtime' && addingHost && hostMethod === 'command' && (
-          <form
-            className={styles.enrollmentCard}
-            onSubmit={(event) => {
-              event.preventDefault();
-              const data = new FormData(event.currentTarget);
-              onCreateHostEnrollment?.(
-                String(data.get('serverUrl')),
-                data.get('provider') === 'codex' ? 'codex' : 'qwen',
-                allowHostHttp,
-              );
-            }}
-          >
-            <strong>接入执行主机</strong>
-            <label>
-              在哪里运行？
-              <select
-                className={styles.field}
-                value={hostLocation}
-                onChange={(event) => setHostLocation(event.target.value)}
-              >
-                <option value="local">协调端所在的本机</option>
-                <option value="remote">另一台机器</option>
-              </select>
-            </label>
-            <label>
-              执行程序
-              <select name="provider" className={styles.field}>
-                <option value="qwen">Qwen Code</option>
-                <option value="codex">Codex CLI</option>
-              </select>
-            </label>
-            <label>
-              协调端地址
-              <input
-                key={hostLocation}
-                name="serverUrl"
-                type="url"
-                required
-                className={styles.field}
-                defaultValue={hostLocation === 'local' ? hostServerUrl : ''}
-                placeholder={
-                  hostLocation === 'remote'
-                    ? 'https://可从目标主机访问的协调端地址'
-                    : 'http://127.0.0.1:端口'
-                }
-                pattern={
-                  hostLocation === 'remote' && !allowHostHttp
-                    ? 'https://.*'
-                    : 'https?://.*'
-                }
-              />
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={allowHostHttp}
-                onChange={(event) => setAllowHostHttp(event.target.checked)}
-              />{' '}
-              允许 HTTP（仅演示）
-            </label>
-            {allowHostHttp && (
-              <p role="status" className={styles.configNote}>
-                HTTP
-                不加密：注册凭据、任务内容和结果可能被网络中的其他人读取。仅在可信演示网络使用；此选项不会关闭
-                HTTPS 证书校验。
-              </p>
-            )}
-            <p className={styles.configNote}>
-              {hostLocation === 'local'
-                ? '127.0.0.1 仅指运行命令的这台机器。开发环境显示的地址可能经过前端代理，请确认代理持续运行，或填写实际后端地址。'
-                : '这里填写当前协调端从目标机器可访问的地址，不是待接入主机的地址。推荐 HTTPS；可信演示网络可勾选允许 HTTP。远程机器不能直接使用你电脑的 localhost。'}
-            </p>
-            <p className={styles.configNote}>
-              目标主机需要支持 Agent Host 的 Qwen Code；选择 Codex
-              时还需安装并登录 Codex
-              CLI。命令应在要执行任务的项目目录中运行，并保持进程在线。它不会接管已有的
-              Codex App 对话。
-            </p>
-            <Button type="submit" disabled={pending}>
-              生成接入命令
-            </Button>
-          </form>
-        )}
-        {view === 'runtime' &&
-        addingHost &&
-        hostMethod === 'command' &&
-        hostEnrollment ? (
-          <section className={styles.enrollmentCard}>
-            <strong>在目标主机的项目目录中执行，并保持运行</strong>
-            <code>{hostEnrollment.command}</code>
-            <span>
-              注册凭据有效期至{' '}
-              {new Date(hostEnrollment.expiresAt).toLocaleTimeString()}.
-            </span>
-          </section>
-        ) : null}
-
         {view === 'runtime' && runtimeEntries.length > 0 ? (
           runtimeEntries.map((runtimeEntry) => (
             <section className={styles.runtimeCard} key={runtimeEntry.id}>
@@ -1113,8 +868,8 @@ export function ThreadsPage({
                 </h2>
                 <p className={styles.configNote}>
                   {runtimeEntry.kind === 'local'
-                    ? '使用本机 Qwen Code 执行此工作区的智能体任务。'
-                    : `使用 ${runtimeEntry.provider} 执行明确分配到此主机的智能体任务。接入不代表它在另一台物理机器上。`}
+                    ? t('collab.runtime.localNote')
+                    : t('collab.runtime.remoteNote')}
                 </p>
               </div>
               <strong
@@ -1125,7 +880,7 @@ export function ThreadsPage({
               </strong>
               <dl className={styles.runtimeFacts}>
                 <div>
-                  <dt>执行程序</dt>
+                  <dt>{t('collab.runtime.programs')}</dt>
                   <dd>{runtimeEntry.provider}</dd>
                 </div>
                 {runtimeEntry.workspaceCwd ? (
@@ -1167,11 +922,31 @@ export function ThreadsPage({
           ))
         ) : view === 'runtime' ? (
           <div className={styles.emptyState}>
-            <p className={styles.emptyLead}>暂无可用执行主机。</p>
-            <p>接入主机后，将智能体分配到主机，再创建任务开始协作。</p>
+            <p className={styles.emptyLead}>{t('collab.runtime.empty')}</p>
+            <p>{t('collab.runtime.emptyHint')}</p>
           </div>
         ) : null}
       </div>
+      {onCreateJoinToken && (
+        <AddRuntimeDialog
+          open={addingRuntime}
+          onOpenChange={setAddingRuntime}
+          serverUrl={hostServerUrl ?? ''}
+          runtimes={runtimeEntries}
+          onCreateJoinToken={onCreateJoinToken}
+          {...(onConnectRemoteHost
+            ? { onConnectExisting: onConnectRemoteHost }
+            : {})}
+          {...(onOpenAgentBuilder
+            ? {
+                onCreateAgentOn: () => {
+                  setAddingRuntime(false);
+                  onOpenAgentBuilder();
+                },
+              }
+            : {})}
+        />
+      )}
     </div>
   );
 }

@@ -83,7 +83,6 @@ import styles from './AgentsManagerPage.module.css';
 
 interface AgentsManagerPageProps {
   initialAgentView?: 'agents' | 'tasks' | 'runtime';
-  initialCreateTask?: boolean;
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;
@@ -138,7 +137,6 @@ function unwrapPlainText(value: string): string {
 
 export function AgentsManagerPage({
   initialAgentView,
-  initialCreateTask,
   onClose,
   embedded,
   initialCreateScope,
@@ -354,8 +352,6 @@ export function AgentsManagerPage({
         {navigation}
         <ThreadsRoute
           initialView={initialAgentView}
-          hideNavigation={initialAgentView !== undefined}
-          initialCreateTask={initialCreateTask}
           onOpenThreadChat={onOpenThreadChat}
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
           onOpenDefinitions={() => setAgentsOpen(false)}

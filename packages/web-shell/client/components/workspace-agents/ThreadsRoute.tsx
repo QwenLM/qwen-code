@@ -14,7 +14,6 @@ import {
   ThreadsPage,
   type WorkspaceAgentSummaryView,
   type WorkspaceAgentRuntimeView,
-  type AgentHostEnrollmentView,
   type AgentWorkspaceView,
   type NewWorkspaceAgent,
   type NewThread,
@@ -34,6 +33,7 @@ import {
   type AgentRunProgressEvent,
   type AgentStreamState,
 } from './agent-events';
+import type { JoinToken } from './add-runtime-dialog';
 
 interface CreateThreadResult {
   id: string;
@@ -54,11 +54,8 @@ export interface ThreadsApi {
     runtimes?: WorkspaceAgentRuntimeView[];
     capabilities?: AgentCapabilitiesView;
   }>;
-  createHostEnrollment?(
-    targetUrl: string,
-    provider: 'qwen' | 'codex',
-    allowHttp?: boolean,
-  ): Promise<AgentHostEnrollmentView>;
+  /** A single-use token for `qwen serve --join` on another machine. */
+  createJoinToken?(): Promise<JoinToken>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
@@ -119,44 +116,7 @@ export function createThreadsHttpApi(
   return {
     connectRemoteHost: (input) => post('/hosts/remote-connect', input),
     listAgents: () => request('/agents'),
-    createHostEnrollment: async (targetUrl, provider, allowHttp = false) => {
-      const target = new URL(targetUrl);
-      if (
-        target.username ||
-        target.password ||
-        target.search ||
-        target.hash ||
-        (target.protocol !== 'https:' &&
-          !(
-            target.protocol === 'http:' &&
-            (allowHttp ||
-              ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname))
-          ))
-      ) {
-        throw new Error(
-          '请使用 HTTPS，或显式开启「允许 HTTP（仅演示）」。地址不能携带账号、查询参数或片段。',
-        );
-      }
-      const quote = (value: string) =>
-        "'" + value.replaceAll("'", "'\\''") + "'";
-      const result = await post<{
-        token: string;
-        workspaceId: string;
-        expiresAt: number;
-      }>('/hosts/enrollment', {});
-      return {
-        expiresAt: result.expiresAt,
-        command:
-          `QWEN_AGENT_HOST_ENROLLMENT_TOKEN=${quote(result.token)} ` +
-          `qwen serve --no-web --port 0 ` +
-          `--agent-host-server ${quote(target.toString().replace(/\/$/, ''))} ` +
-          `--agent-host-provider ${provider} ` +
-          (allowHttp && target.protocol === 'http:'
-            ? '--agent-host-allow-http '
-            : '') +
-          `--agent-host-workspace-id ${quote(result.workspaceId)}`,
-      };
-    },
+    createJoinToken: () => post('/hosts/enrollment', {}),
     listThreads: () => request('/threads'),
     getThread: (id) => request(`/threads/${encodeURIComponent(id)}`),
     createAgent: (input) => post('/agents', input),
@@ -250,7 +210,6 @@ const REFRESH_MS = 1_000;
 const CHANGE_REFETCH_MS = 150;
 
 export interface ThreadsRouteProps {
-  initialCreateTask?: boolean;
   initialView?: AgentWorkspaceView;
   initialThreadId?: string;
   workspaceCwd?: string;
@@ -261,7 +220,6 @@ export interface ThreadsRouteProps {
   onTitleChange?: (threadId: string, title: string) => void;
   hideNavigation?: boolean;
   onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
-  api?: ThreadsApi;
   /** Switches the shell to an agent's own session. Absent when embedded
    * somewhere with no session view to switch to. */
   onOpenAgentSession?: (sessionId: string) => void;
@@ -269,7 +227,6 @@ export interface ThreadsRouteProps {
 }
 
 export function ThreadsRoute({
-  initialCreateTask,
   initialView,
   initialThreadId,
   workspaceCwd: boundWorkspaceCwd,
@@ -280,7 +237,6 @@ export function ThreadsRoute({
   onTitleChange,
   hideNavigation = false,
   onOpenThreadChat,
-  api,
   onOpenAgentSession,
   onOpenDefinitions,
 }: ThreadsRouteProps) {
@@ -294,20 +250,14 @@ export function ThreadsRoute({
     workspace.capabilities?.workspaces?.find((entry) => entry.primary)?.cwd;
   const client = useMemo(
     () =>
-      api ??
-      (workspaceCwd
+      workspaceCwd
         ? createThreadsHttpApi(workspace.baseUrl, workspace.token, workspaceCwd)
-        : undefined),
-    [api, workspace.baseUrl, workspace.token, workspaceCwd],
+        : undefined,
+    [workspace.baseUrl, workspace.token, workspaceCwd],
   );
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
-  const [runtime, setRuntime] = useState<WorkspaceAgentRuntimeView>();
   const [runtimes, setRuntimes] = useState<WorkspaceAgentRuntimeView[]>([]);
-  const [hostEnrollment, setHostEnrollment] =
-    useState<AgentHostEnrollmentView>();
-  const [view, setView] = useState<AgentWorkspaceView>(
-    initialView ?? (initialCreateTask ? 'tasks' : 'agents'),
-  );
+  const [view, setView] = useState<AgentWorkspaceView>(initialView ?? 'agents');
   const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [threads, setThreads] = useState<ThreadSummaryView[]>([]);
   const [openId, setOpenId] = useState<string | undefined>(initialThreadId);
@@ -362,7 +312,6 @@ export function ThreadsRoute({
       }
       appliedRefresh.current = sequence;
       setAgents(nextAgents.agents);
-      setRuntime(nextAgents.runtime);
       setRuntimes(
         nextAgents.runtimes ?? (nextAgents.runtime ? [nextAgents.runtime] : []),
       );
@@ -661,14 +610,12 @@ export function ThreadsRoute({
         view={view}
         onViewChange={setView}
         hideNavigation={hideNavigation}
-        {...(runtime ? { runtime } : {})}
         runtimes={runtimes}
         onConnectRemoteHost={
           client.connectRemoteHost
             ? (input) => mutate(() => client.connectRemoteHost!(input))
             : undefined
         }
-        {...(hostEnrollment ? { hostEnrollment } : {})}
         createPreview={createPreview}
         pending={pending}
         onOpenThread={openThread}
@@ -680,24 +627,8 @@ export function ThreadsRoute({
           void mutate(() => client.updateAgent(id, patch))
         }
         onOpenAgentBuilder={() => setCreatingAgent(true)}
-        {...(client.createHostEnrollment
-          ? {
-              onCreateHostEnrollment: (
-                targetUrl: string,
-                provider: 'qwen' | 'codex',
-                allowHttp?: boolean,
-              ) =>
-                void mutate(async () => {
-                  setHostEnrollment(undefined);
-                  const enrollment = await client.createHostEnrollment?.(
-                    targetUrl,
-                    provider,
-                    allowHttp,
-                  );
-                  if (enrollment) setHostEnrollment(enrollment);
-                  return enrollment;
-                }),
-            }
+        {...(client.createJoinToken
+          ? { onCreateJoinToken: client.createJoinToken }
           : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
@@ -710,7 +641,6 @@ export function ThreadsRoute({
           setCreatePreview(undefined);
           createAssigneeRef.current = undefined;
         }}
-        initialCreateTask={initialCreateTask}
         createError={error}
         onCreateThread={(input) =>
           mutate(async () => {

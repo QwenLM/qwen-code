@@ -583,7 +583,6 @@ export function ThreadView({
                         key={row.run.id}
                         row={row}
                         {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
-                        {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
                         {...(onCancelRun ? { onCancelRun } : {})}
                       />
                     ))
