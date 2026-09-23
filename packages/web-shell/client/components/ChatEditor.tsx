@@ -11,6 +11,7 @@ import {
   useState,
 } from 'react';
 import type {
+  CSSProperties,
   ReactNode,
   RefObject,
   DragEvent as ReactDragEvent,
@@ -58,6 +59,7 @@ import { AddMenu } from './composer/AddMenu';
 import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getShadowAwareActiveElement } from '../utils/dom';
+import { POPOVER_MIN_HEIGHT, popoverTopEdge } from '../utils/popoverRoom';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
   getComposerTagIconUrl,
@@ -2179,6 +2181,61 @@ export const ChatEditor = memo(
       handleSearchCompositionEnd,
     } = core.searchState;
 
+    // The panel opens upward from the composer; a soft keyboard can leave less
+    // room above it than the panel needs, which would slide the search box
+    // under the header. When the room is smaller than the panel, the panel
+    // overlaps the top of the composer instead. The two custom properties are
+    // written straight to the panel node: they change on every frame the
+    // composer moves, and publishing them through state would re-render the
+    // whole composer each time.
+    useLayoutEffect(() => {
+      const container = containerRef.current;
+      if (!searchMode || !container) return undefined;
+      // The panel is rendered in the same commit, so its ref is already
+      // populated; capture the node because the panel never unmounts while
+      // searchMode stays true.
+      const panel = searchUiRef.current;
+      if (!panel) return undefined;
+      let frame: number | null = null;
+      const update = () => {
+        const room =
+          container.getBoundingClientRect().top - popoverTopEdge(container) - 8;
+        // The panel's height is content-driven — with no matches it is just
+        // the search bar — so measure it instead of always charging the
+        // minimum height. jsdom reports 0, hence the fallback.
+        const panelHeight = panel.offsetHeight || POPOVER_MIN_HEIGHT;
+        panel.style.setProperty(
+          '--chat-editor-search-room',
+          `${Math.max(panelHeight, room)}px`,
+        );
+        panel.style.setProperty(
+          '--chat-editor-search-shift',
+          `${Math.max(0, panelHeight - room)}px`,
+        );
+      };
+      const scheduleUpdate = () => {
+        if (frame !== null) return;
+        frame = window.requestAnimationFrame(() => {
+          frame = null;
+          update();
+        });
+      };
+      update();
+      const resizeObserver = new ResizeObserver(scheduleUpdate);
+      resizeObserver.observe(container);
+      // The panel is absolutely positioned, so a change in match count does
+      // not resize the container; observe it directly to re-fit.
+      resizeObserver.observe(panel);
+      window.addEventListener('resize', scheduleUpdate);
+      window.addEventListener('scroll', scheduleUpdate, true);
+      return () => {
+        if (frame !== null) window.cancelAnimationFrame(frame);
+        resizeObserver.disconnect();
+        window.removeEventListener('resize', scheduleUpdate);
+        window.removeEventListener('scroll', scheduleUpdate, true);
+      };
+    }, [searchMode, searchUiRef]);
+
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
       const custom = renderComposerTag?.({
         tag,
@@ -2359,6 +2416,24 @@ export const ChatEditor = memo(
         )
       ) : null;
     const mobileVoiceActive = isMobile && voiceActive;
+    const mobileContextRowVisible =
+      isMobile &&
+      !mobileVoiceActive &&
+      (workspaceSelectVisible || workspaceIndicatorVisible || gitBranchVisible);
+    // The workspace/Git row lives inside the capped box and wraps on narrow
+    // viewports, so its measured height is added back to the cap.
+    const mobileContextRowRef = useRef<HTMLDivElement>(null);
+    const [mobileContextRowHeight, setMobileContextRowHeight] =
+      useState<number>();
+    useLayoutEffect(() => {
+      const row = mobileContextRowRef.current;
+      if (!row) return undefined;
+      const update = () => setMobileContextRowHeight(row.offsetHeight);
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(row);
+      return () => resizeObserver.disconnect();
+    }, [mobileContextRowVisible]);
 
     useLayoutEffect(() => {
       const toolbar = toolbarRef.current;
@@ -2667,6 +2742,13 @@ export const ChatEditor = memo(
         <div
           ref={containerRef}
           className={styles.container}
+          style={
+            mobileContextRowHeight === undefined
+              ? undefined
+              : ({
+                  '--chat-editor-context-row-height': `${mobileContextRowHeight}px`,
+                } as CSSProperties)
+          }
           data-web-shell-composer-surface
           tabIndex={-1}
           data-at-panel-open={hasAtMenu || undefined}
@@ -3058,15 +3140,14 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            {isMobile &&
-              !mobileVoiceActive &&
-              (workspaceSelectVisible ||
-                workspaceIndicatorVisible ||
-                gitBranchVisible) && (
-                <div className={styles.mobileContextRow}>
-                  {workspaceControls(false)}
-                </div>
-              )}
+            {mobileContextRowVisible && (
+              <div
+                ref={mobileContextRowRef}
+                className={styles.mobileContextRow}
+              >
+                {workspaceControls(false)}
+              </div>
+            )}
             {core.mobileComposer && !mobileVoiceActive && (
               <div
                 className={styles.mobileEditingActions}

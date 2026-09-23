@@ -47,6 +47,8 @@ export function extractTranscriptTiming(
   const durationMs = getFiniteNumber(timing, 'durationMs');
   if (durationMs === undefined || durationMs < 0) return undefined;
 
+  // A tool frame carries a start only when the session recorded one; the
+  // producer never derives it, so a present value is a measurement.
   const startedAt = getFiniteNumber(timing, 'startedAt');
   const ttftMs = getFiniteNumber(timing, 'ttftMs');
   const status = timing['status'];

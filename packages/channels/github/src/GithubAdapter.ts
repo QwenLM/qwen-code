@@ -622,6 +622,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     this.gate.replaceAllowedUsers(allowed);
+    // The decoupled group axis is matched against the same lowercased login.
+    if (this.config.allowedGroupUsers) {
+      const allowedGroup = this.config.allowedGroupUsers.map((u) =>
+        u.toLowerCase(),
+      );
+      this.config.allowedGroupUsers = allowedGroup;
+      this.groupSenderGate?.replaceAllowedUsers(allowedGroup);
+    }
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
     this.migrateLegacyPublicationState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;
@@ -1351,7 +1362,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // Approved paired groups bypass the sender gate in preflight, so the
       // directed lane must mirror that or follow-ups fail mention gating.
       const allowed =
-        this.gate.isAllowed(senderId) ||
+        this.senderGateFor(true).isAllowed(senderId) ||
         (directed &&
           this.config.groupPolicy === 'pairing' &&
           this.groupGate.isGroupApproved(ctx.chatId));
@@ -1458,7 +1469,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        this.gate.isAllowed(sender)
+        this.senderGateFor(true).isAllowed(sender)
       );
     });
     for (const comment of newComments) {

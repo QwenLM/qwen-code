@@ -187,9 +187,15 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   source?: 'model' | 'code_mode';
   function_name: string;
   function_args: Record<string, unknown>;
-  /** Scheduling start, matching duration_ms (including approval wait). */
-  started_at?: number;
   duration_ms: number;
+  /**
+   * Epoch ms at which `duration_ms` started counting: when the call was
+   * scheduled, before any approval wait. Set only when the producer measured
+   * it. Readers must not derive it from `event.timestamp` instead — that is
+   * when the event was logged, which for a scheduled batch is after every
+   * call in the batch has settled.
+   */
+  started_at_ms?: number;
   status: 'success' | 'error' | 'cancelled';
   execution_status?: ToolExecutionStatus | 'unknown';
   success: boolean; // Keep for backward compatibility
@@ -227,8 +233,8 @@ export class ToolCallEvent implements BaseTelemetryEvent {
       call.request.name === ToolNames.STRUCTURED_OUTPUT
         ? { ...STRUCTURED_OUTPUT_REDACTED_ARGS }
         : call.request.args;
-    this.started_at = call.startedAt;
     this.duration_ms = call.durationMs ?? 0;
+    if (call.startTime !== undefined) this.started_at_ms = call.startTime;
     this.status = call.status;
     this.execution_status = call.response.executionStatus;
     this.success = call.status === 'success'; // Keep for backward compatibility

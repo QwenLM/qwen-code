@@ -369,13 +369,27 @@ describe('buildTrajectory', () => {
             durationMs: 35,
             callId: 'call_a',
             startedAt: 123,
-          } as DaemonTranscriptTimingMeta,
+          },
         },
       ]).rows;
 
       expect(rows.find((row) => row.kind === 'tool')?.timing).toEqual({
         durationMs: 35,
         startedAt: 123,
+      });
+    });
+
+    it('gives a tool no start time when its frame has none', () => {
+      const rows = buildTrajectory([
+        block(toolBlock('call_a')),
+        {
+          kind: 'timing',
+          timing: { kind: 'tool', durationMs: 35, callId: 'call_a' },
+        },
+      ]).rows;
+
+      expect(rows.find((row) => row.kind === 'tool')?.timing).toEqual({
+        durationMs: 35,
       });
     });
   });

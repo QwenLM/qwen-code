@@ -114,7 +114,9 @@ and accessible timing description. Running calls and incomplete historical
 timing retain the elapsed label without a tooltip.
 
 The scheduler now retains the start already used to measure each call's duration
-through success, error and cancellation. `ToolCallEvent.started_at` carries it to
+through success, error and cancellation. Earlier development recordings using
+`started_at` remain readable; new records use the upstream
+`ToolCallEvent.started_at_ms`, which carries it to
 telemetry, replay emits `startedAt`, and the SDK/trajectory preserve it. The exact
 end is that start plus the recorded duration, independent of when the batch logs.
 This retains the existing duration scope, including validation, approval and

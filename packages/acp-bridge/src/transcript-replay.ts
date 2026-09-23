@@ -367,8 +367,11 @@ export function createTranscriptUsageUpdate(
 export interface TranscriptTimingMeta {
   readonly kind: 'request' | 'tool';
   /**
-   * Epoch ms. Tool starts are recorded by the scheduler, never inferred from
-   * the telemetry timestamp (which may be logged after the batch settles).
+   * Epoch ms. A request is logged when its stream ends, so its start time is
+   * a real subtraction from a real end time. A tool call carries one only when
+   * its record does (`started_at_ms`): tool calls can be logged in one loop
+   * after their whole batch settles, so the record's timestamp is the batch's
+   * end and subtracting a tool's own duration from it would misplace it.
    */
   readonly startedAt?: number;
   readonly durationMs: number;
@@ -486,7 +489,10 @@ function parseTelemetryTiming(
     if (callId === undefined) return undefined;
     const toolName = nonEmptyString(uiEvent['function_name']);
     const toolStatus = parseToolTimingStatus(uiEvent['status']);
-    const startedAt = finiteNumber(uiEvent['started_at']);
+    // Earlier panel development builds recorded the same value as started_at.
+    const startedAt = finiteNumber(
+      uiEvent['started_at_ms'] ?? uiEvent['started_at'],
+    );
     // Legacy non-success records use zero for missing timing. A recorded start
     // distinguishes a measured zero duration from that placeholder.
     if (
@@ -510,8 +516,8 @@ function parseTelemetryTiming(
   // A request is logged the moment its stream ends, so its `event.timestamp`
   // really is this span's end and the start time follows from the duration.
   // Tool calls are logged in a batch loop after the whole batch settles, so
-  // the same subtraction would place a fast tool just before the batch ended
-  // rather than when it actually ran — see `startedAt` on the type.
+  // the same subtraction would misplace a tool; theirs is read from the
+  // record above — see `startedAt` on the type.
   const endMs = toTranscriptEpochMs(
     typeof uiEvent['event.timestamp'] === 'string'
       ? uiEvent['event.timestamp']

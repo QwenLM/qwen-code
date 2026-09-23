@@ -20087,10 +20087,19 @@ describe('Session', () => {
                 execution_status?: string;
                 success?: boolean;
                 error_type?: string;
+                started_at_ms?: number;
+                duration_ms?: number;
+                'event.timestamp'?: string;
               },
           )
           .find((ev) => ev.function_name === 'read_file');
         expect(toolEvent?.call_id).toBe('call-1');
+        // The start the duration was measured from, so start + duration is the
+        // call's end, which cannot be after the event was logged.
+        expect(toolEvent?.started_at_ms).toEqual(expect.any(Number));
+        expect(
+          toolEvent!.started_at_ms! + toolEvent!.duration_ms!,
+        ).toBeLessThanOrEqual(Date.parse(toolEvent!['event.timestamp']!));
         expect(toolEvent?.status).toBe('error');
         expect(toolEvent?.execution_status).toBe('error');
         expect(toolEvent?.success).toBe(false);
@@ -38838,7 +38847,6 @@ describe('Session', () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
-
       const before = Date.now();
       const result = await (
         session as unknown as ToolCallInternals
@@ -38868,8 +38876,8 @@ describe('Session', () => {
       const timing = logToolCallSpy.mock.calls.find(
         ([, event]) => event.call_id === 'missing_name_call',
       )?.[1];
-      expect(timing?.started_at).toBeGreaterThanOrEqual(before);
-      expect(timing?.started_at).toBeLessThanOrEqual(Date.now());
+      expect(timing?.started_at_ms).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at_ms).toBeLessThanOrEqual(Date.now());
       expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
         result.parts,
@@ -39078,8 +39086,8 @@ describe('Session', () => {
       const timing = logToolCallSpy.mock.calls.find(
         ([, event]) => event.call_id === 'success_call',
       )?.[1];
-      expect(timing?.started_at).toBeGreaterThanOrEqual(before);
-      expect(timing?.started_at).toBeLessThanOrEqual(Date.now());
+      expect(timing?.started_at_ms).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at_ms).toBeLessThanOrEqual(Date.now());
       expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         1,

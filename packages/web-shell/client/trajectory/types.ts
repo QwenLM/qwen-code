@@ -46,7 +46,11 @@ export type TrajectoryEntry =
  */
 export interface TrajectoryTiming {
   durationMs: number;
-  /** Epoch ms; tool starts must be explicitly recorded, not batch-log times. */
+  /**
+   * Epoch ms. Requests have one whenever their end was recorded; tool calls
+   * only when the session recorded the call's start, which older sessions did
+   * not.
+   */
   startedAt?: number;
   /** Requests only: dispatch to first user-visible content. */
   ttftMs?: number;

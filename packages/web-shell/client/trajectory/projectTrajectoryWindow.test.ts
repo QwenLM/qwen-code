@@ -113,17 +113,33 @@ describe('projectTrajectoryWindow', () => {
     ]);
   });
 
-  it('preserves a start time explicitly supplied by replay', () => {
+  it('gives tools no start time on a page recorded before starts were', () => {
+    // A tool frame carries a start only when the session recorded one, and
+    // this session predates that. Nothing downstream may invent one.
     const toolFrames = timings(projectTrajectoryWindow(REAL_PAGE)).filter(
       (entry) => entry.timing.kind === 'tool',
     );
 
     expect(toolFrames.map((frame) => frame.timing.startedAt)).toEqual([
-      1789877518944, 1789877518982,
+      undefined,
+      undefined,
     ]);
     for (const frame of toolFrames) {
       expect(frame.timing.durationMs).toBeGreaterThan(0);
     }
+  });
+
+  it('preserves a recorded start and measured zero duration through projection', () => {
+    const timing = {
+      kind: 'tool',
+      callId: 'measured-call',
+      startedAt: 1_760_000_000_000,
+      durationMs: 0,
+      toolStatus: 'cancelled',
+    };
+    expect(timings(projectTrajectoryWindow([timingFrame(timing)]))).toEqual([
+      expect.objectContaining({ timing }),
+    ]);
   });
 
   it('carries the record id a frame was stamped with', () => {
@@ -352,8 +368,8 @@ describe('projectTrajectoryWindow', () => {
         'glob',
       ]);
       expect(tools.map((row) => row.timing)).toEqual([
-        { durationMs: 35, startedAt: 1789877518944 },
-        { durationMs: 20, startedAt: 1789877518982 },
+        { durationMs: 35 },
+        { durationMs: 20 },
       ]);
       expect(tools.map((row) => row.toolStatus)).toEqual([
         'success',

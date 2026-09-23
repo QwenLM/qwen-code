@@ -11065,7 +11065,8 @@ describe('transcript timing frames', () => {
     expect(extractTranscriptTiming(update)).toBeUndefined();
   });
 
-  it('preserves a recorded tool start without replacing it with the replay time', () => {
+  it('keeps the start time a tool frame carries', () => {
+    // The producer only sends one the session recorded, never a derived one.
     expect(
       extractTranscriptTiming({
         _meta: {
@@ -11083,6 +11084,21 @@ describe('transcript timing frames', () => {
       callId: 'call-1',
       startedAt: 1_760_000_000_000,
     });
+  });
+
+  it('drops a tool start time that is not a finite number', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: '1760000000000',
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
   });
 
   it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, '1760000000000'])(

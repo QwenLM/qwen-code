@@ -131,7 +131,10 @@ Tailwind/shadcn 组件；现有 CSS Modules 的主题色值保持不变。组件
   变量以及外部配置的 z-index 才能正确继承。
 - 保留组件上的 `data-web-shell-*` 属性和公开 CSS 变量。接入方可能通过这些属性或
   `--web-shell-dialog-backdrop-z-index`、`--web-shell-popover-z-index`、
-  `--web-shell-tooltip-z-index` 等变量定制样式和层级。
+  `--web-shell-tooltip-z-index` 等变量定制样式和层级。宿主自己的标题栏覆盖在
+  shell 之上但并不裁剪它时，必须通过 `--web-shell-popover-safe-top` 声明顶部
+  安全区，向上展开的浮层（输入历史、@ 引用）才能避开它；显式声明 `0px` 表示
+  没有顶部安全区，不会被默认值覆盖。
 
 在 `packages/web-shell` 目录添加后续组件，例如：
 

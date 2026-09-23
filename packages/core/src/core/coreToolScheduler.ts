@@ -587,7 +587,11 @@ export type ErroredToolCall = {
   request: ToolCallRequestInfo;
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
-  startedAt?: number;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -598,7 +602,11 @@ export type SuccessfulToolCall = {
   tool: AnyDeclarativeTool;
   response: ToolCallResponseInfo;
   invocation: AnyToolInvocation;
-  startedAt?: number;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -637,7 +645,11 @@ export type CancelledToolCall = {
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
   invocation?: AnyToolInvocation;
-  startedAt?: number;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -1362,7 +1374,7 @@ function withPostToolBatchStop(
     request: lastCall.request,
     tool: lastCall.tool,
     response,
-    startedAt: lastCall.startedAt,
+    startTime: lastCall.startTime,
     durationMs: lastCall.durationMs,
     outcome: undefined,
   } as ErroredToolCall;
@@ -1971,8 +1983,10 @@ export class CoreToolScheduler {
             invocation,
             status: 'success',
             response: auxiliaryData as CoreToolCallResponseInfo,
-            startedAt: existingStartTime,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as SuccessfulToolCall;
         }
@@ -1985,8 +1999,10 @@ export class CoreToolScheduler {
             status: 'error',
             tool: toolInstance,
             response: auxiliaryData as CoreToolCallResponseInfo,
-            startedAt: existingStartTime,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as ErroredToolCall;
         }
@@ -2085,8 +2101,10 @@ export class CoreToolScheduler {
             invocation,
             status: 'cancelled',
             response,
-            startedAt: existingStartTime,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as CancelledToolCall;
         }
