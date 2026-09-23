@@ -224,9 +224,12 @@ describe('user-level auto-memory', () => {
       );
 
       const seen: MemoryChangedNotice[] = [];
-      const unregister = registerMemoryChangedListener(projectRoot, (change) => {
-        seen.push(change);
-      });
+      const unregister = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          seen.push(change);
+        },
+      );
       let index: string;
       try {
         index = await rebuildUserAutoMemoryIndex(projectRoot);
