@@ -72,7 +72,7 @@ handler 永不返回 bearer token。token 通过等长 `timingSafeEqual` 比较�
 
 TypeScript 测试物化每个用例，并通过 `node:http` → raw manifest gate → Express 鉴权与 JSON 解析 → attestation handler 的完整路径发送请求。测试校验 status、分类、`no-store`、精确成功 body 和响应大小。
 
-Java Runtime Broker 测试使用 Jackson 读取仓库中的同一批文件，固定 route metadata、大小限制、闭合字段集合、fixture 唯一性和共享状态分类。当前不增加 Java 生产 validator，因为 `main` 尚无 Java HTTP transport consumer；现在发布会形成未使用 API。未来 transport PR 必须把 fixture 断言迁入真实请求发送和响应解析逻辑，并继续读取同一文件。
+Java attestation client 读取同一批文件，向真实 HTTP endpoint 发送规范请求，并按 status 解析响应。它执行 16 KiB 上限、闭合字段和成功身份全等；404 不可重试。详见[Java client 切片](2026-09-23-java-runtime-attestation-client.zh-CN.md)。该客户端仍不实现 acquire/execute，也不把结果写入 Broker service。
 
 ## 仅提供身份证明的 Worker 外壳
 
@@ -118,4 +118,4 @@ Hosted Runtime 按以下顺序集成：
 
 ## 后续边界
 
-本变更完成可独立评审的 A1 route source、TypeScript 进程挂载和 A2 的 schema/fixture 部分。只有具体 Java client 使用共享 fixtures 验证请求发送与严格响应解析，并且 required CI lane 同时运行两端测试后，A2 才算完成。跨语言进程 E2E、重启/CAS 行为、部署身份和故障注入仍是后续验收门禁。
+本变更完成可独立评审的 A1 route source、TypeScript 进程挂载和 A2 的 schema/fixture 部分。Java client 已按共享 fixture 完成请求发送和严格响应解析。A2 仍差一条 required CI lane 同时运行两端测试。跨语言进程 E2E、重启/CAS、部署身份和故障注入仍是后续门禁。
