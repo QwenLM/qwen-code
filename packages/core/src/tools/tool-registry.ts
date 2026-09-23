@@ -52,6 +52,19 @@ export interface DeferredToolSummary {
 
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
+/**
+ * What a deferred tool looked like when tool_search returned it: its
+ * serialized declaration plus, for an MCP tool, the server it belongs to.
+ * tool_call compares against this so a model cannot invoke a hidden tool
+ * whose schema or server changed after it last reviewed it (#11321).
+ */
+export function deferredDeclarationFingerprint(
+  tool: AnyDeclarativeTool,
+): string {
+  const server = tool instanceof DiscoveredMCPTool ? tool.serverName : '';
+  return `${server}\u0000${JSON.stringify(tool.schema)}`;
+}
+
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
@@ -217,6 +230,10 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
+  // Fingerprint of each hidden deferred tool as tool_search last returned
+  // it. Kept across `/clear`: a stale entry can only make tool_call ask for
+  // a fresh review, never let a changed tool through.
+  private reviewedDeferredDeclarations: Map<string, string> = new Map();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
@@ -946,6 +963,22 @@ export class ToolRegistry {
    */
   unrevealDeferredTool(name: string): void {
     this.revealedDeferred.delete(name);
+  }
+
+  /** Records the declaration tool_search just returned for a hidden tool. */
+  recordReviewedDeclaration(tool: AnyDeclarativeTool): void {
+    this.reviewedDeferredDeclarations.set(
+      tool.name,
+      deferredDeclarationFingerprint(tool),
+    );
+  }
+
+  /**
+   * The fingerprint recorded by {@link recordReviewedDeclaration}, or
+   * `undefined` when tool_search has not returned this tool in the session.
+   */
+  getReviewedDeclaration(name: string): string | undefined {
+    return this.reviewedDeferredDeclarations.get(name);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */

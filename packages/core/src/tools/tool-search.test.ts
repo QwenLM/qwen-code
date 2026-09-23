@@ -8,7 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { CallableTool } from '@google/genai';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
-import { ToolRegistry } from './tool-registry.js';
+import {
+  deferredDeclarationFingerprint,
+  ToolRegistry,
+} from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
@@ -299,6 +302,49 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('Not found: missing');
     expect(registry.isDeferredToolRevealed('alpha')).toBe(false);
     expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
+  });
+
+  it('select: mode reports a name that matches several tools only by case (#11321)', async () => {
+    registry.registerTool(
+      new MockTool({ name: 'deferred_target', shouldDefer: true }),
+    );
+    registry.registerTool(
+      new MockTool({ name: 'Deferred_Target', shouldDefer: true }),
+    );
+
+    const search = (query: string) =>
+      new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+
+    // The ambiguous spelling is named with its candidates, not guessed.
+    const ambiguous = await search('select:DEFERRED_TARGET');
+    expect(String(ambiguous.llmContent)).not.toContain('<functions>');
+    expect(String(ambiguous.llmContent)).toContain(
+      'request the exact name: DEFERRED_TARGET (Deferred_Target, deferred_target)',
+    );
+    expect(ambiguous.returnDisplay).toBe('1 ambiguous');
+
+    // An exact spelling still resolves to exactly that tool.
+    const exact = await search('select:Deferred_Target');
+    expect(String(exact.llmContent)).toContain('"name":"Deferred_Target"');
+    expect(String(exact.llmContent)).not.toContain('"name":"deferred_target"');
+  });
+
+  it('select: mode records what it returned for a hidden tool, so tool_call can detect a later change (#11321)', async () => {
+    const hidden = new MockTool({ name: 'alpha', shouldDefer: true });
+    registry.registerTool(hidden);
+    registry.registerTool(new MockTool({ name: 'visible_tool' }));
+
+    await new ToolSearchTool(config)
+      .build({ query: 'select:alpha,visible_tool' })
+      .execute(new AbortController().signal);
+
+    expect(registry.getReviewedDeclaration('alpha')).toBe(
+      deferredDeclarationFingerprint(hidden),
+    );
+    // A declared tool is called directly, never through tool_call.
+    expect(registry.getReviewedDeclaration('visible_tool')).toBeUndefined();
   });
 
   describe('media-policy tool hiding', () => {

@@ -27,7 +27,11 @@ import type {
   ToolResult,
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import {
+  resolveRegisteredToolName,
+  ToolNames,
+  ToolDisplayNames,
+} from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
@@ -311,16 +315,19 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const bridgeUnavailable: string[] = [];
     const bridgeAvailable = isDeferredToolBridgeAvailable(registry);
 
-    // Case-insensitive lookup across all known names (instance names + factory
-    // names). Preserve the user-supplied casing in the error list so the
-    // response matches what the model asked for.
-    const lowerIndex = new Map<string, string>();
-    for (const realName of registry.getAllToolNames()) {
-      lowerIndex.set(realName.toLowerCase(), realName);
-    }
+    // Resolve across all known names (instance names + factory names) with
+    // the rule tool_call applies, so the schema reviewed here is the tool
+    // that call invokes. Preserve the user-supplied casing in the error list
+    // so the response matches what the model asked for.
+    const knownNames = registry.getAllToolNames();
+    const ambiguous: string[] = [];
 
     for (const requested of names) {
-      const canonical = lowerIndex.get(requested.toLowerCase());
+      const canonical = resolveRegisteredToolName(requested, knownNames);
+      if (Array.isArray(canonical)) {
+        ambiguous.push(`${requested} (${canonical.join(', ')})`);
+        continue;
+      }
       if (!canonical) {
         missing.push(requested);
         continue;
@@ -401,6 +408,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // JSON unicode escapes decode back to their original characters when the
     // model interprets the JSON, but as raw text inside the wrapper they are
     // no longer tag delimiters.
+    for (const tool of reviewed) {
+      if (registry.isDeferredAndHidden(tool.name)) {
+        registry.recordReviewedDeclaration(tool);
+      }
+    }
     const schemaBlocks = reviewed.map(
       (tool) =>
         `<function>${escapeJsonTagCharacters(JSON.stringify(tool.schema))}</function>`,
@@ -412,6 +424,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
     if (missing.length > 0) {
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Not found: ${missing.join(', ')}`;
+    }
+    if (ambiguous.length > 0) {
+      const header = llmContent ? '\n\n' : '';
+      llmContent += `${header}Ambiguous — several tools differ only by case; request the exact name: ${ambiguous.join('; ')}`;
     }
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {
@@ -451,6 +467,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     if (reviewed.length > 0)
       displayParts.push(`Reviewed ${reviewed.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
+    if (ambiguous.length > 0)
+      displayParts.push(`${ambiguous.length} ambiguous`);
     if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
     if (bridgeUnavailable.length > 0)
       displayParts.push(`${bridgeUnavailable.length} bridge unavailable`);
