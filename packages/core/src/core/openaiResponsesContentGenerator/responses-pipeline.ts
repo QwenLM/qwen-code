@@ -8,7 +8,12 @@ import { GenerateContentResponse } from '@google/genai';
 import type { GenerateContentParameters } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../reasoning-overrides.js';
 import type {
+  ResponsesApiInputItem,
   ResponsesApiRequest,
   ResponsesApiReasoning,
   ResponsesSSEEvent,
@@ -23,6 +28,8 @@ import {
 } from './responses-converter.js';
 import {
   countReasoningItems,
+  downgradeEncryptedReasoningItems,
+  isEncryptedReasoningRejection,
   downgradeRejectedReasoningItems,
   parseReasoningIdRejection,
 } from './responses-reasoning-rejection.js';
@@ -33,6 +40,7 @@ import {
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import {
+  normalizeOpenAiWireBaseUrl,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   DISABLED_REQUEST_TIMEOUT_MS,
@@ -42,10 +50,17 @@ import {
   resolveRequestTimeout,
 } from '../openaiContentGenerator/constants.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
+import { buildSessionAwareFetch } from '../outbound-session-id.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { ResponsesHttpError } from '../../utils/responses-http-error.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
+
+// Re-exported for existing consumers; the definition lives in the
+// dependency-free constants leaf so config/model modules can import it
+// without this module's SDK closure.
+export { normalizeOpenAiWireBaseUrl };
 
 /**
  * Thrown when the SSE read loop goes silent past the inactivity timeout.
@@ -285,8 +300,8 @@ export class ResponsesPipeline {
 
   /**
    * Connect, and if the endpoint explicitly refuses a replayed reasoning item
-   * id, send the same request once more with those items downgraded (issue
-   * #9452).
+   * id or encrypted content, send the same request once more with those items
+   * downgraded (issue #9452).
    *
    * The first request always goes out exactly as built. Recovery matters
    * because the offending ids live in persisted history: without it, every
@@ -311,7 +326,7 @@ export class ResponsesPipeline {
   }
 
   /**
-   * The retry request, or undefined when the error is not a reasoning-id
+   * The retry request, or undefined when the error is not a reasoning replay
    * rejection or nothing in this body would change. Builds a new request
    * object -- the caller's request, the input array, and every item it holds
    * are left untouched.
@@ -323,17 +338,21 @@ export class ResponsesPipeline {
     if (typeof error !== 'object' || error === null) return undefined;
     const { reasoningIdRejection: rejection } =
       error as Partial<ResponsesApiError>;
-    if (!rejection) return undefined;
-
-    const input = downgradeRejectedReasoningItems(apiRequest.input, rejection);
+    const encryptedRejected = (error as Partial<ResponsesApiError>)
+      .encryptedReasoningRejected;
+    const input = rejection
+      ? downgradeRejectedReasoningItems(apiRequest.input, rejection)
+      : encryptedRejected
+        ? downgradeEncryptedReasoningItems(apiRequest.input)
+        : apiRequest.input;
     if (input === apiRequest.input) return undefined;
 
     const reasoningItems = countReasoningItems(apiRequest.input);
     // Metadata only: no id, no encrypted content, no endpoint.
     debugLogger.debug(
       'Retrying once with downgraded reasoning replay',
-      `namedIndex=${rejection.namedIndex}`,
-      `maxLengthReported=${rejection.maxLength !== null}`,
+      `namedIndex=${rejection?.namedIndex ?? 'all'}`,
+      `maxLengthReported=${rejection?.maxLength != null}`,
       `reasoningItems=${reasoningItems}`,
       `downgradedItems=${reasoningItems - countReasoningItems(input)}`,
     );
@@ -520,7 +539,18 @@ export class ResponsesPipeline {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
-    const r = this.config.reasoning;
+    const r =
+      this.config.reasoning === undefined &&
+      this.config.extra_body?.['reasoning'] !== undefined
+        ? undefined
+        : getEffectiveReasoning(
+            this.config,
+            resolveReasoningForModel(
+              this.cliConfig,
+              this.config,
+              request.model,
+            ),
+          );
     if (r === false) return undefined;
     // `extra_body.enable_thinking` is the DashScope/Qwen-specific on/off
     // toggle (predates the unified reasoning-effort ladder). It has no
@@ -559,14 +589,20 @@ export class ResponsesPipeline {
     apiRequest: ResponsesApiRequest,
     signal?: AbortSignal,
   ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-    const baseUrl = (this.config.baseUrl || 'https://api.openai.com')
-      .replace(/\/v1\/?$/, '')
-      .replace(/\/$/, '');
+    const baseUrl = normalizeOpenAiWireBaseUrl(this.config.baseUrl);
     const url = `${baseUrl}/v1/responses`;
 
+    const version = this.cliConfig.getCliVersion() || 'unknown';
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       accept: 'text/event-stream',
+      // The same stamp the Chat wire sends (openaiContentGenerator/provider/
+      // default.ts buildHeaders). This wire assembles its request by hand, so
+      // without it the gateway sees the transport's default agent string and
+      // cannot attribute the traffic to Qwen Code (issue #11936). Placed
+      // before the customHeaders merge below so a user-configured
+      // `User-Agent` still overrides it, as it does on every other wire.
+      'user-agent': `QwenCode/${version} (${process.platform}; ${process.arch})`,
     };
 
     const apiKey =
@@ -587,7 +623,8 @@ export class ResponsesPipeline {
     const body = JSON.stringify(apiRequest);
     debugLogger.debug(
       `POST ${redactProxyCredentials(url)}`,
-      body.substring(0, 500),
+      `bodyBytes=${body.length}`,
+      `inputItems=${summarizeInputItemTypes(apiRequest.input)}`,
     );
 
     // Compose the caller's AbortSignal with a connect-timeout controller so a
@@ -625,8 +662,20 @@ export class ResponsesPipeline {
     // fetch -- Node's built-in undici can be a different major version than
     // the bundled one, and handing it a foreign dispatcher throws `invalid
     // onError method`.
-    const fetchFn =
+    const pinnedFetch =
       (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ?? fetch;
+    // Wrapped per request rather than once per pipeline, so `${session_id}` in
+    // customHeaders is resolved from live Config state on every send: /new and
+    // /resume rotate it, and with outboundCorrelation.allowDynamicHeaderValues
+    // off the header is dropped instead of reaching the gateway as a literal.
+    // The wrapper also adds the first-party session_id header for the
+    // allowlisted gateways -- the treatment the Chat, Anthropic and Gemini
+    // wires already get and this hand-built one was missing (issue #11936).
+    const fetchFn = buildSessionAwareFetch(
+      pinnedFetch,
+      this.cliConfig,
+      this.config.customHeaders,
+    );
 
     // Connect-phase timeout: fetch() resolves once response headers arrive, so
     // an endpoint that completes TCP/TLS but never sends headers would block
@@ -695,12 +744,23 @@ export class ResponsesPipeline {
         // A truncated URL authority can end before the credential's '@'.
         diagnosticBody = diagnosticBody.replace(/\/\/[^/\s]*$/, '//<redacted>');
       }
-      const excerpt = redactProxyCredentials(diagnosticBody).substring(0, 500);
-      const err = new Error(
-        `Responses API error ${response.status}: ${excerpt}`,
+      diagnosticBody = redactProxyCredentials(diagnosticBody);
+      const err = new ResponsesHttpError(
+        response.status,
+        diagnosticBody,
+        response.headers,
+        [
+          apiKey,
+          headers['authorization'],
+          headers['authorization']?.replace(/^Bearer\s+/i, ''),
+          headers['api-key'],
+        ],
       ) as ResponsesApiError;
-      err.status = response.status;
       err.reasoningIdRejection = rejection;
+      err.encryptedReasoningRejected = isEncryptedReasoningRejection(
+        response.status,
+        errBody,
+      );
       throw redactProxyError(err);
     }
 
@@ -1093,9 +1153,25 @@ function sanitizePromptCacheKey(key: string): string {
     .slice(0, PROMPT_CACHE_KEY_MAX_LENGTH);
 }
 
-interface ResponsesApiError extends Error {
-  status: number;
+/**
+ * Counts `input` items by type for the connect-phase debug log. Metadata only:
+ * the log must never carry message text, tool names/arguments, reasoning ids,
+ * or encrypted reasoning content (see the sibling convention at
+ * `buildReasoningReplayRetry` and issue #11667).
+ */
+function summarizeInputItemTypes(items: ResponsesApiInputItem[]): string {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    counts.set(item.type, (counts.get(item.type) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([type, count]) => `${type}=${count}`)
+    .join(',');
+}
+
+interface ResponsesApiError extends ResponsesHttpError {
   reasoningIdRejection?: ReasoningIdRejection;
+  encryptedReasoningRejected?: boolean;
 }
 
 export function mergeStreamResponses(

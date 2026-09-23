@@ -181,7 +181,10 @@ describe('GitDialog', () => {
     ).toHaveLength(1);
     expect(historyTab?.getAttribute('aria-selected')).toBe('true');
     expect(panel?.getAttribute('aria-labelledby')).toBe('git-dialog-tab-log');
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined, undefined, {
+      all: false,
+      search: undefined,
+    });
   });
 
   it('supports arrow-key tab navigation', async () => {
@@ -249,7 +252,13 @@ describe('GitDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, '/worktrees/feature-x');
+    expect(workspaceGitLog).toHaveBeenCalledWith(
+      50,
+      0,
+      '/worktrees/feature-x',
+      undefined,
+      { all: false, search: undefined },
+    );
   });
 
   it('shows the pull requests tab only when the daemon advertises the capability', async () => {

@@ -716,7 +716,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       appendFileSync(
         join(dir, '.git', 'config'),
         `[filter "evil"]\n\tsmudge = echo ${'x'.repeat(1200000)}\n` +
-          `\tsmudge = touch ${canary}\n`,
+          `\tsmudge = touch ${canary.replaceAll('\\', '/')}\n`,
       );
       writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
 
@@ -788,6 +788,16 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     const isolation = isolateHostGitConfig();
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      // The runner-stage observation below is `findVitestBin`'s throw, and a
+      // bare tmpdir only throws "not found" when nothing up-tree provides
+      // vitest — a node_modules above the runner's TMPDIR (observed on
+      // self-hosted CI, where jobs share one /tmp) resolves one, the probe
+      // then runs for real, and the detail names no vitest. Plant a shadow
+      // vitest that declares no bin: the innermost node_modules wins
+      // resolution on every host, so the throw is deterministic.
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(join(vitestDir, 'package.json'), '{}');
       asCheckout(dir);
       appendFileSync(
         join(dir, '.git', 'config'),
@@ -808,9 +818,10 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
 
       expect(detail).not.toContain('could not read to the bottom');
       expect(detail).not.toContain('content filter');
-      // And it reached the runner, which this bare fixture does not have: the
-      // screen PASSED, rather than the run failing for some other reason — the
-      // difference between "did not refuse" and "proceeded".
+      // And it reached the runner stage, where the shadow vitest above makes
+      // `findVitestBin` throw: the screen PASSED, rather than the run failing
+      // for some other reason — the difference between "did not refuse" and
+      // "proceeded".
       expect(detail).toContain('vitest');
     } finally {
       isolation.dispose();
@@ -818,7 +829,11 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
-  it('REFUSES an include whose `..` the kernel resolves through a symlink', () => {
+  it('REFUSES an include whose `..` the kernel resolves through a symlink', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     // The other half of the test above, and the one that makes the `dangling`
     // bucket safe to drop anything at all. `<repo>/.git/link` is a symlink and
     // `include.path = link/../evil.cfg` names a payload one level ABOVE the

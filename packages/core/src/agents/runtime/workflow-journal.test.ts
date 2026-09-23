@@ -177,6 +177,14 @@ describe('WorkflowJournal', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
+  async function loadedReplay(journal: WorkflowJournal) {
+    const loaded = await journal.load();
+    if (loaded.kind !== 'loaded') {
+      throw new Error(`expected a loaded journal, got ${loaded.kind}`);
+    }
+    return loaded.replay;
+  }
+
   it('append then load round-trips entries', async () => {
     const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
     await j.append({ type: 'started', key: 'k1', agentId: '1' });
@@ -186,7 +194,7 @@ describe('WorkflowJournal', () => {
       agentId: '1',
       result: { v: 9 },
     });
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.results.get('k1')?.result).toEqual({ v: 9 });
     expect(replay.started.get('k1')).toHaveLength(1);
   });
@@ -196,7 +204,7 @@ describe('WorkflowJournal', () => {
     await j.append({ type: 'started', key: 'k1', agentId: '1' });
     await j.append({ type: 'failed', key: 'k1', agentId: '1' });
 
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.failed.has('k1')).toBe(true);
     expect(replay.results.has('k1')).toBe(false);
     // The record is on disk in the same one-JSON-object-per-line shape as
@@ -228,17 +236,63 @@ describe('WorkflowJournal', () => {
 
     await j.drain();
 
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.started.get('k1')).toHaveLength(1);
     expect(replay.results.get('k1')?.result).toBe('done');
   });
 
-  it('load on a missing file returns empty maps', async () => {
+  // A resume has to tell these three apart: an empty journal belongs to a run
+  // with nothing cached yet, a missing one leaves nothing to resume, and an
+  // unreadable one must not pass for either.
+  it('reports a missing file as missing, not as an empty replay', async () => {
     const j = new WorkflowJournal(path.join(dir, 'nope.jsonl'));
-    const replay = await j.load();
+    await expect(j.load()).resolves.toEqual({ kind: 'missing' });
+  });
+
+  it('loads a file that exists and holds no entries', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    expect(await j.ensureExists()).toBe(true);
+    const replay = await loadedReplay(j);
     expect(replay.results.size).toBe(0);
     expect(replay.started.size).toBe(0);
     expect(replay.failed.size).toBe(0);
+  });
+
+  it('reports a path that cannot be read as unreadable', async () => {
+    // A directory where the journal file should be: it is there, and it is
+    // not a journal.
+    const journalPath = path.join(dir, 'sub', 'journal.jsonl');
+    await fs.mkdir(journalPath, { recursive: true });
+    const loaded = await new WorkflowJournal(journalPath).load();
+    expect(loaded.kind).toBe('unreadable');
+    expect(loaded).toHaveProperty('reason', expect.stringMatching(/\S/));
+  });
+
+  it('records a launch as a line no replay reads', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    await j.markLaunched();
+    await j.append({ type: 'started', key: 'k1', agentId: '1' });
+
+    const written = (
+      await fs.readFile(path.join(dir, 'sub', 'journal.jsonl'), 'utf8')
+    )
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(written[0]).toEqual({ type: 'launched', version: 1 });
+    const replay = await loadedReplay(j);
+    expect(replay.started.get('k1')).toHaveLength(1);
+    expect(replay.results.size).toBe(0);
+    expect(replay.failed.size).toBe(0);
+  });
+
+  it('does not fail a launch whose record cannot be written', async () => {
+    // The parent of the run directory is a file, so the append cannot create
+    // the directory it needs.
+    const blocker = path.join(dir, 'blocker');
+    await fs.writeFile(blocker, '');
+    const j = new WorkflowJournal(path.join(blocker, 'run', 'journal.jsonl'));
+    await expect(j.markLaunched()).resolves.toBeUndefined();
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -303,5 +357,75 @@ describe('deriveArgsSeed', () => {
     const k1 = deriveAgentKey(deriveArgsSeed({ topic: 'a' }), 'do x', {});
     const k2 = deriveAgentKey(deriveArgsSeed({ topic: 'b' }), 'do x', {});
     expect(k1).not.toBe(k2); // same prompt+opts, different args → different key
+  });
+});
+
+// A resume that changed how hard an agent thinks, or what it may call, has to
+// run that agent live. The sandbox normalizes spellings before the key is
+// derived; that half is pinned end to end in workflow-orchestrator.test.ts.
+describe('resume key for effort and disallowedTools', () => {
+  it('projects both into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        effort: 'high',
+        disallowedTools: ['run_shell_command', 'write_file'],
+      }),
+    ).toBe(
+      JSON.stringify({
+        disallowedTools: ['run_shell_command', 'write_file'],
+        effort: 'high',
+      }),
+    );
+  });
+
+  it('gives a different effort a different key', () => {
+    const low = deriveAgentKey('', 'review it', { effort: 'low' });
+    expect(low).not.toBe(deriveAgentKey('', 'review it', { effort: 'high' }));
+    expect(low).not.toBe(deriveAgentKey('', 'review it', {}));
+    expect(low).toBe(deriveAgentKey('', 'review it', { effort: 'low' }));
+  });
+
+  it('gives a different deny set a different key', () => {
+    expect(
+      deriveAgentKey('', 'scan', { disallowedTools: ['write_file'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { disallowedTools: ['edit', 'write_file'] }),
+    );
+  });
+});
+
+// An allowlist changes what the agent may call. The sandbox folds built-in
+// spellings, order and duplicates before the key is derived (pinned in
+// workflow-sandbox.test.ts); what it leaves alone reaches the key as written.
+describe('resume key for tools', () => {
+  it('projects the allowlist into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    ).toBe(JSON.stringify({ tools: ['read_file', 'run_shell_command'] }));
+  });
+
+  it('gives a different allowlist a different key', () => {
+    const narrow = deriveAgentKey('', 'scan', { tools: ['read_file'] });
+    expect(narrow).not.toBe(
+      deriveAgentKey('', 'scan', {
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    );
+    expect(narrow).not.toBe(deriveAgentKey('', 'scan', {}));
+    expect(narrow).toBe(deriveAgentKey('', 'scan', { tools: ['read_file'] }));
+  });
+
+  // Two names that reach one MCP tool are not folded, so they are two keys.
+  // The skill says so; this keeps the sentence honest.
+  it('keys two spellings of one MCP tool apart', () => {
+    expect(
+      deriveAgentKey('', 'scan', { tools: ['mcp__warehouse__query'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { tools: ['query (warehouse MCP Server)'] }),
+    );
   });
 });

@@ -55,14 +55,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
         ? 'this session can apply some actions without per-action review and the sender does not'
         : `held (${cause})`,
   flattenPeerLabel: (value: string) => {
-    const oneLine = value
-      .replace(
-        // eslint-disable-next-line no-control-regex
-        /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff]+/g,
-        ' ',
-      )
-      .trim();
-    return oneLine.length > 200 ? `${oneLine.slice(0, 199)}\u2026` : oneLine;
+    const oneLine = value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' ').trim();
+    const points = Array.from(oneLine);
+    return points.length > 200
+      ? `${points.slice(0, 199).join('')}\u2026`
+      : oneLine;
   },
   canonicalizeMsgId: (msgId: string) => msgId.replace(/-/g, '').toLowerCase(),
   listPeerControllers: async () => {
@@ -97,6 +94,7 @@ function held(over: {
   monotonicAt?: number;
   selfSent?: true;
   controller?: HeldMessage['controller'];
+  toSessionId?: string;
 }): HeldMessage {
   return {
     frame: {
@@ -106,6 +104,9 @@ function held(over: {
       priority: 'next',
       from: '/tmp/peer.sock',
       ...(over.fromName !== undefined ? { fromName: over.fromName } : {}),
+      ...(over.toSessionId !== undefined
+        ? { toSessionId: over.toSessionId }
+        : {}),
       message: { role: 'user', content: over.content ?? 'do a thing' },
     },
     cause: over.cause ?? 'mode-mismatch',
@@ -123,7 +124,7 @@ function held(over: {
 
 interface Fake {
   getHeld: () => readonly HeldMessage[];
-  getHeldExpiryMs: () => number | null;
+  getHeldExpiryMs: (sessionId?: string) => number | null;
   decide: ReturnType<typeof vi.fn>;
   forgetController: ReturnType<typeof vi.fn>;
   recordHeldListing: ReturnType<typeof vi.fn>;
@@ -132,12 +133,13 @@ interface Fake {
 
 function makeContext(
   peerMessaging: Fake | null,
-  crossSessionMessaging?: boolean,
+  crossSessionMessaging?: unknown,
+  scopes: Record<string, unknown> = {},
 ): CommandContext {
   return {
     services: {
       peerMessaging,
-      settings: { merged: { agents: { crossSessionMessaging } } },
+      settings: { merged: { agents: { crossSessionMessaging } }, ...scopes },
     },
   } as unknown as CommandContext;
 }
@@ -145,10 +147,11 @@ function makeContext(
 async function run(
   peerMessaging: Fake | null,
   args: string,
-  crossSessionMessaging?: boolean,
+  crossSessionMessaging?: unknown,
+  scopes?: Record<string, unknown>,
 ): Promise<{ messageType: string; content: string }> {
   const result = await peersCommand.action!(
-    makeContext(peerMessaging, crossSessionMessaging),
+    makeContext(peerMessaging, crossSessionMessaging, scopes),
     args,
   );
   if (!result || result.type !== 'message') {
@@ -386,9 +389,61 @@ describe('formatHeldList', () => {
 });
 
 describe('/peers', () => {
-  it('explains how to turn the feature on when it is off', async () => {
-    const result = await run(null, '');
+  it('explains how to turn the feature back on when it is off', async () => {
+    const result = await run(null, '', false);
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('Cross-session messaging is off');
     expect(result.content).toContain('crossSessionMessaging');
+  });
+
+  it('does not claim the feature is off when nothing set the key', async () => {
+    // Unset means on: the null inbox is then a startup or bind problem,
+    // and telling the user to enable a setting that is already on sends
+    // them nowhere.
+    const result = await run(null, '');
+    expect(result.content).not.toContain('Cross-session messaging is off');
+    expect(result.content).toContain('no inbox');
+  });
+
+  it('names the repository when a workspace false outranks a user true', async () => {
+    // A workspace may only tighten, so writing true in user settings
+    // changes nothing here; the remedy has to point at the repository.
+    const result = await run(null, '', false, {
+      user: { settings: { agents: { crossSessionMessaging: true } } },
+      workspace: { settings: { agents: { crossSessionMessaging: false } } },
+      isTrusted: true,
+      workspaceSettingsActive: true,
+    });
+    expect(result.content).toContain('.qwen/settings.json');
+    expect(result.content).toContain('cannot turn it back on here');
+    expect(result.content).not.toContain('Set it to true');
+  });
+
+  it('does not claim a value it cannot see', async () => {
+    const result = await run(null, '', 'yes', {
+      user: { settings: { agents: { crossSessionMessaging: 'yes' } } },
+    });
+    expect(result.content).toContain('your user settings');
+    expect(result.content).not.toMatch(/: ?false/);
+  });
+
+  it('says an unsupported platform as information, without advice to disable', async () => {
+    inboxFailure.current = {
+      cause: 'unsupported_platform',
+      socketPath: 'C:\\Users\\me\\qwen-socks\\1.sock',
+      detail: 'automatic peer inbox paths are not supported on Windows',
+      hint: 'Disable cross-session messaging for this session.',
+      attempts: 1,
+    };
+    try {
+      const result = await run(null, '');
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('not available on this platform');
+      expect(result.content).not.toContain('failed to bind its socket');
+      expect(result.content).not.toContain('Disable');
+    } finally {
+      inboxFailure.current = null;
+    }
   });
 
   it('does not tell a user to enable a setting they already enabled', async () => {
@@ -398,7 +453,8 @@ describe('/peers', () => {
     const result = await run(null, '', true);
     expect(result.messageType).toBe('error');
     expect(result.content).toContain('failed to register');
-    expect(result.content).not.toContain('Enable it with');
+    expect(result.content).not.toContain('Cross-session messaging is off');
+    expect(result.content).not.toContain('Remove that entry');
   });
 
   it('repeats the bind failure and what to change when the inbox could not bind', async () => {
@@ -418,7 +474,8 @@ describe('/peers', () => {
       // ever existed in this file's stub.
       expect(result.content).toContain('belongs to another user');
       expect(result.content).toContain('XDG_RUNTIME_DIR');
-      expect(result.content).not.toContain('Enable it with');
+      expect(result.content).not.toContain('Cross-session messaging is off');
+      expect(result.content).not.toContain('Remove that entry');
     } finally {
       inboxFailure.current = null;
     }
@@ -626,6 +683,32 @@ describe('/peers', () => {
     expect(result.content).toContain('4 minutes left');
   });
 
+  it("counts each message down on its own session's lifetime", async () => {
+    // One process can hold sessions from several workspaces, each with
+    // its own `agents.crossSessionHeldExpiry`. A listing that showed one
+    // number for all of them would promise a deadline the gate will not
+    // keep for at least one of the messages on screen.
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        heldAt: Date.now() - 30_000,
+        toSessionId: 'brief',
+      }),
+      held({
+        msgId: 'bbbbbb22-0000-4000-8000-000000000000',
+        heldAt: Date.now() - 30_000,
+        toSessionId: 'patient',
+      }),
+    ];
+    fake.getHeldExpiryMs = (sessionId?: string) =>
+      sessionId === 'brief' ? 60_000 : 10 * 60_000;
+
+    const result = await run(fake, '');
+
+    expect(result.content).toContain('less than a minute left');
+    expect(result.content).toContain('10 minutes left');
+  });
+
   it('bounces a handle that would reassign after the shorter id expired', async () => {
     // `msgId` is peer-chosen and only shape-checked, so a peer can park
     // `abc` beside `abc12345`. While both are held the handles are
@@ -730,7 +813,7 @@ describe("formatHeldList for the session's own process", () => {
 
 describe('formatHeldList — remaining time', () => {
   it('says nothing about expiry when holds do not expire', () => {
-    const out = formatHeldList([held({ msgId: 'a1b2c3' })], null);
+    const out = formatHeldList([held({ msgId: 'a1b2c3' })], () => null);
     expect(out).not.toContain('left');
     expect(out).not.toContain('expiring');
   });
@@ -740,7 +823,7 @@ describe('formatHeldList — remaining time', () => {
     // that hides its own deadline invites decisions made too late.
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 60_000 })],
-      5 * 60_000,
+      () => 5 * 60_000,
     );
     expect(out).toContain('4 minutes left');
   });
@@ -756,7 +839,7 @@ describe('formatHeldList — remaining time', () => {
     // scheduling drift up to 30s.
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 30_000 })],
-      120_000,
+      () => 120_000,
     );
     expect(out).toContain('2 minutes left');
   });
@@ -779,7 +862,7 @@ describe('formatHeldList — remaining time', () => {
             monotonicAt: 0,
           }),
         ],
-        5 * 60_000,
+        () => 5 * 60_000,
       );
       expect(out).toContain('expiring now');
       expect(out).not.toContain('minutes left');
@@ -791,7 +874,7 @@ describe('formatHeldList — remaining time', () => {
   it('does not count seconds nobody can act on', () => {
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 55_000 })],
-      60_000,
+      () => 60_000,
     );
     expect(out).toContain('less than a minute left');
   });
@@ -799,7 +882,7 @@ describe('formatHeldList — remaining time', () => {
   it('says so when the hold has already run out', () => {
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 120_000 })],
-      60_000,
+      () => 60_000,
     );
     expect(out).toContain('expiring now');
   });
@@ -807,7 +890,7 @@ describe('formatHeldList — remaining time', () => {
   it('keeps the hold cause alongside the deadline', () => {
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() })],
-      5 * 60_000,
+      () => 5 * 60_000,
     );
     expect(out).toContain('held because');
     expect(out).toContain('5 minutes left');
@@ -903,7 +986,9 @@ describe('/peers controllers', () => {
     ];
     const out = await run(null, 'controllers', false);
     expect(out.content).toContain('c_0123abcd');
-    expect(out.content).not.toContain('Cross-session messaging is off');
+    // The whole off-notice, not one phrasing of it: the listing is served
+    // before the off-check and must not carry it.
+    expect(out.content).not.toContain('Cross-session messaging');
   });
 
   it('reports a registry it cannot read as a line, not a crash', async () => {

@@ -9,6 +9,11 @@ import {
   type DaemonSessionSummary,
   type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import {
+  clickSidebarElement,
+  installSidebarDomShims,
+  resolveWebShellSessions,
+} from '../../test/sidebarHarness';
 
 const {
   connection,
@@ -131,6 +136,7 @@ const {
         | undefined,
     },
     workspace: {
+      baseUrl: '',
       capabilities: undefined as
         | {
             qwenCodeVersion: string;
@@ -215,20 +221,11 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         workspaceCwd: connection.workspaceCwd,
         options,
       };
-      if (options?.enabled === false) {
-        return { ...state, sessions: [], data: undefined, catalogQuery };
-      }
-      // A useSessions implementation may model an unsettled catalog page with
-      // an explicit `data` key (undefined until the fetch settles), matching
-      // the real store's empty snapshot on a query-key change.
-      return {
-        ...state,
-        data:
-          'data' in state
-            ? (state as { data?: DaemonSessionSummary[] }).data
-            : state.sessions,
+      return resolveWebShellSessions(
+        state,
+        options?.enabled !== false,
         catalogQuery,
-      };
+      );
     },
     useSessionCatalogController: () => ({
       refreshQueries: refreshSessionCatalogQueries,
@@ -353,22 +350,7 @@ const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+installSidebarDomShims();
 
 const capabilities = {
   qwenCodeVersion: '1.2.3',
@@ -431,7 +413,6 @@ function renderSidebar(
             | 'hooks'
           )[];
         };
-    onOpenGitDiff?: (cwd: string) => void;
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
     onOpenWorkspacesOverview?: () => void;
@@ -489,7 +470,6 @@ function renderSidebar(
           footer={overrides.footer}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaceOverview={overrides.workspaceOverview}
-          onOpenGitDiff={overrides.onOpenGitDiff}
           onNewWorktreeSession={overrides.onNewWorktreeSession}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
@@ -523,11 +503,7 @@ function menuItemLabels(): string[] {
 }
 
 function click(element: HTMLElement): void {
-  element.dispatchEvent(
-    new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-  );
-  element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  clickSidebarElement(element, true);
 }
 
 function setInputValue(input: HTMLInputElement, value: string): void {
@@ -807,6 +783,7 @@ beforeEach(() => {
   connection.supportedCommands = undefined;
   connection.capabilities = capabilities;
   workspace.capabilities = capabilities;
+  workspace.baseUrl = '';
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
   workspace.client.workspaceByCwd.mockReset();
@@ -907,6 +884,30 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
+  it('marks each remote workspace folder', () => {
+    workspace.baseUrl = 'https://remote.example.com';
+
+    renderSidebar();
+
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(capabilities.workspaces.length);
+  });
+
+  it('leaves local workspace folders unmarked', () => {
+    workspace.baseUrl = window.location.origin;
+
+    renderSidebar();
+
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(0);
+  });
+
   it('delegates Add workspace to the App-owned dialog', () => {
     const onOpenAddWorkspace = vi.fn();
     renderSidebar({ onOpenAddWorkspace });
@@ -1679,7 +1680,6 @@ describe('WebShellSidebar workspace removal', () => {
       projectFeaturesEnabled: false,
       onOpenAddWorkspace: vi.fn(),
       onOpenWorkspacesOverview: vi.fn(),
-      onOpenGitDiff: vi.fn(),
     });
     await act(async () => {
       await Promise.resolve();
@@ -3286,49 +3286,79 @@ describe('WebShellSidebar workspace removal', () => {
     );
   });
 
-  it('copies the workspace path and reports a clipboard failure', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    const previousClipboard = Object.getOwnPropertyDescriptor(
-      navigator,
-      'clipboard',
-    );
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    });
-    const onError = vi.fn();
-    try {
-      renderSidebar({ onError });
-      act(() => click(workspaceAction('/tmp/other')!));
-      const copy = () =>
-        Array.from(
-          document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-        ).find((element) => element.textContent === 'Copy path');
-      await act(async () => {
-        click(copy()!);
-        await Promise.resolve();
+  it.each([false, true])(
+    'copies the displayed workspace path and limits local open actions (SSH=%s)',
+    async (remote) => {
+      connection.capabilities = {
+        ...capabilities,
+        features: [
+          ...capabilities.features,
+          'workspace_local_open',
+          'workspace_local_terminal',
+        ],
+        workspaces: capabilities.workspaces.map((ws) =>
+          ws.cwd === '/tmp/other' && remote
+            ? {
+                ...ws,
+                ssh: { host: 'host', port: 2222, directory: '/srv/project' },
+              }
+            : ws,
+        ),
+      };
+      workspace.capabilities = connection.capabilities;
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const previousClipboard = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
+      );
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
       });
-      expect(writeText).toHaveBeenCalledWith('/tmp/other');
-      expect(onError).not.toHaveBeenCalled();
+      const onError = vi.fn();
+      try {
+        renderSidebar({ onError });
+        act(() =>
+          click(workspaceAction(remote ? 'host:2222:' : '/tmp/other')!),
+        );
+        expect(menuItemLabels().includes('Open folder')).toBe(!remote);
+        expect(menuItemLabels().includes('Open terminal')).toBe(!remote);
+        const copy = () =>
+          Array.from(
+            document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+          ).find((element) => element.textContent === 'Copy path');
+        await act(async () => {
+          click(copy()!);
+          await Promise.resolve();
+        });
+        expect(writeText).toHaveBeenCalledWith(
+          remote ? '/srv/project' : '/tmp/other',
+        );
+        expect(onError).not.toHaveBeenCalled();
 
-      writeText.mockRejectedValueOnce(new Error('denied'));
-      act(() => click(workspaceAction('/tmp/other')!));
-      await act(async () => {
-        click(copy()!);
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0]?.[1]).toBe('Failed to copy workspace path');
-    } finally {
-      // Put the shared jsdom stub back rather than leaving a hole behind.
-      if (previousClipboard) {
-        Object.defineProperty(navigator, 'clipboard', previousClipboard);
-      } else {
-        delete (navigator as { clipboard?: unknown }).clipboard;
+        writeText.mockRejectedValueOnce(new Error('denied'));
+        act(() =>
+          click(workspaceAction(remote ? 'host:2222:' : '/tmp/other')!),
+        );
+        await act(async () => {
+          click(copy()!);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(onError).toHaveBeenCalledTimes(1);
+        expect(onError.mock.calls[0]?.[1]).toBe(
+          'Failed to copy workspace path',
+        );
+      } finally {
+        // Put the shared jsdom stub back rather than leaving a hole behind.
+        if (previousClipboard) {
+          Object.defineProperty(navigator, 'clipboard', previousClipboard);
+        } else {
+          delete (navigator as { clipboard?: unknown }).clipboard;
+        }
       }
-    }
-  });
+    },
+  );
 
   it('keeps the rename dialog open and skips the refresh when the daemon rejects', async () => {
     connection.capabilities = {
@@ -3378,7 +3408,6 @@ describe('WebShellSidebar workspace removal', () => {
     const onNewSession = vi.fn(() => true);
     const onNewWorktreeSession = vi.fn();
     renderSidebar({
-      onOpenGitDiff: vi.fn(),
       onNewSession,
       onNewWorktreeSession,
       workspaces: [
@@ -3398,6 +3427,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     act(() => click(workspaceAction('/tmp/other')!));
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(menuItemLabels()).toContain('New worktree task');
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
@@ -3442,7 +3474,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
 
-    act(() => click(workspaceAction('/tmp/project')!));
+    await act(async () => {
+      click(workspaceAction('/tmp/project')!);
+    });
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
     ).find((element) => element.textContent === 'New worktree task');
@@ -3571,16 +3605,18 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    const clickWorktree = () => {
-      act(() => click(workspaceAction('/tmp/other')!));
+    const clickWorktree = async () => {
+      await act(async () => {
+        click(workspaceAction('/tmp/other')!);
+      });
       const item = Array.from(
         document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
       ).find((element) => element.textContent === 'New worktree task');
       expect(item).toBeDefined();
       act(() => click(item!));
     };
-    clickWorktree();
-    clickWorktree();
+    await clickWorktree();
+    await clickWorktree();
     expect(onNewWorktreeSession).toHaveBeenCalledTimes(1);
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
     const catalogCallsBefore = refreshWorkspaceSessionCatalog.mock.calls.length;
@@ -3653,8 +3689,7 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    // The selection drives the fetch: skills is never requested.
-    expect(workspaceMcp).toHaveBeenCalled();
+    expect(workspaceMcp).not.toHaveBeenCalled();
     expect(workspaceSkills).not.toHaveBeenCalled();
 
     // Hovering the header lists only the selected facet in the popover.
@@ -3671,6 +3706,8 @@ describe('WebShellSidebar workspace removal', () => {
     const rows = document.querySelectorAll(
       '[role="dialog"] [data-web-shell-workspace-overview]',
     );
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(workspaceSkills).not.toHaveBeenCalled();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.getAttribute('data-web-shell-workspace-overview')).toBe(
       'mcp',
@@ -4818,7 +4855,9 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       row?.querySelector('[data-web-shell-scheduled-task-session]'),
     ).toBeTruthy();
-    expect(row?.querySelector(scenario.selector)).toBeTruthy();
+    expect(Boolean(row?.querySelector(scenario.selector))).toBe(
+      scenario.activeWorkState === 'active',
+    );
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {

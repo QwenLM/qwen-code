@@ -71,10 +71,10 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
-  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -350,7 +350,6 @@ type PendingPermissionLookup =
   | { kind: 'ambiguous'; requestIds: string[] };
 type CollectBufferEntry = {
   text: string;
-  displayText: string;
   envelope: Envelope;
 };
 type NamedTurnBinding = {
@@ -421,7 +420,6 @@ const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
-const MAX_DISPLAY_PROJECTION_CHARS = 8000;
 // Mirrors BTW_MAX_INPUT_LENGTH in core without adding core to channel-base.
 const CHANNEL_BTW_MAX_INPUT_LENGTH = 4096;
 
@@ -462,6 +460,8 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
+  /** Sender axis for group traffic; `undefined` means it follows `gate`. */
+  protected groupSenderGate?: SenderGate;
   protected router: SessionRouter;
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
@@ -610,6 +610,24 @@ export abstract class ChannelBase {
       return;
     }
     await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected getBackgroundResponseSourceLabel(
+    sessionId: string,
+  ): string | undefined {
+    const target = this.router.getTarget(sessionId);
+    const presentation = this.namedSessions?.presentation(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      !this.router.isSessionLive(sessionId) ||
+      !presentation ||
+      presentation.status !== 'open' ||
+      !this.sameTaskOwner(target, presentation.target)
+    ) {
+      return undefined;
+    }
+    return this.createSourceLabel(presentation, target);
   }
 
   protected async resolveBackgroundResponseDelivery(
@@ -1407,6 +1425,17 @@ export abstract class ChannelBase {
       config.allowedUsers,
       pairingStore,
     );
+    // Undefined keeps the group axis on `senderPolicy`, which is the historical
+    // behavior. A decoupled axis gets its own gate and its own member list, and
+    // never pairs: an approval would also unlock direct messages.
+    this.groupSenderGate =
+      config.groupSenderPolicy === 'open' ||
+      config.groupSenderPolicy === 'allowlist'
+        ? new SenderGate(
+            config.groupSenderPolicy,
+            config.allowedGroupUsers ?? [],
+          )
+        : undefined;
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
@@ -1427,6 +1456,7 @@ export abstract class ChannelBase {
         filePath: join(options.stateDir, 'named-sessions.json'),
         router: this.router,
         isBusy: (sessionId) => this.isNamedSessionBusy(sessionId),
+        onSessionRetiring: (sessionId) => this.onSessionRetiring(sessionId),
       });
     }
 
@@ -2023,13 +2053,11 @@ export abstract class ChannelBase {
     this.collectBuffers.delete(sessionId);
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
-    const coalescedDisplayText = buffer.map((b) => b.displayText).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
     this.notifyPromptBufferDrained(lastEnvelope.chatId, sessionId, buffer);
     const syntheticEnvelope: Envelope = {
       ...lastEnvelope,
       text: coalesced,
-      displayText: coalescedDisplayText,
       alreadyPrefixed: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
@@ -2257,7 +2285,6 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
-          job.prompt,
           promptState,
           job.id,
           options.timeoutMs,
@@ -2429,7 +2456,6 @@ export abstract class ChannelBase {
       },
     );
     const promptText = buildChannelWebhookPrompt(task, target);
-    const displayText = buildChannelWebhookDisplayText(task);
     const taskId = `webhook:${task.source}:${task.eventType}`;
     const safeTaskId = sanitizeLogText(taskId, 64);
     const safeChannel = sanitizeLogText(this.name, 64);
@@ -2555,7 +2581,6 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
-          displayText,
           promptState,
           taskId,
           options.timeoutMs,
@@ -2660,12 +2685,13 @@ export abstract class ChannelBase {
     promptBridge: ChannelAgentBridge,
     sessionId: string,
     promptText: string,
-    displayText: string,
     promptState: ActivePrompt,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
-    const prompt = promptBridge.prompt(sessionId, promptText, { displayText });
+    const prompt = promptBridge.prompt(sessionId, promptText, {
+      displayText: sanitizeDisplayText(promptText),
+    });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
@@ -2797,9 +2823,13 @@ export abstract class ChannelBase {
         if (
           !cancelSucceeded ||
           active.deliveryStarted ||
-          (turnEnded && !active.cancelled)
+          (turnEnded && !active.cancelled && !active.cancellationEmitted)
         ) {
           return false;
+        }
+        if (turnEnded) {
+          this.emitTaskCancellation(active, sessionId, reason);
+          return true;
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
@@ -3994,7 +4024,6 @@ export abstract class ChannelBase {
           const result = await namedSessions.close(owner, parts[0]!);
           if (closing) {
             this.cancelBtw(closing.sessionId);
-            this.onSessionRetiring(closing.sessionId);
           }
           await this.sendThreadMessage(
             envelope.chatId,
@@ -4119,7 +4148,9 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
-          if (id !== retiringSessionId) this.onSessionRetiring(id);
+          if (!this.namedSessions && id !== retiringSessionId) {
+            this.onSessionRetiring(id);
+          }
           this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
@@ -4924,7 +4955,9 @@ export abstract class ChannelBase {
       this.dmGate.check(envelope).allowed &&
       (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
         ? true
-        : this.gate.isAllowed(normalizedTarget.senderId)) &&
+        : this.senderGateFor(envelope.isGroup).isAllowed(
+            normalizedTarget.senderId,
+          )) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -5819,6 +5852,11 @@ export abstract class ChannelBase {
   }): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
     const authorized = this.config.allowedUsers;
+    // A decoupled group axis admits members no allowlist vouches for, so an
+    // empty list must not mean "unrestricted" for group targets.
+    if (target.isGroup && this.groupSenderGate && authorized.length === 0) {
+      return false;
+    }
     return authorized.length === 0 || authorized.includes(target.senderId);
   }
 
@@ -6033,7 +6071,7 @@ export abstract class ChannelBase {
     const senderId = truncateGroupHistoryField(envelope.senderId);
     if (
       this.config.groupPolicy !== 'pairing' &&
-      !this.gate.isAllowed(senderId)
+      !this.senderGateFor(true).isAllowed(senderId)
     ) {
       return;
     }
@@ -6126,7 +6164,9 @@ export abstract class ChannelBase {
     const lines =
       this.config.groupPolicy === 'pairing'
         ? entries
-        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+        : entries.filter((entry) =>
+            this.senderGateFor(true).isAllowed(entry.senderId),
+          );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6141,6 +6181,15 @@ export abstract class ChannelBase {
     });
 
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
+  }
+
+  /**
+   * Sender gate that applies to one message axis. Group traffic follows
+   * `groupSenderPolicy` once it is decoupled; otherwise both axes share one
+   * gate, which is the historical behavior.
+   */
+  protected senderGateFor(isGroup: boolean): SenderGate {
+    return isGroup && this.groupSenderGate ? this.groupSenderGate : this.gate;
   }
 
   protected preflightInbound(
@@ -6195,16 +6244,19 @@ export abstract class ChannelBase {
       return true;
     }
 
+    const senderGate = this.senderGateFor(envelope.isGroup);
+
     if (
       options.deferPairingRequests === true &&
+      senderGate === this.gate &&
       this.config.senderPolicy === 'pairing' &&
-      !this.gate.isAllowed(envelope.senderId)
+      !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
       return true;
     }
 
-    const result = this.gate.check(envelope.senderId, envelope.senderName);
+    const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
@@ -6224,7 +6276,9 @@ export abstract class ChannelBase {
             return false;
           });
       }
-      this.logPreflightRejected('sender_denied');
+      this.logPreflightRejected(
+        senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+      );
       return false;
     }
 
@@ -6507,15 +6561,6 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    // Adapters that never set `displayText` fall back to the raw message
-    // text; sanitize at this boundary so attacker-controlled bidi/zero-width/
-    // control chars cannot reach the session-bus echo, recorded transcript,
-    // or session previews.
-    const displayText = sanitizeDisplayText(
-      envelope.displayText ?? envelope.text,
-      MAX_DISPLAY_PROJECTION_CHARS,
-    );
-
     const parsed = this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parsed?.command === 'btw'
@@ -6915,17 +6960,7 @@ export abstract class ChannelBase {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
           }
-          const bufferedDisplayText =
-            (envelope.isGroup || this.config.sessionScope === 'single') &&
-            !envelope.alreadyPrefixed &&
-            !recognizedSlashCommand
-              ? `[${sanitizeSenderName(envelope.senderName || envelope.senderId || 'unknown')}] ${sanitizePromptText(displayText)}`
-              : displayText;
-          buffer.push({
-            text: promptText,
-            displayText: bufferedDisplayText,
-            envelope,
-          });
+          buffer.push({ text: promptText, envelope });
           try {
             this.onPromptBuffered(
               envelope.chatId,
@@ -7244,12 +7279,23 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
 
+      let taskResultPartial = false;
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
+          ...(this.config.outputMode === 'per_task'
+            ? {
+                outputMode: 'per_task' as const,
+                onTaskResult: ({ partial }: { partial: boolean }) => {
+                  taskResultPartial = partial;
+                },
+              }
+            : {}),
           ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
-          displayText,
+          // Session history shows exactly what the model receives. Only the
+          // controls that can reorder or hide rendered text are neutralized.
+          displayText: sanitizeDisplayText(promptToSend),
         });
 
         await this.settleCancelRequested(promptState);
@@ -7261,6 +7307,7 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
           const segment = this.ensureOutputSegment(sessionId, promptState);
+          if (segment && taskResultPartial) segment.partial = true;
           await this.onResponseComplete(
             envelope.chatId,
             response,
@@ -7294,13 +7341,23 @@ export abstract class ChannelBase {
           });
         }
       } catch (err) {
+        const runtimeCancelled =
+          !promptState.deliveryStarted &&
+          err instanceof ChannelPromptCancelledError;
         // Mirror the try path: once delivery started, a late-settling cancel
         // must not suppress the failed emit (the /cancel handler declines to
         // emit its own terminal once deliveryStarted is set).
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
+          if (runtimeCancelled) {
+            this.emitTaskCancellation(
+              promptState,
+              sessionId,
+              'runtime_cancelled',
+            );
+          }
         }
-        if (!promptState.cancelled) {
+        if (!promptState.cancelled && !runtimeCancelled) {
           releaseHeldChunks();
           const segment = this.closeOutputSegment(sessionId, promptState);
           void this.notifyOutputSegmentEnd(
@@ -7327,7 +7384,7 @@ export abstract class ChannelBase {
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
-        if (promptState.cancelled) {
+        if (promptState.cancelled || runtimeCancelled) {
           return;
         }
         if (sourceLabel) {

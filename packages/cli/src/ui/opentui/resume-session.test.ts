@@ -74,7 +74,7 @@ describe('opentui resume mapping', () => {
         tool: 'read_file',
         title: 'read_file',
       },
-      { type: 'tool-output', id: CALL_ID, delta: '# README\nhello' },
+      { type: 'tool-output', id: CALL_ID, output: '# README\nhello' },
       { type: 'tool-end', id: CALL_ID, success: true, summary: 'ok' },
       { type: 'text', delta: 'README 内容已读取。' },
       { type: 'done' },
@@ -114,6 +114,37 @@ describe('opentui resume mapping', () => {
       id: 'c1',
       display: '',
       diff: { fileDiff, fileName: 'a.txt' },
+    });
+  });
+
+  it('carries TodoWrite results as a todo list, not as raw JSON', () => {
+    const todos = [
+      { id: '1', content: 'write the design', status: 'completed' },
+      { id: '2', content: 'run the matrix', status: 'in_progress' },
+    ];
+    const events: OpenTuiStreamEvent[] = resumeEventsFromSession({
+      conversation: {
+        messages: [
+          {
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [{ functionResponse: { id: 'c1', name: 'todo_write' } }],
+            },
+            toolCallResult: {
+              callId: 'c1',
+              status: 'success',
+              resultDisplay: { type: 'todo_list', todos },
+            },
+          },
+        ],
+      },
+    });
+    expect(events).toContainEqual({
+      type: 'tool-result',
+      id: 'c1',
+      display: '',
+      todos,
     });
   });
 

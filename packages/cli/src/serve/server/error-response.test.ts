@@ -5,8 +5,10 @@
  */
 
 import type { Response } from 'express';
+import { RequestError } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  AcpChildCapacityExceededError,
   McpAuthenticationInProgressError,
   SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -48,6 +50,137 @@ function responseMock(): {
   json.mockReturnValue(response);
   return { response: response as unknown as Response, set, status, json };
 }
+
+describe('workflow parameter errors', () => {
+  it.each(['request', 'wire'] as const)(
+    'preserves parameter details from a %s error',
+    (transport) => {
+      const source = RequestError.invalidParams(
+        { errorKind: 'workflow_invalid_params' },
+        '`sourceRef` must contain non-empty id and revision strings',
+      );
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
+      const { response, status, json } = responseMock();
+
+      sendBridgeError(response, error);
+
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({
+        error: source.message,
+        code: 'workflow_invalid_params',
+      });
+    },
+  );
+
+  it.each([
+    'workflow_journal_unavailable',
+    'workflow_args_unavailable',
+    'workflow_run_live_elsewhere',
+  ])('answers %s with 409 and its message', (errorKind) => {
+    const source = RequestError.invalidParams(
+      { errorKind },
+      'Workflow run wf_1234abcd has no journal on disk',
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: errorKind,
+    });
+  });
+
+  it('answers workflow_not_recorded with 503 and its message', () => {
+    const source = RequestError.invalidParams(
+      { errorKind: 'workflow_not_recorded' },
+      'Could not record that workflow run wf_1234abcd is running again',
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: 'workflow_not_recorded',
+    });
+  });
+
+  it.each([
+    new Error('Unexpected workflow failure'),
+    RequestError.invalidParams(undefined, 'Unclassified parameter error'),
+    RequestError.internalError(
+      { errorKind: 'unknown_workflow_error' },
+      'Unexpected workflow failure',
+    ),
+  ])('keeps unclassified errors as internal failures: %s', (error) => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+
+    sendBridgeError(response, error, undefined, daemonLog);
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: error.message }),
+    );
+  });
+});
+
+describe('child capacity errors', () => {
+  it.each([false, true])(
+    'preserves capacity through runtime wrapper=%s',
+    (wrapped) => {
+      const capacity = new AcpChildCapacityExceededError(6, 6);
+      const { response, status, json, set } = responseMock();
+      sendBridgeError(
+        response,
+        wrapped ? new WorkspaceRuntimeInitializationError(capacity) : capacity,
+      );
+      expect(status).toHaveBeenCalledWith(503);
+      expect(json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: capacity.code,
+          maxConcurrentChildren: 6,
+          committedAcpChildren: 6,
+        }),
+      );
+      expect(set).not.toHaveBeenCalled();
+    },
+  );
+  it('retains a verified standalone rollback and its capacity cause without Retry-After', () => {
+    const capacity = {
+      code: 'acp_child_capacity_exhausted' as const,
+      maxConcurrentChildren: 1,
+      committedAcpChildren: 1,
+    };
+    const { response, status, json, set } = responseMock();
+    sendBridgeError(
+      response,
+      new StandaloneSessionServiceError(
+        'standalone_creation_rolled_back',
+        'session-1',
+        'rolled back',
+        true,
+        capacity,
+      ),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'standalone_creation_rolled_back',
+        capacity,
+        sessionId: 'session-1',
+        retryable: true,
+      }),
+    );
+    expect(set).not.toHaveBeenCalled();
+  });
+});
 
 describe('sendBridgeError session writer errors', () => {
   it.each(['local', 'rpc'] as const)(

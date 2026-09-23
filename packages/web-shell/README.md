@@ -3,6 +3,49 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## 开发网页预览
+
+独立 Web Shell 的右侧面板提供「网页预览」。先通过终端启动开发服务器，
+再打开面板并输入当前浏览器可访问的 HTTP/HTTPS 地址。预览支持热更新、
+刷新、390px 手机宽度与桌面宽度切换，以及外部打开。
+
+面板内切换标签会保留页面运行状态。URL 和宽度模式按工作区与会话保存；
+重新打开整个面板、切换会话或刷新 Web Shell 后会从保存的入口 URL 加载。
+预览中的跨域页面导航不会同步到地址栏，刷新也会返回入口 URL。
+关闭预览不会停止开发服务器。
+
+Artifact 发布的网页链接会在对应轮次留下产物卡片；开启网页预览后，
+点击卡片「打开」可在右栏查看。普通 `record_artifact` 链接显示详情，
+可从详情外部打开。关闭页签不删除卡片，之后仍能从历史消息重新打开。手动输入的地址只保存为面板状态，不会新增对话记录。
+实时链接始终显示当前内容。
+
+需要保留当时的网页时，使用 `Artifact` 发布自包含 HTML：每次发布会额外
+保存一份独立的历史版本，包含内联样式、脚本、数据和内嵌资源。原消息的
+卡片打开当次保存的内容，关闭面板、刷新或重启 daemon 后仍可回看和交互，
+不依赖源文件、最新发布地址或开发服务器。重新打开会从交付时的初始状态
+开始，不保存用户在预览中的临时操作状态。
+
+历史版本文件保存在所属运行目录的 `artifacts/snapshots/` 中；原发布 URL
+仍更新为最新版。记录沿用会话产物的保留策略（默认最多 200 条，超过后
+可能淘汰旧记录），并非无限存档。淘汰、删除记录、回退历史或删除会话时，
+会释放该会话的快照引用；分支会话仍在使用的内容会保留，最后一个引用
+释放后才回收文件。持久化失败时不会提前删除历史文件。旧版没有引用信息
+的快照，以及落盘前崩溃或清理失败留下的文件会保守保留。仅开启会话记录的受管 ACP 会话保存快照，普通 CLI 发布
+不额外写入历史文件。删除运行目录、移动会话而未复制快照，
+或修改快照文件后会提示不可用，不会退回最新版。普通实时链接和过去未保存
+内容的记录不能自动还原；任意开发网站也不会自动打包成离线网页。
+
+嵌入式接入方通过 `rightPanel={{ items: ['review', 'sideTask', 'webPreview'] }}`
+开启入口。宿主 CSP 需要允许预览来源的 `frame-src`，同时用
+`frame-ancestors` 限制宿主页面只能被受信任的宿主嵌入，不能允许开发页面
+反过来嵌入宿主。预览容器会限制直接子页面跳转，但开发应用自己的后代
+iframe 仍需宿主的防嵌入策略保护。
+
+地址必须使用主机名或 IPv4，不能包含登录凭据，也不能指向 Web Shell 或
+daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程开发目前需要
+浏览器可访问的地址或已有端口转发；预览不会自动把浏览器的 `localhost`
+转成远程 daemon 地址，也不会转发 daemon 凭据。
+
 ## 环境要求
 
 - React：`^18.0.0 || ^19.0.0`
@@ -13,20 +56,57 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 组件包会自动注入自身的 CSS（包括 Tailwind 编译产物），接入方不需要配置
 Tailwind 或额外引入全局 CSS。
 
+### Browser Support Matrix
+
+- Chrome / Edge 111+
+- Firefox 128+
+- Safari / iOS 16.4+
+- Android System WebView 111+
+
+最低版本覆盖 Tailwind v4 的生成 CSS；JavaScript 构建目标单独设置为 ES2021。
+独立页面在不支持的浏览器显示升级提示，嵌入式组件由宿主保证该支持约定。
+此矩阵不是所有最低版本真机均已验证的声明。
+
+独立生产页面在 HTTPS 或可信 loopback origin 下注册 service worker。
+仅带内容哈希的构建资源使用 worker 缓存；manifest、公开图标、API、令牌和
+事件流不缓存。HTML 连接失败时显示 503 重试页，不支持离线会话。
+安装入口由浏览器决定，不保证自动弹出安装提示。
+
 ## 浏览器任务通知
 
 通过 `qwen serve` 打开的独立 Web Shell 可在 **Settings → UI → 浏览器任务通知**
-开启提醒。默认关闭，仅在用户点击后申请浏览器授权；偏好保存在当前浏览器站点，
+管理提醒。内置 `main.tsx` 显式设置默认开启；用户已保存的关闭选择优先。仅在用户点击后申请浏览器授权；偏好保存在当前浏览器站点，
 不写入 daemon 或 workspace 设置，同源标签页之间同步。
 
 页面在后台或窗口失焦时，当前聊天及 Split View 中仍挂载的聊天在回合结束或失败后
-可以发送系统通知。取消回合、初次加载历史和前台已处理的回合保持静默。通知只显示
-通用状态，不含聊天正文、错误详情或工作目录；点击通知尝试聚焦原窗口。
+可以发送系统通知。取消回合、初次加载历史和前台已处理的回合保持静默。通知显示会话标题（最多 60 个 Unicode 码点）、回合状态，以及带“提问 / 回复”标签的本轮提问（最多 80 个码点）和回复（最多 120 个码点）纯文本摘录。
+标题显示 QwenCode · 会话名，尚未生成时使用本轮问题首行，两者均缺失时显示 QwenCode；业务文案不额外添加地址。通知携带 Qwen Code 图标，实际显示位置由浏览器和操作系统决定，不能替换 macOS 上 Chrome 自身的标志。摘要直接截取文本，不额外调用模型；提问或回复缺失时省略对应行，两者均缺失时只显示状态。失败时可显示本轮提问，不展示错误详情或部分回复。系统可能进一步截短通知正文。
+通知内容可能显示在系统通知中心或锁屏上，遵循系统的预览设置；点击通知尝试聚焦原窗口并在主聊天中打开对应会话，退出设置页或分屏；已在目标会话时不会重新加载。
 
 需要支持 Notifications API 的桌面浏览器以及 HTTPS 或可信的 localhost 环境。
 支持 Web Locks 且存储可用时，同源标签页协调去重；否则退化为页面内去重及相同 tag
 的通知替换。关闭网页、页面冻结或离开未挂载的聊天后不保证提醒。嵌入式组件不自动
 启用此能力；Channel 推送不在首版范围内。
+
+`WebShellWithProviders`（及别名 `StandaloneWebShell`）支持通过 `browserNotifications` 接入通知并配置名称和图标：
+
+```tsx
+<WebShellWithProviders
+  baseUrl="https://daemon.example.com"
+  sidebar
+  browserNotifications={{
+    defaultEnabled: true,
+    appName: 'DataAgent',
+    iconUrl: 'https://cdn.example.com/assets/dataagent.png',
+  }}
+/>
+```
+
+传入 `{}` 时使用默认 `QwenCode` 名称和随包图标；名称和图标均可单独省略，空白值也回退默认。标题显示“应用名称 · 会话标题”。图片 URL 由浏览器直接加载，可使用 HTTPS CDN 地址；加载失败不保证自动回退到默认图标。
+
+`defaultEnabled` 默认 `false`；设为 `true` 时仅对没有保存通知偏好的浏览器站点默认开启。用户明确开启或关闭的选择优先，刷新后也保留；挂载后修改默认值不会覆盖当前选择。不传 `browserNotifications` 时保持嵌入入口原有行为，不接入通知。即使默认开启，也不会自动申请权限，用户仍需在 Settings → UI 中允许浏览器通知。修改品牌值不会重新加载当前会话。通知点击只导航所属实例，并遵守其当前锁定工作区。
+
+低层 `WebShell` 的 daemon providers 由宿主管理，不支持这个配置属性；qwen serve 内置页面继续使用默认品牌。本配置仅影响通知，不改变侧边栏品牌、Chrome 来源地址或浏览器标志。
 
 ## Tailwind 与 shadcn/ui
 
@@ -275,16 +355,47 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性                 | 类型                          | 说明                                                                                                    |
-| -------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `baseUrl`            | `string`                      | daemon API 地址，未传时使用 `window.location.origin`                                                    |
-| `token`              | `string`                      | daemon API Bearer token                                                                                 |
-| `sessionId`          | `string`                      | 要连接的 session id；未传或 `undefined` 时保持空页面                                                    |
-| `workspaceId`        | `string`                      | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                                         |
-| `workspaceCwd`       | `string`                      | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId`                    |
-| `sessionContext`     | `DaemonProductSessionContext` | 显式产品上下文；standalone 或 Live 上下文不能同时传 `workspaceId`、`workspaceCwd` 或 `lockWorkspaceCwd` |
-| `lockWorkspaceCwd`   | `string`                      | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                      |
-| `restartSseOnPrompt` | `boolean`                     | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭 |
+| 属性                   | 类型                                  | 说明                                                                                                                                           |
+| ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `browserNotifications` | `WebShellBrowserNotificationsOptions` | 可选接入通知；`appName` 默认 QwenCode，`iconUrl` 默认内联 PNG（支持 CDN），`defaultEnabled` 默认 false；已保存偏好优先；不传时停用，不重建会话 |
+| `baseUrl`              | `string`                              | daemon API 地址，未传时使用 `window.location.origin`                                                                                           |
+| `token`                | `string`                              | daemon API Bearer token                                                                                                                        |
+| `sessionId`            | `string`                              | 要连接的 session id；未传或 `undefined` 时保持空页面                                                                                           |
+| `workspaceId`          | `string`                              | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                                                                                |
+| `workspaceCwd`         | `string`                              | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId`                                                           |
+| `sessionContext`       | `DaemonProductSessionContext`         | 显式产品上下文；standalone 或 Live 上下文不能同时传 `workspaceId`、`workspaceCwd` 或 `lockWorkspaceCwd`                                        |
+| `lockWorkspaceCwd`     | `string`                              | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                                                             |
+| `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
+| `settings`             | `WebShellSettingsOptions`             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+
+### Workspace 会话创建超时
+
+Workspace 创建由 SDK 分别约束能力查询和创建请求，WebShell 另设 75 秒的
+兜底总超时，覆盖常见的单次能力预检与创建两个默认 30 秒请求，并留出 15 秒余量。冷缓存或缓存过期时，
+能力查询 20 秒、创建请求 15 秒可以在约 35 秒后成功，无需调整配置。
+此规则也适用于已有会话时创建新会话；SDK standalone 创建保持原有超时行为。
+并发能力刷新可能取代原预检并延长请求链；即使每个请求都未超过自身截止时间，
+创建动作仍可能先触及 75 秒上限。
+
+| 配置／机制                  | 默认值     | 作用与边界                                                           |
+| --------------------------- | ---------- | -------------------------------------------------------------------- |
+| WebShell workspace 创建动作 | `75000` ms | 兜底限制不响应 SDK 取消信号的传输；超时后成功返回的会话会被 detach。 |
+| `onSessionCreated` 回调     | `30000` ms | 创建完成后才开始计时的独立宿主回调限制；没有公开的超时配置属性。     |
+
+WebShell Provider 不透传 SDK 的
+[`fetchTimeoutMs`](../../docs/developers/daemon/13-sdk-daemon-client.md#configuration)，
+能力预检和创建请求使用 SDK 默认请求预算；提高 daemon 的初始化超时不会提高这两类请求的 SDK 超时。
+load/resume 使用独立预算；服务端优先级、客户端覆盖顺序、能力缓存前提和缺失时的回退值见
+[restore 超时契约](../../docs/design/2026-08-07-safe-session-restore-timeout.md#timeout-contract)，
+SDK 和 WebShell 的 restore 余量见
+[serve 协议文档](../../docs/developers/qwen-serve-protocol.md#capabilities)。
+
+SDK `query()` 的 `timeout.controlRequest` 等参数属于
+子进程接口，不控制 daemon HTTP 请求。兜底超时限制 WebShell 的等待时间，不保证
+底层传输立即取消；迟到结果仍按原有机制清理。其他动作、会话清理和回调仍使用各自的超时。
+
+daemon 参数的完整含义和配置方式见
+[daemon 配置文档](../../docs/developers/daemon/17-configuration.md)。
 
 ### WebShell
 
@@ -294,12 +405,28 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `onSessionCreated`         | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒                                                               |
 | `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                           |
 | `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                    |
+| `onThemeResolved`          | `(theme: WebShellTheme) => void`                                                                                                      | 未提供 `theme` 且 shell 从 daemon 设置解析出主题时触发；仅供宿主同步文档外观，不应持久化为宿主偏好                                             |
 | `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                                                                                        |
 | `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                                                                              |
+| `onLanguageResolved`       | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                       |
 | `brand`                    | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                      |
 | `onBrandResolved`          | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon |
 | `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                             |
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
+| `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
+| `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+
+宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
+详情的打开操作：
+
+```tsx
+<WebShell onContextUsageOpen={(sessionId) => openContextDetails(sessionId)} />
+```
+
+此参数也适用于 `WebShellWithProviders`。提供回调后，composer hover 弹层的
+「查看明细」及页头上下文详情入口会将来源会话 ID 交给宿主，不再打开内置右侧
+面板或自动读取详情；分屏传入对应分屏的会话 ID。不提供回调则保留默认行为。
+直接点击上下文圆环生成 `/context` 快照、压缩操作和已保存面板的恢复不受影响。
 
 宿主可以监听命令，也可以返回 `true` 接管对应操作：
 
@@ -426,6 +553,43 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 
 自定义内容仍使用内置的展开、收起行为，`expanded` 会随状态更新；文件夹行右侧的内置操作不会渲染。
 未提供 `lockWorkspaceCwd` 时，该 renderer 不会执行。
+
+## 原生设置呈现
+
+嵌入方宿主可以在保留原生表单和模型选择器的前提下，隐藏单个原生设置项：
+
+```tsx
+<WebShellWithProviders
+  settings={{
+    excludeItems: ['setting:fast-model', 'setting:vision-model'],
+  }}
+/>
+```
+
+也可以只开放少量条目，未列出的设置（包括上游新增设置）默认隐藏：
+
+```tsx
+<WebShellWithProviders
+  settings={{
+    includeItems: ['setting:language', 'builtin:chat-width'],
+  }}
+/>
+```
+
+`WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
+
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+
+- 未传 `includeItems` 时保持现有展示逻辑，仅应用 `excludeItems`；新增的上游设置默认仍然可见。
+- `includeItems: []` 隐藏全部原生设置条目；它与未传入白名单不同。
+- 同时传入两个列表时，排除优先：仅展示白名单中且未被排除的条目。
+- 不传 `settings`、传入 `{}` 或仅传 `excludeItems: []` 时，保持默认呈现。
+
+过滤在工作区与用户两个作用域中都生效。被排空的分类会消失，分类导航回退到可用分类；全部隐藏则显示现有空状态。从设置面板打开的选择器会在来源条目不再可见时关闭，包括动态修改白名单的情况。
+
+**呈现限制不是访问控制。** 白名单与排除列表只影响原生设置页展示，不启用或关闭底层功能，不改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供作用域策略、字段覆盖或条目级深链。
+
+设计与验证范围见 [English](../../docs/design/web-shell-settings-allowlists.md) / [简体中文](../../docs/design/web-shell-settings-allowlists.zh-CN.md)。
 
 ## Markdown 图表接入
 

@@ -477,3 +477,36 @@ function readStringLiteral(
 export function countReasoningItems(items: ResponsesApiInputItem[]): number {
   return items.filter(isReasoningItem).length;
 }
+
+export function isEncryptedReasoningRejection(
+  status: number,
+  responseBody: string,
+): boolean {
+  if (status !== 400 || responseBody.length > MAX_BODY_CHARS) return false;
+  // Some gateways return one SSE data frame even on a non-2xx response.
+  const text = toEnvelopeText(responseBody.replace(/^data: ?/, ''));
+  if (!text) return false;
+  const envelope = readEnvelope(text, MAX_OBJECT_CANDIDATES, false);
+  if (!envelope || !isPlainObject(envelope.value)) return false;
+  const direct = readErrorMember(envelope.value);
+  if (direct) return direct['code'] === 'invalid_encrypted_content';
+
+  const gateway = envelope.value['routify_response'];
+  if (
+    !isPlainObject(gateway) ||
+    gateway['success'] !== false ||
+    gateway['status'] !== 400
+  )
+    return false;
+  const error = readErrorMember(gateway['error_detail']);
+  return error?.['code'] === 'invalid_encrypted_content';
+}
+
+export function downgradeEncryptedReasoningItems(
+  items: ResponsesApiInputItem[],
+): ResponsesApiInputItem[] {
+  return downgradeRejectedReasoningItems(items, {
+    namedIndex: items.findIndex(isReasoningItem),
+    maxLength: null,
+  });
+}

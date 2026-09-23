@@ -29,6 +29,7 @@ import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
@@ -53,8 +54,15 @@ import {
   roundCapStopEntryZh,
   roundCapStopDisclosure,
   readBudgetStop,
+  minutesPhrase,
+  verifyBudgetExhausted,
+  wallLeftText,
 } from './lib/deadline.js';
-import { LARGE_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
+import {
+  interactionEntryOf,
+  isFixAuditRound,
+  LARGE_REVERSE_AUDIT_ROUNDS,
+} from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   HOSTNAME_RE,
@@ -72,6 +80,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { repositoryContextOf } from './lib/repository-context.js';
 import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
@@ -101,6 +110,7 @@ import {
   type LedgerFinding,
 } from './lib/ledger.js';
 import { mdField, stripCommentGrammar } from './lib/md-field.js';
+import { CRITICAL_FLOOR_ROUND, FLAT_STREAK_TO_ENGAGE } from './lib/posture.js';
 import {
   convergenceAdvisory,
   convergenceAssessment,
@@ -554,6 +564,26 @@ function planNamesPr(planPath: string | undefined): boolean {
 }
 
 /**
+ * Does this plan carry the focused navigation profile? Read for the
+ * mechanism-health note alone: that profile withholds the ledger anchor BY
+ * DESIGN on every round (its disclosed coverage gap caps the verdict), so
+ * an unanchored recovered round is the profile working, not a stopped
+ * chain — the note must not report it as a malfunction on every round of a
+ * navigation-only PR.
+ */
+function planIsFocusedNavigation(planPath: string | undefined): boolean {
+  try {
+    if (!planPath) return false;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      reviewProfile?: unknown;
+    };
+    return plan?.reviewProfile === DOCS_NAV_PROFILE;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The deferred-suggestions list's rendered bounds, shared by the
  * duplicate-drop account; the cannot-tell account shares the char cap.
  * Module-scoped because two surfaces read the line cap: the body renderer
@@ -972,6 +1002,7 @@ export function criticalFloorKind(
   contextUnavailable: boolean,
   prevRound: number,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): CriticalFloorKind | undefined {
   // The REPORTING reading, and it folds an absent or unrecognisable floor
   // into `auto` the way `composeReviewBody` already does ("A floor the
@@ -1007,6 +1038,7 @@ export function criticalFloorKind(
     contextUnavailable,
     prevRound,
     signalEngaged,
+    fixAuditPlan,
   );
 }
 
@@ -1028,6 +1060,7 @@ export function criticalFloorInEffect(
   contextUnavailable: boolean,
   prevRound: number,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): boolean {
   return (
     floorResolvesCritical(
@@ -1035,6 +1068,7 @@ export function criticalFloorInEffect(
       contextUnavailable,
       prevRound,
       signalEngaged,
+      fixAuditPlan,
     ) !== undefined
   );
 }
@@ -1045,6 +1079,7 @@ function floorResolvesCritical(
   contextUnavailable: boolean,
   prevRound: number,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): CriticalFloorKind | undefined {
   // `prevRound` is the PREVIOUS posted round, so the review being composed
   // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
@@ -1052,7 +1087,11 @@ function floorResolvesCritical(
   // critical".
   const thisRound = prevRound + 1;
   if (floor === 'critical') return 'explicit';
-  if (floor === 'auto' && !contextUnavailable && thisRound >= 6) {
+  if (
+    floor === 'auto' &&
+    !contextUnavailable &&
+    thisRound >= CRITICAL_FLOOR_ROUND
+  ) {
     return 'auto-resolved';
   }
   // The signal-driven early trigger (#9903): the convergence diagnosis's
@@ -1066,6 +1105,19 @@ function floorResolvesCritical(
   if (floor === 'auto' && !contextUnavailable && signalEngaged === true) {
     return 'auto-signaled';
   }
+  // The fix-audit arm (#10104): the PLAN records that the capture resolved
+  // this round's posture to critical from the same side-file facts the two
+  // arms above read — and the round's SHAPE was spent on that resolution
+  // (narrowed fan-out, narrowed waves).
+  // Where the arms above cannot re-derive it — a context-unavailable
+  // compose, or a side file rewritten between capture and compose — the
+  // plan's own record still resolves the floor, because the alternative is
+  // the one combination nothing licenses: a round that narrowed its
+  // coverage on the posture and then posts Suggestions in full, beside a
+  // disclosure describing the posture it did not run. Gated on `auto`
+  // exactly like the other arms: an explicit `suggestion` is the operator
+  // turning the posture off, and it wins over a stale plan record.
+  if (floor === 'auto' && fixAuditPlan === true) return 'auto-resolved';
   return undefined;
 }
 
@@ -1083,12 +1135,16 @@ function floorResolvesCritical(
  * exists as code, here, where the drafts are already in hand.
  *
  * Enforcement fires ONLY where the deferral licence already holds: an
- * explicit `critical` floor at any round, `auto` at round ≥ 6, or `auto`
- * with the flat-trend streak at its bar (#9903) — the `auto` arms only
- * with the round knowable. Everything else fails OPEN exactly as the
+ * explicit `critical` floor at any round, `auto` at round ≥ 6, `auto`
+ * with the flat-trend streak at its bar (#9903) — those two `auto` arms
+ * only with the round knowable — or `auto` beside the plan's own fix-audit
+ * record (#10104), which holds even context-unavailable and at round 1
+ * because the capture already spent the round's shape on the resolution.
+ * Everything else fails OPEN exactly as the
  * posture itself does — an unrecognisable floor, `auto` before round 6 with
- * the streak below its bar, `auto` in the context-unavailable state (the
- * round is unknowable), `--severity-floor suggestion` (posture off): a
+ * the streak below its bar, `auto` in the context-unavailable state without
+ * a fix-audit plan record (the round is unknowable), `--severity-floor
+ * suggestion` (posture off): a
  * posting bar in doubt posts. The rounds-2–5
  * code-age rule stays model-side on purpose — it needs the worktree git
  * checks this module does not have.
@@ -1107,6 +1163,7 @@ export function floorEnforcedReroute(
   prevRound: number,
   drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
   signalEngaged?: boolean,
+  fixAuditPlan?: boolean,
 ): { indices: number[]; entries: DeferredEntry[] } {
   if (
     !criticalFloorInEffect(
@@ -1114,6 +1171,7 @@ export function floorEnforcedReroute(
       contextUnavailable,
       prevRound,
       signalEngaged,
+      fixAuditPlan,
     )
   ) {
     return { indices: [], entries: [] };
@@ -1494,6 +1552,16 @@ export interface ComposeReviewResult {
    * operator which command repairs it. Two registers, two channels.
    */
   remediation: string[];
+  /**
+   * The FIXes the coverage check withheld because the plan's wall would
+   * refuse the build they name, each with the gate's arithmetic — and the
+   * one repair that is named but never performed mid-round (selection
+   * drift: re-planning moves the epoch the round's evidence is fenced on).
+   * Printed to stderr as `NOTE:` lines beside the FIX lines, never rendered
+   * into the body. A gap the body discloses with no FIX beside it is explained
+   * here, not left to look like an oversight.
+   */
+  waivedFixes: string[];
   /**
    * How many findings the convergence posture deferred — Suggestions, and
    * the Criticals the critical floor deferred by their axes (#10291) — the
@@ -2401,12 +2469,17 @@ export function composeReview(
   // here (`=== true`); the authoritative shape check stays in
   // `composeReviewBody`, which runs on the same input immediately after
   // and throws the same TypeError either way.
+  // The plan's own posture record (#10104) — the third evidence source the
+  // resolution reads, so a fix-audit round's posting bar can never disagree
+  // with the shape it already ran.
+  const fixAuditPlan = fixAuditShapeFacts(input.planPath) !== null;
   const reroute = floorEnforcedReroute(
     input.severityFloor,
     input.contextUnavailable === true,
     prevRound,
     Array.isArray(input.draftedComments) ? input.draftedComments : [],
     signalEngaged,
+    fixAuditPlan,
   );
   // The one resolution, read by the enforcement above and reported by the
   // diagnosis below — and stamped into this round's marker, so the NEXT round
@@ -2416,7 +2489,28 @@ export function composeReview(
     input.contextUnavailable === true,
     prevRound,
     signalEngaged,
+    fixAuditPlan,
   );
+  // Whether the PLAN's own record is the only thing licensing that
+  // resolution (#10136 round 23). The plan is CLI-written content behind a
+  // MODEL-written path — which is why `authorization.ts` refuses to let it
+  // fill the host identity axis — so where the arms that read CLI-side
+  // facts could not reach the same answer, the licence rests on a file the
+  // model path can rewrite. That is the intended behaviour (the alternative
+  // is a round that narrowed its coverage on the posture and then posts
+  // Suggestions in full), but it is not a fact the body may leave implied:
+  // the same run states the reduction it made, so it states what licensed
+  // the reduction's posting half.
+  const planOnlyFloorLicence =
+    floorKind !== undefined &&
+    fixAuditPlan === true &&
+    criticalFloorKind(
+      input.severityFloor,
+      input.contextUnavailable === true,
+      prevRound,
+      signalEngaged,
+      false,
+    ) === undefined;
   let effective = input;
   if (reroute.indices.length > 0) {
     const drop = new Set(reroute.indices);
@@ -2471,6 +2565,7 @@ export function composeReview(
     input.contextUnavailable === true,
     prevRound,
     signalEngaged,
+    fixAuditPlan,
   );
   const postedLedger = buildPostedLedger(
     effective,
@@ -2614,6 +2709,7 @@ export function composeReview(
       floor: floorKind === undefined ? ('o' as const) : ('c' as const),
       ...(floorKind === undefined ? {} : { criticalFloorKind: floorKind }),
       floorEnforcementEngaged: floorInEffect,
+      planOnlyFloorLicence,
       // The streak the trigger just resolved, so the deferral header can
       // say WHY the floor engaged ahead of the round-6 schedule.
       flatRounds,
@@ -2723,18 +2819,9 @@ export const CHURN_MIN_FRESH = 4;
  */
 export const CHURN_STREAK_TO_FILE = 2;
 
-/**
- * How many consecutive rounds of a not-falling first-time-finding rate
- * engage the severity floor ahead of the round-6 schedule (#9903).
- *
- * Two, for the argument `CHURN_STREAK_TO_FILE` above states: one flat round
- * is a step, two is the shortest window in which "the rate is not falling"
- * is an observation. The bar is read off the ledger's `flatRounds` streak,
- * which a round advances when its OWN measured trend fires and resets when
- * it falls — so reaching it always takes two measured firing rounds; a
- * carried or pinned streak never adds.
- */
-export const FLAT_STREAK_TO_ENGAGE = 2;
+// The flat-trend bar lives in `lib/posture.ts` beside the round schedule:
+// the capture command's plan-time posture prediction (#10104) reads the same
+// two constants this resolution does, so the two cannot drift.
 
 /**
  * This round's census, or null when it cannot be read as one.
@@ -3474,12 +3561,17 @@ function ledgerMarkerFor(
         // ABSENT floor reads as `auto` in the REPORTING reading (a present but
         // unrecognisable one reads as nothing at all — see
         // `criticalFloorKind`), and `auto` resolves determinately from the
-        // round number and the context state. The ENFORCEMENT reading folds
+        // round number, the context state, and the plan's fix-audit posture
+        // record (#10104) — the last is the one that holds the posture
+        // through a context-unavailable round, so a stamp reading `c` on a
+        // round-3 context-unavailable compose is the record resolving, not a
+        // corrupt stamp. The ENFORCEMENT reading folds
         // nothing and fails open on both; the gap between the two is what the
         // mechanism-health check discloses. Recording it only when the state NAMED a floor
         // left the guard blind under the DEFAULT configuration — where the
-        // posture genuinely transitions at round 6 and again on a transient
-        // context failure — so a real posture change read as loop divergence,
+        // posture genuinely transitions at round 6 and, absent a fix-audit
+        // plan record, again on a transient context failure — so a real
+        // posture change read as loop divergence,
         // which is the misreading the field exists to prevent. What must not
         // be invented is a posture nobody can derive; this one is derived from
         // the same fold the advice and the enforcement backstop already use.
@@ -3629,6 +3721,57 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
     return ingestBodyCriticals(value);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * The plan's fix-audit posture record (#10104), for the body's round-shape
+ * disclosure and the posting floor's fix-audit arm — null on every plan that
+ * did not run one. Read defensively: the plan sits behind a model-written
+ * path, and a malformed block must silence the disclosure rather than render
+ * `undefined` into a posted body.
+ */
+function fixAuditShapeFacts(planPath: string | undefined): {
+  cause: 'explicit' | 'round' | 'flat-trend' | null;
+  /** Interaction entries the brief builder would render — one admission. */
+  interactionFiles: number;
+} | null {
+  try {
+    if (!planPath) return null;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      incremental?: unknown;
+    };
+    // The SAME admission `isFixAuditRound` applies — one bar, called,
+    // not restated: this reader gates the floor arm and the body's
+    // disclosure, that one the roster and the tier, and a weaker bar here
+    // let a garbled scope run the FULL shape while the floor deferred and
+    // the body described a fix-audit round nobody ran.
+    if (!isFixAuditRound(plan)) return null;
+    const rec = plan.incremental as {
+      postureCause?: unknown;
+      scope?: unknown;
+    };
+    const scope = rec.scope;
+    const interaction = (scope as { interaction?: unknown }).interaction;
+    let interactionFiles = 0;
+    if (Array.isArray(interaction)) {
+      for (const raw of interaction) {
+        // The SAME admission the brief builder applies —
+        // `interactionEntryOf`, called, not restated (#10136): an entry the
+        // briefs would not render (no path, no surviving edge) counts for
+        // nothing here either.
+        if (interactionEntryOf(raw) !== null) interactionFiles += 1;
+      }
+    }
+    const cause =
+      rec.postureCause === 'explicit' ||
+      rec.postureCause === 'round' ||
+      rec.postureCause === 'flat-trend'
+        ? rec.postureCause
+        : null;
+    return { cause, interactionFiles };
+  } catch {
+    return null;
   }
 }
 
@@ -4787,6 +4930,14 @@ function composeReviewBody(
      */
     floorEnforcementEngaged?: boolean;
     /**
+     * The floor resolved critical, and only the PLAN's own posture record
+     * licensed it — the CLI-side arms could not reach the same answer
+     * (#10136 round 23). The plan is CLI-written content behind a
+     * MODEL-written path, so the round says which of the two licensed its
+     * posting half rather than leaving it implied.
+     */
+    planOnlyFloorLicence?: boolean;
+    /**
      * The flat-trend streak the floor's early trigger resolved to this
      * round (#9903). Read only by the deferral header: when the floor
      * engaged as `auto-signaled`, the header names the streak so an
@@ -4890,12 +5041,14 @@ function composeReviewBody(
   }
   // The channel's OTHER precondition: deferring is only ever licensed by
   // the posture — `critical` at any round; `auto` from round 2 (the
-  // code-age rule) and round 6 (the floor); never an explicit `suggestion`
-  // (the operator turned the posture off) and never round 1 of `auto` (no
-  // posture, no age reference). An unlicensed deferral is a model
-  // mis-execution that would silently un-post findings — but the response
-  // is a CAP, not a refusal: a thrown compose loses the WHOLE round,
-  // Criticals included, and `prevRound` is a best-effort side-file read
+  // code-age rule) and round 6 (the floor); `auto` beside the plan's own
+  // fix-audit record (#10104); never an explicit `suggestion` (the
+  // operator turned the posture off) and never round 1 of `auto` without
+  // that record (no posture, no age reference). An unlicensed deferral
+  // is a model mis-execution that would silently un-post findings — but
+  // the response is a CAP, not a refusal: a thrown compose loses the
+  // WHOLE round, Criticals included, and `prevRound` is a best-effort
+  // side-file read
   // whose every failure mode returns 0 — a missing file at a true round 6
   // must degrade to a disclosed, uncertified verdict, never to no verdict
   // at all. The findings render; the cap keeps anything from certifying
@@ -4905,7 +5058,9 @@ function composeReviewBody(
   // A floor the module does not recognise — absent, null, or a
   // model-transcribed spelling drift ("Critical", "auto ", "") — is folded
   // into ONE state: unknown. It caps as unlicensed when a deferral list
-  // exists (fail-closed, disclosed) and is inert when it does not — a
+  // exists and no fix-audit plan record licenses it (#10104 — the record
+  // is the licence in that state, see `unlicensedDeferral`), fail-closed
+  // and disclosed, and is inert when no list exists — a
   // refusal here would lose the whole round over a field that changes no
   // output on a zero-deferral run, the exact outcome the licence block is
   // written to avoid. Model-transcribed prose is not a NaN count.
@@ -5071,6 +5226,7 @@ function composeReviewBody(
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
   // lines of the second register posted to the first reader.
   const remediation: string[] = [];
+  const waivedFixes: string[] = [];
   // Budget-gap disclosures from the coverage report — the checks agents said
   // their soft tool budget cut short. A DISCLOSURE channel, deliberately not
   // a cap: these render in the body's "Not reviewed" section mechanically
@@ -5108,6 +5264,12 @@ function composeReviewBody(
   // and a fabrication about a chunk nobody receipted. The public body would give
   // the author a false cause.
   const missingReceipts: number[] = [];
+  // Declarations of an unreadable line from records whose chunk id the plan
+  // does not carry (`coverage.ts` — `unplannedDeclarations`). The same fact as
+  // an `uncoverable` entry and the same cap, kept apart because the id is not
+  // a chunk of this plan: rendered through the chunk translation it was
+  // counted as a section of the author's diff.
+  const unplannedDeclared: number[] = [];
 
   // The plan's chunk→files table and the chunks somebody demonstrably read,
   // for the body renderer and the opener. Empty when no plan could be used —
@@ -5611,7 +5773,31 @@ function composeReviewBody(
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      // Operator register only, and NOT pushed through `coverageEntries`: that
+      // channel caps (every entry folds into the unreviewed-dimension cap and
+      // the posted "Not reviewed:" list), and a check this new must not be
+      // able to take an Approve away before anyone has seen how often it
+      // fires.
+      //
+      // A NOTE, not a FIX. A `FIX:` line is a repair the skill tells the
+      // orchestrator to perform this round, and re-capturing or re-planning
+      // must NOT be performed mid-round: the plan's mtime is the epoch the
+      // round's prompt records and transcripts are fenced on. So it rides the
+      // channel for repairs that are named and withheld. What is withheld is
+      // exactly that — the suffix does not forbid repairing an unreadable
+      // path, which moves no plan.
+      if (cov.selectionDrift !== null) {
+        waivedFixes.push(
+          // Names the artifact, not a direction: this command prints no
+          // coverage summary, so "the coverage below" pointed at the VOLUME
+          // and CONVERGENCE lines that follow it.
+          `selection drift: ${cov.selectionDrift}. The coverage this round ` +
+            `reports is against the plan as written; do not re-capture or ` +
+            `re-plan mid-round.`,
+        );
+      }
       for (const id of cov.missingChunks) missingReceipts.push(id);
+      unplannedDeclared.push(...cov.unplannedDeclarations);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
         // `chunk 5 (src/big.min.js)` vs the bare `chunk 5` here. A strict-equality
@@ -5739,14 +5925,23 @@ function composeReviewBody(
       // Both cap — a run that cannot show what it read has not shown it read
       // anything — but a reader chasing "could not read the transcripts" over a
       // plan with no `chunks[]` is chasing the wrong thing.
+      //
+      // A third, for the same reason: outcomes that do not partition the plan
+      // are a defect in the coverage walk, and "the plan could not be used"
+      // would send the operator to re-capture a diff that was never the
+      // problem.
       const why =
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
-          : `the plan could not be used (${(err as Error).message})`;
+          : err instanceof ChunkPartitionError
+            ? `the coverage check contradicted its own plan (${err.message})`
+            : `the plan could not be used (${(err as Error).message})`;
       const whyZh =
         err instanceof TranscriptsUnavailableError
           ? `无法读取 agent 的运行记录（${err.message}）`
-          : `plan 无法使用（${(err as Error).message}）`;
+          : err instanceof ChunkPartitionError
+            ? `覆盖率检查与其自身的 plan 相矛盾（${err.message}）`
+            : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
@@ -5802,6 +5997,7 @@ function composeReviewBody(
         });
       }
       remediation.push(...verification.remediation);
+      waivedFixes.push(...verification.waived);
       criticalsUnverified =
         verification.unverifiedFindings && criticalsNeedingVerify >= 1;
     } catch (err) {
@@ -5849,12 +6045,34 @@ function composeReviewBody(
       ).length;
       findingsUnverifiedAtCompose = unverifiedTagCount > 0;
       if (findingsUnverifiedAtCompose) {
-        remediation.push(
-          'findings still tagged `— [unverified]`: relaunch the verifier ' +
-            'for each tagged entry (Step 4, `--role verify` with that ' +
-            'entry), apply its verdict in the cumulative findings file, ' +
-            'and run compose-review again with the updated file',
+        // The relaunch is a `--role verify` build, which the compose floor
+        // gates: a FIX the verify builder would refuse (exit 4) is withheld
+        // and explained, like the coverage check's own (`waived`), or the
+        // one repair round Step 6 prescribes is spent on a refusal and the
+        // same FIX comes back. Same predicate as `verifyBudgetExhausted`
+        // in the coverage check, asked here for this FIX.
+        const floorRefusal = verifyBudgetExhausted(
+          input.env ?? process.env,
+          Date.now(),
+          input.planPath,
         );
+        if (floorRefusal === null) {
+          remediation.push(
+            'findings still tagged `— [unverified]`: relaunch the verifier ' +
+              'for each tagged entry (Step 4, `--role verify` with that ' +
+              'entry), apply its verdict in the cumulative findings file, ' +
+              'and run compose-review again with the updated file',
+          );
+        } else {
+          waivedFixes.push(
+            'findings still tagged `— [unverified]`: the relaunch FIX is ' +
+              "withheld — the plan's wall is at or under the compose floor (" +
+              `${wallLeftText(floorRefusal.remainingSeconds)}, floor ` +
+              `${minutesPhrase(floorRefusal.composeFloorSeconds)}), so the ` +
+              'verify builder would refuse each relaunch (exit 4); the tags ' +
+              'stand and cap the verdict, so do not attempt it',
+          );
+        }
       }
     } catch {
       findingsFileUnreadable = true;
@@ -5873,15 +6091,29 @@ function composeReviewBody(
     'contextUnavailable',
   );
 
+  // The plan's posture record, read BEFORE the licence below (#10104): the
+  // same fact the floor arm in `composeReview` acted on. Where it is
+  // present the round's shape was already spent on the critical resolution,
+  // so its deferrals are licensed even in the two states the doubt arms
+  // below name — the licence may not flag the very deferral the floor arm
+  // enforced. The disclosure further down reads this same const.
+  const fixAudit = fixAuditShapeFacts(input.planPath);
+
   // The deferral licence, decided here because two of its arms need inputs
   // parsed above: deferring is only ever licensed by the posture —
   // `critical` at any round; `auto` from round 2 (the code-age rule) and
-  // round 6 (the floor); never an explicit `suggestion` (posture off),
-  // never round 1 of `auto` (no posture, no age reference), never `auto` in
-  // the context-unavailable state (the round is unknowable — SKILL resolves
-  // it as round 1), and never with the field ABSENT beside a non-empty list
-  // (the licence cannot be checked, and the channel ships in the same PR as
-  // the field — omission is fail-closed, not grandfathered). The response
+  // round 6 (the floor); `auto` beside the plan's own fix-audit record
+  // (#10104), whatever the round or the context state; never an explicit
+  // `suggestion` (posture off), never round 1 of `auto` WITHOUT the plan
+  // record (no posture, no age reference), never `auto` in the
+  // context-unavailable state WITHOUT the plan record (the round is
+  // unknowable — SKILL resolves it as round 1), and never with the field
+  // ABSENT beside a non-empty list when the plan carries no fix-audit
+  // record (the licence cannot be checked, and the channel ships in the
+  // same PR as the field — omission is fail-closed, not grandfathered).
+  // A present plan record IS the licence in that state: the round's shape
+  // was spent on the critical resolution, and the deferral is what the
+  // floor arm enforced. The response
   // is a CAP, not a refusal: a thrown compose loses the whole round,
   // Criticals included, and `prevRound` is a best-effort side-file read
   // whose every failure mode returns 0 — a missing file at a true round 6
@@ -5891,13 +6123,13 @@ function composeReviewBody(
   const unlicensedDeferral =
     deferredSuggestions.length === 0
       ? null
-      : floorAbsent
+      : floorAbsent && fixAudit === null
         ? 'the state carried no recognisable `severityFloor`, so the licence cannot be checked'
         : severityFloor === 'suggestion'
           ? 'the operator turned the posture off (`--severity-floor suggestion`)'
-          : severityFloor === 'auto' && contextUnavailable
+          : severityFloor === 'auto' && contextUnavailable && fixAudit === null
             ? 'the round is unknowable in the context-unavailable state'
-            : severityFloor === 'auto' && prevRound === 0
+            : severityFloor === 'auto' && prevRound === 0 && fixAudit === null
               ? 'no posture is engaged on round 1 and no age reference exists'
               : null;
   const presubmitRaw: unknown = input.presubmit ?? {};
@@ -6025,7 +6257,9 @@ function composeReviewBody(
   const cappedBy: string[] = [];
   if (cannotTell.length > 0) cappedBy.push('cannot-tell-existing-critical');
   if (missingReceipts.length > 0) cappedBy.push('chunk-nobody-read');
-  if (uncoverable.length > 0) cappedBy.push('uncoverable-chunk');
+  if (uncoverable.length > 0 || unplannedDeclared.length > 0) {
+    cappedBy.push('uncoverable-chunk');
+  }
   if (unreviewed.length + coverageEntries.length > 0) {
     cappedBy.push('unreviewed-dimension');
   }
@@ -6049,6 +6283,7 @@ function composeReviewBody(
   const scopeUnproven =
     missingReceipts.length > 0 ||
     uncoverable.length > 0 ||
+    unplannedDeclared.length > 0 ||
     contextUnavailable ||
     coverageEntries.some((entry) => entry !== budgetEntry);
 
@@ -6913,6 +7148,8 @@ function composeReviewBody(
       });
     }
   }
+  // Unplanned declarations the caller relayed WITH the file they span.
+  const relayedInFull = new Set<number>();
   if (uncoverable.length > 0) {
     // The CLI's own entries are bare `chunk <id>` (pushed above, from the
     // report) and render through the same translation as every other chunk
@@ -6923,8 +7160,31 @@ function composeReviewBody(
     const callerNamed: string[] = [];
     for (const e of uncoverable) {
       const m = /^chunk (\d+)$/.exec(e);
-      if (m) bareIds.push(Number(m[1]));
-      else callerNamed.push(e);
+      // A bare id the plan does not carry can only be the caller's — the
+      // report's own are planned by construction — and it renders as the
+      // caller wrote it: counted as one of this diff's sections, it would
+      // state a gap in a plan that has none there.
+      if (m && planCarries(Number(m[1]), plannedChunks)) {
+        bareIds.push(Number(m[1]));
+        continue;
+      }
+      // One fact, said once, when the caller relays a declaration the
+      // coverage walk found itself — the same rule the planned ids get where
+      // the walk's are merged in (`chunk 5` vs `chunk 5 (src/big.min.js)`).
+      // A bare relay adds nothing to the walk's own sentence and is dropped;
+      // a richer one names the file, so IT is kept and the walk's sentence
+      // stands down for that id.
+      const relayed = /^chunk (\d+)(?= \S|$)/.exec(e);
+      if (relayed && unplannedDeclared.includes(Number(relayed[1]))) {
+        if (m) continue;
+        relayedInFull.add(Number(relayed[1]));
+      }
+      // A bare id the plan lacks used to collapse through the chunk
+      // translation, which counted it once however often it was relayed;
+      // rendered verbatim it is still said once. Every other entry is the
+      // caller's prose and renders exactly as it always has.
+      if (m && callerNamed.includes(e)) continue;
+      callerNamed.push(e);
     }
     const bareGap =
       bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
@@ -6933,9 +7193,26 @@ function composeReviewBody(
     const callerShown = callerNamed.map((entry) => stripCommentGrammar(entry));
     const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerShown];
     const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerShown];
+    // Nothing left to name when every entry was the caller relaying what the
+    // walk already disclosed: a sentence with no subject is not a disclosure.
+    if (shown.length > 0) {
+      notReviewedParts.push({
+        en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
+        zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+      });
+    }
+  }
+  const declaredUnsaid = new Set(
+    unplannedDeclared.filter((id) => !relayedInFull.has(id)),
+  );
+  if (declaredUnsaid.size > 0) {
+    // Said as what it is — a line, reported by an agent — and not through the
+    // sentence above: "a line THERE" needs a section of this diff to point
+    // at, and the plan has none for this id.
+    const by = unplannedChunkAgents(declaredUnsaid.size);
     notReviewedParts.push({
-      en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
-      zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+      en: `Not reviewed: a line of the diff that no read can reach — reported by ${by.en}.`,
+      zh: `未审查：diff 中有一行超出单次读取上限、任何读取都无法到达——由${by.zh} 报告。`,
     });
   }
   // One disclosure per subject, one sentence per cause — structurally, not by
@@ -7056,8 +7333,17 @@ function composeReviewBody(
   >();
   const reasonZhOf = new Map<string, string>();
   for (const e of covEntries) {
-    if (seenSubjects.has(e.subject)) continue;
-    seenSubjects.add(e.subject);
+    // One line per subject — except that the budget / round-cap entry does
+    // not claim its subject: it says how the audit loop ENDED (stopped by
+    // the budget, capped without converging), and a Step 5 delivery gap
+    // under the same subject says what did or did not run before it — "no
+    // auditor was launched with a prompt this skill builds" beside "did not
+    // converge within the round cap" are two facts, not a duplicate, and
+    // dropping the second would let the first imply rounds that never ran.
+    if (e !== budgetEntry) {
+      if (seenSubjects.has(e.subject)) continue;
+      seenSubjects.add(e.subject);
+    }
     // Keyed on the reason the body will PRINT — public over internal. Two
     // unread briefs differ internally only by their brief paths; grouped on
     // those, the path-free public sentence would render once per role, which
@@ -7088,10 +7374,19 @@ function composeReviewBody(
     // selector — and the partition below keys on the INTERNAL subject, so a
     // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
+    const unplannedIds = new Set<number>();
     const named = new Map<string, { zh: string; count: number }>();
     for (const e of entries) {
       const m = /^chunk (\d+)$/.exec(e.subject);
-      if (m) chunkIds.push(Number(m[1]));
+      if (m && !planCarries(Number(m[1]), plannedChunks)) {
+        // The id came out of a launch prompt's text, and this plan has no
+        // such chunk — a record from another chunking of the diff. Collapsed
+        // with the rest it was counted against THIS plan: a two-chunk plan
+        // read in full told the author that "1 of the diff's 2 sections"
+        // went unreviewed. It is an agent, not a section, and is named as
+        // one — in every arm, since they all arrive here as `chunk <id>`.
+        unplannedIds.add(Number(m[1]));
+      } else if (m) chunkIds.push(Number(m[1]));
       else {
         const subject = e.publicSubject ?? e.subject;
         const existing = named.get(subject);
@@ -7103,16 +7398,20 @@ function composeReviewBody(
           });
       }
     }
+    const unplanned =
+      unplannedIds.size > 0 ? unplannedChunkAgents(unplannedIds.size) : null;
     const gap =
       chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
     const shown = [
       ...(gap ? [gap.phrase] : []),
+      ...(unplanned ? [unplanned.en] : []),
       ...[...named].map(([subject, { count }]) =>
         count > 1 ? `${subject} (×${count})` : subject,
       ),
     ].map((part) => stripCommentGrammar(part));
     const shownZh = [
       ...(gap ? [gap.phraseZh] : []),
+      ...(unplanned ? [unplanned.zh] : []),
       ...[...named.values()].map(({ zh, count }) =>
         count > 1 ? `${zh}（×${count}）` : zh,
       ),
@@ -7290,7 +7589,8 @@ function composeReviewBody(
   const hasCoverageGaps =
     unreviewed.length + coverageEntries.length > 0 ||
     missingReceipts.length > 0 ||
-    uncoverable.length > 0;
+    uncoverable.length > 0 ||
+    unplannedDeclared.length > 0;
   const coverageOpener: Bi | undefined = nothingCertified
     ? {
         keep: 1,
@@ -7570,6 +7870,192 @@ function composeReviewBody(
       ]
     : [];
 
+  // The fix-audit round-shape disclosure (#10104), non-capping: when the
+  // capture resolved the critical posture, the round's SHAPE changed — the
+  // fan-out covered the delta and its seams instead of the full territory,
+  // and the reverse-audit waves narrowed. Each is a reduction the
+  // posted record must own rather than leave to a diff of agent counts, the
+  // same accounting rule the retirement and floor-enforcement notes follow.
+  const fixAuditCauseEn =
+    fixAudit?.cause === 'explicit'
+      ? 'the operator-set critical floor'
+      : fixAudit?.cause === 'flat-trend'
+        ? 'the flat first-time-finding trend'
+        : fixAudit?.cause === 'round'
+          ? 'the round schedule'
+          : 'the critical posting floor';
+  const fixAuditCauseZh =
+    fixAudit?.cause === 'explicit'
+      ? '操作者显式设置的 critical 下限'
+      : fixAudit?.cause === 'flat-trend'
+        ? '首次发现速率持平的信号'
+        : fixAudit?.cause === 'round'
+          ? '轮次日程'
+          : 'critical 发布下限';
+  // The deferral claim states what THIS round's floor actually ENFORCED —
+  // the strict reading `floorEnforcedReroute` acted on — not the reporting
+  // reading: the two diverge on a floor the state omitted, which the
+  // report folds to `auto` (the plan arm resolves it) while enforcement
+  // fails open, and keying the claim off the reporting reading posted
+  // "recorded and deferred" beside the very Suggestions posting inline in
+  // the same body.
+  const fixAuditFloorEngaged = convergence?.floorEnforcementEngaged === true;
+  // Named, not implied (#10136 round 23): where the CLI-side arms could not
+  // reach the resolution themselves, the licence for this round's posting
+  // half is the plan's own record — CLI-written content behind a
+  // MODEL-written path. The round already states the coverage it gave up;
+  // this states what vouched the posting side of the same posture.
+  const planLicenceEn =
+    convergence?.planOnlyFloorLicence === true
+      ? " The licence for that floor is the capture's own plan record: the " +
+        'compose-side facts could not re-derive the posture this round, so ' +
+        'the shape and its posting bar rest on the same file.'
+      : '';
+  const planLicenceZh =
+    convergence?.planOnlyFloorLicence === true
+      ? '该下限的依据是 capture 自己的 plan 记录：本轮 compose 侧的事实无法重推出该姿态，' +
+        '因此形态与其发布下限依据同一个文件。'
+      : '';
+  // The open-floor sentence names its true cause, and the causes are THREE
+  // distinct facts: an explicit `suggestion` floor the operator set, a
+  // floor the state omitted, and a present value the module cannot read —
+  // the strict reading fails open on all of them. Keying the split on the
+  // REPORTING resolution folded the third into the first: the compose state
+  // is model-written, and a transcribed drift ("critcal", "blocker", "")
+  // beside the plan record posted "the operator turned the posture off" —
+  // an operator intent that never happened.
+  const fixAuditOpenCauseEn =
+    floorRaw === 'suggestion'
+      ? '(the operator turned the posture off)'
+      : input.severityFloor === undefined || input.severityFloor === null
+        ? '(the floor record was absent, and the enforcement reading fails open)'
+        : '(the state carried a floor value this module cannot read, and the strict reading cannot act on it)';
+  const fixAuditOpenCauseZh =
+    floorRaw === 'suggestion'
+      ? '（操作者关闭了该姿态）'
+      : input.severityFloor === undefined || input.severityFloor === null
+        ? '（下限记录缺失，强制读取按开放放行）'
+        : '（状态携带了本模块无法识别的下限值，强制读取无法对其生效）';
+  // Beside a non-empty deferral list the open arm may not assert the
+  // no-withholding universal the very same body falsifies: deferral IS the
+  // floor's withholding in this module's terminology — the convergence
+  // posture IS the floor resolution — so beside the list the sentence owns
+  // what the open arm DID (the backstop moved nothing) and routes the
+  // deferrals to the posture, never to a resolved floor (#10136). The
+  // empty-list arm keeps the universal. Beside an explicit `suggestion`
+  // floor the deferrals have NO posture to be routed by — the operator
+  // turned it off, and the licence chain above stamps them unlicensed
+  // (`unlicensedDeferral`) — so that arm says exactly that, in the same
+  // body the licence sentence caps (#10136 R13-1).
+  const fixAuditOpenTailEn =
+    deferredSuggestions.length > 0
+      ? floorRaw === 'suggestion'
+        ? ', so the mechanical backstop moved nothing — the deferrals ' +
+          'listed below carry no posture licence (the operator turned the ' +
+          'posture off), and this verdict is capped for them; only the ' +
+          'narrowed shape above applied.'
+        : ', so the mechanical backstop moved nothing — the deferrals listed ' +
+          'below were routed by the convergence posture, not moved by a ' +
+          'resolved floor; only the narrowed shape above applied.'
+      : ', so no finding was withheld by a floor — only the narrowed shape ' +
+        'above applied.';
+  const fixAuditOpenTailZh =
+    deferredSuggestions.length > 0
+      ? floorRaw === 'suggestion'
+        ? '，机械兜底未移动任何内容——下方列出的延后没有姿态授权（操作者关闭了该姿态），本判定因此受限；只有上述收窄形态生效。'
+        : '，机械兜底未移动任何内容——下方列出的延后由收敛姿态路由，而非已解析下限的移动；只有上述收窄形态生效。'
+      : '，没有任何发现被下限扣留——只有上述收窄形态生效。';
+  // The engaged arm asserts a below-Critical deferral only beside one
+  // (#10136 R16-1): the merged list the deferral block renders carries
+  // Criticals too — the fails-closed/new-surface ones the axes defer, from
+  // the reroute and the model channel alike — so a list holding only those
+  // has NO finding below Critical in it, and "findings below Critical were
+  // recorded and deferred" would name findings that do not exist. Keyed
+  // on the same merged list `deferredCriticals` reads. With nothing
+  // deferred at all the floor either saw nothing below Critical, or only
+  // the pre-confirmed deterministic findings it leaves inline — which is
+  // what `suggestionsInline` counts once enforcement has moved everything
+  // else.
+  const deferredBelowCritical = deferredSuggestions.some(
+    (e) => e.severity !== 'Critical',
+  );
+  const fixAuditFloorEn = fixAuditFloorEngaged
+    ? deferredBelowCritical
+      ? 'Findings below Critical were recorded and deferred, never posted — except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
+      : deferredSuggestions.length > 0
+        ? 'The deferred findings below are Criticals deferred by their axes (fails-closed on new surface) — nothing below Critical was withheld this round' +
+          (suggestionsInline > 0
+            ? ', and the pre-confirmed `[build]`/`[test]`/`[probe]` findings below Critical stay inline at any floor.'
+            : '.')
+        : suggestionsInline > 0
+          ? 'The floor was engaged and nothing was deferred this round; the only Suggestions the floor leaves inline are pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
+          : 'The floor was engaged and nothing below Critical reached it this round — any such finding would have been recorded and deferred, never posted (pre-confirmed `[build]`/`[test]`/`[probe]` findings excepted).'
+    : // Attributed to the READING it is keyed on, never to "the floor"
+      // (#10136 R23-1). The two readings diverge on exactly one state — an
+      // absent floor record beside a postured plan — because the reporting
+      // one folds absence to `auto` while the enforcement one does not, and
+      // that state is the documented default. Said of the floor itself, the
+      // sentence contradicted the marker's `floor: c` and the
+      // mechanism-health note in the same body.
+      "The posting floor's ENFORCEMENT reading resolved OPEN at compose " +
+      'time this round ' +
+      fixAuditOpenCauseEn +
+      fixAuditOpenTailEn;
+  const fixAuditFloorZh = fixAuditFloorEngaged
+    ? deferredBelowCritical
+      ? '低于 Critical 的发现只记录延后，不发布——除了预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
+      : deferredSuggestions.length > 0
+        ? '下方延后的发现都是按其轴向延后的 Critical（新表面上的 fails-closed）——本轮没有任何低于 Critical 的发现被扣留' +
+          (suggestionsInline > 0
+            ? '，预确认的 `[build]`/`[test]`/`[probe]` 低于 Critical 的发现在任何下限下都留在行内。'
+            : '。')
+        : suggestionsInline > 0
+          ? '下限已生效且本轮没有延后；下限唯一留在行内的 Suggestion 是预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
+          : '下限已生效，本轮没有任何低于 Critical 的发现触及它——若有，也只会记录延后、不发布（预确认的 `[build]`/`[test]`/`[probe]` 发现除外）。'
+    : '但本轮发布下限的**执行读法**在 compose 期解析为开放' +
+      fixAuditOpenCauseZh +
+      fixAuditOpenTailZh;
+  const fixAuditShapeBlock: Bi[] = fixAudit
+    ? [
+        {
+          trim: 2,
+          en:
+            `Round shape: this re-review ran as a fix-audit round under the critical ` +
+            `posting posture (engaged by ${fixAuditCauseEn}) — the territory fan-out ` +
+            `covered the commits since the previous round` +
+            (fixAudit.interactionFiles > 0
+              ? ' plus their import-seam interaction files'
+              : ' (no still-clean importer re-entered the scope)') +
+            `, and the reverse-audit waves ` +
+            `re-launched delta territories under the ordinary retirement ` +
+            `rules (a twice-dry one only on its cold-check rounds) and ` +
+            `non-delta chunks the previous waves could not certify dry (a ` +
+            `yield, an uncertified receipt, or no audit history keeps a ` +
+            `chunk in the wave; a dry receipt returns it to the ordinary ` +
+            `retirement rules when it shares its launch with a yield or ` +
+            `uncertified receipt — rounds 1 and 2, the convergence pair, are ` +
+            `one launch — was built on the same findings-list bytes as one, ` +
+            `was built before one came back, ` +
+            `or ran in a different session from some earlier return that was ` +
+            `not dry, or beside one no session stamped). ` +
+            `${fixAuditFloorEn}${planLicenceEn}`,
+          zh:
+            `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
+            `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
+            (fixAudit.interactionFiles > 0
+              ? ' 及其 import 接缝 interaction 文件'
+              : '（没有仍然干净的 importer 重新进入范围）') +
+            `，反向审计各波按普通退役规则重发 delta ` +
+            `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +
+            `chunk（出过发现、收据未认证或无审计历史，` +
+            `都会让 chunk 留在波内；干燥收据若与出过发现或未认证的收据属于同一次启动` +
+            `——第 1、2 轮的收敛对算作一次启动——或与之使用字节完全相同的发现清单，或构建于这类收据返回之前，` +
+            `又或与此前某个非干燥返回不在同一个会话里（或该返回没有会话戳），则该 chunk 回到普通退役规则）。` +
+            `${fixAuditFloorZh}${planLicenceZh}`,
+        },
+      ]
+    : [];
+
   // The not-reviewed disclosures yield after the deferral display and before
   // the convergence observation: they say what the review could not certify,
   // which the verdict's own cap already carries, so trimming them costs
@@ -7679,6 +8165,7 @@ function composeReviewBody(
         // Two consecutive withholds — this round's decision read through the
         // marker's OWN predicate, and the recovered round's recorded anchor.
         anchorChainBroken:
+          !planIsFocusedNavigation(input.planPath) &&
           !convergence.prev.anchored &&
           (convergence.prev.round ?? 0) > 0 &&
           anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly),
@@ -7760,6 +8247,7 @@ function composeReviewBody(
       ...deferredBlock,
       ...testPlanBlock,
       ...repositoryContextBlock,
+      ...fixAuditShapeBlock,
       ...unlicensedDeferralBlock,
       ...deferredSuggestionsBlock,
       ...convergenceBlock,
@@ -7779,6 +8267,7 @@ function composeReviewBody(
       downgraded,
       downgradedFrom,
       remediation,
+      waivedFixes,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
       floorEnforcedEntries: reroute.entries,
@@ -7832,6 +8321,7 @@ function composeReviewBody(
         ...deferredBlock,
         ...testPlanBlock,
         ...repositoryContextBlock,
+        ...fixAuditShapeBlock,
         ...unlicensedDeferralBlock,
         ...deferredSuggestionsBlock,
         // Both of these are spread for symmetry with the branches above and
@@ -7853,6 +8343,7 @@ function composeReviewBody(
         deferredBlock.length ||
         testPlanBlock.length ||
         repositoryContextBlock.length ||
+        fixAuditShapeBlock.length ||
         deferredSuggestionsBlock.length ||
         // Unreachable today and kept deliberately: an APPROVE is composed
         // from zero findings, which means zero posted comments and zero
@@ -7875,6 +8366,7 @@ function composeReviewBody(
       downgraded,
       downgradedFrom,
       remediation,
+      waivedFixes,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
       floorEnforcedEntries: reroute.entries,
@@ -8102,6 +8594,11 @@ function composeReviewBody(
   //     planner recommends disclosing without claiming the code is defective.
   clauses.push(...repositoryContextBlock);
 
+  // 6d-2. Fix-audit round-shape disclosure (non-capping) — the critical
+  //     posture changed what this round fanned out over; the posted record
+  //     owns the reduction.
+  clauses.push(...fixAuditShapeBlock);
+
   // 6e. Convergence-posture deferrals — the licence disclosure (capping)
   //     precedes the list (non-capping).
   clauses.push(...unlicensedDeferralBlock);
@@ -8217,6 +8714,7 @@ function composeReviewBody(
     downgraded,
     downgradedFrom,
     remediation,
+    waivedFixes,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
     floorEnforcedEntries: reroute.entries,
@@ -8257,6 +8755,38 @@ function publicAgentSubject(label: string): string | undefined {
   return /^chunk \d+$/.test(label)
     ? undefined
     : mdField(JSON.stringify(compressSummary(label.replace(/[`\r\n]+/g, ' '))));
+}
+
+/**
+ * Does this plan carry the chunk? True when there is no plan to ask — with no
+ * chunk table nothing can be called foreign to it, and the callers keep the
+ * counting fallback they always had.
+ */
+function planCarries(
+  id: number,
+  planned: ReadonlyArray<{ id: number }>,
+): boolean {
+  return planned.length === 0 || planned.some((p) => p.id === id);
+}
+
+/**
+ * How the posted body names records whose chunk id the plan does not carry.
+ *
+ * Counted by CHUNK, because that is what is known: disclosures are kept one
+ * per subject, so three records that all claim `chunk 9` arrive as one. The
+ * count lives in the phrase itself — the `(×N)` suffix the named subjects
+ * take reads wrong after "an agent".
+ */
+function unplannedChunkAgents(chunks: number): { en: string; zh: string } {
+  return chunks === 1
+    ? {
+        en: 'an agent launched for a chunk this plan does not carry',
+        zh: '一个被指派到当前 plan 中不存在的 chunk 的 agent',
+      }
+    : {
+        en: `agents launched for ${chunks} chunks this plan does not carry`,
+        zh: `被指派到当前 plan 中不存在的 ${chunks} 个 chunk 的 agent`,
+      };
 }
 
 /**
@@ -9057,6 +9587,11 @@ export const composeReviewCommand: CommandModule = {
     // that repairs it, on the channel the author never sees.
     for (const fix of result.remediation) {
       writeStderrLine(`FIX: ${fix}`);
+    }
+    // The FIXes withheld, and why — beside the FIX lines, on the same
+    // channel, so a disclosed gap with no FIX is never a silent one.
+    for (const note of result.waivedFixes) {
+      writeStderrLine(`NOTE: ${note}`);
     }
     // The volume this round adds to the pull request, stated rather than
     // left to be counted by hand — and beside the previous round's when the

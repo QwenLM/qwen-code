@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
+import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import type { WebShellResolvedBrand } from './brandContext';
 import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
 
@@ -12,11 +13,14 @@ interface CapturedWorkspaceSessionProps {
   sessionId?: string;
   workspaceId?: string;
   sessionContext?: DaemonProductSessionContext;
+  chromeTheme?: WebShellProps['theme'];
+  chromeLanguage?: WebShellProps['language'];
   webShellProps: WebShellProps;
 }
 
 const testState = vi.hoisted(() => ({
   props: undefined as CapturedWorkspaceSessionProps | undefined,
+  notificationEnabled: undefined as boolean | undefined,
   throwOnRender: false,
   tokenSurvivesReload: true,
   renderCount: 0,
@@ -36,13 +40,18 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
       throw new Error('render boom');
     }
     testState.props = props;
+    testState.notificationEnabled = useBrowserNotificationSettings()?.enabled;
     return null;
   },
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getAllowedDaemonOrigin: (value: string) => value,
+  confirmDaemonTarget: vi.fn(),
+  isKnownDaemonTarget: () => false,
   getDaemonToken: () => 'token',
   hasReloadSurvivableDaemonToken: () => testState.tokenSurvivesReload,
+  navigateToDaemon: vi.fn(),
   persistDaemonToken: vi.fn(),
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: vi.fn(),
@@ -59,7 +68,16 @@ describe('StandaloneApp', () => {
     testState.throwOnRender = false;
     testState.tokenSurvivesReload = true;
     testState.renderCount = 0;
+    delete (window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean })
+      .__QWEN_CODE_MACOS_TITLEBAR__;
     window.history.replaceState(null, '', '/');
+    // jsdom's document is shared across the file; never let one test's
+    // document chrome leak into the next test's assertions.
+    document.documentElement.classList.remove(
+      'theme-dark',
+      'theme-light',
+      'dark',
+    );
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -188,7 +206,107 @@ describe('StandaloneApp', () => {
     expect(reloadUrl).toContain('workspace=workspace-1');
   });
 
+  it('passes no app opinion while retaining standalone document defaults (#11955)', () => {
+    // "No opinion" (undefined) lets App resolve the daemon's effective
+    // ui.theme / general.language. The concrete document fallbacks stay on
+    // the separate chrome channel, where they cannot shadow settings.json.
+    window.localStorage.clear();
+    vi.spyOn(navigator, 'language', 'get').mockReturnValue('zh-CN');
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.theme).toBeUndefined();
+    expect(testState.props?.webShellProps.language).toBeUndefined();
+    expect(testState.props?.chromeTheme).toBe('dark');
+    expect(testState.props?.chromeLanguage).toBe('zh-CN');
+    expect(document.documentElement.classList.contains('theme-dark')).toBe(
+      true,
+    );
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+  });
+
+  it('keeps the stored theme and language as the entry opinion', () => {
+    // Regression guard for the host-override contract: a value the user
+    // previously chose in-app must keep winning over settings.json.
+    window.localStorage.setItem('qwen-code-web-shell-theme', 'light');
+    window.localStorage.setItem('qwen-code-web-shell-language', 'zh-CN');
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.theme).toBe('light');
+    expect(testState.props?.webShellProps.language).toBe('zh-CN');
+    window.localStorage.clear();
+  });
+
+  it('syncs document chrome to settings-resolved values without adopting them as its opinion', () => {
+    window.localStorage.clear();
+    document.documentElement.classList.add('theme-dark', 'dark');
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    expect(document.documentElement.classList.contains('theme-dark')).toBe(
+      true,
+    );
+
+    act(() => {
+      testState.props?.webShellProps.onThemeResolved?.('light');
+    });
+
+    expect(document.documentElement.classList.contains('theme-light')).toBe(
+      true,
+    );
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+    // The resolved value stays settings-owned: never re-issued as a host
+    // prop and never written to localStorage, or the next settings.json
+    // edit would be shadowed by the stale copy.
+    expect(testState.props?.webShellProps.theme).toBeUndefined();
+    expect(testState.props?.chromeTheme).toBe('light');
+    expect(window.localStorage.getItem('qwen-code-web-shell-theme')).toBeNull();
+
+    act(() => {
+      testState.props?.webShellProps.onLanguageResolved?.('zh-CN');
+    });
+
+    expect(testState.props?.webShellProps.language).toBeUndefined();
+    expect(testState.props?.chromeLanguage).toBe('zh-CN');
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-language'),
+    ).toBeNull();
+  });
+
+  it('adopts and persists an in-app theme choice as the entry opinion', () => {
+    window.localStorage.clear();
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    act(() => {
+      testState.props?.webShellProps.onThemeChange?.('light');
+    });
+
+    expect(testState.props?.webShellProps.theme).toBe('light');
+    expect(window.localStorage.getItem('qwen-code-web-shell-theme')).toBe(
+      'light',
+    );
+    expect(document.documentElement.classList.contains('theme-light')).toBe(
+      true,
+    );
+    window.localStorage.clear();
+  });
+
+  it.each([
+    [null, true],
+    ['false', false],
+    ['true', true],
+  ])(
+    'uses the standalone default unless the browser has saved %s',
+    (stored, enabled) => {
+      vi.spyOn(Storage.prototype, 'getItem').mockReturnValue(stored);
+      act(() => root.render(<StandaloneApp daemonToken="token" />));
+      expect(testState.notificationEnabled).toBe(enabled);
+    },
+  );
+
   it('keeps the controlled session target in sync with URL changes', () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=https%3A%2F%2Fdaemon.example.com',
+    );
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
     act(() => {
@@ -205,6 +323,9 @@ describe('StandaloneApp', () => {
     expect(window.location.pathname).toBe('/session/session-created');
     expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
       'workspace-1',
+    );
+    expect(new URLSearchParams(window.location.search).get('daemon')).toBe(
+      'https://daemon.example.com',
     );
     expect(
       testState.props?.webShellProps.composerToolbarAdditionalActions,
@@ -225,6 +346,19 @@ describe('StandaloneApp', () => {
       enabled: true,
       showLive: true,
     });
+  });
+
+  it('reserves a draggable title bar only when the macOS shell requests it', () => {
+    (
+      window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean }
+    ).__QWEN_CODE_MACOS_TITLEBAR__ = true;
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.className).toBe(
+      'qwen-code-macos-titlebar',
+    );
+    expect(container.querySelector('[data-tauri-drag-region]')).not.toBeNull();
   });
 
   it('round-trips standalone context without a workspace selector', () => {

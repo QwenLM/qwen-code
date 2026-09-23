@@ -1,6 +1,11 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.23.3",
+  "version": "0.24.4",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/web-shell"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -38,7 +43,8 @@
     "test:e2e": "playwright test --config playwright.config.ts",
     "test:e2e:visuals": "playwright test --config playwright.visuals.config.ts",
     "test:e2e:report": "playwright show-report client/e2e/playwright-report",
-    "verify": "npm run lint && npm run format:check && npm run typecheck && npm run test:ci"
+    "verify": "npm run lint && npm run format:check && npm run typecheck && npm run test:ci",
+    "prepublishOnly": "node scripts/verify-publish-artifacts.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",
@@ -79,9 +85,10 @@
     "react-dom": "^18.0.0 || ^19.0.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.57.0",
+    "@playwright/test": "1.61.1",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
+    "@types/hast": "^3.0.5",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",

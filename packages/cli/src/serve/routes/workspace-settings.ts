@@ -57,6 +57,7 @@ const TUI_ONLY_SETTINGS = new Set([
 const WEB_SHELL_SETTINGS = new Set([
   'ui.compactMode',
   'voiceModel',
+  'imageModel',
   'mcpServers',
 ]);
 
@@ -349,6 +350,9 @@ export interface WorkspaceSettingsRouteDeps {
     value: unknown,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  syncImageModel?: (
+    scope: SettingScope,
+  ) => Promise<{ status: 'applied' | 'deferred' | 'failed' }>;
   updateSessionWorkflow: (enabled: boolean) => Promise<unknown>;
   /**
    * Fan a user-scope Session Workflow write out to the non-primary workspace
@@ -697,11 +701,28 @@ export function registerWorkspaceSettingsRoutes(
       }
       if (writeOutcome !== 'ok') return;
 
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            !deps.syncImageModel ||
+            (await deps.syncImageModel(settingScope)).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );
@@ -894,7 +915,10 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             if (sendGenerationClosedError(res, err)) return 'unchanged_failure';
             throw err;
           }
-          if (key === 'experimental.sessionWorkflow') {
+          if (
+            key === 'experimental.sessionWorkflow' &&
+            !runtime.routeFileSystemFactory?.sshWorkspace
+          ) {
             if (
               !(await updateLiveSessionWorkflow(
                 (enabled) =>
@@ -946,11 +970,32 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         ...(clientId ? { originatorClientId: clientId } : {}),
       });
       if (writeOutcome !== 'ok') return;
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            (
+              await runtime.workspaceService.reloadModelProviders({
+                route: 'POST /workspaces/:workspace/settings imageModel',
+                workspaceCwd: runtime.workspaceCwd,
+              })
+            ).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );

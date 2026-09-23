@@ -8,7 +8,10 @@ simply going in circles.
 **The token budget is the only bound a talkative model reaches.** Continuation
 is gated in one place, `queueContinuation` in `goal-runtime.ts`, and the only
 thing that stops it there is a spent `tokenBudget` -- 30,000,000 tokens by
-default. A model that answers each turn with a paragraph of status and calls
+default. (State at the time of writing. The gate now reads three ceilings
+through one `spentBudget` reader; see
+`2026-09-09-goal-turn-and-time-budget.md` and its Chinese twin. The bound
+described here yields to all three, not only to the token budget.) A model that answers each turn with a paragraph of status and calls
 no tools never records evidence, so the verifier is never asked to judge
 anything, and the Goal continues. The user sees turn after turn go by and the
 spend climb, with nothing on the record that could ever end the loop except
@@ -71,14 +74,19 @@ is the whole remedy.
 **Which limit wins.** The bound yields to the limits that describe the Goal
 better, on the turn where they coincide.
 
-- A spent token budget. The budget stop lives in the continuation gate, and so
-  does the wind-down hand-off it grants first; pausing on the crossing turn
+- A spent Goal budget. The token, turn, and active-time stops live in the
+  continuation gate, and so does the wind-down hand-off it grants first;
+  pausing on the crossing turn
   would skip both and record an exhausted allowance as an idle pause with no
-  `limitKind`. The bound stands down when `isGoalTokenBudgetSpent` holds, the
-  streak stays on the record, and the gate runs as it would have.
-- A checkpoint stall streak. A model that fills the evidence window with prose
+  `limitKind`. The bound stands down when `spentBudget` finds any spent
+  allowance, the streak stays on the record, and the gate runs as it would
+  have.
+- A checkpoint stall streak. (Historical: since the verifier judges a proposal
+  from the transcript tail directly, `update_goal` no longer answers
+  `checkpointRequired` and no checkpoint runs; the stall streak stays at zero.)
+  A model that fills the evidence window with prose
   and calls no tool is quiet by this bound's measure and overflowing by the
-  checkpoint's, and `update_goal` answers `checkpointRequired` on an
+  checkpoint's, and `update_goal` used to answer `checkpointRequired` on an
   overflowing catalog without recording a proposal. That Goal is drowning in
   evidence, not idling: the pause's remedy (resume) would send it straight
   back into the same window, while the stall breaker stops it with the reason
@@ -136,8 +144,10 @@ an active Goal; the in-memory snapshot shows the stop regardless, the same way
 the budget stop already handles a lost write.
 
 The threshold is a constant, not a setting. Three matches the checkpoint stall
-bound and the blocked-audit streak; a `goals.*` settings family is the subject
-of separate work on turn and time budgets.
+bound and the blocked-audit streak. Turn and active-time ceilings were the
+subject of separate work, which landed as `model.goalMaxTurns` and
+`model.goalMaxActiveMinutes` under `category: 'Model'` beside the token budget
+-- not under `goals.*`, which holds the model-proposal consent setting.
 
 ## Scope
 
@@ -187,7 +197,7 @@ broadcasts it, and every surface already renders a paused Goal and its reason.
   the ledger could not measure; a resume clears the streak and restores the
   whole allowance; a failed settle write still shows the stop; a waiting user
   turn outranks the bound, including one reserved while the pause record was
-  being written; the checkpoint stall breaker and the token budget each
+  being written; the checkpoint stall breaker and every spent Goal budget
   outrank the bound on the turn where they coincide with it.
 - `transcript-replay.test.ts`: a typed pause replays as `/goal pause`, a
   runtime-written pause replays as the paused card alone, and a pause without

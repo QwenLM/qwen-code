@@ -7,15 +7,12 @@
  *
  * Two key invariants worth knowing before editing:
  *
- *   1. The MultiSelect at the top of the dialog renders ONLY unlocked
- *      skills (skills that the workspace can actually toggle). Skills
- *      disabled at a higher scope (systemDefaults / user / system) are
- *      rendered as a separate "locked" section because the existing
- *      MultiSelect renders `[x]` for any item with `disabled: true`,
- *      which would visually flip the meaning under our checked = enabled
- *      semantic.
+ *   1. MultiSelect renders only workspace-toggleable skills. Locked skills
+ *      use remaining rows in a read-only section, with a
+ *      count for hidden matches, avoiding MultiSelect's misleading
+ *      `[x]` rendering for disabled items.
  *
- *   2. On confirm, locked names are NEVER re-emitted into the workspace
+ *   2. When saving, locked names are NEVER re-emitted into the workspace
  *      `skills.disabled` write (Option A in the plan). The workspace
  *      entry would be redundant — the higher scope already disables it —
  *      and keeping a clean settings file matches what the user sees in
@@ -33,16 +30,24 @@ import type {
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
 import {
+  buildHigherDisabled,
   computeWorkspaceSkillListUpdates,
   skillSettingStrings,
 } from '../../../config/skill-settings.js';
+
 import { t } from '../../../i18n/index.js';
-import { levelLabel } from '../../utils/skill-level-label.js';
+import { MAX_EXTENSION_OWNER_LABEL_WIDTH } from '../../../services/commandMetadata.js';
+import { skillOriginLabel } from '../../utils/skill-level-label.js';
+import { truncateToWidth } from '../../utils/textUtils.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import { MessageType } from '../../types.js';
 import { MultiSelect, type MultiSelectItem } from '../shared/MultiSelect.js';
+
+// The daemon's toggle routes consult the same lock decision through
+// `skillToggleBlockForName`; the picker's tests pin the labels here.
+export { buildHigherDisabled };
 
 interface SkillsManagerDialogProps {
   settings: LoadedSettings;
@@ -64,6 +69,26 @@ interface SkillItemValue {
   name: string;
   description: string;
   level: SkillLevel;
+  /**
+   * Carried so `handlePick`'s lock guard can match a restriction against the
+   * authored spelling too. A value without it is tested against the registry
+   * identity only, so a row blocked solely by a legacy bare entry reads as
+   * pickable.
+   */
+  authoredName?: string;
+}
+
+/**
+ * The row value passed by MultiSelect to the pick guard retains the authored
+ * spelling used by lock lookups.
+ */
+export function skillItemValue(skill: SkillConfig): SkillItemValue {
+  return {
+    name: skill.name,
+    description: skill.description,
+    level: skill.level,
+    authoredName: skill.authoredName,
+  };
 }
 
 const LEVEL_ORDER: Record<SkillLevel, number> = {
@@ -74,16 +99,34 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
 };
 
 const NAME_COLUMN = 24;
+// Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
+// + search row(2) + list marginTop(1) + footer(2). The optional locked-skills
+// block adds its heading, N rows, and a margin after actionable rows;
+// these come from the remaining list budget.
+const SKILLS_DIALOG_FIXED_ROWS = 11;
 
-function lower(name: string): string {
-  return name.trim().toLowerCase();
-}
+/**
+ * The locked row is clipped rather than wrapped (`wrap="truncate"`), so naming
+ * the owner takes room out of the description: the owner's budget plus the
+ * description's still fill the 60 columns the description used to occupy on
+ * its own, which keeps the composed row no wider than the row already was.
+ */
+const LOCKED_ORIGIN_COLUMN = MAX_EXTENSION_OWNER_LABEL_WIDTH + 2; // `skillOriginLabel`'s parens
+const LOCKED_DESCRIPTION_COLUMN = 60 - LOCKED_ORIGIN_COLUMN;
 
-function normalizeNames(list: readonly string[]): string[] {
-  return list
-    .filter((n): n is string => typeof n === 'string')
-    .map(lower)
-    .filter(Boolean);
+/**
+ * The row text a skill is listed under. Split out from the `items` memo (like
+ * `skillItemValue`) so the label a user reads is testable without rendering.
+ *
+ * Reads the extension fields off the full `SkillConfig`, not off the row
+ * value: `skillItemValue` carries only what the pick guard matches, and the
+ * owner is display-only.
+ */
+export function skillRowLabel(skill: SkillConfig): string {
+  return `${truncateToWidth(skill.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncateToWidth(
+    oneLine(skill.description),
+    80,
+  )}  ${truncateToWidth(skillOriginLabel(skill), LOCKED_ORIGIN_COLUMN)}`;
 }
 
 function namesFromScope(
@@ -92,34 +135,12 @@ function namesFromScope(
 ): string[] {
   // settings.json is user-editable: `disabled` could be a non-array
   // (e.g. `"disabled": "all"`) OR contain non-strings. Guard with
-  // `Array.isArray` BEFORE returning so downstream `.map(lower)` /
-  // `normalizeNames` never see a non-iterable. The element-level
-  // string filter still happens in `normalizeNames`. Mirrors the same
-  // defense in `buildDisabledSkillNamesProvider` (config.ts).
+  // `Array.isArray` BEFORE returning so downstream never sees a
+  // non-iterable; the element-level string filter stays with the
+  // caller. Mirrors the same defense in
+  // `buildDisabledSkillNamesProvider` (config.ts).
   const raw = settings.forScope(scope).settings.skills?.disabled;
   return Array.isArray(raw) ? raw : [];
-}
-
-function buildHigherDisabled(settings: LoadedSettings): {
-  set: ReadonlySet<string>;
-  scopeOf: (name: string) => string | null;
-} {
-  const sysDefaults = normalizeNames(
-    namesFromScope(settings, SettingScope.SystemDefaults),
-  );
-  const user = normalizeNames(namesFromScope(settings, SettingScope.User));
-  const system = normalizeNames(namesFromScope(settings, SettingScope.System));
-  const set = new Set([...sysDefaults, ...user, ...system]);
-  // Highest-precedence scope wins for the locked-row label. System >
-  // User > SystemDefaults matches the merge order in `settings.ts`.
-  const scopeOf = (name: string): string | null => {
-    const l = lower(name);
-    if (system.includes(l)) return 'System';
-    if (user.includes(l)) return 'User';
-    if (sysDefaults.includes(l)) return 'SystemDefaults';
-    return null;
-  };
-  return { set, scopeOf };
 }
 
 function sortSkills(skills: SkillConfig[]): SkillConfig[] {
@@ -130,9 +151,9 @@ function sortSkills(skills: SkillConfig[]): SkillConfig[] {
   );
 }
 
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
+// Collapse line breaks from YAML block scalars so one label stays on one row.
+function oneLine(text: string): string {
+  return text.replace(/[\n\r\v\f\u0085\u2028\u2029]+/g, ' ').trim();
 }
 
 export function SkillsManagerDialog({
@@ -147,11 +168,6 @@ export function SkillsManagerDialog({
   const [skills, setSkills] = useState<SkillConfig[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  // Track which row the MultiSelect is currently highlighting so Enter
-  // (which the dialog interprets as "invoke the highlighted skill") knows
-  // what to launch. Updated via the `onHighlight` callback on every up/down.
-  const [activeValue, setActiveValue] = useState<SkillItemValue | null>(null);
-
   // Capture the higher-scope disabled lists once at mount.
   // The dialog is short-lived and these are derived from the *current*
   // settings snapshot at open time — using `useMemo` keyed on `settings`
@@ -189,12 +205,12 @@ export function SkillsManagerDialog({
   // render — that would invalidate every downstream useMemo dependency.
   const allSkills = useMemo(() => skills ?? [], [skills]);
   const lockedSkills = useMemo(
-    () => allSkills.filter((s) => higher.set.has(lower(s.name))),
-    [allSkills, higher.set],
+    () => allSkills.filter((s) => higher.lockedIn(s) !== null),
+    [allSkills, higher],
   );
   const unlockedSkills = useMemo(
-    () => allSkills.filter((s) => !higher.set.has(lower(s.name))),
-    [allSkills, higher.set],
+    () => allSkills.filter((s) => higher.lockedIn(s) === null),
+    [allSkills, higher],
   );
 
   const initialSelectedKeys = useMemo(
@@ -215,59 +231,52 @@ export function SkillsManagerDialog({
     setSelectedKeys([...initialSelectedKeys]);
   }, [unlockedSkills, initialSelectedKeys, selectedKeys]);
 
+  // Height-budget tiers. `compact` sheds border, paddingY, and footer
+  // (6 rows) — mirroring the /statusline compact path. `bare` sheds the
+  // remaining 5-row compact frame (title/subtitle/search/margin) too, so
+  // budgets ≤ 5 render only the list; otherwise the frame floors at 6 rows
+  // and the interactive list is the row that clips.
+  const compact =
+    availableTerminalHeight !== undefined &&
+    availableTerminalHeight <= SKILLS_DIALOG_FIXED_ROWS;
+  const bare =
+    availableTerminalHeight !== undefined &&
+    availableTerminalHeight <= SKILLS_DIALOG_FIXED_ROWS - 6;
+  const frameRows = bare
+    ? 0
+    : compact
+      ? SKILLS_DIALOG_FIXED_ROWS - 6
+      : SKILLS_DIALOG_FIXED_ROWS;
+
+  // The search row is hidden in bare mode, so a retained query must not
+  // filter the list invisibly (mirrors the /statusline `hasFullLayout`
+  // gate).
   const filteredUnlocked = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return unlockedSkills;
+    if (!normalizedQuery || bare) return unlockedSkills;
     return unlockedSkills.filter(
       (s) =>
         s.name.toLowerCase().includes(normalizedQuery) ||
         s.description.toLowerCase().includes(normalizedQuery),
     );
-  }, [unlockedSkills, query]);
-
-  // `activeValue` is what Enter operates on. MultiSelect's `onHighlight`
-  // populates it on arrow-key navigation, but NOT on initial mount or
-  // after a search filter that drops the previously highlighted row
-  // (`useSelectionList` re-INITIALIZE's with `pendingHighlight: false`).
-  // Without this effect, Enter on the first render is a no-op and Enter
-  // after a filter would invoke a stale (now-invisible) skill.
-  useEffect(() => {
-    if (filteredUnlocked.length === 0) {
-      if (activeValue !== null) setActiveValue(null);
-      return;
-    }
-    const stillVisible =
-      activeValue !== null &&
-      filteredUnlocked.some((s) => s.name === activeValue.name);
-    if (!stillVisible) {
-      const top = filteredUnlocked[0];
-      setActiveValue({
-        name: top.name,
-        description: top.description,
-        level: top.level,
-      });
-    }
-  }, [filteredUnlocked, activeValue]);
+  }, [unlockedSkills, query, bare]);
 
   const filteredLocked = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return lockedSkills;
+    if (!normalizedQuery || bare) return lockedSkills;
     return lockedSkills.filter(
       (s) =>
         s.name.toLowerCase().includes(normalizedQuery) ||
         s.description.toLowerCase().includes(normalizedQuery),
     );
-  }, [lockedSkills, query]);
+  }, [lockedSkills, query, bare]);
 
   const items = useMemo<Array<MultiSelectItem<SkillItemValue>>>(
     () =>
       filteredUnlocked.map((s) => ({
         key: s.name,
-        value: { name: s.name, description: s.description, level: s.level },
-        label: `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
-          s.description,
-          80,
-        )}  (${levelLabel(s.level)})`,
+        value: skillItemValue(s),
+        label: skillRowLabel(s),
       })),
     [filteredUnlocked],
   );
@@ -425,19 +434,16 @@ export function SkillsManagerDialog({
   // points at a skill, the user decides whether/when to invoke.
   const handlePick = useCallback(
     async (skill: SkillItemValue) => {
-      // Don't pick a skill the user has just toggled off — `/<name>` would
-      // resolve to the disabled error path on submit. The same gate applies
-      // to skills locked by higher scope (those don't appear in the
-      // MultiSelect at all, so we only see them via stale `activeValue`).
+      // A pick must still be enabled and pass the shared lock decision.
       const isEnabled =
         selectedKeys !== null &&
         selectedKeys.includes(skill.name) &&
-        !higher.set.has(lower(skill.name));
+        higher.lockedIn(skill) === null;
       if (!isEnabled) {
         // Persist any OTHER pending toggles before bailing — otherwise
         // the user's session-long edits get silently discarded just
-        // because their cursor happened to land on a toggled-off (or
-        // locked) row when they pressed Enter. Mirrors handleSaveAndClose
+        // because their cursor happened to land on a toggled-off row when
+        // they pressed Enter. Mirrors handleSaveAndClose
         // (Esc) which persists unconditionally once data has loaded.
         if (skills !== null && selectedKeys !== null) {
           await persistChanges();
@@ -451,7 +457,7 @@ export function SkillsManagerDialog({
         setInputBuffer(`/${skill.name}`);
       }
     },
-    [higher.set, onClose, persistChanges, selectedKeys, setInputBuffer, skills],
+    [higher, onClose, persistChanges, selectedKeys, setInputBuffer, skills],
   );
 
   useKeypress(
@@ -461,7 +467,7 @@ export function SkillsManagerDialog({
         // exiting is intuitive). Esc on an empty search: auto-save and
         // close — there is no longer a "cancel without saving" path,
         // matching the user-requested keymap (Esc = exit, changes stick).
-        if (query) {
+        if (!bare && query) {
           setQuery('');
           return;
         }
@@ -469,7 +475,9 @@ export function SkillsManagerDialog({
         return;
       }
 
-      if (key.name === 'backspace' || key.name === 'delete') {
+      // Search-row inputs are also suppressed in bare mode (the query is
+      // hidden there and bypassed in filtering) — same rationale as above.
+      if (!bare && (key.name === 'backspace' || key.name === 'delete')) {
         setQuery((current) => current.slice(0, -1));
         return;
       }
@@ -478,9 +486,9 @@ export function SkillsManagerDialog({
       // j/k are only deferred when no search query is active — they are
       // valid filter characters (e.g. "json", "jwt", "kotlin", "jdk").
       // When the user IS searching, MultiSelect receives
-      // `isFocused={false}` which disables its vim-style key handlers,
+      // `disableVimNav={true}` which disables its vim-style key handlers,
       // so j/k flow through to the printable-character branch below.
-      if ((key.name === 'j' || key.name === 'k') && !query) {
+      if ((key.name === 'j' || key.name === 'k') && (bare || !query)) {
         return;
       }
       if (
@@ -493,6 +501,7 @@ export function SkillsManagerDialog({
       }
 
       if (
+        !bare &&
         !key.ctrl &&
         !key.meta &&
         key.sequence.length === 1 &&
@@ -505,49 +514,45 @@ export function SkillsManagerDialog({
     { isActive: true },
   );
 
-  const maxItemsToShow = Math.max(
-    5,
-    Math.min(15, (availableTerminalHeight ?? 24) - 10),
-  );
+  const hasQuery = !bare && query.trim().length > 0;
+  const residual =
+    availableTerminalHeight === undefined
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, availableTerminalHeight - frameRows);
+  const maxItemsToShow = Math.min(15, Math.max(1, residual));
 
-  // -- Render --
-  if (loadError) {
+  if (loadError || skills === null) {
     return (
       <Box
-        borderStyle="round"
+        borderStyle={compact ? undefined : 'round'}
         borderColor={theme.border.default}
         flexDirection="column"
         paddingX={1}
-        paddingY={1}
+        paddingY={compact ? 0 : 1}
         width="100%"
       >
-        <Text bold>{t('Manage Skills')}</Text>
-        <Box marginTop={1}>
-          <Text color={theme.status.error}>
-            {t('Failed to load skills: {{error}}', { error: loadError ?? '' })}
+        {!bare && (
+          <Text bold wrap="truncate">
+            {t('Manage Skills')}
+          </Text>
+        )}
+        <Box marginTop={bare ? 0 : 1}>
+          <Text
+            color={loadError ? theme.status.error : theme.text.secondary}
+            wrap="truncate"
+          >
+            {loadError
+              ? t('Failed to load skills: {{error}}', { error: loadError })
+              : t('Loading skills…')}
           </Text>
         </Box>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Press esc to close.')}</Text>
-        </Box>
-      </Box>
-    );
-  }
-
-  if (skills === null) {
-    return (
-      <Box
-        borderStyle="round"
-        borderColor={theme.border.default}
-        flexDirection="column"
-        paddingX={1}
-        paddingY={1}
-        width="100%"
-      >
-        <Text bold>{t('Manage Skills')}</Text>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Loading skills…')}</Text>
-        </Box>
+        {loadError && !compact && (
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary} wrap="truncate">
+              {t('Press esc to close.')}
+            </Text>
+          </Box>
+        )}
       </Box>
     );
   }
@@ -555,113 +560,144 @@ export function SkillsManagerDialog({
   // Counts shown in the header so users can see filter effect at a glance.
   const totalCount = allSkills.length;
   const matchedCount = filteredUnlocked.length + filteredLocked.length;
-  const hasQuery = query.trim().length > 0;
+  const actionableRows = Math.min(items.length, maxItemsToShow);
+  const lockedChromeRows = actionableRows > 0 ? 2 : 1;
+  const lockedBudget = Math.max(0, residual - actionableRows);
+  // Bare mode has no subtitle for the hidden count, so reserve a list row.
+  const countRows =
+    bare && filteredLocked.length + lockedChromeRows > lockedBudget ? 1 : 0;
+  const visibleLocked = filteredLocked.slice(
+    0,
+    Math.max(0, lockedBudget - lockedChromeRows - countRows),
+  );
+  const hiddenLockedCount = filteredLocked.length - visibleLocked.length;
+  const lockedCount = t('{{count}} locked not shown', {
+    count: String(hiddenLockedCount),
+  });
+  const countInList = items.length === 0 && visibleLocked.length === 0;
 
   return (
     <Box
-      borderStyle="round"
+      borderStyle={compact ? undefined : 'round'}
       borderColor={theme.border.default}
       flexDirection="column"
       paddingX={1}
-      paddingY={1}
+      paddingY={compact ? 0 : 1}
       width="100%"
     >
-      <Text bold>{t('Manage Skills')}</Text>
-      <Text color={theme.text.secondary}>
-        {hasQuery
-          ? t('{{matched}} / {{total}} skills · ', {
-              matched: String(matchedCount),
-              total: String(totalCount),
-            })
-          : t('{{count}} skills · ', { count: String(totalCount) })}
-        {t(
-          'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
-        )}
-      </Text>
+      {!bare && (
+        <>
+          <Text bold wrap="truncate">
+            {t('Manage Skills')}
+          </Text>
+          <Text color={theme.text.secondary} wrap="truncate">
+            {hasQuery
+              ? t('{{matched}} / {{total}} skills · ', {
+                  matched: String(matchedCount),
+                  total: String(totalCount),
+                })
+              : t('{{count}} skills · ', { count: String(totalCount) })}
+            {hiddenLockedCount > 0 && !countInList ? `${lockedCount} · ` : ''}
+            {t(
+              'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
+            )}
+          </Text>
+        </>
+      )}
 
-      <Box marginTop={1} flexDirection="row">
-        <Text color={hasQuery ? theme.text.accent : theme.text.secondary}>
-          {t('Search:')}{' '}
-        </Text>
-        <Text>
-          {query || (
-            <Text color={theme.text.secondary} dimColor>
-              {t('type to filter…')}
+      {!bare && (
+        <Box marginTop={1} flexDirection="column">
+          <Text wrap="truncate">
+            <Text color={hasQuery ? theme.text.accent : theme.text.secondary}>
+              {t('Search:')}{' '}
             </Text>
-          )}
-        </Text>
-      </Box>
+            {query || (
+              <Text color={theme.text.secondary} dimColor>
+                {t('type to filter…')}
+              </Text>
+            )}
+          </Text>
+        </Box>
+      )}
 
-      <Box marginTop={1} flexDirection="column">
+      <Box marginTop={bare ? 0 : 1} flexDirection="column">
         {allSkills.length === 0 ? (
-          <Text color={theme.text.secondary}>
+          <Text color={theme.text.secondary} wrap="truncate">
             {t('No skills are currently available.')}
           </Text>
         ) : items.length > 0 ? (
           <MultiSelect
             items={items}
-            disableVimNav={!!query}
+            disableVimNav={!bare && !!query}
             selectedKeys={selectedKeys ?? []}
             onSelectedKeysChange={setSelectedKeys}
-            // Enter == "pick" the highlighted skill: close the dialog and
-            // drop `/<name>` into the input buffer (no auto-submit).
-            // MultiSelect's `onConfirm` fires on Enter; we read the row
-            // tracked via `onHighlight` so we know which one. Saving lives
-            // entirely on Esc — see `handleSaveAndClose`.
-            onConfirm={() => {
-              if (activeValue) {
-                void handlePick(activeValue);
-              }
-              // Empty list (search filtered everything out): no-op; Esc to exit.
+            // Enter saves and fills the input with the highlighted skill.
+            onConfirm={(_selected, activeSkill) => {
+              void handlePick(activeSkill);
             }}
-            onHighlight={(v) => setActiveValue(v)}
             showNumbers={false}
             checkedText="[x]"
             showActiveMarker
+            truncateLabels
             maxItemsToShow={maxItemsToShow}
           />
-        ) : unlockedSkills.length === 0 ? (
-          <Text color={theme.text.secondary}>
-            {t(
-              'All available skills are locked at a higher scope (see below).',
-            )}
+        ) : filteredLocked.length > 0 && visibleLocked.length === 0 ? (
+          <Text color={theme.text.secondary} dimColor wrap="truncate">
+            {lockedCount}
           </Text>
-        ) : (
-          <Text color={theme.text.secondary}>
+        ) : filteredLocked.length > 0 ? null : (
+          <Text color={theme.text.secondary} wrap="truncate">
             {t('No skills match the search.')}
+          </Text>
+        )}
+
+        {visibleLocked.length > 0 && (
+          <Box marginTop={items.length > 0 ? 1 : 0} flexDirection="column">
+            <Text color={theme.text.secondary} wrap="truncate">
+              {t('Locked by settings entries you cannot toggle here:')}
+            </Text>
+            {visibleLocked.map((s) => {
+              // Scope identifiers (System / User / SystemDefaults) stay as
+              // untranslated technical labels — they refer to settings file
+              // scopes by name and matching them exactly helps users locate
+              // the offending entry.
+              const scopeName = higher.lockedIn(s) ?? t('higher scope');
+              return (
+                <Text key={s.name} dimColor wrap="truncate">
+                  {t('  {{name}} {{description}}  [locked: {{scope}}]', {
+                    name: truncateToWidth(s.name, NAME_COLUMN).padEnd(
+                      NAME_COLUMN,
+                    ),
+                    description: truncateToWidth(
+                      oneLine(s.description),
+                      LOCKED_DESCRIPTION_COLUMN,
+                    ),
+                    scope: scopeName,
+                  })}
+                  {/* Appended outside the template rather than interpolated: the
+                    origin is already translated inside `skillOriginLabel`, so
+                    this costs no new string and the locked reason keeps its
+                    place. Bounded like every other column on the row. */}
+                  {`  ${truncateToWidth(skillOriginLabel(s), LOCKED_ORIGIN_COLUMN)}`}
+                </Text>
+              );
+            })}
+          </Box>
+        )}
+        {bare && hiddenLockedCount > 0 && lockedBudget > 0 && !countInList && (
+          <Text color={theme.text.secondary} dimColor wrap="truncate">
+            {lockedCount}
           </Text>
         )}
       </Box>
 
-      {filteredLocked.length > 0 && (
-        <Box marginTop={1} flexDirection="column">
-          <Text color={theme.text.secondary}>
-            {t('Locked by higher-scope settings (cannot toggle here):')}
+      {!compact && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} dimColor wrap="truncate">
+            {t('↑/↓ navigate · backspace edits search')}
           </Text>
-          {filteredLocked.map((s) => {
-            // Scope identifiers (System / User / SystemDefaults) stay as
-            // untranslated technical labels — they refer to settings file
-            // scopes by name and matching them exactly helps users locate
-            // the offending entry.
-            const scopeName = higher.scopeOf(s.name) ?? t('higher scope');
-            return (
-              <Text key={s.name} dimColor wrap="truncate">
-                {t('  {{name}} {{description}}  [locked: {{scope}}]', {
-                  name: truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN),
-                  description: truncate(s.description, 60),
-                  scope: scopeName,
-                })}
-              </Text>
-            );
-          })}
         </Box>
       )}
-
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary} dimColor>
-          {t('↑/↓ navigate · backspace edits search')}
-        </Text>
-      </Box>
     </Box>
   );
 }

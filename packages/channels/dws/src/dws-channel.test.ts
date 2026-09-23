@@ -4684,7 +4684,6 @@ describe('DwsChannel', () => {
         chatId: 'todo:task-new',
         threadId: 'task-new',
         senderId: 'alice',
-        displayText: 'Investigate the new failure',
         text: expect.stringContaining('Investigate the new failure'),
         metadata: expect.stringContaining('DWS native todo ID: task-new'),
       }),

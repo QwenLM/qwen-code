@@ -28,6 +28,7 @@ import type {
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
+  APPROVAL_MODES,
   ApprovalMode,
   clampInlineMediaPart,
   compactToolResultDisplayForHistory,
@@ -53,8 +54,9 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import {
   createEventMapper,
-  extractFileDiff,
+  extractStructuredResult,
   renderResultDisplay,
+  toolResultEvent,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
 import { isAtCommand } from '../utils/commandUtils.js';
@@ -127,23 +129,15 @@ export interface LivePromptOptions {
 }
 
 /**
- * Shift+Tab cycle order (core approval-mode.ts order:
- * [plan, default, auto-edit, auto, yolo]).
+ * Next mode in the Shift+Tab cycle (unset mode cycles from DEFAULT). Cycles
+ * core's own `APPROVAL_MODES`, so the order cannot drift from the enum ink
+ * walks; an unknown mode indexes to -1 and wraps to entry 0, as ink does.
  */
-export const APPROVAL_MODE_CYCLE: readonly ApprovalMode[] = [
-  ApprovalMode.PLAN,
-  ApprovalMode.DEFAULT,
-  ApprovalMode.AUTO_EDIT,
-  ApprovalMode.AUTO,
-  ApprovalMode.YOLO,
-];
-
-/** Next mode in the Shift+Tab cycle (unset mode cycles from DEFAULT). */
 export function nextApprovalMode(
   current: ApprovalMode | undefined,
 ): ApprovalMode {
-  const idx = APPROVAL_MODE_CYCLE.indexOf(current ?? ApprovalMode.DEFAULT);
-  return APPROVAL_MODE_CYCLE[(idx + 1) % APPROVAL_MODE_CYCLE.length];
+  const idx = APPROVAL_MODES.indexOf(current ?? ApprovalMode.DEFAULT);
+  return APPROVAL_MODES[(idx + 1) % APPROVAL_MODES.length];
 }
 
 /** A scheduler call parked in `awaiting_approval`, tracked by the backend. */
@@ -205,11 +199,6 @@ export function nextLivePromptId(config: Config): string {
   return id;
 }
 
-/** Compact token count for task-end stats (matches the scripted demo form). */
-function formatTokenCount(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-}
-
 /**
  * Single-consumer async queue: lets the scheduler's output callbacks enqueue
  * neutral events while the generator is awaiting tool completion, so live
@@ -259,9 +248,8 @@ function atMentionCardEvents(
       title: display.description,
     },
   ];
-  const text = renderResultDisplay(display.resultDisplay);
-  if (text)
-    events.push({ type: 'tool-result', id: display.callId, display: text });
+  const result = toolResultEvent(display.callId, display.resultDisplay);
+  if (result) events.push(result);
   const failed = display.status === ToolCallStatus.Error;
   events.push({
     type: 'tool-end',
@@ -839,24 +827,19 @@ export async function* livePromptEvents(
           });
         }
         if (agent.status !== 'running' && agent.status !== 'background') {
-          const stats = agent.executionSummary;
-          out.push({
-            type: 'task-end',
-            id: callId,
-            tools: stats?.totalToolCalls ?? agent.toolCalls?.length ?? 0,
-            seconds: Math.round((stats?.totalDurationMs ?? 0) / 100) / 10,
-            tokens: formatTokenCount(
-              stats?.totalTokens ?? agent.tokenCount ?? 0,
-            ),
-          });
+          out.push({ type: 'task-end', id: callId });
         }
         return out;
       }
-      const display = renderResultDisplay(
-        compactToolResultDisplayForHistory(chunk),
-      );
+      const compacted = compactToolResultDisplayForHistory(chunk);
+      const structured = extractStructuredResult(compacted);
+      if (structured)
+        return [
+          { type: 'tool-result', id: callId, display: '', ...structured },
+        ];
+      const display = renderResultDisplay(compacted);
       return display
-        ? [{ type: 'tool-output', id: callId, delta: display }]
+        ? [{ type: 'tool-output', id: callId, output: display }]
         : [];
     };
 
@@ -864,6 +847,9 @@ export async function* livePromptEvents(
     // callIds whose real invocation description already went out (one per
     // call, ink mapToDisplay parity).
     const descriptionSeen = new Set<string>();
+    // Calls last seen in the scheduler's queued state, so a status only goes
+    // out when it changes.
+    const queuedSeen = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config,
       getPreferredEditor: () => undefined,
@@ -935,6 +921,17 @@ export async function* livePromptEvents(
             confirmationDetails: c.confirmationDetails,
           });
         }
+        // A call approved while the batch still holds another approval goes
+        // back to 'scheduled' rather than straight to 'executing'; ink's card
+        // reads that status and holds its pending glyph until the call runs.
+        for (const c of calls) {
+          const callId = c.request.callId;
+          const queued = c.status === 'scheduled';
+          if (queuedSeen.has(callId) === queued) continue;
+          if (queued) queuedSeen.add(callId);
+          else queuedSeen.delete(callId);
+          live.push({ type: 'tool-queued', id: callId, queued });
+        }
       },
       onAllToolCallsComplete: async (calls) => {
         completed = calls as unknown as LooseCompletedCall[];
@@ -951,22 +948,8 @@ export async function* livePromptEvents(
     const responseParts: Part[] = [];
     for (const call of completed) {
       const resp = call.response;
-      // FileDiff results ride as structured payloads so the tool card renders
-      // colored diff lines (ink DiffResultRenderer parity) instead of the
-      // flattened unified-diff text.
-      const diff = extractFileDiff(resp?.resultDisplay);
-      if (diff) {
-        yield {
-          type: 'tool-result',
-          id: call.request.callId,
-          display: '',
-          diff,
-        };
-      } else {
-        const display = renderResultDisplay(resp?.resultDisplay);
-        if (display)
-          yield { type: 'tool-result', id: call.request.callId, display };
-      }
+      const result = toolResultEvent(call.request.callId, resp?.resultDisplay);
+      if (result) yield result;
       const failed = call.status === 'error' || call.status === 'cancelled';
       yield {
         type: 'tool-end',

@@ -52,6 +52,13 @@ interface FakeEditor {
   newLine(): void;
 }
 
+type MockSuggestion = {
+  label: string;
+  value: string;
+  description?: string;
+  category?: 'file' | 'session' | 'mcp' | 'extension';
+};
+
 const mocks = vi.hoisted(() => {
   const state = {
     inputHandlers: [] as Array<(sequence: string) => boolean>,
@@ -61,6 +68,8 @@ const mocks = vi.hoisted(() => {
     slashCommands: [] as unknown[],
     fileSearchResults: [] as string[],
     fileSearchDelay: Promise.resolve() as Promise<void>,
+    sessionSuggestions: [] as MockSuggestion[],
+    extensionSuggestions: [] as MockSuggestion[],
     textareaProps: null as Record<string, unknown> | null,
   };
 
@@ -219,23 +228,31 @@ vi.mock('@opentui/react', () => ({
   useTerminalDimensions: () => ({ width: 80, height: 24 }),
 }));
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  return {
-    ...actual,
-    FileSearchFactory: {
-      create: () => ({
-        initialize: async () => {},
-        search: async () => {
-          await mocks.state.fileSearchDelay;
-          return mocks.state.fileSearchResults;
-        },
-        dispose: async () => {},
-      }),
-    },
-  };
-});
+// The composer delegates `@` completion to ink's useAtCompletion, which
+// resolves the crawler through the core subpath and lists prior sessions off
+// disk. Mock both so the tests never crawl the real project root.
+vi.mock('@qwen-code/qwen-code-core/utils/filesearch/fileSearch.js', () => ({
+  FileSearchFactory: {
+    create: () => ({
+      initialize: async () => {},
+      search: async () => {
+        await mocks.state.fileSearchDelay;
+        return mocks.state.fileSearchResults;
+      },
+      dispose: async () => {},
+    }),
+  },
+}));
+
+vi.mock('../hooks/session-completion.js', () => ({
+  getSessionSuggestions: async () => mocks.state.sessionSuggestions,
+}));
+
+// The real helper returns [] without a Config, so a third `@` category has to
+// come from here.
+vi.mock('../hooks/extension-mention-ref.js', () => ({
+  getExtensionSuggestions: () => mocks.state.extensionSuggestions,
+}));
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
@@ -467,6 +484,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     mocks.state.slashCommands = [];
     mocks.state.fileSearchResults = [];
     mocks.state.fileSearchDelay = Promise.resolve();
+    mocks.state.sessionSuggestions = [];
   });
 
   it('Esc invalidates in-flight @ searches: a late resolve must not reopen the dropdown (R2-2)', async () => {
@@ -696,7 +714,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(onInterrupt).toHaveBeenCalledTimes(1);
   });
 
-  it('`!` does not toggle shell mode while a stale dropdown is open (R1-54)', async () => {
+  it('a late @ resolution cannot reopen the dropdown over a cleared buffer (R1-54)', async () => {
     let releaseSearch!: () => void;
     mocks.state.fileSearchResults = ['hit-file.txt'];
     mocks.state.fileSearchDelay = new Promise<void>((resolve) => {
@@ -713,22 +731,26 @@ describe('OpenTuiInputPrompt submit guard', () => {
     const editor = currentEditor();
     await typeText('@x');
     await act(async () => {});
-    // Clear the buffer by Ctrl+C: the stale search result repopulates the
-    // dropdown over the empty buffer, exactly ink's !showCompletionSuggestions
-    // hazard.
+    // Clear the buffer by Ctrl+C while the search is still pending.
     await act(async () => {
       lastKeyboardHandler()(
         baseKeyEvent({ name: 'c', sequence: '\x03', ctrl: true }),
       );
     });
     expect(editor.plainText).toBe('');
+    // The clear flipped the completion mode to IDLE before the search settled,
+    // and the shared hook's callbacks are gated on that mode, so the late
+    // result is dropped instead of repopulating the dropdown over an empty
+    // buffer. Ink needed its `!showCompletionSuggestions` guard for exactly
+    // this stale dropdown; that guard stays for slash argument completion,
+    // which this renderer still races with a sequence counter of its own.
     releaseSearch();
     await act(async () => {});
     await act(async () => {
       lastKeyboardHandler()(baseKeyEvent({ name: '!', sequence: '!' }));
     });
-    expect(onToggleShellMode).not.toHaveBeenCalled();
-    expect(editor.plainText).toBe('!');
+    expect(onToggleShellMode).toHaveBeenCalledTimes(1);
+    expect(editor.plainText).toBe('');
   });
 
   it('Up at the top edge pops queued prompts into the composer', async () => {
@@ -1047,12 +1069,36 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
   async function renderWithCommands(
     commands: unknown[],
     onSubmit: (text: string) => void = () => {},
+    onSuggestionsVisibilityChange?: (visible: boolean) => void,
   ) {
     mocks.state.slashCommands = commands;
-    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        userMessages={[]}
+        onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+      />,
+    );
     // Let loadInteractiveCommands resolve into commandsRef.
     await act(async () => {});
   }
+
+  it('publishes completion-list visibility so the shell can hide the footer', async () => {
+    const seen: boolean[] = [];
+    await renderWithCommands(
+      [{ name: 'help', description: 'Show help', kind: 'built-in' }],
+      () => {},
+      (visible) => seen.push(visible),
+    );
+    await typeText('/he');
+    expect(seen).toContain(true);
+
+    // Tab fills `/help `, which matches nothing, so the list closes again.
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(seen[seen.length - 1]).toBe(false);
+  });
 
   it('Enter fills the highlighted candidate instead of submitting `/he`', async () => {
     const submitted: string[] = [];
@@ -1082,6 +1128,28 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     });
     expect(submitted).toEqual([]);
     expect(editor.plainText).toBe('/help ');
+  });
+
+  it('Tab in the same burst as the arrows accepts the row they reached', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        { name: 'help', description: 'Show help', kind: 'built-in' },
+        { name: 'hooks', description: 'Manage hooks', kind: 'built-in' },
+      ],
+      (text) => submitted.push(text),
+    );
+    const editor = currentEditor();
+    await typeText('/');
+    // One burst: the renderer delivers both keys to the handler registered
+    // before either took effect.
+    await act(async () => {
+      const handler = lastKeyboardHandler();
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(submitted).toEqual([]);
+    expect(editor.plainText).toBe('/hooks ');
   });
 
   it('a perfect match submits directly on Enter', async () => {
@@ -1265,10 +1333,11 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
 });
 
 describe('OpenTuiInputPrompt approval-mode indicator', () => {
-  // The mode text is the only on-screen proof an auto-accept mode took
-  // effect, and the OpenTUI interactive e2e leg's readiness poll greps the
-  // terminal for it. Asserted through the same translation call the component
-  // makes, so a non-English locale cannot flip the pin.
+  // ink's InputPrompt uses its status text only as an aria-label, never as a
+  // visible row, and this renderer has no aria surface — so the composer owns
+  // only the prefix glyph. The readable mode name belongs to the footer
+  // (OpenTuiFooter, through formatApprovalModeName), which is how ink splits
+  // it between InputPrompt and AutoAcceptIndicator.
   const renderWithMode = (approvalMode: ApprovalMode) =>
     render(
       <OpenTuiInputPrompt
@@ -1279,33 +1348,47 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
     );
 
   it.each<[ApprovalMode, string]>([
-    [ApprovalMode.YOLO, 'YOLO mode'],
-    [ApprovalMode.AUTO_EDIT, 'Accepting edits'],
-    [ApprovalMode.AUTO, 'Auto mode'],
-  ])('draws the %s status text', (approvalMode, key) => {
+    [ApprovalMode.YOLO, '*'],
+    [ApprovalMode.AUTO_EDIT, '>'],
+    [ApprovalMode.AUTO, '>'],
+    [ApprovalMode.PLAN, '>'],
+    [ApprovalMode.DEFAULT, '>'],
+  ])('draws the %s prefix', (approvalMode, prefix) => {
     renderWithMode(approvalMode);
-    expect(screen.getByText(t(key))).toBeTruthy();
+    expect(screen.getByText(prefix)).toBeTruthy();
   });
 
-  it.each<ApprovalMode>([ApprovalMode.PLAN, ApprovalMode.DEFAULT])(
-    'draws no status text for %s, matching ink',
-    (approvalMode) => {
-      renderWithMode(approvalMode);
-      for (const key of ['YOLO mode', 'Accepting edits', 'Auto mode']) {
-        expect(screen.queryByText(t(key))).toBeNull();
-      }
-    },
-  );
+  it.each<ApprovalMode>([
+    ApprovalMode.YOLO,
+    ApprovalMode.AUTO_EDIT,
+    ApprovalMode.AUTO,
+    ApprovalMode.PLAN,
+    ApprovalMode.DEFAULT,
+  ])('draws no visible mode name for %s, matching ink', (approvalMode) => {
+    renderWithMode(approvalMode);
+    for (const key of [
+      'YOLO mode',
+      'Accepting edits',
+      'Auto mode',
+      'plan mode',
+      'Ask permissions',
+      'Shell mode',
+    ]) {
+      expect(screen.queryByText(t(key))).toBeNull();
+    }
+  });
 
-  it('replaces the status text with Shell mode while shell mode is active (R1-16)', () => {
+  it('replaces the prefix with ! while shell mode is active (R1-16)', () => {
     render(
       <OpenTuiInputPrompt
         onSubmit={() => {}}
         userMessages={[]}
+        approvalMode={ApprovalMode.YOLO}
         shellModeActive
       />,
     );
-    expect(screen.getByText(t('Shell mode'))).toBeTruthy();
+    expect(screen.getByText('!')).toBeTruthy();
+    expect(screen.queryByText('*')).toBeNull();
   });
 });
 
@@ -1320,6 +1403,7 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
     mocks.state.slashCommands = [];
     mocks.state.fileSearchResults = [];
     mocks.state.fileSearchDelay = Promise.resolve();
+    mocks.state.sessionSuggestions = [];
     mocks.state.textareaProps = null;
   });
 
@@ -1513,5 +1597,372 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  // The mocked useTerminalDimensions reports width 80, so a row has
+  // columns = 80 and a description keeps 80 - 8 (dropdown margins, active
+  // marker, gutter) minus whatever the widest label column took. Asserting the
+  // exact surviving prefix is what pins that arithmetic: jsdom has no layout, so
+  // an over-allocated budget only shows up as a wrapped row on a real terminal.
+  async function dropdownText(command: Record<string, unknown>) {
+    mocks.state.slashCommands = [command];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    // Let loadInteractiveCommands resolve into commandsRef.
+    await act(async () => {});
+    await typeText('/');
+    return container.textContent ?? '';
+  }
+
+  it('draws the source badge ink puts next to the label', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      source: 'bundled-skill',
+    });
+    expect(text).toContain('stuck [Skill]');
+  });
+
+  it('counts the badge toward the label column, not on top of it', async () => {
+    // `stuck [Skill]` is 13 wide, so the description keeps 80 - 8 - 13 = 59
+    // columns and truncateToWidth leaves 58 x's plus the ellipsis. Without the
+    // badge in the measurement the same row would keep 66.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+      source: 'bundled-skill',
+    });
+    expect(text).toContain(`${'x'.repeat(58)}…`);
+    expect(text).not.toContain(`${'x'.repeat(59)}…`);
+  });
+
+  it('truncates an over-long description to a single line', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+    });
+    expect(text).toContain(`${'x'.repeat(66)}…`);
+    expect(text).not.toContain('x'.repeat(120));
+  });
+
+  it('collapses the newlines a multi-line SKILL.md description carries', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose\n  a hung\n  session',
+    });
+    expect(text).toContain('Diagnose a hung session');
+  });
+
+  // The wrap alignment measured on a real terminal only holds while these stay
+  // three separate flex children: concatenated into one text run, a long hint
+  // word-wraps the whole run and the row grows to three lines instead of ink's
+  // two. jsdom has no layout, so this pins the structure behind the frame.
+  it('keeps the label, hint and badge as three separate text runs', async () => {
+    mocks.state.slashCommands = [
+      {
+        name: 'stuck',
+        description: 'Diagnose a hung session',
+        source: 'bundled-skill',
+        argumentHint: '[PID or symptom]',
+      },
+    ];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    await act(async () => {});
+    await typeText('/');
+    const runs = [...container.querySelectorAll('span')].map(
+      (span) => span.textContent,
+    );
+    expect(runs).toContain('stuck');
+    expect(runs).toContain(' [PID or symptom]');
+    expect(runs).toContain(' [Skill]');
+    expect(runs).not.toContain('stuck [PID or symptom] [Skill]');
+  });
+});
+
+describe('OpenTuiInputPrompt Windows Tab approval-mode fallback (F-2)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  const shiftTab = baseKeyEvent({
+    name: 'tab',
+    sequence: '\x1b[Z',
+    shift: true,
+  });
+
+  function renderWithCycle(onCycleApprovalMode: () => void) {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={onCycleApprovalMode}
+      />,
+    );
+  }
+
+  async function withPlatform(
+    platform: NodeJS.Platform,
+    run: () => Promise<void>,
+  ) {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: platform,
+      configurable: true,
+    });
+    try {
+      await run();
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  }
+
+  it('leaves a real Shift+Tab to the shell', async () => {
+    // The shell broadcasts Shift+Tab to every useKeyboard subscriber, this
+    // composer included, so cycling here too would advance the mode twice.
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(shiftTab);
+      });
+    });
+    expect(cycles).toBe(0);
+  });
+
+  it('leaves a bare Tab alone off Windows', async (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(cycles).toBe(0);
+  });
+
+  it('accepts a bare Tab on Windows, where terminals cannot tell them apart', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(cycles).toBe(1);
+  });
+
+  it('does not also cycle when the bare Tab was spent on a completion', async () => {
+    // The Windows fallback only needs no extra guard because both completion
+    // consumers return, so a Tab that filled `/help ` never reaches the cycle
+    // branch. ink has to thread shouldBlockTab across two components for the
+    // same reason (#4171).
+    mocks.state.slashCommands = [
+      { name: 'help', description: 'Show help', kind: 'built-in' },
+    ];
+    let cycles = 0;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={() => {
+          cycles += 1;
+        }}
+      />,
+    );
+    await act(async () => {});
+    await withPlatform('win32', async () => {
+      await typeText('/he');
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(currentEditor().plainText).toBe('/help ');
+    expect(cycles).toBe(0);
+  });
+});
+
+describe('OpenTuiInputPrompt @ completion categories (#143)', () => {
+  const SESSION_ROW = {
+    label: 'Fix the flaky test',
+    value: 'session:abc123',
+    description: '2 hours ago',
+    category: 'session' as const,
+  };
+
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+    mocks.state.fileSearchResults = [];
+    mocks.state.fileSearchDelay = Promise.resolve();
+    mocks.state.sessionSuggestions = [];
+    mocks.state.extensionSuggestions = [];
+  });
+
+  async function openAtCompletion() {
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    await act(async () => {});
+    await typeText('@');
+    // One flush for the crawler's initialize(), one for the search promise.
+    await act(async () => {});
+    await act(async () => {});
+    return container;
+  }
+
+  async function pressArrow(name: 'left' | 'right'): Promise<void> {
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name, sequence: '' }));
+    });
+  }
+
+  it('draws the category tab bar when results span more than one category', async () => {
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.sessionSuggestions = [SESSION_ROW];
+    const { textContent } = await openAtCompletion();
+    const text = textContent ?? '';
+    expect(text).toContain(' All ');
+    expect(text).toContain(' Files ');
+    expect(text).toContain(' Sessions ');
+    expect(text).toContain('(←/→ to switch)');
+    // Both sources are on screen under the default `all` tab.
+    expect(text).toContain('hit-file.txt');
+    expect(text).toContain('Fix the flaky test');
+  });
+
+  it('hides the bar for a files-only result set', async () => {
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    const { textContent } = await openAtCompletion();
+    const text = textContent ?? '';
+    expect(text).toContain('hit-file.txt');
+    expect(text).not.toContain('(←/→ to switch)');
+    expect(text).not.toContain(' Files ');
+  });
+
+  it('filters the rows to the tab the arrows land on, wrapping at both ends', async () => {
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.sessionSuggestions = [SESSION_ROW];
+    const container = await openAtCompletion();
+
+    await pressArrow('right'); // all → file
+    expect(container.textContent).toContain('hit-file.txt');
+    expect(container.textContent).not.toContain('Fix the flaky test');
+
+    await pressArrow('right'); // file → session
+    expect(container.textContent).toContain('Fix the flaky test');
+    expect(container.textContent).not.toContain('hit-file.txt');
+
+    await pressArrow('right'); // session → all (wrap)
+    expect(container.textContent).toContain('hit-file.txt');
+    expect(container.textContent).toContain('Fix the flaky test');
+
+    await pressArrow('left'); // all → session (wrap backwards)
+    expect(container.textContent).toContain('Fix the flaky test');
+    expect(container.textContent).not.toContain('hit-file.txt');
+  });
+
+  it('accepts a session row as its reference, not as a path', async () => {
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.sessionSuggestions = [SESSION_ROW];
+    await openAtCompletion();
+    const editor = currentEditor();
+
+    await pressArrow('right'); // all → file
+    await pressArrow('right'); // file → session: one row, already highlighted
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(editor.plainText).toBe('@session:abc123 ');
+  });
+
+  it('steps from the raw tab, so a category the results dropped lands on All', async () => {
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.sessionSuggestions = [SESSION_ROW];
+    mocks.state.extensionSuggestions = [
+      {
+        label: '@ext:lint',
+        value: '@ext:lint',
+        description: 'Extension',
+        category: 'extension' as const,
+      },
+    ];
+    const container = await openAtCompletion();
+
+    await pressArrow('right'); // all → file
+    await pressArrow('right'); // file → session
+    expect(container.textContent).toContain('Fix the flaky test');
+
+    // A newer result set drops the session category and keeps two others, so
+    // the bar stays up while the tab the state names is no longer on it.
+    mocks.state.sessionSuggestions = [];
+    await typeText('x');
+    await act(async () => {});
+    await act(async () => {});
+    expect(container.textContent).not.toContain(' Sessions ');
+
+    // ink steps from its raw state: the index lookup misses and the step lands
+    // on 'all', which still shows every remaining row. Stepping from the
+    // derived tab instead would land on Files and hide the extension row.
+    await pressArrow('right');
+    expect(container.textContent).toContain('hit-file.txt');
+    expect(container.textContent).toContain('@ext:lint');
+  });
+
+  it('steps the tab once per arrow of a single read', async () => {
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.sessionSuggestions = [SESSION_ROW];
+    mocks.state.extensionSuggestions = [
+      {
+        label: '@ext:lint',
+        value: '@ext:lint',
+        description: 'Extension',
+        category: 'extension' as const,
+      },
+    ];
+    const container = await openAtCompletion();
+
+    // All → Files → Sessions → Extensions out of one stdin read. Read from the
+    // render that armed the handler, every arrow steps from 'all' and the burst
+    // lands on Files.
+    await act(async () => {
+      const handler = lastKeyboardHandler();
+      for (let i = 0; i < 3; i++) {
+        handler(baseKeyEvent({ name: 'right', sequence: '' }));
+      }
+    });
+
+    expect(container.textContent).toContain('@ext:lint');
+    expect(container.textContent).not.toContain('hit-file.txt');
   });
 });

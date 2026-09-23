@@ -17,14 +17,14 @@ You are drafting the text for `/goal set`. You are NOT doing the work the goal d
 
 ## How Goals are judged (why the format below matters)
 
-An active Goal is re-fed to the model every turn, and its completion is judged by an independent verifier that sees ONLY transcript evidence:
+An active Goal is re-fed to the model every turn, and its completion is judged by an independent verifier that sees ONLY transcript evidence, read from the most recent record backwards until its request is full:
 
-- Visible assistant output and tool results count as evidence. The objective itself, user prompts, and hidden reasoning do not.
+- Visible assistant output, tool results, and the user's own messages recorded for the Goal count as evidence; a user message proves only what the user said, chose, or approved. The objective itself and hidden reasoning do not, and in a long Goal the oldest records no longer reach the verifier.
 - `delivered_output` evidence proves only that text was printed. It cannot prove that tests passed, files changed, or remote state changed — those need a tool result in the transcript (an `external_fact`).
 - A claim that the user confirmed, chose, or approved something needs a real user message as evidence; otherwise the completion proposal is rejected.
-- Vague, subjective, or open-ended conditions never accumulate enough evidence; the loop then runs until a limit is hit.
+- Vague, subjective, or open-ended conditions never produce decisive evidence; the loop then runs until a limit is hit.
 
-So a good objective makes the agent PRODUCE evidence: run the named check and paste the decisive output line.
+So a good objective makes the agent PRODUCE evidence at the end: run the named check immediately before proposing completion and paste the decisive output line. A check that ran long before may have to run again when completion is proposed.
 
 ## Step 0 — should this be a Goal at all?
 
@@ -66,7 +66,7 @@ Use exactly these labels, in this order. Keep the whole objective on one line wh
 Outcome: <one sentence: what is true when done>
 Done when: 1) <command> exits 0 and its output shows <…> (paste that line); 2) <file/state assertion provable via read or grep>; 3) …
 Must not: <files not to touch; tests/thresholds not to weaken; irreversible actions not to take>
-Budget: <user's stopping agreement; otherwise stop as blocked after 20 turns, and mark that default [ASSUMPTION] in Context>
+Budget: <user's advisory stopping agreement; otherwise stop as blocked after 20 turns, and mark that default [ASSUMPTION] in Context>
 On block: propose blocked with the exact blocker and the decision a human must make; never claim completion without evidence for every Done-when item
 Context: <only facts the agent cannot derive: paths, branch, environment, earlier decisions>
 ```
@@ -80,18 +80,18 @@ Rules of thumb:
 - Prefer "the smallest safe change in `<scope>`" over open-ended refactors.
 - Put anything that must not change on the way into Must not — this is what stops the loop from deleting a failing test to "pass".
 - Keep it short: everything the agent can derive from the workspace stays out. Aim for under ~1200 characters.
-- `Budget` is a stopping agreement for the model, not a runtime-enforced turn or wall-clock limit. Do not claim that writing it configures a timer or changes the Goal token budget. Preserve a user-specified budget; otherwise mark the default `[ASSUMPTION]` in Context.
+- `Budget` is a stopping agreement for the model, not a runtime-enforced turn or wall-clock limit. Do not claim that writing it configures a timer or changes the Goal token budget. When the user needs an enforced ceiling, tell them to set `model.goalMaxTurns` or `model.goalMaxActiveMinutes` in their settings -- never write the setting into the objective, which the Goal's own model cannot act on -- and say that either takes effect after a restart and only for Goals created afterwards -- neither bounds a Goal that is already running. Preserve a user-specified budget; otherwise mark the default `[ASSUMPTION]` in Context.
 
 For example, an audit's Done-when checks can require a report covering the agreed scenarios, observed results and evidence for each scenario, and reproduction steps for each confirmed defect (or an explicit "no confirmed defects" result). Ground the scenarios and report destination before offering the objective for use.
 
 ### Weak → strong
 
-| Weak                          | Strong                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| make checkout faster          | Outcome: checkout API p95 is below 250 ms on the documented slow path. Done when: 1) `npm run bench:checkout` exits 0 and prints a p95 below 250 (paste the line); 2) `npm test` exits 0. Must not: change the benchmark, skip tests, touch files outside `src/checkout`. Budget: stop as blocked after 20 turns. On block: report the measured p95 and what blocks it. Context: [ASSUMPTION] the 20-turn budget is the drafter's default, not the user's. |
-| keep handling the PR comments | Outcome: every unresolved review thread on PR #123 is fixed or answered. Done when: 1) the review-threads query shows zero unresolved threads (paste the count); 2) CI on the head commit is green (paste the check summary). Must not: force-push, resolve a thread without replying to it. Budget: stop as blocked after 30 turns. On block: list the threads that need a maintainer decision.                                                           |
-| clean up the auth module      | Not a goal — "clean" has no check. Ask what would be observable (zero lint warnings in `src/auth`? a file count? a coverage threshold?) or offer a refactor plan instead.                                                                                                                                                                                                                                                                                  |
-| get the release out           | Not a goal as written — publishing is irreversible. Either narrow it to a checkable pre-release state (tag exists, changelog entry present, `npm run release:dry-run` exits 0) and put "do not publish" in Must not, or leave publishing to a human.                                                                                                                                                                                                       |
+| Weak                          | Strong                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| make checkout faster          | Outcome: checkout API p95 is below 250 ms on the documented slow path. Done when: 1) `npm run bench:checkout` exits 0 and prints a p95 below 250 (paste the line); 2) `npm test` exits 0. Must not: change the benchmark, skip tests, touch files outside `src/checkout`. Budget: as model guidance, stop as blocked after 20 turns. On block: report the measured p95 and what blocks it. Context: [ASSUMPTION] the 20-turn budget is the drafter's default, not the user's. |
+| keep handling the PR comments | Outcome: every unresolved review thread on PR #123 is fixed or answered. Done when: 1) the review-threads query shows zero unresolved threads (paste the count); 2) CI on the head commit is green (paste the check summary). Must not: force-push, resolve a thread without replying to it. Budget: as model guidance, stop as blocked after 30 turns. On block: list the threads that need a maintainer decision.                                                           |
+| clean up the auth module      | Not a goal — "clean" has no check. Ask what would be observable (zero lint warnings in `src/auth`? a file count? a coverage threshold?) or offer a refactor plan instead.                                                                                                                                                                                                                                                                                                     |
+| get the release out           | Not a goal as written — publishing is irreversible. Either narrow it to a checkable pre-release state (tag exists, changelog entry present, `npm run release:dry-run` exits 0) and put "do not publish" in Must not, or leave publishing to a human.                                                                                                                                                                                                                          |
 
 ## Step 5 — self-check, then hand off
 
@@ -112,7 +112,7 @@ Check every line before printing:
 
 Then hand off, and nothing else:
 
-**If the `propose_goal` tool is available and no Goal is active**, call it with the objective on one line. The user approves or declines it in a dialog; only their approval sets the Goal. If they decline you will not be told why: stop, do not ask about it, and do not propose the same or a reworded objective again. After approval, acknowledge it in one sentence and end the turn — the Goal runtime starts the first Goal turn on its own.
+**If the `propose_goal` tool is available and no Goal is active**, call it with the objective on one line. `propose_goal` refuses an objective over 1,500 characters: tighten a longer draft before calling it, never cut it off mid-check. The user approves or declines it in a dialog; only their approval sets the Goal. If they decline you will not be told why: stop, do not ask about it, and do not propose the same or a reworded objective again. After approval, acknowledge it in one sentence and end the turn — the Goal runtime starts the first Goal turn on its own.
 
 **Otherwise** (a client without Goal proposal support, headless, the tool is disabled, or a Goal is active), print:
 

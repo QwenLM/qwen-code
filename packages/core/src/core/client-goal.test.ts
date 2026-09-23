@@ -244,6 +244,7 @@ function setupGoalClient() {
     startAutomaticActiveTodoWorkChain: vi.fn(),
     endAutomaticActiveTodoWorkChain: vi.fn(),
     takeActiveTodoReminder: vi.fn(() => undefined),
+    getActiveTodoReminder: vi.fn(() => undefined),
     getContentGeneratorConfig: vi.fn(() => undefined),
     hasHooksForEvent: vi.fn(() => false),
     getStopHookBlockingCap: vi.fn(() => 8),
@@ -1374,22 +1375,10 @@ describe('LlmClient Goal admission', () => {
       (event) =>
         event.type === LlmEventType.GoalState && event.cause === undefined,
     );
-    const initialActiveGoalIndex = eventIndex(
-      events,
-      LlmEventType.ActiveGoal,
-      (event) => event.type === LlmEventType.ActiveGoal && event.value !== null,
-    );
     expect(initialGoalStateIndex).toBeGreaterThanOrEqual(0);
-    expect(initialActiveGoalIndex).toBeGreaterThan(initialGoalStateIndex);
-    expect(events[initialActiveGoalIndex]).toEqual({
-      type: LlmEventType.ActiveGoal,
-      value: {
-        condition: 'ship',
-        iterations: 0,
-        setAt: 1,
-        tokensAtStart: 0,
-        hookId: 'goal-v2:goal-1:1',
-      },
+    expect(events[initialGoalStateIndex]).toMatchObject({
+      type: LlmEventType.GoalState,
+      value: { goal: { objective: 'ship', goalId: 'goal-1', revision: 1 } },
     });
   });
 
@@ -1912,15 +1901,105 @@ describe('LlmClient Goal admission', () => {
       (event) =>
         event.type === LlmEventType.GoalState && event.cause === 'pause',
     );
-    const inactiveProjectionIndex = eventIndex(
-      events,
-      LlmEventType.ActiveGoal,
-      (event) => event.type === LlmEventType.ActiveGoal && event.value === null,
-    );
     const loopIndex = eventIndex(events, LlmEventType.StopHookLoop);
     expect(pauseStateIndex).toBeGreaterThanOrEqual(0);
-    expect(inactiveProjectionIndex).toBeGreaterThan(pauseStateIndex);
-    expect(loopIndex).toBeGreaterThan(inactiveProjectionIndex);
+    expect(loopIndex).toBeGreaterThan(pauseStateIndex);
+  });
+
+  it('reports stop_hook_active on a goal-bound Stop hook continuation', async () => {
+    const { client, config } = setupGoalClient();
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+
+    await collect(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+      ),
+    );
+
+    const stopFlags = messageBus.request.mock.calls
+      .filter(([request]) => request.eventName === 'Stop')
+      .map(([request]) => request.input.stop_hook_active);
+    expect(stopFlags).toEqual([false, true]);
+  });
+
+  it('reports stop_hook_active false when a goal turn reuses a hook-forced prompt id', async () => {
+    const { client, config } = setupGoalClient();
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+    vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+    // Goal turn 1: the hook-forced continuation ends with a tool call that is
+    // never returned. Goal turn 2 then runs under the same prompt id, which
+    // is how consecutive goal continuations are submitted.
+    turnMocks.pendingToolCalls.push(
+      [],
+      [{ name: 'read_file' }],
+      [],
+      [{ name: 'read_file' }],
+    );
+    const goalSend = () =>
+      collect(
+        client.sendMessageStream(
+          [{ text: 'continue' }],
+          new AbortController().signal,
+          'goal-prompt-shared',
+          {
+            type: SendMessageType.Goal,
+            goalPermit: permit,
+            goalTurnKey: `goal-runtime:${permit.turnId}`,
+          },
+        ),
+      );
+
+    await goalSend();
+    const secondTurnEvents = await goalSend();
+
+    const stopFlags = messageBus.request.mock.calls
+      .filter(([request]) => request.eventName === 'Stop')
+      .map(([request]) => request.input.stop_hook_active);
+    expect(stopFlags).toEqual([false, false]);
+    expect(client['stopHookChains'].get('goal-prompt-shared')?.count).toBe(1);
+    expect(secondTurnEvents).not.toContainEqual(
+      expect.objectContaining({ type: LlmEventType.HookSystemMessage }),
+    );
   });
 
   it('drains a concurrent pause before a non-blocking Stop true-stops', async () => {
@@ -1962,11 +2041,6 @@ describe('LlmClient Goal admission', () => {
       (event) =>
         event.type === LlmEventType.GoalState && event.cause === 'pause',
     );
-    const inactiveProjectionIndex = eventIndex(
-      events,
-      LlmEventType.ActiveGoal,
-      (event) => event.type === LlmEventType.ActiveGoal && event.value === null,
-    );
     const finishStateIndex = eventIndex(
       events,
       LlmEventType.GoalState,
@@ -1975,8 +2049,7 @@ describe('LlmClient Goal admission', () => {
         event.cause === 'turn_finished',
     );
     expect(pauseStateIndex).toBeGreaterThanOrEqual(0);
-    expect(inactiveProjectionIndex).toBeGreaterThan(pauseStateIndex);
-    expect(finishStateIndex).toBeGreaterThan(inactiveProjectionIndex);
+    expect(finishStateIndex).toBeGreaterThan(pauseStateIndex);
     expect(eventIndex(events, LlmEventType.StopHookLoop)).toBe(-1);
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
   });

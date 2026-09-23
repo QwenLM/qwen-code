@@ -4,6 +4,7 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import { parseChannelOutputMode } from '@qwen-code/channel-base';
 import {
   APPROVAL_MODES,
   isInternalSecretEnvVar,
@@ -13,6 +14,9 @@ import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const CHANNEL_APPROVAL_MODES = new Set<string>(APPROVAL_MODES);
+const GROUP_SENDER_POLICIES = new Set<
+  NonNullable<ChannelConfig['groupSenderPolicy']>
+>(['inherit', 'open', 'allowlist']);
 
 export { findCliEntryPath } from './cli-entry-path.js';
 
@@ -405,6 +409,45 @@ function parseApprovalModeConfig(
   return approvalMode;
 }
 
+function parseGroupSenderPolicy(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelConfig['groupSenderPolicy'] {
+  const value = rawConfig['groupSenderPolicy'];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (
+    typeof value !== 'string' ||
+    !GROUP_SENDER_POLICIES.has(
+      value as NonNullable<ChannelConfig['groupSenderPolicy']>,
+    )
+  ) {
+    throw new Error(
+      `Channel "${channelName}" field "groupSenderPolicy" must be one of: ${[
+        ...GROUP_SENDER_POLICIES,
+      ].join(', ')}.`,
+    );
+  }
+  return value as NonNullable<ChannelConfig['groupSenderPolicy']>;
+}
+
+function parseAllowedGroupUsers(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): string[] | undefined {
+  const value = rawConfig['allowedGroupUsers'];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error(
+      `Channel "${channelName}" field "allowedGroupUsers" must be an array of user IDs.`,
+    );
+  }
+  return value as string[];
+}
+
 export function parseChannelWebhookConfig(
   channelName: string,
   rawConfig: Record<string, unknown>,
@@ -465,6 +508,11 @@ export async function parseChannelConfig(
   }
 
   const resolvedRawConfig = { ...rawConfig };
+  const outputMode = parseChannelOutputMode(
+    name,
+    rawConfig['outputMode'],
+    plugin.supportsOutputMode === true,
+  );
   const envResolution = options.resolveEnvVars ?? true;
   const resolvedPluginFields = new Set<string>();
 
@@ -547,9 +595,12 @@ export async function parseChannelConfig(
     ] as const) as ChannelConfig['identity'],
     memoryScope: parseMemoryScopeConfig(name, rawConfig),
     model: rawConfig['model'] as string | undefined,
+    outputMode,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
+    groupSenderPolicy: parseGroupSenderPolicy(name, rawConfig),
+    allowedGroupUsers: parseAllowedGroupUsers(name, rawConfig),
     groups,
     webhooks,
   };

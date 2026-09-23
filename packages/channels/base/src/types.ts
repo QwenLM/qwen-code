@@ -7,8 +7,16 @@ export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+/**
+ * Who may use the bot inside a group the channel already admitted.
+ * `inherit` keeps the historical behavior of following `senderPolicy`.
+ * `pairing` is deliberately absent: pairing approvals are stored per user and
+ * would also unlock direct messages, which is the coupling this axis removes.
+ */
+export type GroupSenderPolicy = 'inherit' | 'open' | 'allowlist';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
+export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
 
 export interface ChannelIdentityConfig {
   id?: string;
@@ -58,8 +66,14 @@ export interface ChannelConfig {
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
   model?: string;
+  /** Output grouping for opted-in adapters. Defaults to `per_turn`. */
+  outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
   dmPolicy: DmPolicy; // default: "open"
+  /** Who may use the bot inside an admitted group. Default: "inherit". */
+  groupSenderPolicy?: GroupSenderPolicy;
+  /** Member allowlist used when `groupSenderPolicy` is `allowlist`. */
+  allowedGroupUsers?: string[];
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
@@ -90,8 +104,6 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
-  /** User-authored text to display when `text` contains model-only context. */
-  displayText?: string;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
@@ -258,6 +270,7 @@ export interface ChannelOutputSegmentContext {
   target: SessionTarget;
   sourceLabel?: string;
   messageId?: string;
+  partial?: boolean;
 }
 
 export type ChannelOutputSegmentEndReason =
@@ -299,6 +312,7 @@ export interface SanitizedToolCallEvent {
 /** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
 export type ChannelTaskCancellationReason =
   | 'cancel_command'
+  | 'runtime_cancelled'
   | 'clear'
   | 'steer'
   | 'timeout'
@@ -534,6 +548,9 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Opt in to shared task, response, and turn output grouping. */
+  supportsOutputMode?: boolean;
 
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;

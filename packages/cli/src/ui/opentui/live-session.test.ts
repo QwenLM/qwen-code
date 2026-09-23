@@ -99,6 +99,32 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         } else if (
           calls.some(
             (c) =>
+              (c.args as { __queuedApproval?: boolean } | undefined)
+                ?.__queuedApproval,
+          )
+        ) {
+          // Two-call batch where approving the first does not start it: the
+          // scheduler holds it in 'scheduled' until the sibling's approval
+          // lands, and only then moves it to 'executing'.
+          const awaiting = calls.map((c) => ({
+            status: 'awaiting_approval',
+            request: c,
+            confirmationDetails: {
+              type: 'info',
+              title: 'original',
+              onConfirm: async () => {},
+            },
+          }));
+          const firstMoved = (status: string) =>
+            calls.map((c, i) =>
+              i === 0 ? { status, request: c } : awaiting[i],
+            );
+          await this.opts.onToolCallsUpdate?.(awaiting);
+          await this.opts.onToolCallsUpdate?.(firstMoved('scheduled'));
+          await this.opts.onToolCallsUpdate?.(firstMoved('executing'));
+        } else if (
+          calls.some(
+            (c) =>
               (c.args as { __cancelApproval?: boolean } | undefined)
                 ?.__cancelApproval,
           )
@@ -1861,6 +1887,42 @@ describe('livePromptEvents', () => {
     ]);
   });
 
+  it('reports an approved call as queued while its sibling still awaits', async () => {
+    let requests = 0;
+    const queuedArgs = { __queuedApproval: true };
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      requests += 1;
+      if (requests === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 'q1', name: 'run_shell_command', args: queuedArgs },
+        };
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 'q2', name: 'run_shell_command', args: queuedArgs },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // Approving the first call does not start it while the second still
+    // awaits: ink shows it as queued, not running, for exactly that span. The
+    // call that never left awaiting_approval carries no event at all.
+    expect(events.filter((e) => e.type === 'tool-queued')).toEqual([
+      { type: 'tool-queued', id: 'q1', queued: true },
+      { type: 'tool-queued', id: 'q1', queued: false },
+    ]);
+  });
+
   it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {
     const sendMessageStream = vi.fn(function* (): Generator<{
       type: string;
@@ -2015,7 +2077,7 @@ describe('livePromptEvents', () => {
       expect(events[outputIdx]).toEqual({
         type: 'tool-output',
         id: 't1',
-        delta: 'live output\n',
+        output: 'live output\n',
       });
       // Live output arrives before the tool-end settlement.
       const endIdx = events.findIndex((e) => e.type === 'tool-end');
@@ -2093,9 +2155,6 @@ describe('livePromptEvents', () => {
       expect(events).toContainEqual({
         type: 'task-end',
         id: 'agent1',
-        tools: 2,
-        seconds: 12.4,
-        tokens: '2.1k',
       });
       // Progress for already-seen subagent tool calls is not repeated.
       expect(

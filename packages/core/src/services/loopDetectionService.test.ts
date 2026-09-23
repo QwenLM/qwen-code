@@ -21,6 +21,7 @@ import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
 import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -2123,6 +2124,64 @@ describe('LoopDetectionService', () => {
         expect(isLoop).toBe(false);
       }
     });
+
+    it('tracks bridged target names instead of the shared wrapper name', () => {
+      service.reset('');
+
+      for (let i = 0; i < 8; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+            name: `mcp__service_${i}__read`,
+            arguments: { id: i },
+          }),
+        );
+        expect(isLoop).toBe(false);
+      }
+    });
+
+    it('still detects eight bridged calls to the same target', () => {
+      service.reset('');
+
+      for (let i = 0; i < 7; i++) {
+        expect(
+          service.addAndCheck(
+            createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+              name: 'mcp__github__get_issue',
+              arguments: { number: i },
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.addAndCheck(
+          createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+            name: 'mcp__github__get_issue',
+            arguments: { number: 7 },
+          }),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.ACTION_STAGNATION);
+    });
+
+    it('does not collapse bridged calls with stringified arguments onto one repeat key', () => {
+      service.reset('');
+
+      // A model can emit the bridge envelope with `arguments` as a JSON
+      // string (the malformation SchemaValidator repairs before execution),
+      // so the loop detector must keep that payload as key material instead
+      // of collapsing every such call onto `{}`.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+              name: 'read_file',
+              arguments: JSON.stringify({ file_path: `/file-${i}` }),
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
   });
 
   describe('Turn Tool Call Cap', () => {
@@ -2807,6 +2866,47 @@ describe('LoopDetectionService', () => {
       }
       expect(fired).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it.each(['task_list', 'Task_List'])(
+      'uses changing result evidence for bridged task-list polling (%s)',
+      (targetName) => {
+        const bridgeArgs = {
+          name: targetName,
+          arguments: TASK_LIST_ARGS,
+        };
+        for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+          expect(
+            service.checkAlwaysOnSafeties(
+              createToolCallRequestEvent(ToolNames.TOOL_CALL, bridgeArgs),
+            ),
+          ).toBe(false);
+          expect(
+            service.recordToolResult(
+              { name: ToolNames.TOOL_CALL, args: bridgeArgs },
+              taskListResult(`bridged board state v${i}`),
+            ),
+          ).toBe(false);
+        }
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      },
+    );
+
+    it('treats case variants of a bridged tool as one loop identity', () => {
+      let fired = false;
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+            name: i % 2 === 0 ? 'Read_File' : 'read_file',
+            arguments: { file_path: '/tmp/example' },
+          }),
+        );
+        if (fired) break;
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
     });
 
     it('keeps productive polling alive past the adaptive per-turn cap', () => {

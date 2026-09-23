@@ -14,6 +14,7 @@ import {
 } from '../../../core/permission-helpers.js';
 import { PermissionManager } from '../../../permissions/permission-manager.js';
 import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
+import { PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS } from '../../../goals/goal-tools.js';
 import { parseSkillContent } from '../../skill-load.js';
 
 function loadGoalDraftSkill() {
@@ -96,7 +97,7 @@ describe('bundled goal-draft skill', () => {
   it('explains the verifier rules the objective format is derived from', () => {
     const { body } = loadGoalDraftSkill();
 
-    // These mirror goal-verifier.ts / goalJudge.ts: transcript-only
+    // These mirror goal-verifier.ts: transcript-only
     // evidence, delivered_output cannot prove external state, and user
     // actions need user_input evidence.
     expect(body).toContain('sees ONLY transcript evidence');
@@ -184,12 +185,33 @@ describe('bundled goal-draft skill', () => {
     expect(body.slice(gate, readyHandoff)).toContain('Stop here');
   });
 
+  it('names the propose_goal objective limit the tool enforces', () => {
+    const { body } = loadGoalDraftSkill();
+    const handoff = body.slice(
+      body.indexOf('**If the `propose_goal` tool is available'),
+      body.indexOf('**Otherwise**'),
+    );
+
+    // The number is prose in a markdown file, so pin it to the constant the
+    // tool validates against: raising one without the other sends the model
+    // a limit the tool does not have.
+    expect(handoff).toContain(
+      `refuses an objective over ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS.toLocaleString('en-US')} characters`,
+    );
+    expect(handoff).toContain('tighten a longer draft before calling it');
+  });
+
   it('describes the prose budget as an agreement rather than a runtime limit', () => {
     const { body } = loadGoalDraftSkill();
 
     expect(body).toContain('not a runtime-enforced turn or wall-clock limit');
     expect(body).toContain(
       'Do not claim that writing it configures a timer or changes the Goal token budget',
+    );
+    // Naming the settings without their timing sends a reader to bound a Goal
+    // that is already running, which neither setting can do.
+    expect(body).toContain(
+      'takes effect after a restart and only for Goals created afterwards',
     );
     expect(body).toContain('Preserve a user-specified budget');
     expect(body).toContain('mark the default `[ASSUMPTION]` in Context');
@@ -228,8 +250,28 @@ describe('bundled goal-draft skill', () => {
       expect(position).toBeGreaterThan(previous);
       previous = position;
     }
-    expect(template).toContain("<user's stopping agreement");
+    expect(template).toContain("<user's advisory stopping agreement");
     expect(template).toContain('stop as blocked after 20 turns');
+    // The ceiling settings are operator configuration, not objective text:
+    // the template and the exemplar keep them out of the Budget slot, and the
+    // rules of thumb name them instead. One placement, pinned both ways, so
+    // the two cannot drift apart again.
+    expect(template).not.toContain('model.goalMax');
+    // Every literal Budget exemplar, not just the first: a drafting model
+    // copies whichever example it imitates, so one unmarked row is enough to
+    // put an unenforced turn count into an objective.
+    const weakToStrong = body.slice(body.indexOf('### Weak'));
+    const exemplars = weakToStrong
+      .split('\n')
+      .filter((line) => line.startsWith('| ') && line.includes('Budget:'));
+    expect(exemplars.length).toBeGreaterThanOrEqual(2);
+    for (const exemplar of exemplars) {
+      expect(exemplar).toContain('as model guidance');
+      expect(exemplar).not.toContain('model.goalMax');
+    }
+    expect(body).toContain('model.goalMaxTurns');
+    expect(body).toContain('model.goalMaxActiveMinutes');
+    expect(body).toContain('never write the setting into the objective');
     expect(template).not.toContain('minutes');
     // parseGoalCommand joins whitespace-separated tokens with single
     // spaces, so a multi-line objective would be flattened anyway.

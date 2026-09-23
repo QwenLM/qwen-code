@@ -6,6 +6,7 @@
 
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -19,10 +20,11 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { parse } from 'yaml';
+import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
+import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -153,7 +155,18 @@ describe('package scripts', () => {
     });
   });
 
-  it('checks both lockfiles for integrity', () => {
+  it('preserves the registry retry policy under pnpm', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+
+    expect(workspace).toMatchObject({
+      fetchRetries: 5,
+      fetchRetryMintimeout: 20000,
+      fetchRetryMaxtimeout: 120000,
+      fetchTimeout: 300000,
+    });
+  });
+
+  it('checks the pnpm lockfile for integrity and Playwright parity', () => {
     const result = spawnSync(
       process.execPath,
       [path.join(root, 'scripts/check-lockfile.js')],
@@ -161,8 +174,109 @@ describe('package scripts', () => {
     );
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('Lockfile check passed.');
     expect(result.stdout).toContain('pnpm lockfile check passed.');
+    // Pins the Playwright parity block's existence and happy path: deleting it,
+    // or returning before it, goes red here. Its drift arms live in
+    // check-lockfile.test.js, which runs the script against perturbed fixtures.
+    expect(result.stdout).toContain('Playwright parity check passed.');
+  });
+
+  describe('check-lockfile failure branches', () => {
+    // Each case runs the real script against a temp root holding copies of
+    // the committed lockfiles with one mutation, so the detectors — not
+    // today's lockfile data — are what the assertions pin.
+    function runCheckLockfile(mutate) {
+      const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'check-lockfile-'));
+      try {
+        // The Playwright parity section reads the pinned manifests as
+        // well as the lockfiles, so the fixture carries them too: without
+        // them the run dies on a missing package.json before reaching the
+        // branch under test.
+        for (const file of [
+          'pnpm-lock.yaml',
+          'pnpm-workspace.yaml',
+          'package.json',
+          'packages/web-shell/package.json',
+        ]) {
+          const to = path.join(fixtureRoot, file);
+          mkdirSync(path.dirname(to), { recursive: true });
+          copyFileSync(path.join(root, file), to);
+        }
+        mutate(fixtureRoot);
+        return spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/check-lockfile.js')],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, CHECK_LOCKFILE_ROOT: fixtureRoot },
+          },
+        );
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true });
+      }
+    }
+
+    function mutatePnpmLock(fixtureRoot, mutate) {
+      const file = path.join(fixtureRoot, 'pnpm-lock.yaml');
+      const lock = parse(readFileSync(file, 'utf8'));
+      mutate(lock);
+      writeFileSync(file, stringify(lock));
+    }
+
+    it('fails closed when pnpm-lock.yaml has no packages section', () => {
+      const result = runCheckLockfile((fixtureRoot) => {
+        writeFileSync(
+          path.join(fixtureRoot, 'pnpm-lock.yaml'),
+          "lockfileVersion: '9.0'\n",
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('has no packages section');
+    });
+
+    it('accepts a git dependency pnpm keys by source instead of version', () => {
+      const resolved = 'git+https://github.com/example/git-dep.git#7ae66ab2';
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          lock.packages[`git-dep@${resolved}`] = {
+            resolution: { type: 'git' },
+          };
+        }),
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('pnpm lockfile check passed.');
+    });
+
+    it('fails when a registry package loses its integrity hash', () => {
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          lock.packages['left-pad@1.3.0'] = { resolution: {} };
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('missing "resolution.integrity"');
+      expect(result.stderr).toContain('- left-pad@1.3.0');
+    });
+  });
+
+  it('checks undeclared imports in web-shell shipped sources', () => {
+    // web-shell is published and keeps its shipped sources in client/, so the
+    // src/ globs reach none of it. Pinning the glob inside this block keeps a
+    // published package from silently dropping out of the check.
+    const config = readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
+    const start = config.indexOf(
+      'A package must declare what its own sources import',
+    );
+    const end = config.indexOf('export-html and insight carry', start);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(config.slice(start, end)).toContain(
+      "'packages/web-shell/client/**/*.{ts,tsx}'",
+    );
   });
 
   it('keeps the internal release-age exception independent of the version', () => {
@@ -609,6 +723,33 @@ describe('package scripts', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'ignores a PATH entry that cannot be executed',
+    () => {
+      // A `corepack` left without its exec bit by a half-removed toolchain
+      // used to be chosen anyway, and the spawn then died with EACCES instead
+      // of the actionable message below.
+      const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-noexec-'));
+      const env = { ...process.env, PATH: binDir };
+
+      try {
+        writeFileSync(path.join(binDir, 'corepack'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'corepack'), 0o644);
+
+        const result = spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/setup-worktree.js')],
+          { cwd: root, encoding: 'utf8', env },
+        );
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('Corepack is required');
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('falls back to registry access when the pnpm store is incomplete', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-fallback-'));
     const logFile = path.join(binDir, 'corepack.log');
@@ -702,14 +843,8 @@ describe('package scripts', () => {
       'utf8',
     );
 
-    expect(versionScript).toContain(
-      'const workspacesToExclude = [\n' +
-        "  '@qwen-code/sdk',\n" +
-        "  '@qwen-code/mobile-mcp',\n" +
-        "  '@qwen-code/node-repl-mcp',\n" +
-        "  '@qwen-code/qwen-live',\n" +
-        '];',
-    );
+    expect(versionScript).toContain('INDEPENDENT_PACKAGES.map((name)');
+    expect(INDEPENDENT_PACKAGES).toContain('@qwen-code/node-repl-mcp');
   });
 
   it('smoke-tests the real worktree bootstrap on every supported host', () => {
@@ -780,6 +915,8 @@ describe('package scripts', () => {
     const workflow = parse(
       readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
     );
+    // The install validates pnpm-lock.yaml against the workspace manifests,
+    // so these are the inputs that can change its result.
     const expectedPaths = [
       '.github/workflows/pnpm-worktree-smoke.yml',
       '.npmrc',
@@ -788,6 +925,7 @@ describe('package scripts', () => {
       'packages/*/package.json',
       '!packages/desktop-shell/package.json',
       '!packages/live-host/package.json',
+      '!packages/mobile-shell/package.json',
       'packages/channels/*/package.json',
       'integrations/*/package.json',
       'patches/**',
@@ -806,22 +944,46 @@ describe('package scripts', () => {
     expect(workflow.on.push.paths).toEqual(expectedPaths);
   });
 
-  it('builds the standalone qwen-live daemon in the root build order', () => {
+  it('includes the standalone qwen-live daemon in recursive root builds', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
       'utf8',
     );
 
-    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
-    // the workspace unit tests run from src, so this pin is what catches the
-    // root build silently dropping the package.
-    const startIndex = buildScript.indexOf('const buildOrder = [');
-    expect(startIndex).toBeGreaterThan(-1);
-    const buildOrder = buildScript.slice(
-      startIndex,
-      buildScript.indexOf('];', startIndex),
+    expect(buildScript).toContain('corepack pnpm -r');
+    expect(buildScript).not.toContain('!@qwen-code/qwen-live');
+    expect(readPackageJson().workspaces).toContain('packages/*');
+  });
+
+  it('selects the CLI dependency closure without selecting the same-named root', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
     );
-    expect(buildOrder).toContain("'packages/qwen-live',");
+    const selector = buildScript.match(/\? '--filter "([^"]+)"/)?.[1];
+    expect(selector).toBeDefined();
+    const result = spawnSync(
+      'corepack',
+      ['pnpm', '--filter', selector, 'list', '--depth', '-1', '--json'],
+      { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const paths = JSON.parse(result.stdout).map((pkg) =>
+      path.relative(root, pkg.path).replaceAll('\\', '/'),
+    );
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'packages/cli',
+        'packages/core',
+        'packages/browser-use',
+        'packages/sdk-typescript',
+        'packages/web-shell',
+        'packages/web-templates',
+      ]),
+    );
+    expect(paths).not.toContain('');
+    expect(paths).not.toContain('packages/mobile-mcp');
+    expect(paths).not.toContain('packages/vscode-ide-companion');
   });
 
   it('keeps the Mem0 Extension manifest aligned with release versions', () => {
@@ -1326,12 +1488,14 @@ describe('package scripts', () => {
     // The validation jobs reuse the anchored install step; only the anchor
     // definition plus prepare and publish appear as full textual copies.
     expect(installSteps.length).toBe(3);
+    for (const installStep of installSteps.slice(0, 2)) {
+      expect(installStep).toContain('npm run generate');
+    }
     for (const installStep of installSteps) {
       expect(installStep).toContain(
-        'npm ci --ignore-scripts --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
       );
       expect(installStep).toContain('npm run postinstall');
-      expect(installStep).toContain('npm run generate');
       expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
       expect(installStep).not.toContain('CI_BOT_PAT');
     }
@@ -1343,6 +1507,9 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    expect(getWorkflowStep(publishJob, 'Install Dependencies')).not.toContain(
+      'npm run generate',
+    );
     expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
       'CI_BOT_PAT',
     );
@@ -1399,10 +1566,10 @@ describe('package scripts', () => {
     expect(releaseStepScript).toContain('already published; skipping');
     expect(releaseStepScript).toContain('exit 0');
     expect(releaseStepScript).toContain(
-      'npm publish --provenance "${publish_args[@]}"',
+      'corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
-      'Every channel package was already published; nothing shipped',
+      'corepack pnpm -r publish "${publish_args[@]}"',
     );
   });
 
@@ -1459,6 +1626,7 @@ describe('package scripts', () => {
       'packages/mobile-mcp',
       'packages/node-repl',
       'packages/sdk-typescript',
+      'packages/web-shell',
     ]) {
       const packageJson = JSON.parse(
         readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),
@@ -1512,7 +1680,7 @@ describe('package scripts', () => {
 
       expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
       expect(installStep).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
       if (armsHooks) {
         expect(installStep).toContain('git config core.hooksPath .husky');

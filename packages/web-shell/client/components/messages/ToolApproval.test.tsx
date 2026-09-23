@@ -13,6 +13,7 @@ import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
+import { WebShellCustomizationProvider } from '../../customization';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -137,6 +138,266 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it.each([false, true])(
+    'preserves edit approval changes and warnings (host owns preview: %s)',
+    (hostOwnsEditDiffPreview) => {
+      const adapted = extractPendingPermission([
+        {
+          id: 'permission-edit',
+          kind: 'permission',
+          requestId: 'request-edit',
+          sessionId: 'session-edit',
+          title: 'Edit: /outside/example.txt',
+          options: [],
+          toolCall: {
+            kind: 'edit',
+            _meta: { toolName: 'replace' },
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: 'Path is outside the workspace',
+                },
+              },
+              {
+                type: 'diff',
+                path: '/outside/example.txt',
+                oldText: 'before11966',
+                newText: 'after11966',
+              },
+            ],
+          },
+          preview: { kind: 'generic' },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ])!;
+      render();
+      act(() =>
+        root!.render(
+          <WebShellCustomizationProvider value={{ hostOwnsEditDiffPreview }}>
+            <I18nProvider language="en">
+              <ToolApproval
+                request={{ ...adapted, options: request.options }}
+                onConfirm={onConfirm}
+              />
+            </I18nProvider>
+          </WebShellCustomizationProvider>,
+        ),
+      );
+      expect(container!.textContent).toContain('Path is outside the workspace');
+      expect(container!.textContent?.includes('before11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      expect(container!.textContent?.includes('after11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      if (!hostOwnsEditDiffPreview) {
+        const dialog = container!.querySelector('[role="alertdialog"]')!;
+        const descriptions = dialog
+          .getAttribute('aria-describedby')!
+          .split(' ')
+          .map((id) => document.getElementById(id)?.textContent)
+          .join(' ');
+        expect(descriptions).not.toContain('before11966');
+        expect(descriptions).not.toContain('after11966');
+        const diffRegion = container!.querySelector<HTMLElement>(
+          '[aria-label="File diff"]',
+        )!;
+        expect(diffRegion.tabIndex).toBe(0);
+        const arrowDown = new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => diffRegion.dispatchEvent(arrowDown));
+        expect(arrowDown.defaultPrevented).toBe(false);
+      }
+      act(() =>
+        optionButtons()
+          .find((button) => button.dataset.optionId === 'reject')!
+          .click(),
+      );
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        'request-edit',
+        'reject',
+      );
+    },
+  );
+
+  it('rejects on Escape even when focus is inside the edit diff', () => {
+    // The approval panel documents "Escape rejects" and the diff region is
+    // focusable so users can inspect the change before answering. Regression
+    // guard: a blanket stopPropagation on DiffView used to swallow Escape too,
+    // silently breaking the fastest way to decline.
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-esc',
+        kind: 'permission',
+        requestId: 'request-edit-esc',
+        sessionId: 'session-edit-esc',
+        title: 'Edit: /outside/example.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/example.txt',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    const diffRegion = container!.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    diffRegion.focus();
+    pressKey(diffRegion, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-edit-esc',
+      'reject',
+    );
+  });
+
+  it('omits oversized edit diffs at the approval boundary', () => {
+    // The approval card renders synchronously into an [role=alertdialog], so
+    // an outsized edit would freeze the panel and drown the accessible
+    // description — surface a short notice instead. The transcript
+    // completed-edit path stays coarse but visible; the cap belongs to the
+    // approval boundary, not to buildUnifiedDiff itself.
+    const bigOld = 'line\n'.repeat(2_000);
+    const bigNew = 'line\n'.repeat(2_000) + 'extra';
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-big',
+        kind: 'permission',
+        requestId: 'request-edit-big',
+        sessionId: 'session-edit-big',
+        title: 'Edit: /outside/big.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/big.txt',
+              oldText: bigOld,
+              newText: bigNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('line\nline\nline\nline');
+  });
+
+  it('omits edit diffs that exceed the character budget while staying under the line budget', () => {
+    // The sibling test above uses many short lines, so it only ever trips
+    // `tooManyLines`. The char gate decides on its own for any edit with
+    // ≤1000 total lines and >100_000 total chars — 400 long lines per side is
+    // 800 lines but ~119k chars, and also lands on n*m = 160_000, i.e. under
+    // MAX_DIFF_PRODUCT, so nothing else would have stopped the LCS table.
+    const longOld = Array.from(
+      { length: 400 },
+      (_, i) => `old-${i}-${'x'.repeat(140)}`,
+    ).join('\n');
+    const longNew = Array.from(
+      { length: 400 },
+      (_, i) => `new-${i}-${'y'.repeat(140)}`,
+    ).join('\n');
+    expect(longOld.length + longNew.length).toBeGreaterThan(100_000);
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-wide',
+        kind: 'permission',
+        requestId: 'request-edit-wide',
+        sessionId: 'session-edit-wide',
+        title: 'Edit: /outside/wide.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/wide.txt',
+              oldText: longOld,
+              newText: longNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('x'.repeat(140));
+    expect(container!.textContent).not.toContain('y'.repeat(140));
+  });
+
   it('renders generic parameter content even when it equals the title', () => {
     const adapted = extractPendingPermission([
       {
@@ -1066,5 +1327,200 @@ describe('ToolApproval accessibility', () => {
     });
     act(() => optionButtons()[0]!.click());
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+});
+
+const goalObjective =
+  'Outcome: Audit open PRs. Done when: Every PR has evidence. Must not: Push or comment. Budget: 20 turns. On block: Report missing access. Context: Preserve the exact budget assumption.';
+const goalNotice =
+  'Replace the paused Goal and start working toward this objective?';
+const goalRequest: PermissionRequest = {
+  ...request,
+  id: 'goal-request',
+  toolName: 'propose_goal',
+  title: `Propose Goal: ${goalObjective}`,
+  rawInput: { objective: goalObjective },
+  content: [{ type: 'text', text: `${goalNotice}\n\n${goalObjective}` }],
+};
+
+function switchGoalTab(value: string) {
+  const tab =
+    container!.querySelectorAll<HTMLButtonElement>('[role="tab"]')[
+      value === 'full' ? 1 : 0
+    ];
+  act(() => {
+    tab.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+    );
+  });
+}
+
+describe('goal approval', () => {
+  it('formats the draft without hiding constraints or the replacement notice', () => {
+    render(false, goalRequest, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('确认会话目标');
+    expect(container!.textContent).toContain('设置并继续');
+    expect(container!.textContent).toContain('暂不设置');
+    expect(container!.textContent).toContain(goalNotice);
+    expect(container!.textContent).toContain('Push or comment.');
+    expect(container!.textContent).toContain(
+      'Preserve the exact budget assumption.',
+    );
+    expect(container!.textContent).not.toContain('Propose Goal:');
+    expect(container!.querySelector('pre')).toBeNull();
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('retains arbitrary objectives and fallback confirmation content', () => {
+    render(false, { ...goalRequest, rawInput: undefined });
+    expect(container!.textContent!.split(goalNotice)).toHaveLength(2);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    rerender(false, {
+      ...goalRequest,
+      id: 'plain',
+      rawInput: { objective: '原样保留\n  command --flag' },
+      content: [],
+    });
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe('原样保留\n  command --flag');
+  });
+
+  it('does not invoke approval shortcuts while reading goal tabs or text', () => {
+    render(false, goalRequest);
+    const panel = container!.querySelector(
+      '[role="tabpanel"][data-state="active"]',
+    )!;
+    act(() => {
+      for (const key of ['1', '2', 'j', 'k', 'Home', 'End', 'Escape']) {
+        panel.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true }),
+        );
+      }
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('disables duplicate submissions and retains the full view when retrying', async () => {
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    render(false, goalRequest);
+    switchGoalTab('full');
+    const approve = container!.querySelector<HTMLButtonElement>(
+      '[data-option-id="proceed"]',
+    )!;
+    act(() => {
+      approve.click();
+      approve.click();
+    });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(approve.disabled).toBe(true);
+    await act(async () => {
+      fail(new Error('offline'));
+    });
+    expect(approve.disabled).toBe(false);
+    expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+      'Please try again',
+    );
+    expect(
+      container!.querySelector('[role="tab"][data-state="active"]')!
+        .textContent,
+    ).toBe('Full content');
+    act(() => approve.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('goal-request', 'proceed');
+  });
+
+  it('rearms synchronous failures and ignores late rejection of an older request', async () => {
+    onConfirm.mockImplementationOnce(() => {
+      throw new Error('offline');
+    });
+    render(false, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(container!.querySelector('[role="alert"]')).not.toBeNull();
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    rerender(false, { ...goalRequest, id: 'next-goal' });
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    await act(async () => {
+      fail(new Error('old request'));
+    });
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe('successive goal approvals', () => {
+  it('focuses the safe default when a pending request is replaced', () => {
+    render(true, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    rerender(true, { ...goalRequest, id: 'new-goal' });
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-option-id="reject"]'),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="reject"]')!
+        .disabled,
+    ).toBe(false);
+  });
+});
+
+describe('goal approval objective whitespace', () => {
+  it('does not repeat an objective trimmed by the confirmation producer', () => {
+    render(false, {
+      ...goalRequest,
+      rawInput: { objective: `  ${goalObjective}\n` },
+    });
+    expect(container!.textContent!.split('Audit open PRs.')).toHaveLength(2);
+    expect(container!.textContent).toContain(goalNotice);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
   });
 });
