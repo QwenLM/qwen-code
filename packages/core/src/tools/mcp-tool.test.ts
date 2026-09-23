@@ -2528,9 +2528,9 @@ describe('DiscoveredMCPTool', () => {
 
         expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
         expect(discoverToolsForServer).toHaveBeenCalledTimes(
-          mode === 'repair' ? 1 : 0,
+          mode === 'cancelled' ? 0 : 1,
         );
-        if (mode === 'repair') {
+        if (mode !== 'cancelled') {
           expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, true);
         }
         expect(received).not.toHaveBeenCalled();

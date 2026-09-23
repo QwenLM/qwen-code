@@ -225,6 +225,7 @@ describe('McpTransportPool', () => {
       const targetConfig = {
         ...bootstrapConfig,
         getSessionId: () => 'target',
+        getToolInvocationGuard: () => vi.fn(),
         getMcpServers: () => ({
           srv: { command: 'node', args: ['different-fingerprint'] },
         }),

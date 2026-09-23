@@ -126,6 +126,38 @@ function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
   };
 }
 
+// Share the limit across cards so App requests leave HTTP/1.1 connections for
+// session events and approval requests. Hold the slot until the request settles.
+let activeAppToolCalls = 0;
+const waitingAppToolCalls = new Set<() => void>();
+
+function acquireAppToolSlot(signal: AbortSignal): Promise<() => void> {
+  return new Promise((resolve, reject) => {
+    const cancel = () => {
+      waitingAppToolCalls.delete(start);
+      reject(signal.reason);
+    };
+    const start = () => {
+      signal.removeEventListener('abort', cancel);
+      activeAppToolCalls += 1;
+      resolve(() => {
+        activeAppToolCalls -= 1;
+        const next = waitingAppToolCalls.values().next().value;
+        if (next) {
+          waitingAppToolCalls.delete(next);
+          next();
+        }
+      });
+    };
+    if (signal.aborted) reject(signal.reason);
+    else if (activeAppToolCalls < 2) start();
+    else {
+      waitingAppToolCalls.add(start);
+      signal.addEventListener('abort', cancel, { once: true });
+    }
+  });
+}
+
 export function McpApp({ display }: { display: McpAppDisplay }) {
   const daemonBaseUrl = useContext(McpAppHostContext);
   const sessionId = useContext(McpAppSessionContext);
@@ -203,7 +235,10 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
               }, 30_000);
         const stopHeartbeat = () => clearInterval(heartbeat);
         signal.addEventListener('abort', stopHeartbeat, { once: true });
+        let releaseSlot: (() => void) | undefined;
         try {
+          releaseSlot = await acquireAppToolSlot(signal);
+          signal.throwIfAborted();
           const result = await callTool(
             {
               serverName: current.serverName,
@@ -215,6 +250,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
           );
           return result as AppToolResult;
         } finally {
+          releaseSlot?.();
           stopHeartbeat();
           signal.removeEventListener('abort', stopHeartbeat);
         }

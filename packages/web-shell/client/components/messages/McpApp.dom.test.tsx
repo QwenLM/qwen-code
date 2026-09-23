@@ -416,6 +416,194 @@ describe('McpApp host lifetime', () => {
 });
 
 describe('McpApp server tool bridge', () => {
+  it('bounds a page shared burst across two App cards to two active calls', async () => {
+    const finishes: Array<() => void> = [];
+    const callTool = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finishes.push(() => resolve({ content: [] }));
+        }),
+    );
+    const handlers = [];
+    for (let index = 0; index < 2; index++) {
+      const { rerender } = renderApp(appDisplay());
+      rerender(
+        <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+          <McpAppSessionContext.Provider value="s">
+            <McpApp
+              display={appDisplay({ resourceUri: 'ui://demo/' + index })}
+            />
+          </McpAppSessionContext.Provider>
+        </McpAppToolsContext.Provider>,
+      );
+      handlers.push(appBridgeMocks.last!.oncalltool!);
+    }
+    const pending = Array.from({ length: 9 }, (_, index) =>
+      handlers[index % 2](
+        { name: 'slow' },
+        { signal: new AbortController().signal },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const dispatched = callTool.mock.calls.length;
+    for (let i = 0; i < 9; i++) {
+      await act(async () => {
+        finishes.shift()?.();
+        await Promise.resolve();
+      });
+    }
+    await Promise.all(pending);
+    expect(dispatched).toBe(2);
+    expect(callTool).toHaveBeenCalledTimes(9);
+  });
+  it('removes cancelled and unmounted queued calls without releasing active requests early', async () => {
+    const finishes: Array<() => void> = [];
+    const callTool = vi.fn(
+      (_request: unknown, _signal: AbortSignal) =>
+        new Promise((resolve) => {
+          finishes.push(() => resolve({ content: [] }));
+        }),
+    );
+    const cards = [0, 1].map((index) => {
+      const rendered = renderApp(appDisplay());
+      rendered.rerender(
+        <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+          <McpAppSessionContext.Provider value="s">
+            <McpApp
+              display={appDisplay({ resourceUri: `ui://demo/${index}` })}
+            />
+          </McpAppSessionContext.Provider>
+        </McpAppToolsContext.Provider>,
+      );
+      return { ...rendered, invoke: appBridgeMocks.last!.oncalltool! };
+    });
+    const controllers = Array.from({ length: 5 }, () => new AbortController());
+    const pending = controllers.map((controller, index) =>
+      cards[index % 2]
+        .invoke({ name: 'slow' }, { signal: controller.signal })
+        .then(
+          () => 'done',
+          () => 'cancelled',
+        ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(callTool).toHaveBeenCalledTimes(2);
+    controllers[4].abort();
+    expect(await pending[4]).toBe('cancelled');
+    cards[1].rerender(null);
+    expect(await pending[3]).toBe('cancelled');
+    controllers[0].abort();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect((callTool.mock.calls[0][1] as AbortSignal).aborted).toBe(true);
+    expect((callTool.mock.calls[1][1] as AbortSignal).aborted).toBe(true);
+    await act(async () => {
+      finishes.shift()!();
+      await Promise.resolve();
+    });
+    expect(callTool).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      for (const finish of finishes.splice(0)) finish();
+    });
+    await Promise.all(pending);
+  });
+
+  it.each(['throw', 'reject'] as const)(
+    'releases slots when the host call fails by %s',
+    async (failure) => {
+      const callTool = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          if (failure === 'throw') throw new Error('fixture failure');
+          return Promise.reject(new Error('fixture failure'));
+        })
+        .mockResolvedValue({ content: [] });
+      const { rerender } = renderApp(appDisplay());
+      rerender(
+        <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+          <McpAppSessionContext.Provider value="s">
+            <McpApp display={appDisplay()} />
+          </McpAppSessionContext.Provider>
+        </McpAppToolsContext.Provider>,
+      );
+      const invoke = appBridgeMocks.last!.oncalltool!;
+      const results = await Promise.allSettled(
+        Array.from({ length: 5 }, () =>
+          invoke({ name: 'tool' }, { signal: new AbortController().signal }),
+        ),
+      );
+      expect(results.map((result) => result.status)).toEqual([
+        'rejected',
+        'fulfilled',
+        'fulfilled',
+        'fulfilled',
+        'fulfilled',
+      ]);
+      expect(callTool).toHaveBeenCalledTimes(5);
+    },
+  );
+
+  it('keeps queued calls alive and stops their heartbeat on cancellation', async () => {
+    vi.useFakeTimers();
+    const finishes: Array<() => void> = [];
+    const callTool = vi.fn(
+      () =>
+        new Promise<{ content: [] }>((resolve) => {
+          finishes.push(() => resolve({ content: [] }));
+        }),
+    );
+    try {
+      const { rerender } = renderApp(appDisplay());
+      rerender(
+        <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+          <McpAppSessionContext.Provider value="s">
+            <McpApp display={appDisplay()} />
+          </McpAppSessionContext.Provider>
+        </McpAppToolsContext.Provider>,
+      );
+      await act(async () => {
+        appBridgeMocks.last?.oninitialized?.();
+      });
+      const invoke = appBridgeMocks.last!.oncalltool!;
+      const active = [0, 1].map(() =>
+        invoke({ name: 'hold' }, { signal: new AbortController().signal }),
+      );
+      const abort = new AbortController();
+      const sendNotification = vi.fn().mockResolvedValue(undefined);
+      const queued = invoke(
+        { name: 'queued', _meta: { progressToken: 19 } },
+        { signal: abort.signal, sendNotification },
+      ).catch(() => 'cancelled');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(callTool).toHaveBeenCalledTimes(2);
+      expect(sendNotification).toHaveBeenCalledTimes(2);
+      expect(sendNotification).toHaveBeenLastCalledWith({
+        method: 'notifications/progress',
+        params: { progressToken: 19, progress: 2 },
+      });
+      abort.abort();
+      expect(await queued).toBe('cancelled');
+      for (const finish of finishes.splice(0)) finish();
+      await Promise.all(active);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(callTool).toHaveBeenCalledTimes(2);
+      expect(sendNotification).toHaveBeenCalledTimes(2);
+    } finally {
+      for (const finish of finishes.splice(0)) finish();
+      vi.useRealTimers();
+    }
+  });
+
   it.each([0, 'app-progress', undefined])(
     'keeps pending calls alive with the declared token %s and stops on abort',
     async (progressToken) => {
