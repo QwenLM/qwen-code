@@ -37,6 +37,8 @@ import {
   parseCustomId,
   customIdOf,
   isAmbiguous,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
 } from './batch-task.js';
 import type {
   BatchPlan,
@@ -107,8 +109,8 @@ const liveApi: WorkflowApi = {
 
 export interface WorkflowDeps {
   ep: BatchEndpoint;
-  /** Project root: sources/targets resolve against it, the ledger lives in
-   * its `.qwen/batch` (overridable with QWEN_BATCH_HOME, mostly for tests). */
+  /** Project root for `run`: sources/targets resolve against it. Task
+   * records live under the user's qwen home (QWEN_BATCH_HOME overrides). */
   cwd: string;
   env: Record<string, string | undefined>;
   out: (line: string) => void;
@@ -234,6 +236,34 @@ function enforceBudget(plan: BatchPlan, cost: { costUsd?: number }): void {
 const ownedBy = (item: TaskItem, attempt: TaskAttempt) =>
   (item.lastAttempt ?? attempt.attempt) === attempt.attempt;
 
+const endpointOf = (ep: BatchEndpoint) => ({
+  baseUrl: ep.baseUrl,
+  // Enough to notice a different key; not enough to recover or use one.
+  keyFingerprint: sha256(ep.apiKey).slice(0, 12),
+});
+
+/**
+ * A batch is only visible to the account and region that created it. With
+ * settings switched since `run`, every query would hit the wrong account —
+ * reporting the batch missing, or reconciling against the wrong list.
+ */
+function assertSameEndpoint(task: BatchTask, ep: BatchEndpoint): void {
+  if (!task.endpoint) return;
+  const current = endpointOf(ep);
+  if (current.baseUrl !== task.endpoint.baseUrl) {
+    throw new Error(
+      `task ${task.id} was submitted to ${task.endpoint.baseUrl}, but the current settings point at ${current.baseUrl}. ` +
+        `Switch back to that endpoint; its batches are not visible from another region or provider.`,
+    );
+  }
+  if (current.keyFingerprint !== task.endpoint.keyFingerprint) {
+    throw new Error(
+      `task ${task.id} was submitted with a different API key than the one configured now. ` +
+        `Switch back to that key; its batches are not visible from another account.`,
+    );
+  }
+}
+
 /** The attempt now owns these items: only its result lines count. */
 function markSubmitted(task: BatchTask, attempt: TaskAttempt): void {
   for (const item of task.items) {
@@ -287,8 +317,10 @@ async function submitAttempt(
       attempt.itemIds,
       attempt.maxOutputTokens,
     );
-  fs.mkdirSync(attemptDir, { recursive: true });
-  fs.writeFileSync(path.join(attemptDir, 'input.jsonl'), assembly.jsonl);
+  fs.mkdirSync(attemptDir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  fs.writeFileSync(path.join(attemptDir, 'input.jsonl'), assembly.jsonl, {
+    mode: PRIVATE_FILE_MODE,
+  });
 
   const uploaded = await api.uploadJsonl(
     deps.ep,
@@ -353,17 +385,31 @@ async function submitAttempt(
   }
 }
 
+/**
+ * Plans live in the project (the agent writes them with its normal file
+ * tools) under `.qwen/batch/plans/`; they are working files, not source.
+ */
+function keepPlansOutOfGit(cwd: string, planPath: string): void {
+  const plansHome = path.join(cwd, '.qwen', 'batch');
+  if (!planPath.startsWith(plansHome + path.sep)) return;
+  const ignore = path.join(plansHome, '.gitignore');
+  if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, '*\n');
+}
+
 export async function runPlan(
   deps: WorkflowDeps,
   planFile: string,
 ): Promise<void> {
-  const plan = loadPlanFile(planFile);
+  const planPath = path.resolve(deps.cwd, planFile);
+  const plan = loadPlanFile(planPath);
   const window = plan.completionWindow ?? '24h';
   assertValidWindow(window);
-  const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  keepPlansOutOfGit(deps.cwd, planPath);
+  const store = new BatchTaskStore(batchHomeDir(deps.env));
   const task = store.create(plan, deps.cwd, deps.ep.model);
   const request = freezeRequest(deps.ep.generationConfig);
   task.request = request;
+  task.endpoint = endpointOf(deps.ep);
 
   const attemptNumber = 1;
   const attempt: TaskAttempt = {
@@ -519,7 +565,7 @@ export async function collectTask(
   taskId: string,
   options: CollectOptions = {},
 ): Promise<void> {
-  const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  const store = new BatchTaskStore(batchHomeDir(deps.env));
   await store.withLock(taskId, () =>
     collectLocked(deps, store, taskId, options),
   );
@@ -533,6 +579,7 @@ async function collectLocked(
 ): Promise<void> {
   const api = deps.api ?? liveApi;
   const task = store.load(taskId);
+  assertSameEndpoint(task, deps.ep);
   const deadline = Date.now() + (options.timeoutSeconds ?? 3600) * 1000;
 
   for (const attempt of task.attempts) {
@@ -573,7 +620,7 @@ async function collectLocked(
     }
 
     const attemptDir = store.attemptDir(task.id, attempt.attempt);
-    fs.mkdirSync(attemptDir, { recursive: true });
+    fs.mkdirSync(attemptDir, { recursive: true, mode: PRIVATE_DIR_MODE });
     if (job?.output_file_id && !attempt.outputPath) {
       const target = path.join(attemptDir, 'output.jsonl');
       await api.downloadFile(deps.ep, job.output_file_id, target);
@@ -755,7 +802,7 @@ export async function retryTask(
   taskId: string,
   options: RetryOptions = {},
 ): Promise<void> {
-  const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  const store = new BatchTaskStore(batchHomeDir(deps.env));
   await store.withLock(taskId, () => retryLocked(deps, store, taskId, options));
 }
 
@@ -767,6 +814,7 @@ async function retryLocked(
 ): Promise<void> {
   const task = store.load(taskId);
   const api = deps.api ?? liveApi;
+  assertSameEndpoint(task, deps.ep);
 
   if (task.attempts.some(isAmbiguous)) {
     throw new Error(
@@ -897,10 +945,10 @@ export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
 }
 
 export async function listTasks(deps: WorkflowDeps): Promise<void> {
-  const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  const store = new BatchTaskStore(batchHomeDir(deps.env));
   const tasks = store.list();
   if (tasks.length === 0) {
-    deps.out(`no batch tasks under ${batchHomeDir(deps.cwd, deps.env)}`);
+    deps.out(`no batch tasks under ${batchHomeDir(deps.env)}`);
     return;
   }
   for (const task of tasks) {
@@ -913,7 +961,7 @@ export async function listTasks(deps: WorkflowDeps): Promise<void> {
     const latest = task.attempts.at(-1);
     deps.out(
       `${task.id}\t${task.status}\t${delivered}/${task.items.length} delivered` +
-        `${latest?.batchId ? `\tbatch ${latest.batchId}` : ''}\tupdated ${task.updatedAt}`,
+        `${latest?.batchId ? `\tbatch ${latest.batchId}` : ''}\tupdated ${task.updatedAt}\t${task.projectRoot}`,
     );
   }
 }
@@ -922,7 +970,7 @@ export async function cancelTask(
   deps: WorkflowDeps,
   taskId: string,
 ): Promise<void> {
-  const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
+  const store = new BatchTaskStore(batchHomeDir(deps.env));
   await store.withLock(taskId, () => cancelLocked(deps, store, taskId));
 }
 
@@ -933,6 +981,7 @@ async function cancelLocked(
 ): Promise<void> {
   const api = deps.api ?? liveApi;
   const task = store.load(taskId);
+  assertSameEndpoint(task, deps.ep);
   const attempt = [...task.attempts]
     .reverse()
     .find(

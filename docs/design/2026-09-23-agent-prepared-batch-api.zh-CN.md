@@ -94,6 +94,12 @@
   把尝试留在 `uploaded`——都记为 `submit-unknown`，由 `collect` 用
   `input_file_id` 对服务商批次列表对账——绝不盲目重发，因为答错的代价是
   重复计费。
+- **任务记录跟随用户而非仓库。** 任务保存在 `~/.qwen/batch`（遵守
+  `QWEN_HOME`/`QWEN_BATCH_HOME`），仅所有者可读写，记录各自的项目根目录，
+  在任何目录下都能找回。只有 agent 的计划文件留在项目内，并被 git 忽略。
+- **任务绑定提交时的端点。** `run` 时冻结 base URL 与 API key 的短哈希
+  （绝不保存 key 本身）；设置不同时 `collect`、`retry`、`cancel` 拒绝
+  执行，因为批次在其他账号或地域下不可见。
 - **同一任务同一时间只跑一个命令。** `collect`、`retry`、`cancel`（以及
   提交中的 `run`）持有任务级锁文件；持锁 pid 已不存在的锁会被接管。否则
   两个并发的 retry 会对同一批条目各计费一次。

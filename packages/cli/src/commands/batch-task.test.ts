@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   BatchTaskStore,
   batchHomeDir,
@@ -151,6 +152,18 @@ describe('BatchTaskStore', () => {
     expect(store.load(task.id).items[0].state).toBe('failed');
   });
 
+  it('keeps task records private to the user', () => {
+    if (process.platform === 'win32') return; // POSIX modes only
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const dir = path.dirname(store.fileOf(task.id));
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(store.fileOf(task.id)).mode & 0o777).toBe(0o600);
+  });
+
   it('keeps the ledger out of git', () => {
     store.create(validatePlan(validPlan, 'plan.json'), root, 'qwen-plus');
     expect(fs.readFileSync(path.join(root, '.gitignore'), 'utf8')).toBe('*\n');
@@ -262,12 +275,10 @@ describe('refreshTaskStatus', () => {
 });
 
 describe('batchHomeDir', () => {
-  it('defaults to .qwen/batch under the cwd and honors the env override', () => {
-    expect(batchHomeDir('/proj', {})).toBe(
-      path.join('/proj', '.qwen', 'batch'),
+  it('lives in the user qwen home, not the project, and honors the override', () => {
+    expect(batchHomeDir({})).toBe(
+      path.join(Storage.getGlobalQwenDir(), 'batch'),
     );
-    expect(batchHomeDir('/proj', { QWEN_BATCH_HOME: '/elsewhere' })).toBe(
-      '/elsewhere',
-    );
+    expect(batchHomeDir({ QWEN_BATCH_HOME: '/elsewhere' })).toBe('/elsewhere');
   });
 });

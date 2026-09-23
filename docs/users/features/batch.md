@@ -196,11 +196,13 @@ qwen batch run .qwen/batch/plans/<slug>.json
 ```
 
 `run` returns immediately — the provider works for tens of minutes to hours.
-Nothing polls a model while you wait. Later:
+Nothing polls a model while you wait. Later — from any directory, and inside
+a session with the `!` prefix (e.g. `!qwen batch collect <task-id>`) so no
+model turn is spent:
 
 ```bash
 qwen batch collect <task-id> [--wait]   # validate + write target files
-qwen batch list                          # every task recorded under .qwen/batch
+qwen batch list                          # every recorded task, with its project
 qwen batch retry <task-id>               # resubmit only the failed items
 qwen batch retry <task-id> --max-output-tokens 8192  # include truncated ones
 qwen batch check                         # verify setup; nothing is billed
@@ -217,9 +219,14 @@ local record, delivered items are never redone, and repeated collects never
 double-count usage. After results are safely on disk the remote input and
 output files are deleted (`--keep-remote` keeps them).
 
-Each item's state survives crashes in `.qwen/batch/tasks/<task-id>/`. The
-directory holds full copies of your sources and the generated outputs, so it
-gets its own `.gitignore` on first use. If the create call's answer is lost
+Each item's state survives crashes in `~/.qwen/batch/tasks/<task-id>/`
+(under `QWEN_HOME` when set; `QWEN_BATCH_HOME` overrides). The records hold
+full copies of your sources and the generated outputs, so they live outside
+every repository with owner-only permissions; the agent's plan files under
+the project's `.qwen/batch/` get a `.gitignore`. A task is tied to the
+endpoint and API key it was submitted with (only a short hash of the key is
+stored); after switching accounts or regions, commands refuse until you
+switch back, because the batch is not visible from anywhere else. If the create call's answer is lost
 (a 5xx, a timeout, a dropped socket, or the process dying mid-call), the task
 is marked `submit-unknown` and `collect` reconciles against the provider's
 batch list instead of resubmitting — a duplicate submission would bill twice.

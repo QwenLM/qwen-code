@@ -234,6 +234,20 @@ describe('runPlan', () => {
     expect(h.out.join('\n')).toContain(`collect ${task.id}`);
   });
 
+  it('keeps the project plans directory out of git', async () => {
+    const h = (harness = setup());
+    const plansDir = path.join(h.root, '.qwen', 'batch', 'plans');
+    fs.mkdirSync(plansDir, { recursive: true });
+    fs.copyFileSync(h.planPath, path.join(plansDir, 'p.json'));
+    await runPlan(h.deps, '.qwen/batch/plans/p.json');
+    expect(
+      fs.readFileSync(
+        path.join(h.root, '.qwen', 'batch', '.gitignore'),
+        'utf8',
+      ),
+    ).toBe('*\n');
+  });
+
   it('refuses to submit when a budget is set but unit prices are missing', async () => {
     const h = (harness = setup({ maxCostUsd: 5 }));
     await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(
@@ -765,6 +779,35 @@ describe('frozen request parameters', () => {
   });
 });
 
+describe('endpoint identity', () => {
+  it('refuses to act on a task from another endpoint or account', async () => {
+    const h = (harness = setup());
+    await runPlan(h.deps, h.planPath);
+    const taskId = taskIdOf(h);
+    const task = h.store.load(taskId);
+    expect(task.endpoint?.baseUrl).toBe('http://fake');
+    // Only a short hash is kept, never the key.
+    expect(JSON.stringify(task)).not.toContain('"k"');
+    const calls = h.api.getBatch.mock.calls.length;
+
+    const otherRegion = {
+      ...h.deps,
+      ep: { ...h.deps.ep, baseUrl: 'http://other' },
+    };
+    await expect(collectTask(otherRegion, taskId)).rejects.toThrow(
+      /submitted to http:\/\/fake/,
+    );
+    const otherKey = { ...h.deps, ep: { ...h.deps.ep, apiKey: 'k2' } };
+    await expect(retryTask(otherKey, taskId)).rejects.toThrow(
+      /different API key/,
+    );
+    await expect(cancelTask(otherKey, taskId)).rejects.toThrow(
+      /different API key/,
+    );
+    expect(h.api.getBatch.mock.calls.length).toBe(calls);
+  });
+});
+
 describe('checkReadiness', () => {
   it('probes the Batch route and shows what a run would freeze', async () => {
     const h = (harness = setup());
@@ -837,6 +880,8 @@ describe('listTasks', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('0/2 delivered');
     expect(lines[0]).toContain('batch batch-1');
+    // Records are per user, so each row names its project.
+    expect(lines[0]).toContain(h.root);
   });
 
   it('says so when there are no tasks', async () => {

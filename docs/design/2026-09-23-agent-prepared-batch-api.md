@@ -110,6 +110,14 @@ Design invariants:
   `submit-unknown`, reconciled against the provider's batch list by
   `input_file_id` — never blindly resubmitted, because the wrong answer
   bills twice.
+- **Records live with the user, not the repository.** Tasks are kept under
+  `~/.qwen/batch` (`QWEN_HOME`/`QWEN_BATCH_HOME` honoured) with owner-only
+  permissions, record their project root, and are reachable from any
+  directory. Only the agent's plan files stay in the project, git-ignored.
+- **A task is pinned to its endpoint.** The base URL and a short hash of the
+  API key (never the key) are frozen at `run`; `collect`, `retry` and
+  `cancel` refuse under different settings, since the batch is invisible
+  from another account or region.
 - **One command per task at a time.** `collect`, `retry` and `cancel` (and
   `run` while submitting) hold a per-task lock file; a lock whose pid is
   dead is taken over. Two concurrent retries would otherwise both bill the

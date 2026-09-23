@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type { FrozenRequest } from './batch-docs.js';
 
 export const BATCH_TASK_SCHEMA_VERSION = 1;
@@ -187,6 +188,9 @@ export interface BatchTask {
   model: string;
   completionWindow: string;
   plan: BatchPlan;
+  /** The endpoint this task's batches live on. Credentials are never
+   * stored — only a short hash, to notice a switched account. */
+  endpoint?: { baseUrl: string; keyFingerprint: string };
   /** Realtime request parameters frozen at `run`; retries reuse them. */
   request?: FrozenRequest;
   items: TaskItem[];
@@ -210,12 +214,22 @@ export function parseCustomId(
   return { itemId: match[1], attempt: Number(match[2]) };
 }
 
+/**
+ * Where task records live: per user, outside every repository, so they
+ * never reach a commit and `collect` finds a task from any directory. Each
+ * task records its own project root.
+ */
 export function batchHomeDir(
-  cwd: string,
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env['QWEN_BATCH_HOME'] ?? path.join(cwd, '.qwen', 'batch');
+  return (
+    env['QWEN_BATCH_HOME'] ?? path.join(Storage.getGlobalQwenDir(), 'batch')
+  );
 }
+
+/** Task records hold full copies of the sources and the generated outputs. */
+export const PRIVATE_DIR_MODE = 0o700;
+export const PRIVATE_FILE_MODE = 0o600;
 
 export class BatchTaskStore {
   constructor(private readonly homeDir: string) {}
@@ -265,8 +279,7 @@ export class BatchTaskStore {
       attempts: [],
     };
     this.save(task);
-    // Inputs are full copies of the sources and outputs are generated text;
-    // neither belongs in the user's commits.
+    // QWEN_BATCH_HOME may point into a repository; keep it out of commits.
     const ignore = path.join(this.homeDir, '.gitignore');
     if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, '*\n');
     return task;
@@ -340,10 +353,15 @@ export class BatchTaskStore {
   /** Atomic write: a reader must never meet half a JSON document. */
   save(task: BatchTask): void {
     const file = this.fileOf(task.id);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(file), {
+      recursive: true,
+      mode: PRIVATE_DIR_MODE,
+    });
     task.updatedAt = new Date().toISOString();
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(task, null, 2) + '\n');
+    fs.writeFileSync(tmp, JSON.stringify(task, null, 2) + '\n', {
+      mode: PRIVATE_FILE_MODE,
+    });
     fs.renameSync(tmp, file);
   }
 

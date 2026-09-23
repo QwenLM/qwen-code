@@ -133,9 +133,13 @@ hand-crafting requests or calling the API directly.
 
 Tell the user:
 
+- Everything below is a plain command that needs no model: typed with the
+  `!` prefix in this session (for example `!qwen batch collect <task-id>`)
+  it runs without spending a model turn, and it works from any directory.
 - Check progress or collect results any time with
   `qwen batch collect <task-id>` (add `--wait` to poll until it settles).
-  You can run this for them whenever they ask — it needs no model judgment.
+  If they ask you to do it instead, run it for them — but mention the `!`
+  form costs nothing.
 - Failed items can be resubmitted after the underlying problem is fixed:
   `qwen batch retry <task-id>`. Items truncated at the output limit are
   skipped unless a larger limit is given:
@@ -143,5 +147,8 @@ Tell the user:
   billed request.
 - Held results (source changed / target conflict) are delivered by re-running
   `qwen batch collect <task-id>` after the conflict is resolved.
-- `qwen batch list` shows all recorded tasks; `qwen batch cancel --task <task-id>`
-  cancels the active job (already-finished requests are still billed).
+- `qwen batch list` shows all recorded tasks with their project;
+  `qwen batch cancel --task <task-id>` cancels the active job
+  (already-finished requests are still billed).
+- A task is tied to the endpoint and API key it was submitted with; after
+  switching accounts or regions, switch back to collect it.
