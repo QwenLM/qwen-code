@@ -34,9 +34,28 @@ import type {
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { streamAgentTurn } from './stream-agent-turn.js';
 import {
+  publishAgentEvent,
+  type AgentPermissionPrompt,
+} from './agent-events.js';
+import {
   AGENT_SESSION_SOURCE_TYPE,
   agentThreadSessionId,
 } from '../../runtime/agent-session-source.js';
+
+/** How often a running agent's snapshot is saved for page reloads. */
+const PROGRESS_SAVE_MS = 3_000;
+/** Streamed text is coalesced to at most one browser frame per this long. */
+const PROGRESS_PUBLISH_MS = 100;
+/**
+ * A run with no agent activity for this long (and no person to wait on) is
+ * cancelled. The client warns much earlier, from `activityAt`.
+ * ponytail: one deadline for model and tools alike, so a single tool that is
+ * silent for 15 minutes (a very long build) is stopped too; give tools their
+ * own deadline if that bites.
+ */
+export const AGENT_RUN_STALL_TIMEOUT_MS = 15 * 60_000;
+/** Error recorded on a run the stall timeout stopped; the client localizes it. */
+export const AGENT_RUN_STALLED_ERROR = 'agent_run_stalled';
 
 /** What the port needs from the bridge, so a test can supply four functions. */
 export type AgentSessionBridge = Pick<
@@ -96,6 +115,7 @@ export function createSessionDispatchPort(
   async function waitForTurn(
     sessionId: string,
     promptId: string,
+    liveness?: { activityAt(): number; waitingOnPerson(): boolean },
   ): Promise<void> {
     const getSessionTurnStatus = bridge.getSessionTurnStatus;
     if (!getSessionTurnStatus) return;
@@ -115,6 +135,16 @@ export function createSessionDispatchPort(
           throw new Error(status.error?.message ?? 'Agent turn failed.');
         }
         return;
+      }
+      // An agent waiting on a person is not stuck; everything else that goes
+      // quiet this long is, and holding its slot forever blocks the thread.
+      if (
+        liveness &&
+        !liveness.waitingOnPerson() &&
+        Date.now() - liveness.activityAt() >= AGENT_RUN_STALL_TIMEOUT_MS
+      ) {
+        await bridge.cancelSession(sessionId).catch(() => {});
+        throw new Error(AGENT_RUN_STALLED_ERROR);
       }
       await delay(250);
     }
@@ -137,13 +167,44 @@ export function createSessionDispatchPort(
     agentRun: AgentRunContext,
   ): Promise<void> => {
     const controller = new AbortController();
-    let progress = {
+    let progress: {
+      attempt: number;
+      sequence: number;
+      stage: string;
+      detail: string;
+      outputText: string;
+      thoughtText: string;
+      permission?: AgentPermissionPrompt;
+    } = {
       attempt: agentRun.attempt,
       sequence: 1,
       stage: 'starting',
-      detail: '正在启动',
+      detail: '',
       outputText: '',
       thoughtText: '',
+    };
+    let activityAt = Date.now();
+    // Streamed text goes to the browser as it arrives (throttled to one frame
+    // per PROGRESS_PUBLISH_MS). Disk only keeps a slower snapshot so a page
+    // that reloads mid-run can show where the agent got to.
+    let publishTimer: ReturnType<typeof setTimeout> | undefined;
+    const publish = () => {
+      publishTimer ??= setTimeout(() => {
+        publishTimer = undefined;
+        publishAgentEvent(workspaceCwd, {
+          type: 'progress',
+          threadId: agentRun.threadId,
+          runId: agentRun.runId,
+          attempt: agentRun.attempt,
+          sessionId,
+          stage: progress.stage,
+          detail: progress.detail,
+          outputText: progress.outputText,
+          thoughtText: progress.thoughtText,
+          activityAt,
+          ...(progress.permission ? { permission: progress.permission } : {}),
+        });
+      }, PROGRESS_PUBLISH_MS);
     };
     let saving: Promise<unknown> | undefined;
     const flush = () => {
@@ -162,15 +223,11 @@ export function createSessionDispatchPort(
           run.sessionId !== sessionId
         )
           return;
-        const previous = run.progress;
-        const now = Date.now();
+        if (run.progress?.sequence === snapshot.sequence) return;
         run.progress = {
           ...snapshot,
-          receivedAt: now,
-          activityAt:
-            previous?.sequence === snapshot.sequence
-              ? previous.activityAt
-              : now,
+          receivedAt: Date.now(),
+          activityAt,
         };
         await transaction.writeThread(thread);
       }).finally(() => {
@@ -189,23 +246,42 @@ export function createSessionDispatchPort(
             detail,
             outputText = progress.outputText,
             thoughtText = progress.thoughtText,
+            permission,
           ) => {
+            activityAt = Date.now();
+            const { permission: previousPermission, ...rest } = progress;
+            const nextPermission =
+              permission === null
+                ? undefined
+                : (permission ?? previousPermission);
             progress = {
-              ...progress,
+              ...rest,
               sequence: progress.sequence + 1,
               stage,
-              detail: detail.slice(0, 1200),
+              // Tool updates often carry no title; keep the one that did.
+              detail: (
+                detail || (stage === rest.stage ? rest.detail : '')
+              ).slice(0, 1200),
               outputText: outputText.slice(0, 262144),
               thoughtText: thoughtText.slice(0, 65536),
+              ...(nextPermission ? { permission: nextPermission } : {}),
             };
+            publish();
+            // An approval is the one update a person is waiting to act on.
+            if (permission !== undefined) void flush().catch(() => {});
           },
         ).catch(() => {
-          progress.detail = '实时输出连接中断；最终结果仍将显示';
+          progress = {
+            ...progress,
+            sequence: progress.sequence + 1,
+            stage: 'stream_lost',
+          };
+          publish();
         })
       : undefined;
     const timer = setInterval(() => {
       void flush().catch(() => {});
-    }, 500);
+    }, PROGRESS_SAVE_MS);
     try {
       await bridge.sendPrompt(
         sessionId,
@@ -229,9 +305,19 @@ export function createSessionDispatchPort(
           },
         },
       );
-      await waitForTurn(sessionId, deliveryId);
+      await waitForTurn(
+        sessionId,
+        deliveryId,
+        stream
+          ? {
+              activityAt: () => activityAt,
+              waitingOnPerson: () => progress.permission !== undefined,
+            }
+          : undefined,
+      );
     } finally {
       clearInterval(timer);
+      if (publishTimer) clearTimeout(publishTimer);
       controller.abort();
       await stream;
       await saving?.catch(() => {});

@@ -38,3 +38,52 @@ it('accumulates only this turn’s reply without rendering thoughts as text', as
     ['responding', 'hello world', undefined],
   ]);
 });
+
+it('reports a pending approval for this turn and clears it once answered', async () => {
+  const updates: Array<[string, unknown]> = [];
+  await streamAgentTurn(
+    {
+      async *subscribeEvents() {
+        yield {
+          v: 1 as const,
+          type: 'permission_request',
+          promptId: 'other',
+          data: { requestId: 'r0', toolCall: { title: 'not ours' } },
+        };
+        yield {
+          v: 1 as const,
+          type: 'permission_request',
+          promptId: 'turn',
+          data: {
+            requestId: 'r1',
+            toolCall: { title: 'Shell: npm test' },
+            options: [{ optionId: 'allow', name: 'Allow' }],
+          },
+        };
+        yield {
+          v: 1 as const,
+          type: 'permission_resolved',
+          promptId: 'turn',
+          data: { requestId: 'r1' },
+        };
+      },
+    },
+    'session',
+    'turn',
+    new AbortController().signal,
+    (stage, _detail, _text, _thought, permission) => {
+      updates.push([stage, permission]);
+    },
+  );
+  expect(updates).toEqual([
+    [
+      'awaiting_approval',
+      {
+        requestId: 'r1',
+        title: 'Shell: npm test',
+        options: [{ optionId: 'allow', name: 'Allow' }],
+      },
+    ],
+    ['tool', null],
+  ]);
+});

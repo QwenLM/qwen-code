@@ -353,6 +353,12 @@ export interface ThreadRun {
     detail: string;
     outputText?: string;
     thoughtText?: string;
+    /** A tool call waiting for a person; kept so a reloaded page can answer it. */
+    permission?: {
+      requestId: string;
+      title: string;
+      options: Array<{ optionId: string; name: string; kind?: string }>;
+    };
   };
   id: string;
   agentId: string;

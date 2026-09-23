@@ -85,6 +85,10 @@ import { deliverNotifications } from '@qwen-code/qwen-code-core/agents/workspace
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
+import {
+  subscribeAgentEvents,
+  type AgentLiveEvent,
+} from '../workspace-agents/agent-events.js';
 import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
 import type { ChannelDeliveryRequest } from '../../runtime/channel-delivery-ipc.js';
 import {
@@ -487,6 +491,51 @@ export function registerWorkspaceAgentRoutes(
     clearInterval(recoveryTimer);
     for (const { owner } of owners.values()) owner.stop();
   };
+
+  /**
+   * Live collaboration events for one workspace (see agent-events.ts). The
+   * client keeps the REST reads as its source of truth and uses this stream
+   * only to know when to read again, plus the streamed text of running
+   * agents. A reconnecting client therefore just refetches: nothing here is
+   * replayed.
+   */
+  app.get(`${prefix}/events`, async (req: Request, res: Response) => {
+    const runtime = runtimeFor(req, res);
+    if (!runtime) return;
+    res.status(200).set({
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+    let closed = false;
+    // A slow client skips intermediate progress frames rather than queueing
+    // them; the next frame carries the whole text so far anyway.
+    let congested = false;
+    res.on('drain', () => {
+      congested = false;
+    });
+    const send = (event: AgentLiveEvent) => {
+      if (closed || (congested && event.type === 'progress')) return;
+      congested = !res.write(
+        `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      );
+    };
+    const heartbeat = setInterval(() => {
+      if (!closed) res.write(': ping\n\n');
+    }, 20_000);
+    heartbeat.unref?.();
+    let unsubscribe: (() => void) | undefined;
+    req.on('close', () => {
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe?.();
+    });
+    unsubscribe = await subscribeAgentEvents(runtime.workspaceCwd, send);
+    if (closed) unsubscribe();
+    else send({ type: 'changed' });
+  });
 
   app.get(`${prefix}/agents`, async (req: Request, res: Response) => {
     const runtime = runtimeFor(req, res);

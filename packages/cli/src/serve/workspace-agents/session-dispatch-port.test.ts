@@ -9,9 +9,49 @@ import type { WorkspaceAgent } from '@qwen-code/qwen-code-core';
 import { agentThreadSessionId } from '../../runtime/agent-session-source.js';
 
 import {
+  AGENT_RUN_STALL_TIMEOUT_MS,
+  AGENT_RUN_STALLED_ERROR,
   createSessionDispatchPort,
   type AgentSessionBridge,
 } from './session-dispatch-port.js';
+
+// Progress snapshots would otherwise write into the real runtime directory.
+vi.mock(
+  '@qwen-code/qwen-code-core/agents/workspace-agents/store.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/agents/workspace-agents/store.js')
+    >()),
+    withAgentStoreTransaction: vi.fn(async () => undefined),
+  }),
+);
+
+/** A session event stream the test feeds by hand. */
+function eventFeed() {
+  const queue: unknown[] = [];
+  let wake: (() => void) | undefined;
+  return {
+    push(event: unknown) {
+      queue.push(event);
+      wake?.();
+    },
+    async *subscribeEvents(_sessionId: string, opts: { signal: AbortSignal }) {
+      while (!opts.signal.aborted) {
+        if (queue.length > 0) {
+          yield queue.shift();
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          opts.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        wake = undefined;
+      }
+    },
+  };
+}
 
 const WS = '/ws';
 const AGENT: WorkspaceAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
@@ -212,5 +252,78 @@ describe('session dispatch port', () => {
     });
 
     expect(result.status).toBe('agent_unavailable');
+  });
+
+  describe('stall watchdog', () => {
+    async function startWatchedRun() {
+      const { bridge } = makeBridge();
+      const feed = eventFeed();
+      const turn = { state: 'running' };
+      Object.assign(bridge, {
+        subscribeEvents: feed.subscribeEvents,
+        getSessionTurnStatus: vi.fn(
+          async (_sessionId: string, _client: unknown, promptId: string) => ({
+            promptId,
+            state: turn.state,
+          }),
+        ),
+      });
+      const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
+      const result = await port.start({
+        action: 'launch',
+        agent: AGENT,
+        prompt: 'envelope',
+        ...TURN,
+      });
+      if (result.status !== 'started') throw new Error(result.status);
+      result.activate();
+      await vi.waitFor(() => expect(bridge.sendPrompt).toHaveBeenCalled());
+      const inspect = () =>
+        port.inspect({ agent: AGENT, threadId: TURN.threadId });
+      return { bridge, feed, turn, inspect };
+    }
+
+    it('stops a run that shows no activity for the timeout', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const { bridge, inspect } = await startWatchedRun();
+        vi.setSystemTime(Date.now() + AGENT_RUN_STALL_TIMEOUT_MS + 1);
+        await vi.waitFor(
+          async () =>
+            expect(await inspect()).toMatchObject({
+              kind: 'failed',
+              error: AGENT_RUN_STALLED_ERROR,
+            }),
+          { timeout: 3_000 },
+        );
+        expect(bridge.cancelSession).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not stop a run that is waiting for a person to approve', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const { bridge, feed, turn, inspect } = await startWatchedRun();
+        feed.push({
+          v: 1,
+          type: 'permission_request',
+          promptId: `${TURN.runId}:${TURN.attempt}`,
+          data: { requestId: 'r1', toolCall: { title: 'Shell' }, options: [] },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        vi.setSystemTime(Date.now() + AGENT_RUN_STALL_TIMEOUT_MS + 1);
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        turn.state = 'completed';
+        await vi.waitFor(
+          async () => expect(await inspect()).toEqual({ kind: 'absent' }),
+          { timeout: 3_000 },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
