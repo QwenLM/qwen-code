@@ -7,6 +7,10 @@
 import type { Content, ContentListUnion } from '@google/genai';
 import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+} from '../core/environmentContext.js';
 import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
@@ -165,12 +169,13 @@ export function buildReattachParts(
  * those writers may vouch for an older image's currency.
  *
  * Client-side bookkeeping only, like {@link REATTACH_BOUNDARY_METADATA}:
- * `LlmContentGenerator.stripPartFields` deletes top-level `partMetadata`
- * before the request is built and the OpenAI-compatible converters never
- * serialize it. Tool-nested parts are deliberately left unstamped —
- * `stripPartFields` does not recurse into `functionResponse.parts`, so a
- * stamp there would ride along to providers that reject the field. Nested
- * markers are tool captures, which never claim prompt currency anyway.
+ * `LlmContentGenerator.stripPartFields` deletes `partMetadata` before the
+ * request is built — at every level, nested `functionResponse.parts`
+ * included — and the OpenAI-compatible converters never serialize it.
+ * Tool-nested parts are deliberately left unstamped for semantics, not for
+ * wire safety: nested markers are tool captures, which
+ * {@link classifyMarkerOrigins} never grants the prompt label, so a stamp
+ * there could not change any outcome.
  */
 export const IMAGE_MARKER_METADATA = 'qwen-code:image-marker';
 
@@ -301,7 +306,7 @@ function transformPart(
   store: ImagePayloadStore,
   collected: CollectedImage[],
 ): Part {
-  if (part.inlineData?.mimeType?.startsWith('image/') && part.inlineData.data) {
+  if (isInlineImagePart(part)) {
     const stored = store.put(part);
     collected.push({ stored });
     return { text: imageReferenceText(stored) };
@@ -401,10 +406,13 @@ function collectReferencedImageIds(contents: Content[]): Set<string> {
 /** Where a replayed image came from, as the label states it. */
 type ReattachOrigin = 'prompt' | 'turn' | 'earlier';
 
-// Ordered stalest first: an id is labeled by the weakest claim about it, so
-// neither an echoed marker nor the same bytes re-attached in a later turn can
-// upgrade an older image to "current" (ids are content hashes, so two turns
-// attaching identical bytes share one id).
+// Ordered stalest first: absent provenance an id is labeled by the weakest
+// claim about it, so a marker-shaped echo can never upgrade an older image to
+// "current". The prompt's own stamped marker is the one claim that overrides.
+// Ids are content hashes, so re-attaching identical bytes in a later turn
+// reuses an id an earlier turn already labeled stale — and only the stamp
+// eviction writes into the prompt's part says those bytes are the attachment
+// being answered now.
 const ORIGIN_PRECEDENCE: readonly ReattachOrigin[] = [
   'earlier',
   'turn',
@@ -431,13 +439,15 @@ function classifyMarkerOrigins(
     }
     // Only a marker eviction stamped into the prompt's own part says the user
     // attached that image to the prompt being answered now.
-    const origin: ReattachOrigin =
-      marker.contentIndex === turnStart && marker.stamped && !marker.toolNested
-        ? 'prompt'
-        : 'turn';
+    const promptClaim =
+      marker.contentIndex === turnStart && marker.stamped && !marker.toolNested;
+    const origin: ReattachOrigin = promptClaim ? 'prompt' : 'turn';
     const known = origins.get(marker.id);
     if (
       known === undefined ||
+      // A provenance-vouched prompt attachment outranks a stale label an
+      // earlier turn's marker wrote for the same content hash.
+      promptClaim ||
       ORIGIN_PRECEDENCE.indexOf(origin) < ORIGIN_PRECEDENCE.indexOf(known)
     ) {
       origins.set(marker.id, origin);
@@ -449,7 +459,7 @@ function classifyMarkerOrigins(
 // Index of the content that starts the current user turn, or -1 when the
 // history holds no user turn at all. A prompt merged with a preceding tool
 // result (consecutive user contents are fused by `appendCuratedContent`) still
-// starts the turn, so any non-`functionResponse` part counts; a content made
+// starts the turn, so any part the user could have sent counts; a content made
 // only of tool responses belongs to the turn but does not start it. On a
 // tool-call continuation the last content is such a tool result, and a
 // screenshot the user sent with the prompt still belongs to this turn and may
@@ -457,15 +467,31 @@ function classifyMarkerOrigins(
 function currentTurnStartIndex(contents: Content[]): number {
   for (let index = contents.length - 1; index >= 0; index--) {
     const content = contents[index];
-    if (
-      content?.role === 'user' &&
-      content.parts?.some((part) => !part.functionResponse)
-    ) {
+    if (content?.role === 'user' && content.parts?.some(isUserSentPart)) {
       return index;
     }
   }
   // No prompt in view: fall back to the last content, as before.
   return contents.at(-1)?.role === 'user' ? contents.length - 1 : -1;
+}
+
+// Whether a part can start a user turn. The request path splices structural
+// `<system-reminder>` scaffolding into tool-result contents — the active todo
+// reminder (`client.ts`, before `createUserContent`) and the memory-recall
+// prompt appended on the same branch — so "has a text part" alone would read a
+// routine tool result as the prompt and label the prompt's own evicted
+// attachment as an earlier turn's. Rejected per part, as `isApiUserPrompt`
+// rejects reminder-only contents: a genuine prompt keeps its own text or image
+// part next to a reminder, and still starts the turn.
+function isUserSentPart(part: Part): boolean {
+  if (part.functionResponse) return false;
+  const text = part.text;
+  if (typeof text !== 'string') return true;
+  const trimmed = text.trim();
+  return !(
+    trimmed.startsWith(SYSTEM_REMINDER_OPEN) &&
+    trimmed.endsWith(SYSTEM_REMINDER_CLOSE)
+  );
 }
 
 function recentUniqueImages(

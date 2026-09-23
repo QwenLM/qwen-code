@@ -360,8 +360,9 @@ describe('replaceImagePayloadsInPlace', () => {
       inlineData: { mimeType: 'image/png', data: 'top-level' },
     }).id;
     expect(topLevel.partMetadata?.[IMAGE_MARKER_METADATA]).toBe(id);
-    // `stripPartFields` does not recurse into `functionResponse.parts`, so a
-    // stamp on a tool-nested marker would reach providers that reject it.
+    // Tool-nested markers stay unstamped: they are tool captures, which the
+    // classifier never grants the prompt label, so a stamp there could not
+    // change any outcome.
     const nested = contents[1]!.parts![0]!.functionResponse!.parts as Part[];
     expect(nested[0]!.partMetadata).toBeUndefined();
   });
@@ -633,6 +634,104 @@ describe('buildReattachParts', () => {
         label: expect.stringMatching(
           /^Image #[a-f0-9]{12}: captured earlier in the current user turn; may predate later changes$/,
         ),
+      },
+    ]);
+  });
+
+  it('labels re-attached identical bytes as the prompt attachment (#12544)', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      // An earlier turn sent these exact bytes, so the id is already in the
+      // history as an earlier-turn marker (ids are content hashes).
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'dup' } }],
+      },
+      { role: 'model', parts: [{ text: 'ok' }] },
+      {
+        role: 'user',
+        parts: [
+          { text: 'same error, still broken' },
+          { inlineData: { mimeType: 'image/png', data: 'dup' } },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-read',
+              name: 'read_file',
+              response: { output: 'read' },
+            },
+          },
+        ],
+      },
+    ];
+    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
+
+    const images = labeledImages(
+      buildReattachParts([], 3, contents, store),
+      store,
+    );
+
+    // The stamp eviction wrote into the prompt's own part outranks the stale
+    // label the earlier turn's marker gave the same content hash.
+    expect(images).toEqual([
+      {
+        data: 'dup',
+        label: expect.stringMatching(/: part of the current user turn$/),
+      },
+    ]);
+  });
+
+  it('keeps the prompt as the turn start when a reminder rides in the tool result', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'why is the layout broken?' },
+          { inlineData: { mimeType: 'image/png', data: 'prompt-shot' } },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
+      },
+      // `client.ts` splices the active todo reminder into the tool-result
+      // content, so a continuation's last content carries a text part.
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-read',
+              name: 'read_file',
+              response: { output: 'read' },
+            },
+          },
+          {
+            text: '<system-reminder>\nThe current task still has unfinished todo items:\n- [in_progress] fix the layout\n</system-reminder>',
+          },
+        ],
+      },
+    ];
+    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
+
+    const images = labeledImages(
+      buildReattachParts([], 2, contents, store),
+      store,
+    );
+
+    expect(images).toEqual([
+      {
+        data: 'prompt-shot',
+        label: expect.stringMatching(/: part of the current user turn$/),
       },
     ]);
   });
