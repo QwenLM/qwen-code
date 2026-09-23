@@ -206,7 +206,7 @@ describe('StandaloneDeletionJournal', () => {
       await journal.writePrepared(record, root);
       const directory = parent === 'base' ? stableBaseDir : ownerDirectory;
       const saved = `${directory}.saved`;
-      const original = await fs.lstat(directory);
+      const original = await fs.lstat(directory, { bigint: true });
       const originalRecord = await fs.readFile(journalPath('prepared'), 'utf8');
       await fs.rename(directory, saved);
       await fs.mkdir(path.join(ownerDirectory, 'deletions'), {
@@ -226,7 +226,9 @@ describe('StandaloneDeletionJournal', () => {
           expect(stat.uid).toBe(process.getuid?.());
         }
       }
-      expect((await fs.lstat(directory)).ino).not.toBe(original.ino);
+      expect((await fs.lstat(directory, { bigint: true })).ino).not.toBe(
+        original.ino,
+      );
       for (const operation of [
         () => journal.hasRecord(SESSION_ID),
         () => journal.listSessionIds(),
@@ -534,8 +536,8 @@ describe('StandaloneDeletionJournal', () => {
     const prepared = await makeRecord('prepared');
     await journal.writePrepared(prepared, root);
     const journalDirectory = path.dirname(journalPath('prepared'));
-    const journalStats = await fs.lstat(journalDirectory);
-    if (!Number.isSafeInteger(journalStats.ino) || journalStats.ino <= 0) {
+    const journalStats = await fs.lstat(journalDirectory, { bigint: true });
+    if (journalStats.ino === 0n) {
       ctx.skip();
       return;
     }
