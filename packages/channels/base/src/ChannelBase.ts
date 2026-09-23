@@ -22,6 +22,8 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  GroupConfig,
+  GroupSenderPolicy,
   ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
@@ -460,8 +462,6 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
-  /** Sender axis for group traffic; `undefined` means it follows `gate`. */
-  protected groupSenderGate?: SenderGate;
   protected router: SessionRouter;
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
@@ -1425,17 +1425,6 @@ export abstract class ChannelBase {
       config.allowedUsers,
       pairingStore,
     );
-    // Undefined keeps the group axis on `senderPolicy`, which is the historical
-    // behavior. A decoupled axis gets its own gate and its own member list, and
-    // never pairs: an approval would also unlock direct messages.
-    this.groupSenderGate =
-      config.groupSenderPolicy === 'open' ||
-      config.groupSenderPolicy === 'allowlist'
-        ? new SenderGate(
-            config.groupSenderPolicy,
-            config.allowedGroupUsers ?? [],
-          )
-        : undefined;
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
@@ -4953,11 +4942,7 @@ export abstract class ChannelBase {
     return (
       this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
-        ? true
-        : this.senderGateFor(envelope.isGroup).isAllowed(
-            normalizedTarget.senderId,
-          )) &&
+      this.senderGateFor(envelope).isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -5859,13 +5844,14 @@ export abstract class ChannelBase {
    * A session that is not shared only touches its own sender, so anyone may
    * operate it. In a shared session an explicit `operators` list decides, and
    * a non-empty `allowedUsers` stands in for it. Otherwise whoever may speak in
-   * the conversation may operate it — except that an `open` group sender axis
-   * admits members nobody vouched for by name, so there the direct-message
-   * axis decides: everyone under `senderPolicy: "open"`, paired users under
-   * `"pairing"`.
+   * the conversation may operate it — except that a group with `senders:
+   * "open"` admits members nobody vouched for by name, so there the
+   * direct-message axis decides: everyone under `senderPolicy: "open"`, paired
+   * users under `"pairing"`. An approved pairing group is the exception to the
+   * exception: its approval vouches for every member.
    */
   private isSharedSessionOperator(
-    target: { isGroup?: boolean },
+    target: { isGroup?: boolean; chatId: string },
     senderId: string | undefined,
   ): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
@@ -5875,17 +5861,16 @@ export abstract class ChannelBase {
         ? this.config.allowedUsers
         : undefined);
     if (listed) return senderId !== undefined && listed.includes(senderId);
-    // An approved pairing group admits all of its members without consulting
-    // any sender axis, so it keeps the historical "may speak, may operate".
-    const groupAxis =
-      target.isGroup === true && this.config.groupPolicy !== 'pairing'
-        ? this.groupSenderGate
-        : undefined;
-    if (!groupAxis) return true;
+    const senders = this.groupSendersFor(target);
+    if (senders === 'inherit') return true;
     if (senderId === undefined) return false;
-    return this.config.groupSenderPolicy === 'allowlist'
-      ? groupAxis.isAllowed(senderId)
-      : this.gate.isAllowed(senderId);
+    if (senders === 'allowlist') {
+      return this.groupAllowedUsersFor(target.chatId).includes(senderId);
+    }
+    return (
+      this.isApprovedPairingGroup(target.chatId) ||
+      this.gate.isAllowed(senderId)
+    );
   }
 
   private toolCallerName(sessionId: string, target: SessionTarget): string {
@@ -6086,10 +6071,7 @@ export abstract class ChannelBase {
     // text.
     if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (
-      this.config.groupPolicy !== 'pairing' &&
-      !this.senderGateFor(true).isAllowed(senderId)
-    ) {
+    if (!this.senderGateFor(envelope).isAllowed(senderId)) {
       return;
     }
 
@@ -6171,6 +6153,7 @@ export abstract class ChannelBase {
   }
 
   private prependGroupHistoryContext(
+    envelope: Envelope,
     promptText: string,
     entries: GroupHistoryEntry[],
   ): string {
@@ -6178,12 +6161,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines =
-      this.config.groupPolicy === 'pairing'
-        ? entries
-        : entries.filter((entry) =>
-            this.senderGateFor(true).isAllowed(entry.senderId),
-          );
+    const senderGate = this.senderGateFor(envelope);
+    const lines = entries.filter((entry) =>
+      senderGate.isAllowed(entry.senderId),
+    );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6201,12 +6182,58 @@ export abstract class ChannelBase {
   }
 
   /**
-   * Sender gate that applies to one message axis. Group traffic follows
-   * `groupSenderPolicy` once it is decoupled; otherwise both axes share one
-   * gate, which is the historical behavior.
+   * Sender gate for one conversation. Direct messages, and groups whose
+   * `senders` is `inherit`, use `senderPolicy`. Any other group uses its own
+   * `senders` setting, which never pairs: an approval would also unlock
+   * direct messages.
    */
-  protected senderGateFor(isGroup: boolean): SenderGate {
-    return isGroup && this.groupSenderGate ? this.groupSenderGate : this.gate;
+  protected senderGateFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): SenderGate {
+    const senders = this.groupSendersFor(target);
+    if (senders === 'inherit') return this.gate;
+    return new SenderGate(
+      senders,
+      senders === 'allowlist' ? this.groupAllowedUsersFor(target.chatId) : [],
+    );
+  }
+
+  /**
+   * Resolved `senders` for a conversation: the group's own entry, then
+   * `groups["*"]`. Unset, an approved pairing group admits all of its members
+   * and any other group follows `senderPolicy`.
+   */
+  private groupSendersFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): GroupSenderPolicy {
+    if (target.isGroup !== true) return 'inherit';
+    const configured =
+      this.groupConfigFor(target.chatId)?.senders ??
+      this.groupConfigFor('*')?.senders;
+    if (configured) return configured;
+    return this.isApprovedPairingGroup(target.chatId) ? 'open' : 'inherit';
+  }
+
+  private groupAllowedUsersFor(chatId: string): string[] {
+    return (
+      this.groupConfigFor(chatId)?.allowedUsers ??
+      this.groupConfigFor('*')?.allowedUsers ??
+      []
+    );
+  }
+
+  private groupConfigFor(key: string): GroupConfig | undefined {
+    const groups = this.config.groups;
+    return Object.hasOwn(groups, key) ? groups[key] : undefined;
+  }
+
+  private isApprovedPairingGroup(chatId: string): boolean {
+    return (
+      this.config.groupPolicy === 'pairing' &&
+      this.groupGate.isGroupApproved(chatId)
+    );
   }
 
   protected preflightInbound(
@@ -6256,12 +6283,7 @@ export abstract class ChannelBase {
       return false;
     }
 
-    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
-      this.markPreflighted(envelope);
-      return true;
-    }
-
-    const senderGate = this.senderGateFor(envelope.isGroup);
+    const senderGate = this.senderGateFor(envelope);
 
     if (
       options.deferPairingRequests === true &&
@@ -7189,6 +7211,7 @@ export abstract class ChannelBase {
         ? []
         : this.drainPendingGroupHistory(envelope);
       let promptToSend = this.prependGroupHistoryContext(
+        envelope,
         promptText,
         groupHistoryEntries,
       );

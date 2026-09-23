@@ -69,8 +69,6 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                               |
 | `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                             |
 | `dmPolicy`          | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
-| `groupSenderPolicy` | No               | Who may use the bot inside an admitted group: `inherit` (default, follows `senderPolicy`), `open`, or `allowlist` (checked against `allowedGroupUsers`)                                                                 |
-| `allowedGroupUsers` | No               | Group-member IDs allowed when `groupSenderPolicy: "allowlist"`. Separate from `allowedUsers`                                                                                                                            |
 | `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset derives it. See [Shared-Session Operators](#shared-session-operators)                                                                      |
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
@@ -84,20 +82,6 @@ Controls who can interact with the bot:
 - **`pairing`** — Unknown senders receive a pairing code. The bot operator approves them via CLI, and they're added to a persistent allowlist. Users in `allowedUsers` skip pairing entirely. See [DM Pairing](#dm-pairing) below.
 - **`open`** — Anyone can send messages. Use with caution.
 
-### Group Sender Policy
-
-`senderPolicy` also gates who may speak to the bot inside a group, so a group that `groupPolicy` admits still drops messages from users outside the allowlist. Set `groupSenderPolicy` to decouple the two axes:
-
-- **`inherit`** (default) — group traffic follows `senderPolicy`, the historical behavior.
-- **`open`** — any member of an admitted group may use the bot, while `senderPolicy` keeps governing direct messages. This is the usual choice for a team bot that answers in groups but only for a few people in private chat. On the `github` and `gitlab` channels all inbound traffic is group traffic, so `groupSenderPolicy: "open"` there is equivalent to `senderPolicy: "open"` — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` the two axes share one conversation, so a decoupled group axis also exposes direct-message history to group members.
-- **`allowlist`** — group traffic is checked against `allowedGroupUsers`, a list separate from `allowedUsers`.
-
-`pairing` is deliberately absent from this axis: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
-
-This axis applies to `groupPolicy: "open"` and `"allowlist"` groups. Under `groupPolicy: "pairing"` an approved group authorizes all of its members and this axis is not consulted.
-
-The Web Shell channel editor does not show `groupSenderPolicy`, `allowedGroupUsers`, or `operators` yet. Set them in `settings.json`; saving the channel from the editor keeps them, because unrendered keys are carried through unchanged.
-
 ### Shared-Session Operators
 
 In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
@@ -106,9 +90,9 @@ The operators are, in order:
 
 1. `operators`, when set. It is authoritative even when empty: `"operators": []` means nobody may operate a shared session.
 2. Otherwise `allowedUsers`, when it is not empty.
-3. Otherwise anyone who may speak in the conversation — with one exception. Under `groupSenderPolicy: "open"` the group admits members nobody vouched for by name, so in a group the direct-message axis decides instead: everyone under `senderPolicy: "open"`, paired users under `"pairing"`. Under `groupSenderPolicy: "allowlist"` the members in `allowedGroupUsers` are operators. An approved group under `groupPolicy: "pairing"` admits all of its members, and all of them may operate its sessions.
+3. Otherwise anyone who may speak in the conversation — with one exception. A group with `senders: "open"` admits members nobody vouched for by name, so there the direct-message axis decides instead: everyone under `senderPolicy: "open"`, paired users under `"pairing"`. In a group with `senders: "allowlist"` the members of that group's `allowedUsers` are operators. An approved group under `groupPolicy: "pairing"` admits all of its members by default, and all of them may operate its sessions.
 
-For example, `senderPolicy: "pairing"` with `groupSenderPolicy: "open"` lets every group member start a turn, while only the users you approved through pairing may answer its permission prompts. Set `operators` when you want a different list.
+For example, `senderPolicy: "pairing"` with `groups: { "*": { "senders": "open" } }` lets every group member start a turn, while only the users you approved through pairing may answer its permission prompts. Set `operators` when you want a different list.
 
 A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
@@ -187,13 +171,13 @@ The legacy slash aliases `/remember-channel`, `/channel-memory`, and
 commands.
 
 Channel memory follows the channel access gates. Any message accepted by
-`senderPolicy`, `groupSenderPolicy`, `dmPolicy`, `groupPolicy`, group settings,
+`senderPolicy`, `dmPolicy`, `groupPolicy`, group settings (including `senders`),
 pairing, and mention requirements can read, write, update, or clear memory for
 that chat or thread. Accepted members of the same group share that group's
-target store. Use `allowlist` or `pairing` on `senderPolicy`, or
-`groupSenderPolicy: "allowlist"` with `allowedGroupUsers`, when group memory
-should be limited to trusted senders — under `groupSenderPolicy: "open"` every
-member of an admitted group shares that group's memory store.
+target store. Use `allowlist` or `pairing` on `senderPolicy`, or a group's
+`senders: "allowlist"` with its `allowedUsers`, when group memory should be
+limited to trusted senders — under `senders: "open"` every member of an
+admitted group shares that group's memory store.
 
 Existing legacy `CHANNEL.md` memory is migrated automatically to structured
 `CHANNEL.json` storage on the first mutation. Structured memory persists across
@@ -309,6 +293,33 @@ Configure per-group with the `groups` setting:
 - **Group chat ID** — Override settings for a specific group. Overrides `"*"` defaults.
 - **`requireMention`** (default: `true`) — When `true`, the bot only responds to messages that @mention it or reply to one of its messages. When `false`, the bot responds to all messages (useful for dedicated task groups).
 
+### Group Senders
+
+By default a group follows `senderPolicy`, so a group that `groupPolicy` admits still drops messages from users outside the direct-message allowlist. Set `senders` in `groups` to decide who may speak in groups on their own:
+
+```json
+{
+  "senderPolicy": "pairing",
+  "groupPolicy": "open",
+  "groups": {
+    "*": { "senders": "open" },
+    "-100123456": { "senders": "allowlist", "allowedUsers": ["alice", "bob"] }
+  }
+}
+```
+
+- **`inherit`** — follow `senderPolicy`, like a direct message. This is the default, except in an approved group under `groupPolicy: "pairing"`, which defaults to `open` because the approval admits all of its members.
+- **`open`** — any member of the group may use the bot, while `senderPolicy` keeps governing direct messages. This is the usual choice for a team bot that answers in groups but only for a few people in private chat.
+- **`allowlist`** — only the group's `allowedUsers` may speak. This list is separate from the channel-level `allowedUsers`.
+
+Each group's entry is read first, then `"*"`, field by field: a group that sets only `senders: "allowlist"` uses the `allowedUsers` from `"*"`. Under `groupPolicy: "allowlist"` a group ID key also admits the group, so a per-group entry there both admits the group and sets its senders.
+
+`pairing` is deliberately not a `senders` value: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
+
+On the `github` and `gitlab` channels all inbound traffic is group traffic, so `senders: "open"` there is equivalent to `senderPolicy: "open"` — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
+
+The Web Shell channel editor does not show `senders`, the per-group `allowedUsers`, or `operators` yet. Set them in `settings.json`; saving the channel from the editor keeps them, because unrendered keys are carried through unchanged.
+
 ### Group History Backfill
 
 By default, Qwen ignores unmentioned group messages and does not store them as session turns. To let the next `@mention` include recent group context, set `groupHistoryLimit` to a positive number.
@@ -336,7 +347,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 - Omitted or `0` disables backfill.
 - Group-level `groupHistoryLimit` overrides the channel-level value.
-- Only messages from senders authorized on the resolved sender axis (`senderPolicy`, or `groupSenderPolicy` when decoupled), or members of an approved paired group, are persisted — a decoupled group axis therefore also widens whose messages `groupHistoryLimit` records.
+- Only messages from senders the group's `senders` setting admits are persisted (`senderPolicy` when it inherits; every member of an approved paired group by default) — so `senders: "open"` also widens whose messages `groupHistoryLimit` records.
 - Messages rejected by `groupPolicy` or group allowlist are not persisted.
 - Pending group history is stored as local JSONL under `~/.qwen/channels/<channel-name>-group-history.jsonl` or `$QWEN_HOME/channels/<channel-name>-group-history.jsonl`.
 - Cached messages are injected as untrusted context on the next real trigger and are not written as standalone session turns.
@@ -347,7 +358,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 1. groupPolicy — is this group disabled, listed, paired, or open? (no → ignore/pairing flow)
 2. dmPolicy — is this DM allowed?                      (disabled → ignore)
 3. requireMention — was the bot mentioned/replied to? (no → ignore)
-4. sender axis — is this sender approved?              (group traffic follows groupSenderPolicy when decoupled; skipped for a paired group; a DM-axis no → user pairing flow)
+4. senders — may this sender speak here?              (the group's `senders`, else senderPolicy; a senderPolicy no → user pairing flow)
 5. Route to session
 ```
 
