@@ -140,11 +140,16 @@ function assertSharedField(
     }
     return true;
   }
+  if (key === 'groupSenderPolicy' || key === 'allowedGroupUsers') {
+    throw invalidConfig(
+      `Channel field "${key}" moved to groups["*"].${key === 'groupSenderPolicy' ? 'senders' : 'allowedUsers'}.`,
+    );
+  }
   const enumValues: Record<string, ReadonlySet<string>> = {
+    privatePolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
-    groupSenderPolicy: new Set(['inherit', 'open', 'allowlist']),
     sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
   };
@@ -160,11 +165,7 @@ function assertSharedField(
     }
     return true;
   }
-  if (
-    key === 'allowedUsers' ||
-    key === 'allowedGroupUsers' ||
-    key === 'operators'
-  ) {
+  if (key === 'allowedUsers' || key === 'operators') {
     if (
       !Array.isArray(value) ||
       value.some((item) => typeof item !== 'string')
@@ -196,6 +197,8 @@ function assertSharedField(
           'requireMention',
           'dispatchMode',
           'groupHistoryLimit',
+          'senders',
+          'allowedUsers',
         ].includes(nestedKey);
         const valid =
           (nestedKey === 'requireMention' &&
@@ -205,11 +208,18 @@ function assertSharedField(
             ['collect', 'steer', 'followup'].includes(nestedValue)) ||
           (nestedKey === 'groupHistoryLimit' &&
             typeof nestedValue === 'number' &&
-            Number.isFinite(nestedValue));
+            Number.isFinite(nestedValue)) ||
+          (nestedKey === 'senders' &&
+            typeof nestedValue === 'string' &&
+            ['open', 'allowlist'].includes(nestedValue)) ||
+          (nestedKey === 'allowedUsers' &&
+            Array.isArray(nestedValue) &&
+            nestedValue.every((item) => typeof item === 'string'));
         if (
           known &&
           !valid &&
           !(
+            nestedKey !== 'senders' &&
             Object.hasOwn(previousGroup, nestedKey) &&
             isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
             !containsUnsafeObjectKey(nestedValue)

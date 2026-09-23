@@ -415,17 +415,16 @@ describe('collectContextData (contextCommand)', () => {
     });
 
     it('scales every row down when the estimates exceed the provider total', async () => {
-      const data = await collectContextData(
-        makeChatConfig({
-          total: 5_000,
-          cached: 4_000,
-          history: [
-            prelude,
-            { role: 'user', parts: [{ text: 'c'.repeat(40_000) }] },
-          ],
-        }),
-        true,
-      );
+      const config = makeChatConfig({
+        total: 5_000,
+        cached: 4_000,
+        history: [
+          prelude,
+          { role: 'user', parts: [{ text: 'c'.repeat(40_000) }] },
+        ],
+      });
+      vi.mocked(config.getSystemPrompt).mockReturnValue('s'.repeat(40_000));
+      const data = await collectContextData(config, true);
 
       expect(data.breakdown.unattributed).toBe(0);
       expect(sumRows(data.breakdown)).toBe(5_000);

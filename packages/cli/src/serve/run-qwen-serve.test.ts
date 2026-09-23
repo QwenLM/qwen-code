@@ -15696,6 +15696,63 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('does not hold a later registration behind another workspace channel startup', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-bystander-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const bystander = path.join(tmpDir, 'bystander');
+    // Configures no channels at all.
+    fs.mkdirSync(bystander, { recursive: true });
+    // The first workspace's worker never becomes ready, so its startup holds
+    // the channel-control lane for as long as the startup budget allows.
+    let releaseStart: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    daemon.factory.mockImplementation(() => {
+      const worker = makeWorker({
+        enabled: true,
+        state: 'starting',
+        channels: [],
+        requestedChannels: ['feishu'],
+      });
+      worker.start.mockImplementation(() => blocked);
+      return worker;
+    });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const first = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(first.status).toBe(201);
+      await vi.waitFor(() => expect(daemon.factory).toHaveBeenCalled());
+
+      // A workspace with no channels has nothing to wait for. Registering it
+      // must not queue behind the first workspace's stuck startup.
+      const started = Date.now();
+      const second = await Promise.race([
+        fetch(`${handle.url}/workspaces`, {
+          method: 'POST',
+          headers: daemon.headers,
+          body: JSON.stringify({ cwd: bystander }),
+        }).then((response) => response.status),
+        new Promise<'held'>((resolve) =>
+          setTimeout(() => resolve('held'), 3_000),
+        ),
+      ]);
+      expect(second).toBe(201);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      releaseStart?.();
+      await handle.close();
+    }
+  });
+
   it('answers a workspace registration without waiting for its channel worker', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-latency-')),

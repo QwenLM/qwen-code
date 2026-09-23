@@ -22,6 +22,9 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  GroupConfig,
+  GroupSenderPolicy,
+  PrivatePolicy,
   ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
@@ -37,6 +40,7 @@ import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
+import { resolvePrivatePolicy } from './private-policy.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
@@ -460,8 +464,7 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
-  /** Sender axis for group traffic; `undefined` means it follows `gate`. */
-  protected groupSenderGate?: SenderGate;
+  protected readonly privatePolicy: PrivatePolicy;
   protected router: SessionRouter;
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
@@ -1387,6 +1390,7 @@ export abstract class ChannelBase {
   ) {
     this.name = name;
     this.config = config;
+    this.privatePolicy = resolvePrivatePolicy(config);
     this.bridge = bridge;
     this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
@@ -1411,7 +1415,7 @@ export abstract class ChannelBase {
     // Scoped by the channel's workspace cwd: two workspaces reusing the same
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
+      this.privatePolicy === 'pairing' || config.groupPolicy === 'pairing'
         ? new PairingStore(name, config.cwd)
         : undefined;
     this.groupGate = new GroupGate(
@@ -1419,23 +1423,14 @@ export abstract class ChannelBase {
       config.groups,
       pairingStore,
     );
-    this.dmGate = new DmGate(config.dmPolicy);
+    this.dmGate = new DmGate(
+      this.privatePolicy === 'disabled' ? 'disabled' : 'open',
+    );
     this.gate = new SenderGate(
-      config.senderPolicy,
+      this.privatePolicy,
       config.allowedUsers,
       pairingStore,
     );
-    // Undefined keeps the group axis on `senderPolicy`, which is the historical
-    // behavior. A decoupled axis gets its own gate and its own member list, and
-    // never pairs: an approval would also unlock direct messages.
-    this.groupSenderGate =
-      config.groupSenderPolicy === 'open' ||
-      config.groupSenderPolicy === 'allowlist'
-        ? new SenderGate(
-            config.groupSenderPolicy,
-            config.allowedGroupUsers ?? [],
-          )
-        : undefined;
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
@@ -4475,7 +4470,10 @@ export abstract class ChannelBase {
             envelope.chatId,
             envelope.threadId,
           );
-      const policy = this.config.senderPolicy;
+      const policy =
+        envelope.isGroup && !this.isPersonalConversation(envelope)
+          ? this.groupSendersFor(envelope)
+          : this.privatePolicy;
       const lines = [
         `Session: ${hasSession ? 'active' : 'none'}`,
         `Access: ${policy}`,
@@ -4953,11 +4951,7 @@ export abstract class ChannelBase {
     return (
       this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
-        ? true
-        : this.senderGateFor(envelope.isGroup).isAllowed(
-            normalizedTarget.senderId,
-          )) &&
+      this.senderGateFor(envelope).isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -5855,37 +5849,15 @@ export abstract class ChannelBase {
     );
   }
 
-  /**
-   * A session that is not shared only touches its own sender, so anyone may
-   * operate it. In a shared session an explicit `operators` list decides, and
-   * a non-empty `allowedUsers` stands in for it. Otherwise whoever may speak in
-   * the conversation may operate it — except that an `open` group sender axis
-   * admits members nobody vouched for by name, so there the direct-message
-   * axis decides: everyone under `senderPolicy: "open"`, paired users under
-   * `"pairing"`.
-   */
   private isSharedSessionOperator(
-    target: { isGroup?: boolean },
+    target: { isGroup?: boolean; chatId: string },
     senderId: string | undefined,
   ): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
-    const listed =
-      this.config.operators ??
-      (this.config.allowedUsers.length > 0
-        ? this.config.allowedUsers
-        : undefined);
-    if (listed) return senderId !== undefined && listed.includes(senderId);
-    // An approved pairing group admits all of its members without consulting
-    // any sender axis, so it keeps the historical "may speak, may operate".
-    const groupAxis =
-      target.isGroup === true && this.config.groupPolicy !== 'pairing'
-        ? this.groupSenderGate
-        : undefined;
-    if (!groupAxis) return true;
-    if (senderId === undefined) return false;
-    return this.config.groupSenderPolicy === 'allowlist'
-      ? groupAxis.isAllowed(senderId)
-      : this.gate.isAllowed(senderId);
+    return (
+      senderId !== undefined &&
+      this.config.operators?.includes(senderId) === true
+    );
   }
 
   private toolCallerName(sessionId: string, target: SessionTarget): string {
@@ -6086,10 +6058,7 @@ export abstract class ChannelBase {
     // text.
     if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (
-      this.config.groupPolicy !== 'pairing' &&
-      !this.senderGateFor(true).isAllowed(senderId)
-    ) {
+    if (!this.senderGateFor(envelope).isAllowed(senderId)) {
       return;
     }
 
@@ -6171,6 +6140,7 @@ export abstract class ChannelBase {
   }
 
   private prependGroupHistoryContext(
+    envelope: Envelope,
     promptText: string,
     entries: GroupHistoryEntry[],
   ): string {
@@ -6178,12 +6148,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines =
-      this.config.groupPolicy === 'pairing'
-        ? entries
-        : entries.filter((entry) =>
-            this.senderGateFor(true).isAllowed(entry.senderId),
-          );
+    const senderGate = this.senderGateFor(envelope);
+    const lines = entries.filter((entry) =>
+      senderGate.isAllowed(entry.senderId),
+    );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6200,13 +6168,49 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
+  protected senderGateFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): SenderGate {
+    if (target.isGroup !== true || this.isPersonalConversation(target)) {
+      return this.gate;
+    }
+    const senders = this.groupSendersFor(target);
+    return new SenderGate(
+      senders,
+      senders === 'allowlist' ? this.groupAllowedUsersFor(target.chatId) : [],
+    );
+  }
+
+  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+    return (
+      this.groupConfigFor(target.chatId)?.senders ??
+      this.groupConfigFor('*')?.senders ??
+      'open'
+    );
+  }
+
   /**
-   * Sender gate that applies to one message axis. Group traffic follows
-   * `groupSenderPolicy` once it is decoupled; otherwise both axes share one
-   * gate, which is the historical behavior.
+   * Whether a group-shaped conversation acts on behalf of one person, such as
+   * a document comment thread or a task. Its sender follows `privatePolicy`
+   * like a direct message, and `groups` does not apply; its
+   * group shape still decides routing, memory, and presentation.
    */
-  protected senderGateFor(isGroup: boolean): SenderGate {
-    return isGroup && this.groupSenderGate ? this.groupSenderGate : this.gate;
+  protected isPersonalConversation(_target: { chatId: string }): boolean {
+    return false;
+  }
+
+  private groupAllowedUsersFor(chatId: string): string[] {
+    return (
+      this.groupConfigFor(chatId)?.allowedUsers ??
+      this.groupConfigFor('*')?.allowedUsers ??
+      []
+    );
+  }
+
+  private groupConfigFor(key: string): GroupConfig | undefined {
+    const groups = this.config.groups;
+    return Object.hasOwn(groups, key) ? groups[key] : undefined;
   }
 
   protected preflightInbound(
@@ -6256,17 +6260,12 @@ export abstract class ChannelBase {
       return false;
     }
 
-    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
-      this.markPreflighted(envelope);
-      return true;
-    }
-
-    const senderGate = this.senderGateFor(envelope.isGroup);
+    const senderGate = this.senderGateFor(envelope);
 
     if (
       options.deferPairingRequests === true &&
       senderGate === this.gate &&
-      this.config.senderPolicy === 'pairing' &&
+      this.privatePolicy === 'pairing' &&
       !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
@@ -6951,11 +6950,11 @@ export abstract class ChannelBase {
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
-    const groupCfg = envelope.isGroup
-      ? this.config.groups[envelope.chatId] || this.config.groups['*']
+    const groupMode = envelope.isGroup
+      ? (this.groupConfigFor(envelope.chatId)?.dispatchMode ??
+        this.groupConfigFor('*')?.dispatchMode)
       : undefined;
-    const mode: DispatchMode =
-      groupCfg?.dispatchMode || this.config.dispatchMode || 'steer';
+    const mode: DispatchMode = groupMode ?? this.config.dispatchMode ?? 'steer';
 
     const active = this.activePrompts.get(sessionId);
 
@@ -7189,6 +7188,7 @@ export abstract class ChannelBase {
         ? []
         : this.drainPendingGroupHistory(envelope);
       let promptToSend = this.prependGroupHistoryContext(
+        envelope,
         promptText,
         groupHistoryEntries,
       );

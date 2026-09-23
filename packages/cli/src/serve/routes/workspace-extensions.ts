@@ -2381,14 +2381,16 @@ export function registerWorkspaceExtensionRoutes(
           runtime.workspaceCwd,
           runtime.trusted,
         );
-        const snapshot = await manager.refreshCacheWithSnapshot();
+        const { snapshot, extensions: catalog } =
+          await manager.refreshCatalogSnapshot();
         runtime.generationGuard?.assertOpen();
-        const extensions = manager.getLoadedExtensions().map((extension) => {
-          const activation = manager.getExtensionActivationFromSnapshot(
-            extension.id,
-            snapshot,
-            runtime.workspaceCwd,
-          );
+        const extensions = catalog.map((extension) => {
+          const activation =
+            manager.getExtensionActivationForIdentityFromSnapshot(
+              { id: extension.id, name: extension.name },
+              snapshot,
+              runtime.workspaceCwd,
+            );
           return {
             extensionId: extension.id,
             name: extension.name,
