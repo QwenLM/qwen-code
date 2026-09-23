@@ -2286,6 +2286,47 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it.each([
+      "python - <<'PY'\nimport os\nos.system('rm -rf /important')\nPY",
+      "python - <<'PY'\nimport os\nos.system('rm -rf /important')\nPY\necho done",
+    ])(
+      'deny coverage of a heredoc payload ignores the command shape: %#',
+      async (command) => {
+        // An unrelated trailing command must not launder a denied payload:
+        // the single-segment shape evaluates the raw text while the compound
+        // shape evaluates projected segments with the body stripped.
+        const pm2 = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(python *)', 'Bash(echo *)'],
+            permissionsDeny: ['Bash(*rm -rf*)'],
+          }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      },
+    );
+
+    it.each([
+      'cat <<EOF\nrm -rf /important\nEOF',
+      'cat <<EOF\nrm -rf /important\nEOF\necho done',
+    ])(
+      'deny coverage of an inert-receiver heredoc ignores the command shape: %#',
+      async (command) => {
+        const pm2 = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(cat *)', 'Bash(echo *)'],
+            permissionsDeny: ['Bash(*rm -rf*)'],
+          }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      },
+    );
+
     // Regression coverage for issue #4093: command substitution must never
     // produce a hard 'deny' from resolveDefaultPermission. Before the fix
     // the L4 default branch returned 'deny' for any command containing

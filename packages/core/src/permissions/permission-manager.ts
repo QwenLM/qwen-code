@@ -336,6 +336,19 @@ export class PermissionManager {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
         bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
+        if (bashDecision !== 'deny') {
+          // Heredoc projection can strip an interpreter body out of the
+          // segments, so deny/ask rules also see the raw compound text:
+          // a stripped payload must not escape a deny that the same command
+          // in single-segment shape would hit. Escalation only; an allow
+          // found in the raw text never lowers the segment verdict.
+          const rawDecision = this.evaluateSingle(ctx);
+          if (rawDecision === 'deny') {
+            bashDecision = 'deny';
+          } else if (rawDecision === 'ask' && bashDecision === 'allow') {
+            bashDecision = 'ask';
+          }
+        }
       } else {
         bashDecision = this.evaluateSingle(ctx);
         // For shell commands, resolve 'default' to actual permission via AST
