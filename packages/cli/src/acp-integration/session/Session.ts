@@ -13836,7 +13836,6 @@ export class Session implements SessionContext {
             }
           }
 
-          let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
           const cancelStaleTodoPlanApproval = async () => {
             const configRevision =
@@ -14123,7 +14122,6 @@ export class Session implements SessionContext {
                 confirmationDetails.type === 'info')
             ) {
               // Auto-approve, skip requestPermission.
-              // didRequestPermission stays false → emitStart below.
             } else if (!hookHandled) {
               if (planShellDecision.classification !== 'not-applicable') {
                 const finalPreDisplayPlanShellError =
@@ -14156,7 +14154,6 @@ export class Session implements SessionContext {
               }
 
               // Show permission dialog via ACP requestPermission
-              didRequestPermission = true;
               const content =
                 buildPermissionRequestContent(confirmationDetails);
 
@@ -14490,28 +14487,7 @@ export class Session implements SessionContext {
             }
           }
 
-          if (didRequestPermission && !isAgentTool && !isTodoWriteTool) {
-            try {
-              await this.sendUpdate({
-                sessionUpdate: 'tool_call_update',
-                toolCallId: callId,
-                status: 'in_progress',
-                rawInput: args,
-                _meta: { toolName, startedAt: startTime },
-              });
-            } catch (emitError) {
-              debugLogger.debug(
-                '[Session.runTool] Failed to emit approved tool start update',
-                emitError,
-              );
-            }
-            const startEmissionCancellation =
-              cancelBeforeExecutionIfAborted(toolName);
-            if (startEmissionCancellation) return startEmissionCancellation;
-          }
-          if ((!didRequestPermission || isAgentTool) && !isTodoWriteTool) {
-            // Approved agents also need the initial creating frame when the
-            // provider does not emit preparation updates.
+          if (!isTodoWriteTool) {
             const startParams: ToolCallStartParams = {
               callId,
               toolName,

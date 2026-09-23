@@ -28,6 +28,7 @@ import type {
 import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useSharedNow } from '../../hooks/useSharedNow';
+import { WEB_SHELL_TURN_INDEX_PAGE_SIZE } from '../../constants/sessions';
 import type { ACPToolCall } from '../../adapters/types';
 import { daemonToolBlockToToolCall } from '../../adapters/transcriptToMessages';
 import {
@@ -299,6 +300,29 @@ export function TurnCallsPanel({
   const selectedRecordId =
     recordId ?? user?.sourceRecordIds?.[0] ?? indexedTurn?.turnId;
   const selectedPromptId = promptId ?? user?.promptId ?? indexedTurn?.promptId;
+  // Sender echoes are suppressed; navigation still tracks their local block.
+  const adoptedPromptId =
+    recordId || promptId
+      ? undefined
+      : navigation.provisionalTurns.find((turn) => turn.blockId === turnId)
+          ?.promptId;
+  const adoptedRecordId =
+    recordId || promptId || adoptedPromptId
+      ? undefined
+      : [...navigation.locations.values()].find(
+          (location) => location.view === 'live' && location.blockId === turnId,
+        )?.turnId;
+  useEffect(() => {
+    if (ownerMatches && (adoptedPromptId || adoptedRecordId))
+      onSelectPrompt?.(turnId, adoptedRecordId, adoptedPromptId, promptLabel);
+  }, [
+    ownerMatches,
+    adoptedPromptId,
+    adoptedRecordId,
+    onSelectPrompt,
+    turnId,
+    promptLabel,
+  ]);
   const latestUser = [...blocks].reverse().find(isPromptStart);
   const latestPromptId =
     navigation.provisionalTurns.at(-1)?.promptId ??
@@ -354,6 +378,7 @@ export function TurnCallsPanel({
       return;
     }
     if (!client) {
+      setLoading(false);
       setError('turnCalls.loadError');
       return;
     }
@@ -364,7 +389,7 @@ export function TurnCallsPanel({
       let resolvedRecordId = selectedRecordId;
       if (!resolvedRecordId) {
         let index = await client.getSessionTurnIndexPage(sessionId, {
-          limit: 250,
+          limit: WEB_SHELL_TURN_INDEX_PAGE_SIZE,
         });
         for (let page = 0; current && !resolvedRecordId; page += 1) {
           resolvedRecordId = index.turns.find(
@@ -375,8 +400,8 @@ export function TurnCallsPanel({
           if (page >= 99) throw new Error('Turn index loading limit exceeded');
           index = await client.getSessionTurnIndexPage(sessionId, {
             snapshot: index.snapshot,
-            start: Math.max(0, index.start - 250),
-            limit: Math.min(250, index.start),
+            start: Math.max(0, index.start - WEB_SHELL_TURN_INDEX_PAGE_SIZE),
+            limit: Math.min(WEB_SHELL_TURN_INDEX_PAGE_SIZE, index.start),
           });
         }
       }

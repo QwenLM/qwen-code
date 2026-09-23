@@ -37,7 +37,9 @@ user record UUID from its own blocks; its page-local ID must never be matched
 against the unrelated live projection. A single dock tab retargets on selection. Injected goal/runtime cards and empty scheduled messages share the panel’s anchor predicate and have no entry.
 Persist the durable user record ID or stable prompt ID in the existing
 session-scoped dock state, restoring the open state, selected tab and selected
-turn after reload. Live tabs acquire the record ID when it arrives. If live
+turn after reload. Sender-local blocks whose echoes are suppressed adopt the
+provisional prompt ID or settled live record ID from the navigation store;
+existing tab identities are never overwritten. Live tabs acquire the record ID when it arrives. If live
 blocks have been trimmed, resolve the prompt ID through the paginated turn
 index. Projection-local IDs alone must never be persisted or restored because
 they can identify another turn after reload.
@@ -146,7 +148,7 @@ fresh live backend verification remains pending.
 
 Rows use tool-call IDs across live and persisted projections, preserving expansion. Retained live children stay directly under their recorded parent instead of moving to the end of the list. Both paths compute nesting from the same retained parent chain. Row rendering and expanded detail computation are memoized, and collapsed rows do not serialize arguments/results or parse shell details. Diff output also respects the display length limit and shows a truncation notice. Missing filter types reset to All tools. File descriptions use the resolved workspace path, and status icons are decorative beside their visible labels.
 
-The ACP post-approval notification carries the tool name, approved arguments and measured start time, so running rows have their command and description before completion. Failure to deliver this informational notification is logged and does not prevent execution; cancellation is checked after delivery. Tests cover notification rejection, historical viewport UUID forwarding, nonempty agent results reduced to summaries, zero durations and scheduler starts on success, error and cancellation.
+The ACP post-approval notification uses the shared start emitter, which creates an unprepared call or updates a prepared call with full tool metadata. It carries the tool name, approved arguments and measured start time, so running rows have their command and description before completion. Failure to deliver this informational notification is logged and does not prevent execution; cancellation is checked after delivery. Tests cover notification rejection, historical viewport UUID forwarding, nonempty agent results reduced to summaries, zero durations and scheduler starts on success, error and cancellation.
 
 ## Files
 

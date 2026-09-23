@@ -10,6 +10,7 @@ import {
   reduceDaemonTranscriptEvents,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import { WEB_SHELL_TURN_INDEX_PAGE_SIZE } from '../../constants/sessions';
 
 const {
   transcript,
@@ -47,6 +48,10 @@ const {
     indexPages: new Map<
       number,
       { snapshot?: string; turns: DaemonSessionTurnIndexEntry[] }
+    >(),
+    locations: new Map<
+      string,
+      { turnId: string; blockId: string; view: 'live' | 'historical' }
     >(),
     provisionalTurns: [] as Array<{
       promptId: string;
@@ -111,6 +116,8 @@ beforeEach(() => {
   navigation.error = undefined;
   navigation.totalTurns = 0;
   navigation.indexPages.clear();
+  navigation.locations.clear();
+  connection.workspaceCwd = '/workspace';
   const loadIndex = async (start?: number) => {
     try {
       const page = await client.getSessionTurnIndexPage(connection.sessionId, {
@@ -968,7 +975,7 @@ it('restores an early prompt identity beyond the initial tail index page', async
   expect(client.getSessionTurnIndexPage).toHaveBeenCalledWith('session', {
     snapshot: 'frozen-index',
     start: 0,
-    limit: 50,
+    limit: 300 - WEB_SHELL_TURN_INDEX_PAGE_SIZE,
   });
 });
 
@@ -2236,4 +2243,230 @@ it('bounds large file diffs with an explicit truncation notice without serializi
   ).toBeLessThan(6000);
   expect(view.textContent).toContain('Diff truncated');
   expect(toJSON).not.toHaveBeenCalled();
+});
+
+it('adopts the sender prompt identity and retains live calls until one settled history read', async () => {
+  connection.sessionId = 'session';
+  prompt.status = 'streaming';
+  transcript.blocks = [
+    userBlock('local-user', 1),
+    toolBlock({
+      id: 'sender-call',
+      toolCallId: 'sender-record-call',
+      promptId: 'sender-prompt',
+      toolName: 'read_file',
+      status: 'in_progress',
+      rawInput: { description: 'Live sender call' },
+    }),
+  ];
+  navigation.provisionalTurns = [
+    {
+      provisionalId: 'admitted',
+      blockId: 'local-user',
+      promptId: 'sender-prompt',
+      label: 'Sender prompt',
+    },
+  ];
+  const selected: {
+    turnId: string;
+    recordId?: string;
+    promptId?: string;
+    promptLabel?: string;
+  } = { turnId: 'local-user' };
+  const panel = () => (
+    <TurnCallsPanel {...selected} onSelectPrompt={onSelectPrompt} />
+  );
+  const onSelectPrompt = vi.fn(
+    (
+      turnId: string,
+      recordId?: string,
+      promptId?: string,
+      promptLabel?: string,
+    ) => {
+      Object.assign(selected, { turnId, recordId, promptId, promptLabel });
+      root?.render(<I18nProvider language="en">{panel()}</I18nProvider>);
+    },
+  );
+  await act(async () => render(panel()));
+  expect(onSelectPrompt).toHaveBeenCalledWith(
+    'local-user',
+    undefined,
+    'sender-prompt',
+    undefined,
+  );
+  expect(container!.textContent).toContain('Live sender call');
+  expect(client.getSessionToolCalls).not.toHaveBeenCalled();
+  const trigger = container!.querySelector<HTMLButtonElement>(
+    '[aria-label="Prompt"]',
+  )!;
+  await act(async () => trigger.click());
+  expect(
+    document.querySelector('[role="option"][aria-selected="true"]')
+      ?.textContent,
+  ).toBe('Sender prompt');
+  await act(async () => trigger.click());
+  navigation.provisionalTurns = [];
+  navigation.indexPages.set(0, {
+    snapshot: 'settled',
+    turns: [
+      {
+        ordinal: 0,
+        turnId: 'sender-record',
+        promptId: 'sender-prompt',
+        label: 'Sender prompt',
+        kind: 'prompt',
+      },
+    ],
+  });
+  prompt.status = 'idle';
+  client.getSessionToolCalls.mockResolvedValue(
+    recordedCalls('sender-record', 'Saved sender call'),
+  );
+  await act(async () =>
+    root?.render(<I18nProvider language="en">{panel()}</I18nProvider>),
+  );
+  expect(client.getSessionToolCalls.mock.calls).toEqual([
+    ['session', 'sender-record'],
+  ]);
+  expect(container!.textContent).toContain('Saved sender call');
+});
+
+it('adopts the settled sender record identity from its live navigation location', async () => {
+  connection.sessionId = 'session';
+  transcript.blocks = [userBlock('local-user', 1)];
+  navigation.locations.set('sender-record', {
+    turnId: 'sender-record',
+    blockId: 'local-user',
+    view: 'live',
+  });
+  const onSelectPrompt = vi.fn();
+  await act(async () =>
+    render(
+      <TurnCallsPanel turnId="local-user" onSelectPrompt={onSelectPrompt} />,
+    ),
+  );
+  expect(onSelectPrompt).toHaveBeenCalledWith(
+    'local-user',
+    'sender-record',
+    undefined,
+    undefined,
+  );
+});
+
+it.each([false, true])(
+  'keeps an explicit sender identity or rejects navigation from another owner (foreign owner=%s)',
+  async (foreignOwner) => {
+    connection.sessionId = 'session';
+    prompt.status = 'streaming';
+    transcript.blocks = [userBlock('local-user', 1)];
+    navigation.provisionalTurns = [
+      {
+        provisionalId: 'admitted',
+        blockId: 'local-user',
+        promptId: 'sender-prompt',
+        label: 'Sender prompt',
+      },
+    ];
+    navigation.locations.set('sender-record', {
+      turnId: 'sender-record',
+      blockId: 'local-user',
+      view: 'live',
+    });
+    client.getSessionToolCalls.mockResolvedValue(
+      recordedCalls('explicit-record', 'Explicit calls'),
+    );
+    const onSelectPrompt = vi.fn();
+    await act(async () =>
+      render(
+        <TurnCallsPanel
+          turnId="local-user"
+          recordId={foreignOwner ? undefined : 'explicit-record'}
+          promptId={foreignOwner ? undefined : 'explicit-prompt'}
+          ownerSessionId={foreignOwner ? 'another-session' : undefined}
+          onSelectPrompt={onSelectPrompt}
+        />,
+      ),
+    );
+    expect(onSelectPrompt).not.toHaveBeenCalled();
+  },
+);
+
+it('clears an in-flight loading flag when the workspace client disappears', async () => {
+  connection.sessionId = 'session';
+  transcript.blocks = [];
+  let finish!: (value: ReturnType<typeof recordedCalls>) => void;
+  client.getSessionToolCalls.mockReturnValue(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await act(async () =>
+    render(<TurnCallsPanel turnId="historical" recordId="record" />),
+  );
+  const refresh = () =>
+    [...container!.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === 'Refresh',
+    )!;
+  expect(refresh().disabled).toBe(true);
+  connection.workspaceCwd = '';
+  await act(async () =>
+    root?.render(
+      <I18nProvider language="en">
+        <TurnCallsPanel turnId="historical" recordId="record" />
+      </I18nProvider>,
+    ),
+  );
+  await act(async () => finish(recordedCalls('record', 'Stale response')));
+  expect(container!.querySelector('[role="alert"]')).not.toBeNull();
+  expect(refresh().disabled).toBe(false);
+  expect(container!.textContent).not.toContain('Stale response');
+});
+
+it('resolves a prompt-only history identity using the shared turn-index page size', async () => {
+  connection.sessionId = 'session';
+  transcript.blocks = [];
+  const size = WEB_SHELL_TURN_INDEX_PAGE_SIZE;
+  client.getSessionTurnIndexPage
+    .mockResolvedValueOnce({
+      snapshot: 'snapshot',
+      start: size,
+      totalTurns: size * 2,
+      turns: [
+        {
+          ordinal: size,
+          turnId: 'later-record',
+          promptId: 'later-prompt',
+          kind: 'prompt',
+          label: 'Later',
+        },
+      ],
+    })
+    .mockResolvedValueOnce({
+      snapshot: 'snapshot',
+      start: 0,
+      totalTurns: size * 2,
+      turns: [
+        {
+          ordinal: 0,
+          turnId: 'wanted-record',
+          promptId: 'wanted-prompt',
+          kind: 'prompt',
+          label: 'Wanted',
+        },
+      ],
+    });
+  client.getSessionToolCalls.mockResolvedValue(
+    recordedCalls('wanted-record', 'Resolved calls'),
+  );
+  await act(async () =>
+    render(<TurnCallsPanel turnId="unresolved" promptId="wanted-prompt" />),
+  );
+  expect(client.getSessionTurnIndexPage.mock.calls).toEqual([
+    ['session', { limit: size }],
+    ['session', { snapshot: 'snapshot', start: 0, limit: size }],
+  ]);
+  expect(client.getSessionToolCalls).toHaveBeenCalledWith(
+    'session',
+    'wanted-record',
+  );
 });
