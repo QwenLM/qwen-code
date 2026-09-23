@@ -1518,7 +1518,12 @@ type SessionActionsWithCreate = {
 
 type NewSessionIntent =
   | { kind: 'global' }
-  | { kind: 'inherit' }
+  /**
+   * Stay in the current context. From a Live chat that means a fresh Live
+   * conversation, unless `leaveLive` sends the new chat to the trusted
+   * primary workspace the way a cold draft starts.
+   */
+  | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
 
 type StandaloneRecoveryResolution =
@@ -13091,6 +13096,14 @@ export function App({
                 cwd: connectionRef.current.workspaceCwd,
               }
             : undefined);
+        if (nextContext?.kind === 'live' && intent.leaveLive) {
+          const primaryCwd = workspacesRef.current.find(
+            (entry) => entry.primary && entry.trusted !== false,
+          )?.cwd;
+          nextContext = primaryCwd
+            ? { kind: 'workspace', cwd: primaryCwd }
+            : undefined;
+        }
         if (nextContext?.kind === 'live') {
           pendingManualTitleRef.current = undefined;
           gitModeIntentRef.current = { mode: 'current' };
@@ -18948,12 +18961,14 @@ export function App({
                   // A cwd-less New task inherits the current context: a
                   // workspace chat stays in its workspace and a cold draft
                   // lands on the primary one. Projectless targets are chosen
-                  // in the composer's workspace picker instead.
+                  // in the composer's workspace picker instead. From a Live
+                  // chat it opens an ordinary task; a fresh voice conversation
+                  // comes from the Live controls.
                   onNewSession={(workspaceCwd) =>
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'inherit' },
+                        : { kind: 'inherit', leaveLive: true },
                     )
                   }
                   onNewStandaloneSession={() =>

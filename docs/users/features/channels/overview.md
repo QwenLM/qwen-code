@@ -71,6 +71,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `dmPolicy`          | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
 | `groupSenderPolicy` | No               | Who may use the bot inside an admitted group: `inherit` (default, follows `senderPolicy`), `open`, or `allowlist` (checked against `allowedGroupUsers`)                                                                 |
 | `allowedGroupUsers` | No               | Group-member IDs allowed when `groupSenderPolicy: "allowlist"`. Separate from `allowedUsers`                                                                                                                            |
+| `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset derives it. See [Shared-Session Operators](#shared-session-operators)                                                                      |
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
 | `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
@@ -95,9 +96,21 @@ Controls who can interact with the bot:
 
 This axis applies to `groupPolicy: "open"` and `"allowlist"` groups. Under `groupPolicy: "pairing"` an approved group authorizes all of its members and this axis is not consulted.
 
-Shared-session commands (`/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, and the loop tool) still follow `allowedUsers`: a member admitted only by the group axis can start a turn in a shared group session but cannot answer that turn's permission prompts or run those commands unless they are also in `allowedUsers`. Switching group traffic to `allowedGroupUsers` also re-authorizes already-stored group loops against that list, so every existing group-loop creator must appear in it or their jobs are permanently disabled on the next fire.
+The Web Shell channel editor does not show `groupSenderPolicy`, `allowedGroupUsers`, or `operators` yet. Set them in `settings.json`; saving the channel from the editor keeps them, because unrendered keys are carried through unchanged.
 
-The Web Shell channel editor does not show `groupSenderPolicy` or `allowedGroupUsers` yet. Set them in `settings.json`; saving the channel from the editor keeps them, because unrendered keys are carried through unchanged.
+### Shared-Session Operators
+
+In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+
+The operators are, in order:
+
+1. `operators`, when set. It is authoritative even when empty: `"operators": []` means nobody may operate a shared session.
+2. Otherwise `allowedUsers`, when it is not empty.
+3. Otherwise anyone who may speak in the conversation — with one exception. Under `groupSenderPolicy: "open"` the group admits members nobody vouched for by name, so in a group the direct-message axis decides instead: everyone under `senderPolicy: "open"`, paired users under `"pairing"`. Under `groupSenderPolicy: "allowlist"` the members in `allowedGroupUsers` are operators. An approved group under `groupPolicy: "pairing"` admits all of its members, and all of them may operate its sessions.
+
+For example, `senderPolicy: "pairing"` with `groupSenderPolicy: "open"` lets every group member start a turn, while only the users you approved through pairing may answer its permission prompts. Set `operators` when you want a different list.
+
+A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
 ### Session Scope
 
@@ -551,7 +564,7 @@ qwen channel status --daemon-url http://127.0.0.1:4170 --token secret
 qwen channel stop --daemon-url http://127.0.0.1:4170 --token secret
 ```
 
-This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. An explicit `--channel` selection takes precedence and fails daemon startup if it cannot become ready. On a flagless boot, every trusted registered workspace's own `serve.channels` setting is restored, and a name that cannot be hosted is skipped with a log instead of stopping the others. `all` remains primary-workspace only. Without either source, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`.
+This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. An explicit `--channel` selection takes precedence and fails daemon startup if it cannot become ready. On a flagless boot, every trusted registered workspace's own `serve.channels` setting is restored, and a name that cannot be hosted is skipped with a log instead of stopping the others. `all` remains primary-workspace only. Registering a workspace later restores its channels too — without holding the registration open — once per daemon run, and not at all when the daemon was started with an explicit `--channel` or after `qwen channel stop`. Unlike the boot restore, one name it cannot host costs that workspace its whole list. Without any of these sources, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`, or until a workspace that configures its own `serve.channels` registers.
 
 Automatic restore skips invalid startup settings and validation or lease failures that occur before workers start, while preserving unrelated settings. After a worker startup fails, the daemon continues only once cleanup succeeds. A global runtime startup timeout or an unconfirmed worker stop still follows the normal startup-failure path; the service lease remains held while worker termination is unconfirmed. Check the daemon log for messages identifying `serve.channels` when a channel does not restore.
 

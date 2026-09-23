@@ -1615,6 +1615,53 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('stores an operators list and refuses one that is not a string array', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        operators: ['admin'],
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+    const before = fs.readFileSync(settingsPath, 'utf8');
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot'],
+    ).toMatchObject({ operators: ['admin'] });
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          operators: 'admin',
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "operators" must be a string array.',
+    });
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('preserves an unchanged invalid nested object while a sibling property changes', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

@@ -432,17 +432,18 @@ function parseGroupSenderPolicy(
   return value as NonNullable<ChannelConfig['groupSenderPolicy']>;
 }
 
-function parseAllowedGroupUsers(
+function parseUserIdList(
   channelName: string,
   rawConfig: Record<string, unknown>,
+  field: 'allowedGroupUsers' | 'operators',
 ): string[] | undefined {
-  const value = rawConfig['allowedGroupUsers'];
+  const value = rawConfig[field];
   if (value === undefined || value === null) {
     return undefined;
   }
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
     throw new Error(
-      `Channel "${channelName}" field "allowedGroupUsers" must be an array of user IDs.`,
+      `Channel "${channelName}" field "${field}" must be an array of user IDs.`,
     );
   }
   return value as string[];
@@ -600,7 +601,8 @@ export async function parseChannelConfig(
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
     groupSenderPolicy: parseGroupSenderPolicy(name, rawConfig),
-    allowedGroupUsers: parseAllowedGroupUsers(name, rawConfig),
+    allowedGroupUsers: parseUserIdList(name, rawConfig, 'allowedGroupUsers'),
+    operators: parseUserIdList(name, rawConfig, 'operators'),
     groups,
     webhooks,
   };
