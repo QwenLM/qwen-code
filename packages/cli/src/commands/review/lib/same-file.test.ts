@@ -23,12 +23,18 @@ import { isSameFile } from './same-file.js';
 // reports ino 0 while enabled, everything else delegates to the real thing.
 const inoZeroVolume = vi.hoisted(() => ({ enabled: false }));
 // Lets a test pose as a volume whose 64-bit file ids exceed the JS
-// safe-integer range (NTFS): while set, every stat reports that exact id —
-// a constant posing as a hard-link pair, a function of the path posing as
-// distinct files — as a bigint when the caller asks for bigint stats, and
-// as the rounded (unsafe) double a number-backed `Stats` would carry.
+// safe-integer range (NTFS): while set, every stat reports the id the pose
+// returns — a constant, or a function of the path and the path's REAL id, so
+// a test can lift genuine ids above 2^60 and keep a hard-linked pair sharing
+// one id while unrelated files stay distinct — as a bigint when the caller
+// asks for bigint stats, and as the rounded (unsafe) double a number-backed
+// `Stats` would carry. Only `ino` is posed: `dev` stays the real stat's, so
+// the inode comparison below is what decides.
 const bigInodeVolume = vi.hoisted(() => ({
-  inode: undefined as bigint | ((filePath: string) => bigint) | undefined,
+  inode: undefined as
+    | bigint
+    | ((filePath: string, realInode: bigint) => bigint)
+    | undefined,
 }));
 // Lets a test pose as a case-insensitive volume (FAT/exFAT/SMB): every
 // registered case-variant spelling stats and canonicalises as the file it
@@ -57,7 +63,10 @@ vi.mock('node:fs', async (importOriginal) => {
       posed.ino = bigint ? 0n : 0;
     } else if (bigInodeVolume.inode !== undefined) {
       const pose = bigInodeVolume.inode;
-      const inode = typeof pose === 'function' ? pose(String(filePath)) : pose;
+      const inode =
+        typeof pose === 'function'
+          ? pose(String(filePath), BigInt(stats.ino))
+          : pose;
       posed.ino = bigint ? inode : Number(inode);
     }
     return stats;
@@ -195,14 +204,29 @@ describe('isSameFile', () => {
     // open. Bigint stats keep the id exact, so dev/ino decides and the
     // canonical-spelling fallback is reserved for volumes reporting no id
     // at all.
+    //
+    // The pose LIFTS each path's real id above 2^60 rather than reporting a
+    // constant, the shape `standalone-deletion-journal.test.ts` uses: the
+    // hard-linked pair keeps sharing one id and the unrelated file below
+    // keeps a different one, so the `toBe(true)` half fails if the
+    // comparator degrades to spellings again (the pre-fix shape) and the
+    // `toBe(false)` half fails if `{ bigint: true }` is dropped from
+    // `tryStat` — under a number-backed `Stats` the lifted ids round into
+    // one double and every pair on the volume would compare equal. A
+    // constant pose passes both halves for the wrong reason: it equates
+    // unrelated files too, so the hard link it creates is not load-bearing.
     const original = join(dir, 'original.json');
     writeFileSync(original, '{}');
     const linked = join(dir, 'linked.json');
     linkSync(original, linked);
-    bigInodeVolume.inode = 2n ** 60n + 2n;
+    const unrelated = join(dir, 'unrelated.json');
+    writeFileSync(unrelated, '{}');
+    bigInodeVolume.inode = (_filePath, realInode) => 2n ** 60n + realInode;
     try {
       expect(isSameFile(original, linked)).toBe(true);
       expect(isSameFile(linked, original)).toBe(true);
+      expect(isSameFile(original, unrelated)).toBe(false);
+      expect(isSameFile(unrelated, linked)).toBe(false);
     } finally {
       bigInodeVolume.inode = undefined;
     }

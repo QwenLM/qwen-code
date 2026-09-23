@@ -21,6 +21,14 @@ import { basename, dirname, join } from 'node:path';
 // consume, and core's looser predicate (`Number(ino) !== 0`) stays as-is so
 // `assertVerifiableTranscriptIdentity` does not flip on >2^53 Windows
 // transcript inodes.
+//
+// The non-zero rule inside `isSameFile` below is therefore a deliberate
+// LOCAL restatement, listed in the lockstep ledger at that predicate's
+// declaration site (utils/conversation-directory-identity.ts). Core's
+// bigint-tolerant `hasVerifiableInode` (core/src/utils/file-identity.ts)
+// states the same rule and would be equivalent here; it is not imported
+// because this helper is a leaf that imports only node builtins, and one
+// comparison does not justify coupling it to core.
 function tryStat(path: string): BigIntStats | undefined {
   try {
     return statSync(path, { bigint: true });

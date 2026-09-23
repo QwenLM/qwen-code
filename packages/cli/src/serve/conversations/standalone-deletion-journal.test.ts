@@ -492,6 +492,45 @@ describe('StandaloneDeletionJournal', () => {
     });
   });
 
+  it('refuses an owner handle whose identity disagrees with the expected one', async () => {
+    // The at-open guard in `openDurableDirectory` is the only check covering
+    // the lstat→open window: the post-open `assertDirectoryIdentity` re-lstats
+    // the PATH, so it cannot see an fd bound to a substituted inode. Before
+    // the `{ bigint: true }` conversion the guard was silently inert on a
+    // >2^53 NTFS id (both sides unverifiable → device-only compare → a
+    // substituted same-device directory passed); now it discriminates, so it
+    // needs a witness. Dropping only the `sameDirectoryIdentity` term used to
+    // leave the suite green: the pre-sync re-check in `syncDurableDirectory`
+    // backstops the same substituted handle and still rejects — but only
+    // AFTER the journal directory was created inside it. The ENOENT assertion
+    // below is what makes this case mutation-visible.
+    const root = await workspace.getRoot();
+    const record = await makeRecord('prepared');
+    // BigIntStats of a DIFFERENT same-device directory. The fake handle must
+    // answer in bigint: a number-backed one rejects on the representation
+    // mismatch (`dev: number !== bigint`) instead of the identity mismatch,
+    // witnessing nothing — the same reason the sync case above stats with
+    // `{ bigint: true }`.
+    const substituted = await fs.stat(stableBaseDir, { bigint: true });
+    openMock.mockImplementationOnce(async (filePath: PathLike) => {
+      expect(filePath.toString()).toBe(ownerDirectory);
+      return {
+        stat: async () => substituted,
+        sync: async () => undefined,
+        close: async () => undefined,
+      } as unknown as fs.FileHandle;
+    });
+
+    await expect(journal.writePrepared(record, root)).rejects.toMatchObject({
+      reason: 'compromised',
+    });
+    // The guard fired before any side effect: the journal directory was never
+    // created, so nothing was written into the substituted tree.
+    await expect(
+      fs.lstat(path.join(ownerDirectory, 'deletions')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('does not hide Windows journal owner open failures', async () => {
     const root = await workspace.getRoot();
     const record = await makeRecord('prepared');

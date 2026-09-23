@@ -136,9 +136,23 @@ function sameDirectoryIdentity(
 
 // Verifiability is the bigint non-zero rule: with `{ bigint: true }` stats
 // the filesystem's id is exact, so only a volume reporting no id at all
-// (`ino === 0` — FAT/exFAT/SMB-style) is unverifiable. The shared
-// number-typed `hasVerifiableInode` predicate is deliberately NOT used here;
-// widening it is out of scope (see its declaration site).
+// (`ino === 0` — FAT/exFAT/SMB-style) is unverifiable. On such a volume the
+// comparator above degrades to device-only, so ANY two same-device journal
+// directories compare equal — an accepted fail-open, since refusing there
+// would make the journal unusable on those volumes altogether.
+//
+// The rule is restated here rather than called, and both alternatives are
+// deliberate (this restatement is listed in the ledger at the cli
+// predicate's declaration site, utils/conversation-directory-identity.ts):
+// - core's `hasVerifiableInode` (packages/core/src/utils/file-identity.ts)
+//   states the same non-zero rule and accepts `number | bigint`, but this
+//   module is loaded from the serve entry and keeps core out of its import
+//   graph — the bundle-closure trade-off serve/managed-scratch-workspace.ts
+//   records for that very predicate;
+// - the cli's number-typed predicate of the same name is a DIFFERENT rule
+//   (`Number.isSafeInteger(ino) && ino > 0`). Applying it to the exact
+//   bigint ids this module now stats would report every >2^53 NTFS id
+//   unverifiable and re-open #11848.
 function directoryIdentityOf(stat: BigIntStats): DirectoryIdentity {
   return {
     device: stat.dev,
