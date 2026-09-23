@@ -1857,7 +1857,7 @@ export default {
   tokens: 'Tokens',
   Used: 'Verwendet',
   Free: 'Frei',
-  'Autocompact buffer': 'Autokomprimierungs-Puffer',
+  'Autocompact buffer': 'Komprimierungspuffer',
   'Usage by category': 'Verwendung nach Kategorie',
   'System prompt': 'System-Prompt',
   'Built-in tools': 'Integrierte Tools',
@@ -1867,7 +1867,7 @@ export default {
   Messages: 'Nachrichten',
   'Startup context': 'Startkontext',
   Unattributed: 'Nicht zugeordnet',
-  'Cached prefix': 'Zwischengespeichertes Präfix',
+  'Cached prefix': 'Cache-Präfix',
   'Run /context detail for per-item breakdown.':
     'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
   active: 'aktiv',

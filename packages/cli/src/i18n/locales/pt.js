@@ -1856,7 +1856,7 @@ export default {
   tokens: 'tokens',
   Used: 'Usado',
   Free: 'Livre',
-  'Autocompact buffer': 'Buffer de autocompactação',
+  'Autocompact buffer': 'Buffer de compactação',
   'Usage by category': 'Uso por categoria',
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',

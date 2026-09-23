@@ -1904,7 +1904,7 @@ export default {
   'Context window': 'Fenêtre de contexte',
   Used: 'Utilisé',
   Free: 'Libre',
-  'Autocompact buffer': 'Tampon de compaction automatique',
+  'Autocompact buffer': 'Réserve de compaction',
   'Usage by category': 'Utilisation par catégorie',
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',

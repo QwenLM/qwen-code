@@ -1899,7 +1899,7 @@ export default {
   tokens: 'tokens',
   Used: 'Usat',
   Free: 'Lliure',
-  'Autocompact buffer': 'Memòria intermèdia de compactació automàtica',
+  'Autocompact buffer': 'Reserva de compactació',
   'Usage by category': 'Ús per categoria',
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',

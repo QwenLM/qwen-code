@@ -473,8 +473,8 @@ export function projectContextUsage(item: Record<string, unknown>): string {
       `█ ${label} ${fmtTokensShort(value)} tokens (${pct(value, windowSize)}%)`,
     );
   }
-  if (totalTokens > 0) {
-    const messages = Number(breakdown['messages'] ?? 0);
+  const messages = Number(breakdown['messages'] ?? 0);
+  if (totalTokens > 0 || messages > 0) {
     lines.push(
       `█ Messages ${fmtTokensShort(messages)} tokens (${pct(messages, windowSize)}%)`,
     );
@@ -565,7 +565,7 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ];
     // Loaded skills first, then by total (listing + body) token cost.
     skills.sort((a, b) => {
-      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
       const aTotal = a.tokens + (a.bodyTokens ?? 0);
       const bTotal = b.tokens + (b.bodyTokens ?? 0);
       return bTotal - aTotal;

@@ -105,6 +105,33 @@ describe('ContextUsageMessage', () => {
     },
   );
 
+  it('shows the cached prefix, startup context and unattributed rows only when present (#12235)', () => {
+    const status = makeStatus(60, false);
+    // Rows still sum to the total: 20 + 10 + 5 + 5 + 12 + 8 = 60.
+    Object.assign(status.usage.breakdown, {
+      messages: 0,
+      startupContext: 12,
+      unattributed: 8,
+      cachedTokens: 30,
+    });
+    const text = render(status).textContent;
+    expect(text).toContain('Cached prefix 30 (30.0%)');
+    expect(text).toContain('Startup context 12 (12.0%)');
+    expect(text).toContain('Unattributed 8 (8.0%)');
+
+    const plain = render(makeStatus(60, false)).textContent;
+    expect(plain).not.toContain('Cached prefix');
+    expect(plain).not.toContain('Startup context');
+    expect(plain).not.toContain('Unattributed');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    const status = makeStatus(0, true);
+    status.usage.breakdown.messages = 25;
+    expect(render(status).textContent).toContain('Messages 25 (25.0%)');
+    expect(render(makeStatus(0, true)).textContent).not.toContain('Messages');
+  });
+
   it('separates remaining capacity from free space and clamps exhausted capacity', () => {
     const container = render(makeStatus(60, false));
     expect(container.querySelector('[class*="total"]')?.textContent).toBe(

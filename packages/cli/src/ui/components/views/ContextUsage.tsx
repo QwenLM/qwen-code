@@ -23,6 +23,10 @@ const BUFFER = '\u2592'; // ▒ - medium shade (autocompact buffer)
 const EMPTY = '\u2591'; // ░ - light shade (free space)
 
 const CONTENT_WIDTH = 56;
+/** Label column of a category row; a wider translated label wraps the row. */
+export const CATEGORY_LABEL_WIDTH = 24;
+/** Label column of a compaction-threshold row. */
+export const THRESHOLD_LABEL_WIDTH = 22;
 
 interface ContextUsageProps {
   modelName: string;
@@ -130,7 +134,7 @@ const CategoryRow: React.FC<{
       <Box width={2}>
         <Text color={symbolColor || theme.text.secondary}>{symbol}</Text>
       </Box>
-      <Box width={24}>
+      <Box width={CATEGORY_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -160,7 +164,7 @@ const ThresholdRow: React.FC<{
           {isCurrent ? '▶' : ' '}
         </Text>
       </Box>
-      <Box width={22}>
+      <Box width={THRESHOLD_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -230,7 +234,7 @@ const CompactionThresholds: React.FC<{
       <Box width={2}>
         <Text> </Text>
       </Box>
-      <Box width={22}>
+      <Box width={THRESHOLD_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{t('Current tier')}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -295,7 +299,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   );
   // Sort skills: loaded first, then by total token cost descending
   const sortedSkills = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     const aTotal = a.tokens + (a.bodyTokens ?? 0);
     const bTotal = b.tokens + (b.bodyTokens ?? 0);
     return bTotal - aTotal;
@@ -468,8 +472,10 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           symbolColor={theme.text.accent}
         />
       )}
-      {/* Show Messages whenever a numeric token count is available. */}
-      {hasTokenCount && (
+      {/* Show Messages whenever a token count is available, or when an
+          estimated history (after /model, /restore or a resume) drives the
+          tier. */}
+      {(hasTokenCount || breakdown.messages > 0) && (
         <CategoryRow
           symbol={FILLED}
           label={t('Messages')}

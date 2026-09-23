@@ -27,6 +27,7 @@ import {
   ToolNames,
   buildAvailableSkillsReminder,
   buildSkillLlmContent,
+  isSkillListingReminder,
   computeThresholds,
   getStartupContextLength,
   isMediaPolicyToolHiddenFromModel,
@@ -141,10 +142,6 @@ function unescapeXml(text: string): string {
     .replace(/&amp;/g, '&');
 }
 
-// `buildAvailableSkillsReminder` emits either the listing or, when nothing is
-// available, a fixed notice in the same prelude slot.
-const AVAILABLE_SKILLS_OPEN = '<available_skills>';
-const NO_SKILLS_NOTICE = 'No skills are currently available.';
 const SKILL_LISTING_ENTRY =
   /<skill>\n<name>\n([\s\S]*?)\n<\/name>[\s\S]*?<\/skill>/g;
 
@@ -159,12 +156,6 @@ interface SkillListingCost {
   tokens: number;
   /** Per-entry cost, keyed by lower-cased skill name. */
   byName: Map<string, SkillListingEntryCost>;
-}
-
-function isSkillListingText(text: string): boolean {
-  return (
-    text.includes(AVAILABLE_SKILLS_OPEN) || text.includes(NO_SKILLS_NOTICE)
-  );
 }
 
 // Measured from the rendered text rather than re-derived from skill configs,
@@ -194,15 +185,16 @@ function mergeSkillListing(
 /**
  * Skill-listing reminders that landed *after* the startup prelude. A skill
  * enabled mid-session is announced by a tail `<system-reminder>` carrying an
- * `<available_skills>` block (`buildChangedSkillsReminder`, and the scheduler's
- * equivalent), which `getStartupContextLength` never inspects. Those tokens are
- * listing cost, not conversation, so they are measured here and billed with the
- * startup listing under `skills` — otherwise the entry is billed to `messages`
- * while its detail row prints `0`.
+ * `<available_skills>` block (`buildChangedSkillsReminder`), which
+ * `getStartupContextLength` never inspects. Those tokens are listing cost, not
+ * conversation, so they are measured here and billed with the startup listing
+ * under `skills` — otherwise the entry is billed to `messages` while its detail
+ * row prints `0`.
  *
- * Text that merely mentions `<available_skills>` without a single `<skill>`
- * entry (a pasted example, the fixed "no skills" notice) is left alone: only
- * measured listings are excluded from `messages`.
+ * Only core's own listing reminders qualify (`isSkillListingReminder`); other
+ * text that mentions `<available_skills>` stays in `messages`. A qualifying
+ * reminder with no `<skill>` entry is left there too: only measured listings
+ * are excluded from `messages`.
  */
 function measureTailSkillListings(conversation: Content[]): {
   listing: SkillListingCost;
@@ -214,7 +206,7 @@ function measureTailSkillListings(conversation: Content[]): {
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       const text = part.text;
-      if (typeof text !== 'string' || !isSkillListingText(text)) continue;
+      if (typeof text !== 'string' || !isSkillListingReminder(text)) continue;
       const measured = measureSkillListing(text);
       if (measured.byName.size === 0) continue;
       mergeSkillListing(listing, measured);
@@ -236,7 +228,7 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
   for (const content of prelude) {
     for (const part of content.parts ?? []) {
       if (typeof part.text !== 'string') continue;
-      if (isSkillListingText(part.text)) {
+      if (isSkillListingReminder(part.text)) {
         mergeSkillListing(skillListing, measureSkillListing(part.text));
       } else {
         startupContextTokens += estimateContextTextTokens(part.text);
@@ -532,11 +524,13 @@ export async function collectContextData(
   // subtracts the Skill tool definition *because* `skills` carries it.
   const rowedNames = new Set(skillConfigs.map((s) => s.name.toLowerCase()));
   for (const [key, entry] of skillListing.byName) {
+    // Rendered into the listing, so model-invocable by definition. That holds
+    // for a skill disabled after the listing went out as well: its entry is
+    // still billed under `skills`, so its row must not be filtered away.
+    enabledSkillNames.add(key);
     if (rowedNames.has(key)) continue;
     rowedNames.add(key);
-    // Rendered into the listing, so model-invocable by definition.
-    enabledSkillNames.add(key);
-    skills.push({ name: entry.name, tokens: entry.tokens });
+    skills.push({ name: entry.name, tokens: entry.tokens, loaded: false });
   }
 
   conversationTokens = estimateConversationTokens(conversationHistory, {
@@ -610,10 +604,11 @@ export async function collectContextData(
     );
     displayMcpTools = mcpToolsTotalTokens;
     displayMemoryFiles = memoryFilesTokens;
-    messagesTokens = 0;
     // Include the conversation: a `/model` switch, `/restore` or a resume
     // zeroes the provider count while leaving `this.history` intact, and such a
-    // session must not report a 100K history as free window.
+    // session must not report a 100K history as free window. The same estimate
+    // drives the tier, so it is reported as `messages` rather than hidden.
+    messagesTokens = conversationTokens;
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
     detailMcpTools = mcpTools;
@@ -905,7 +900,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       ),
     );
   }
-  if (hasTokenCount) {
+  if (hasTokenCount || breakdown.messages > 0) {
     lines.push(
       fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
     );
@@ -925,7 +920,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     const sortedMcp = [...mcpTools].sort((a, b) => b.tokens - a.tokens);
     const sortedMemory = [...memoryFiles].sort((a, b) => b.tokens - a.tokens);
     const sortedSkills = [...skills].sort((a, b) => {
-      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
       return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
     });
 

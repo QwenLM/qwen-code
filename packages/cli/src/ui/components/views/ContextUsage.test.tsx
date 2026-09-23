@@ -65,6 +65,26 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(frame).not.toContain('No API response yet');
   });
 
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    const frame = (messages: number) =>
+      render(
+        <ContextUsage
+          modelName="qwen3-coder"
+          totalTokens={0}
+          contextWindowSize={128_000}
+          breakdown={makeBreakdown('warn', { messages })}
+          builtinTools={[]}
+          mcpTools={[]}
+          memoryFiles={[]}
+          skills={[]}
+          isEstimated={true}
+        />,
+      ).lastFrame() ?? '';
+
+    expect(frame(90_000)).toContain('Messages');
+    expect(frame(0)).not.toContain('Messages');
+  });
+
   it('renders the startup context, unattributed and cached prefix rows only when nonzero (#12033)', () => {
     const present = render(
       <ContextUsage

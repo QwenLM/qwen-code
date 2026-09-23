@@ -220,7 +220,7 @@ function SkillsSection({
   };
 }) {
   const sorted = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
   });
   if (sorted.length === 0) return null;
@@ -472,7 +472,7 @@ export function ContextUsageMessage({
               tokens={breakdown.startupContext!}
             />
           )}
-          {hasTokenCount && (
+          {(hasTokenCount || breakdown.messages > 0) && (
             <CategoryRow
               {...categoryProps}
               label={t('contextUsage.messages')}

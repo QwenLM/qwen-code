@@ -1403,7 +1403,7 @@ export default {
   Messages: 'メッセージ',
   'Startup context': '起動時コンテキスト',
   Unattributed: '未分類',
-  'Cached prefix': 'キャッシュ済みプレフィックス',
+  'Cached prefix': 'キャッシュ済み接頭辞',
   'Run /context detail for per-item breakdown.':
     '/context detail を実行すると項目ごとの内訳を表示します。',
   active: '有効',

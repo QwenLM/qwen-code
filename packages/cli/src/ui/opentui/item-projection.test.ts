@@ -202,7 +202,7 @@ describe('projectContextUsage', () => {
     // nonzero on purpose — `Cached prefix` and `Unattributed` are total-gated,
     // so at 0 they cannot render with or without their own guard, and only the
     // widened `startupContext` skip would be witnessed. This is also the shape
-    // of an older daemon payload and of the pre-first-turn estimated view.
+    // of an older daemon payload; the pre-first-turn view is pinned below.
     expect(text).not.toContain('Cached prefix');
     expect(text).not.toContain('Startup context');
     expect(text).not.toContain('Unattributed');
@@ -219,19 +219,71 @@ describe('projectContextUsage', () => {
         mcpTools: 0,
         memoryFiles: 200,
         skills: 0,
-        messages: 3000,
+        // Rows sum to totalTokens, freeSpace is window − total − buffer, and
+        // the cached prefix is part of the total (ui/types.ts invariant).
+        messages: 900,
         freeSpace: 94000,
         autocompactBuffer: 1000,
         startupContext: 1200,
         unattributed: 900,
-        cachedTokens: 30000,
+        cachedTokens: 3000,
       },
       isEstimated: false,
       showDetails: false,
     });
-    expect(text).toContain('█ Cached prefix 30.0k tokens (30.0%)');
+    expect(text).toContain('█ Cached prefix 3.0k tokens (3.0%)');
     expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
     expect(text).toContain('█ Unattributed 900 tokens (0.9%)');
+  });
+
+  it('renders the pre-first-turn estimate: startup context shown, no messages yet (#12235)', () => {
+    // The producer's shape before any request: no provider total, a nonzero
+    // startup prelude, and no conversation. `Startup context` is the one
+    // optional row that is not total-gated.
+    const text = projectContextUsage({
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 300,
+        startupContext: 1200,
+        messages: 0,
+        freeSpace: 95500,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    });
+    expect(text).toContain('No API response yet.');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).not.toContain('Messages');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    // After `/model`, `/restore` or a resume the provider total is 0 while the
+    // history is intact; that estimate drives the tier, so it must be visible.
+    const text = projectContextUsage({
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 40000,
+        freeSpace: 57000,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    });
+    expect(text).toContain('█ Messages 40.0k tokens (40.0%)');
   });
 
   it('shows the no-API-response notice before the first turn', () => {
