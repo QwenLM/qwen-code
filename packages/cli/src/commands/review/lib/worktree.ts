@@ -1361,6 +1361,14 @@ export function filterCommandsIn(
     'value' in configuredWorktreeRead && configuredWorktreeRead.value
       ? resolve(commonDir, configuredWorktreeRead.value)
       : null;
+  const rootNamesGitDir = (root: string, expectedGitDir: string): boolean => {
+    const marker = gitOutput(
+      commonDir,
+      ['rev-parse', '--resolve-git-dir', join(root, '.git')],
+      128,
+    );
+    return 'value' in marker && samePath(marker.value, expectedGitDir);
+  };
   const trackedAt = (
     root: string,
     file: string,
@@ -1456,8 +1464,22 @@ export function filterCommandsIn(
           'value' in discoveredTop
             ? trackedAt(discoveredTop.value, file)
             : null;
-        verdict =
-          tracked === null ? 'unknown' : tracked ? 'controlled' : 'outside';
+        verdict = tracked === true ? 'controlled' : 'unknown';
+        if (tracked === false && 'value' in discoveredTop) {
+          // core.worktree can redirect --show-toplevel even to an ancestor,
+          // where a different relative path produces a misleading index miss.
+          const discoveredGitDir = gitOutput(
+            dirname(file),
+            ['rev-parse', '--absolute-git-dir'],
+            128,
+          );
+          if (
+            'value' in discoveredGitDir &&
+            rootNamesGitDir(discoveredTop.value, discoveredGitDir.value)
+          ) {
+            verdict = 'outside';
+          }
+        }
       } else if (
         ('absent' in discoveredCommon && !discoveredCommon.absent) ||
         ('absent' in configuredWorktreeRead && !configuredWorktreeRead.absent)
@@ -1466,7 +1488,12 @@ export function filterCommandsIn(
       } else if (configuredWorktree !== null) {
         const tracked = trackedAt(configuredWorktree, file, true);
         verdict =
-          tracked === null ? 'unknown' : tracked ? 'controlled' : 'outside';
+          tracked === true
+            ? 'controlled'
+            : tracked === false &&
+                rootNamesGitDir(configuredWorktree, commonDir)
+              ? 'outside'
+              : 'unknown';
       } else {
         verdict = 'outside';
       }
@@ -1538,27 +1565,33 @@ export function filterCommandsIn(
     '--no-includes',
     '--list',
   ]);
+  if (trustedOriginRecords === null && trustedFilterRecords?.length) {
+    unread.add(
+      'the global/system graph delivers filter commands but its origins could not be read completely - not screened',
+    );
+  }
   if (trustedFilterRecords !== null && trustedOriginRecords !== null) {
     // Git's native global/system slots remain user-owned when another
     // worktree tracks them; the screened checkout must not be able to rewrite
     // the slot, and repository admin files never gain this exception.
-    for (const { file } of nativeSlotRecords ?? []) {
+    const nativeOrigins = new Set(
+      (nativeSlotRecords ?? []).map(({ file }) => originKey(file)),
+    );
+    const screenedIdentity = pathIdentity(screenedTree);
+    for (const { file } of trustedOriginRecords) {
       const spelled = resolve(file);
       const real = pathIdentity(file);
       const slot = join(pathIdentity(dirname(file)), basename(file));
       if (
-        !isSubpath(pathIdentity(screenedTree), slot) &&
-        !isSubpath(pathIdentity(screenedTree), real) &&
+        !isSubpath(screenedIdentity, slot) &&
+        !isSubpath(screenedIdentity, real) &&
         !adminRoots.some((root) => isSubpath(root, spelled)) &&
         !adminRealpaths.some(
           (root) => isSubpath(root, slot) || isSubpath(root, real),
-        )
+        ) &&
+        (nativeOrigins.has(originKey(file)) ||
+          repositoryControl(file) === 'outside')
       ) {
-        trustedOrigins.add(originKey(file));
-      }
-    }
-    for (const { file } of trustedOriginRecords) {
-      if (repositoryControl(file) === 'outside') {
         trustedOrigins.add(originKey(file));
       }
     }
