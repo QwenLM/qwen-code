@@ -34,6 +34,7 @@ import {
   type AgentStreamState,
 } from './agent-events';
 import type { JoinToken } from './add-runtime-dialog';
+import type { AgentShare, AgentShareSummary } from './share-agent-dialog';
 
 interface CreateThreadResult {
   id: string;
@@ -56,6 +57,12 @@ export interface ThreadsApi {
   }>;
   /** A single-use token for `qwen serve --join` on another machine. */
   createJoinToken?(): Promise<JoinToken>;
+  createShare?(
+    agentId: string,
+    scope: 'analysis' | 'full',
+  ): Promise<AgentShare>;
+  listShares?(agentId: string): Promise<{ shares: AgentShareSummary[] }>;
+  revokeShare?(agentId: string, callerId: string): Promise<unknown>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
@@ -117,6 +124,15 @@ export function createThreadsHttpApi(
     connectRemoteHost: (input) => post('/hosts/remote-connect', input),
     listAgents: () => request('/agents'),
     createJoinToken: () => post('/hosts/enrollment', {}),
+    createShare: (agentId, scope) =>
+      post(`/agents/${encodeURIComponent(agentId)}/shares`, { scope }),
+    listShares: (agentId) =>
+      request(`/agents/${encodeURIComponent(agentId)}/shares`),
+    revokeShare: (agentId, callerId) =>
+      request(
+        `/agents/${encodeURIComponent(agentId)}/shares/${encodeURIComponent(callerId)}`,
+        { method: 'DELETE' },
+      ),
     listThreads: () => request('/threads'),
     getThread: (id) => request(`/threads/${encodeURIComponent(id)}`),
     createAgent: (input) => post('/agents', input),
@@ -629,6 +645,16 @@ export function ThreadsRoute({
         onOpenAgentBuilder={() => setCreatingAgent(true)}
         {...(client.createJoinToken
           ? { onCreateJoinToken: client.createJoinToken }
+          : {})}
+        {...(client.createShare && client.listShares && client.revokeShare
+          ? {
+              shares: {
+                create: client.createShare,
+                list: async (agentId: string) =>
+                  (await client.listShares!(agentId)).shares,
+                revoke: client.revokeShare,
+              },
+            }
           : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}

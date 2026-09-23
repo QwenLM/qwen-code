@@ -191,6 +191,21 @@ function modelPrompt(assignment: HostRunAssignment): string {
     .join('\n\n');
 }
 
+/**
+ * The program an assignment asks for: the one its agent is bound to when this
+ * host offers it, else the host's default. Lets one machine run a Qwen Code
+ * agent and a Codex agent side by side.
+ */
+function providerFor(
+  assignment: HostRunAssignment,
+  fallback: AgentHostProvider,
+): AgentHostProvider {
+  const execution = assignment.agent.execution;
+  const wanted =
+    execution?.mode === 'managed-host' ? execution.provider : undefined;
+  return wanted && detectedProviders?.includes(wanted) ? wanted : fallback;
+}
+
 async function executeAssignment(
   options: AgentHostConnectionOptions,
   credential: AgentHostCredential,
@@ -292,7 +307,7 @@ async function executeAssignment(
   renew.unref?.();
   let summary: string | undefined;
   try {
-    if (options.provider === 'codex') {
+    if (providerFor(assignment, options.provider) === 'codex') {
       const session = await codexHostSession(
         path.join(Storage.getGlobalQwenDir(), 'agent-hosts', 'codex-sessions'),
         [

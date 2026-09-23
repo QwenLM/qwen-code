@@ -187,7 +187,10 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
           Array.isArray(execution['hostIds']) &&
           execution['hostIds'].length > 0 &&
           execution['hostIds'].every(isValidId) &&
-          new Set(execution['hostIds']).size === execution['hostIds'].length)));
+          new Set(execution['hostIds']).size === execution['hostIds'].length &&
+          (execution['provider'] === undefined ||
+            execution['provider'] === 'qwen' ||
+            execution['provider'] === 'codex'))));
   return (
     isValidId(value['id']) &&
     isValidAgentName(value['name']) &&

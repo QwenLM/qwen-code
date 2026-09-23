@@ -6,6 +6,11 @@
 
 import { useI18n } from '../../i18n';
 import { AddRuntimeDialog, type JoinToken } from './add-runtime-dialog';
+import {
+  ShareAgentDialog,
+  type AgentShare,
+  type AgentShareSummary,
+} from './share-agent-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
 import { PlusIcon } from 'lucide-react';
 
@@ -39,7 +44,9 @@ export interface AgentConfigPatch {
   instructions?: string | null;
   agentType?: string | null;
   maxConcurrentRuns?: number | null;
-  execution?: { mode: 'local' } | { mode: 'managed-host'; hostIds: string[] };
+  execution?:
+    | { mode: 'local' }
+    | { mode: 'managed-host'; hostIds: string[]; provider?: 'qwen' | 'codex' };
 }
 
 /** What every agent in this workspace may do. A property of the subsystem. */
@@ -73,6 +80,15 @@ export interface ThreadsPageProps {
   onOpenDefinitions?: () => void;
   /** Issues a single-use join token for the Add runtime dialog. */
   onCreateJoinToken?: () => Promise<JoinToken>;
+  /** A2A shares of one agent; absent hides Share. */
+  shares?: {
+    create: (
+      agentId: string,
+      scope: 'analysis' | 'full',
+    ) => Promise<AgentShare>;
+    list: (agentId: string) => Promise<AgentShareSummary[]>;
+    revoke: (agentId: string, callerId: string) => Promise<unknown>;
+  };
   hostServerUrl?: string;
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => Promise<boolean> | void;
@@ -237,6 +253,7 @@ export function ThreadsPage({
   onOpenAgentBuilder,
   onOpenDefinitions,
   onCreateJoinToken,
+  shares,
   onConnectRemoteHost,
   hostServerUrl,
   capabilities,
@@ -256,6 +273,7 @@ export function ThreadsPage({
   const [openAgentId, setOpenAgentId] = useState<string>();
   const { t } = useI18n();
   const [addingRuntime, setAddingRuntime] = useState(false);
+  const [sharing, setSharing] = useState<{ id: string; name: string }>();
   const [taskAssignee, setTaskAssignee] = useState('');
   const statusLabels: Record<string, string> = {
     online: '在线',
@@ -658,6 +676,17 @@ export function ThreadsPage({
                         {configuring === agent.id ? '收起' : '配置'}
                       </button>
                     ) : null}
+                    {shares ? (
+                      <button
+                        type="button"
+                        className={styles.agentAction}
+                        onClick={() =>
+                          setSharing({ id: agent.id, name: agent.name })
+                        }
+                      >
+                        {t('collab.agent.share')}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className={styles.agentAction}
@@ -927,6 +956,18 @@ export function ThreadsPage({
           </div>
         ) : null}
       </div>
+      {shares && sharing && (
+        <ShareAgentDialog
+          agentName={sharing.name}
+          open
+          onOpenChange={(open) => {
+            if (!open) setSharing(undefined);
+          }}
+          onCreate={(scope) => shares.create(sharing.id, scope)}
+          onList={() => shares.list(sharing.id)}
+          onRevoke={(callerId) => shares.revoke(sharing.id, callerId)}
+        />
+      )}
       {onCreateJoinToken && (
         <AddRuntimeDialog
           open={addingRuntime}

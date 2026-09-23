@@ -64,7 +64,13 @@ interface AgentCreatePageProps {
     instructions: string;
     model?: string;
     maxConcurrentRuns: number;
-    execution?: { mode: 'local' } | { mode: 'managed-host'; hostIds: string[] };
+    execution?:
+      | { mode: 'local' }
+      | {
+          mode: 'managed-host';
+          hostIds: string[];
+          provider?: 'qwen' | 'codex';
+        };
   }) => Promise<void>;
 }
 
@@ -151,6 +157,9 @@ export function AgentCreatePage({
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
+  const [executionProvider, setExecutionProvider] = useState<'qwen' | 'codex'>(
+    'qwen',
+  );
   const [executionHostIds, setExecutionHostIds] = useState(
     () => new Set<string>(),
   );
@@ -504,6 +513,7 @@ export function AgentCreatePage({
                 execution: {
                   mode: 'managed-host' as const,
                   hostIds: [...executionHostIds],
+                  provider: executionProvider,
                 },
               }
             : {}),
@@ -770,9 +780,10 @@ export function AgentCreatePage({
                             name="agent-execution-location"
                             id={`agent-host-${host.id}`}
                             checked={executionHostIds.has(host.id)}
-                            onChange={() =>
-                              setExecutionHostIds(new Set([host.id]))
-                            }
+                            onChange={() => {
+                              setExecutionHostIds(new Set([host.id]));
+                              setExecutionProvider('qwen');
+                            }}
                           />
                           <label htmlFor={`agent-host-${host.id}`}>
                             {host.label} ·{' '}
@@ -787,6 +798,37 @@ export function AgentCreatePage({
                         </div>
                       ))}
                     </div>
+                    {(() => {
+                      // A runtime lists what it can run ("Qwen Code ACP,
+                      // Codex CLI"); offer a choice only when there is one.
+                      const host = executionHosts.find((entry) =>
+                        executionHostIds.has(entry.id),
+                      );
+                      const offersCodex = /codex/i.test(host?.provider ?? '');
+                      if (!host || !offersCodex) return null;
+                      return (
+                        <div
+                          role="radiogroup"
+                          aria-label={t('collab.runtime.program')}
+                          className="mt-2 flex gap-2"
+                        >
+                          {(['qwen', 'codex'] as const).map((provider) => (
+                            <label
+                              key={provider}
+                              className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
+                            >
+                              <input
+                                type="radio"
+                                name="agent-execution-provider"
+                                checked={executionProvider === provider}
+                                onChange={() => setExecutionProvider(provider)}
+                              />
+                              {provider === 'qwen' ? 'Qwen Code' : 'Codex'}
+                            </label>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     <FieldDescription>
                       选择实际执行任务的机器和程序，不改变所属项目。远程机器使用上面显示的执行目录，不会自动同步本地文件。多个智能体可以共用同一台机器。
                     </FieldDescription>

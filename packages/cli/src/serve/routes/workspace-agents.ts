@@ -24,6 +24,7 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
+import { randomBytes } from 'node:crypto';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
   ThreadPriority,
@@ -81,6 +82,11 @@ import {
   AGENT_TOOL_CLASSIFICATION,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { resolveThreadStatus } from '@qwen-code/qwen-code-core/agents/workspace-agents/thread-status.js';
+import {
+  issueA2AGrant,
+  listA2AGrants,
+  revokeA2AGrant,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
@@ -214,15 +220,23 @@ function readAgentExecution(
   const input = value as Record<string, unknown>;
   if (input['mode'] === 'local') return { mode: 'local' };
   const hostIds = input['hostIds'];
+  const provider = input['provider'];
   if (
     input['mode'] !== 'managed-host' ||
     !Array.isArray(hostIds) ||
     hostIds.length === 0 ||
-    !hostIds.every((hostId) => typeof hostId === 'string' && hostId.length > 0)
+    !hostIds.every(
+      (hostId) => typeof hostId === 'string' && hostId.length > 0,
+    ) ||
+    (provider !== undefined && provider !== 'qwen' && provider !== 'codex')
   ) {
     return 'invalid';
   }
-  return { mode: 'managed-host', hostIds: [...new Set(hostIds)] };
+  return {
+    mode: 'managed-host',
+    hostIds: [...new Set(hostIds)],
+    ...(provider ? { provider } : {}),
+  };
 }
 
 /**
@@ -1404,6 +1418,103 @@ export function registerWorkspaceAgentRoutes(
           retired: true,
           ...(dispatchError ? { dispatchError } : {}),
         });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  /**
+   * Shares: A2A grants for one agent, so a caller outside this workspace can
+   * message it. Each share is its own caller id, so revoking one leaves the
+   * others working; the secret is returned once and only its hash is kept.
+   */
+  const SHARE_TTL_MS = 7 * 24 * 60 * 60_000;
+  const knownAgent = async (runtime: WorkspaceRuntime, agentId: string) =>
+    (await readWorkspaceAgents(runtime.workspaceCwd)).some(
+      (agent) => agent.id === agentId && isAgentAddressable(agent),
+    );
+
+  app.get(`${prefix}/agents/:id/shares`, async (req, res) => {
+    const runtime = runtimeFor(req, res);
+    if (!runtime) return;
+    const agentId = String(req.params['id']);
+    try {
+      const now = Date.now();
+      const shares = (await listA2AGrants(runtime.workspaceCwd))
+        .filter(
+          (grant) =>
+            grant.agentId === agentId &&
+            (grant.expiresAt === undefined || grant.expiresAt > now),
+        )
+        .map(({ callerId, scope, createdAt, expiresAt }) => ({
+          callerId,
+          scope,
+          createdAt,
+          ...(expiresAt !== undefined ? { expiresAt } : {}),
+        }));
+      res.json({ shares });
+    } catch (error) {
+      fail(res, error);
+    }
+  });
+
+  app.post(
+    `${prefix}/agents/:id/shares`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const agentId = String(req.params['id']);
+      const scope = (req.body as { scope?: unknown } | undefined)?.scope;
+      if (scope !== 'analysis' && scope !== 'full') {
+        res.status(400).json({ error: 'share_scope_invalid' });
+        return;
+      }
+      try {
+        if (!(await knownAgent(runtime, agentId))) {
+          res.status(404).json({ error: 'agent_not_found' });
+          return;
+        }
+        const callerId = `share_${randomBytes(6).toString('hex')}`;
+        const expiresAt = Date.now() + SHARE_TTL_MS;
+        const { secret } = await issueA2AGrant(runtime.workspaceCwd, {
+          callerId,
+          agentId,
+          scope,
+          expiresAt,
+        });
+        res.status(201).json({
+          endpoint: `${req.protocol}://${req.get('host') ?? '127.0.0.1'}/a2a/v1`,
+          workspaceId: runtime.workspaceId,
+          callerId,
+          agentId,
+          secret,
+          scope,
+          expiresAt,
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  app.delete(
+    `${prefix}/agents/:id/shares/:callerId`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      try {
+        const removed = await revokeA2AGrant(runtime.workspaceCwd, {
+          agentId: String(req.params['id']),
+          callerId: String(req.params['callerId']),
+        });
+        if (!removed) {
+          res.status(404).json({ error: 'share_not_found' });
+          return;
+        }
+        res.json({ revoked: true });
       } catch (error) {
         fail(res, error);
       }

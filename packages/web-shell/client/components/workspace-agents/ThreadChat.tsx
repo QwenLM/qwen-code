@@ -269,10 +269,16 @@ export function ThreadChat({
       if (!seen || (run.startedAt ?? 0) >= (seen.startedAt ?? 0))
         latest.set(run.agentId, run);
     }
+    // A retried run waits in the queue without a start time, so "is it
+    // working again" is read from the live runs, not from ordering.
     return [...latest.values()].filter(
-      (run) => run.status === 'failed' && thread.status !== 'done',
+      (run) =>
+        run.status === 'failed' &&
+        thread.status !== 'done' &&
+        thread.status !== 'cancelled' &&
+        !live.some((row) => row.run.agentId === run.agentId),
     );
-  }, [thread.runs, thread.status]);
+  }, [thread.runs, thread.status, live]);
   const messages = useMemo<Message[]>(
     () =>
       [

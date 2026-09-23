@@ -86,7 +86,12 @@ export interface WorkspaceAgentsFile {
 
 export type WorkspaceAgentExecution =
   | { mode: 'local' }
-  | { mode: 'managed-host'; hostIds: string[] };
+  | {
+      mode: 'managed-host';
+      hostIds: string[];
+      /** The program to run on the host; the host's default when absent. */
+      provider?: 'qwen' | 'codex';
+    };
 
 /**
  * A durable agent identity, scoped to one workspace.
