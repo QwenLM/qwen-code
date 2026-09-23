@@ -15594,6 +15594,125 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('counts a registration whose names were all hosted as its one restore', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-hosted-once-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const hosting = path.join(tmpDir, 'hosting');
+    const claimant = path.join(tmpDir, 'claimant');
+    fs.mkdirSync(primary, { recursive: true });
+    // Two checkouts of one repository: both list the same channels, and the
+    // one registered at boot hosts them.
+    writeWorkspaceSettings(hosting, {
+      serve: { channels: ['shared', 'other'] },
+    });
+    writeWorkspaceSettings(claimant, {
+      serve: { channels: ['shared', 'other'] },
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      () =>
+        ({
+          merged: {
+            channels: {
+              shared: { type: 'feishu' },
+              other: { type: 'feishu' },
+            },
+          },
+        }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const { factory } = makePerWorkspaceWorkerFactory();
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeById: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    };
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, hosting],
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        workspaceRegistrationStore: store,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      expect(added.status).toBe(201);
+      const workspaceId = ((await added.json()) as { id: string }).id;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // The operator stops one channel; the other keeps hosting enabled.
+      const narrowed = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['other'] },
+        }),
+      });
+      expect(narrowed.status).toBe(200);
+      const callsAfterStop = factory.mock.calls.length;
+
+      // The claimant leaves and comes back. It already had its restore — it
+      // found nothing to bring up — so coming back must not bring up the
+      // channel the operator stopped in between.
+      const removed = await fetch(`${handle.url}/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+        headers,
+      });
+      expect(removed.status).toBe(200);
+      const readded = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: claimant }),
+      });
+      expect(readded.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const control = await fetch(`${handle.url}/workspace/channel`, {
+        headers,
+      });
+      expect(await control.json()).toMatchObject({
+        selection: { mode: 'names', names: ['other'] },
+      });
+      expect(factory.mock.calls).toHaveLength(callsAfterStop);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('keeps explicit channel selection ahead of workspace startup channels', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-explicit-')),

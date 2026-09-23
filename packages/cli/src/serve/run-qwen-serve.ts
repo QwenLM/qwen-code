@@ -4195,7 +4195,13 @@ async function runQwenServeImpl(
           channels: channelSelectionNames(opts.channelSelection),
           workspaceCwd: boundWorkspace,
           ...(restored.ownerHints.size > 0
-            ? { requestedByWorkspace: Object.fromEntries(restored.ownerHints) }
+            ? {
+                // The daemon log renders each field with String(), so an
+                // object here would print as "[object Object]".
+                requestedByWorkspace: [...restored.ownerHints]
+                  .map(([name, owner]) => `${name}@${owner}`)
+                  .join(','),
+              }
             : {}),
         });
       }
@@ -7572,11 +7578,15 @@ async function runQwenServeImpl(
           return;
         }
         const requested = startupChannelsForWorkspace(workspaceCwd);
+        if (requested.length === 0) return;
+        // Recorded before the hosted names are filtered out: a workspace whose
+        // every name was already hosted has had its restore, and coming back
+        // later must not bring up a name an operator stopped in between.
+        lateRestoredWorkspaces.add(workspaceCwd);
         const committed =
           committedSelection?.mode === 'names' ? committedSelection.names : [];
         const pending = requested.filter((name) => !committed.includes(name));
         if (pending.length === 0) return;
-        lateRestoredWorkspaces.add(workspaceCwd);
         // Bringing channels up is not part of registering a workspace. This
         // hook runs under the daemon-wide runtime-topology gate, so awaiting a
         // worker here holds that gate for as long as the worker takes to
