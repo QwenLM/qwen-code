@@ -1196,25 +1196,22 @@ describe('isSkillListingReminder (#12235)', () => {
   const activation = `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n<skill>\n<name>\nreport-builder\n</name>\n</skill>\n</available_skills>`;
 
   it('accepts every listing reminder core builds', async () => {
-    const config = {
-      getSkillManager: () => ({
-        listSkills: async () => [entry],
-        isSkillActive: () => true,
-      }),
-      isSkillEnabled: () => true,
-      getModelInvocableCommandsProvider: () => undefined,
-    } as unknown as Config;
-    const empty = {
-      ...config,
-      getSkillManager: () => ({
-        listSkills: async () => [],
-        isSkillActive: () => true,
-      }),
-    } as unknown as Config;
+    // collectAvailableSkillEntries is mocked for this file; hand the builder
+    // one entry, then none, as the startup snapshot and its "no skills" form.
+    const collected = (entries: AvailableSkillEntry[]) => ({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set<string>(),
+      modelInvocableCommands: [],
+      entries,
+    });
+    vi.mocked(collectAvailableSkillEntries)
+      .mockResolvedValueOnce(collected([entry]) as never)
+      .mockResolvedValueOnce(collected([]) as never);
+    const config = { getSkillManager: () => ({}) } as unknown as Config;
 
     for (const text of [
       (await buildAvailableSkillsReminder(config))!.reminder,
-      (await buildAvailableSkillsReminder(empty))!.reminder,
+      (await buildAvailableSkillsReminder(config))!.reminder,
       buildChangedSkillsReminder([entry], [])!,
       `${SYSTEM_REMINDER_OPEN}\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
       // The scheduler puts a rules block first when one applies.
