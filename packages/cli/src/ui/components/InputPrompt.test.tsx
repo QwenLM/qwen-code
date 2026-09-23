@@ -1805,56 +1805,72 @@ describe('InputPrompt', () => {
       expect(addItem).toHaveBeenCalledWith(
         {
           type: 'error',
-          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          text:
+            process.platform === 'linux'
+              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
         },
         expect.any(Number),
       );
       second.unmount();
     });
 
-    it('uses a Linux-specific unavailable message on Linux (#12504)', async () => {
-      const originalPlatform = process.platform;
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      try {
-        const addItem = vi.fn();
-        const clipboardUnavailableShownRef = { current: false };
-        mockedUseUIState.mockReturnValue({
-          isFeedbackDialogOpen: false,
-          messageQueue: [],
-          pendingLlmHistoryItems: [],
-          historyManager: { addItem },
-        } as unknown as ReturnType<typeof useUIState>);
-        vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
-          async (onUnavailable) => {
-            onUnavailable?.();
-            return false;
-          },
-        );
+    // Issue #12504. PASTE_CLIPBOARD_IMAGE is computed once at module-import
+    // time from the real host platform, so `process.platform` cannot be
+    // stubbed late. Only run on a real Linux runner; skip on Windows
+    // (where the Ctrl+V byte would never trigger the keybinding) and
+    // macOS (where the Linux message branch wouldn't fire anyway).
+    const linuxOnly = process.platform === 'linux' ? describe : describe.skip;
+    linuxOnly(
+      'uses a Linux-specific unavailable message on Linux (#12504)',
+      () => {
+        it('emits the wl-clipboard/xclip message under stubbed process.platform', async () => {
+          const originalPlatform = process.platform;
+          Object.defineProperty(process, 'platform', { value: 'linux' });
+          try {
+            const addItem = vi.fn();
+            const clipboardUnavailableShownRef = { current: false };
+            mockedUseUIState.mockReturnValue({
+              isFeedbackDialogOpen: false,
+              messageQueue: [],
+              pendingLlmHistoryItems: [],
+              historyManager: { addItem },
+            } as unknown as ReturnType<typeof useUIState>);
+            vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+              async (onUnavailable) => {
+                onUnavailable?.();
+                return false;
+              },
+            );
 
-        const view = renderWithProviders(
-          <InputPrompt
-            {...props}
-            clipboardUnavailableShownRef={clipboardUnavailableShownRef}
-          />,
-        );
-        await wait();
+            const view = renderWithProviders(
+              <InputPrompt
+                {...props}
+                clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+              />,
+            );
+            await wait();
 
-        view.stdin.write('\x16');
-        await wait();
+            view.stdin.write('\x16');
+            await wait();
 
-        expect(addItem).toHaveBeenCalledTimes(1);
-        expect(addItem).toHaveBeenCalledWith(
-          {
-            type: 'error',
-            text: 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
-          },
-          expect.any(Number),
-        );
-        view.unmount();
-      } finally {
-        Object.defineProperty(process, 'platform', { value: originalPlatform });
-      }
-    });
+            expect(addItem).toHaveBeenCalledTimes(1);
+            expect(addItem).toHaveBeenCalledWith(
+              {
+                type: 'error',
+                text: 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
+              },
+              expect.any(Number),
+            );
+            view.unmount();
+          } finally {
+            Object.defineProperty(process, 'platform', {
+              value: originalPlatform,
+            });
+          }
+        });
+      },
+    );
 
     it('should handle image save failure gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
