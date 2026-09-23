@@ -599,6 +599,41 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-overview-details-${theme}`);
     });
 
+    test('conversation search', async ({ page }, testInfo) => {
+      const events = Array.from({ length: 12 }, (_, index) => [
+        userTextEvent(`Explain synthetic example ${index + 1}.`, {
+          id: index * 2 + 1,
+        }),
+        assistantTextEvent(
+          index === 2
+            ? 'The sample uses **search-marker** to locate an earlier answer.'
+            : `Synthetic answer ${index + 1}: review the example and its expected output.`,
+          { id: index * 2 + 2 },
+        ),
+      ]).flat();
+      const scenario = createWebShellDaemonScenario({ events });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      const search = page.getByRole('button', {
+        name: 'Search this conversation',
+        exact: true,
+      });
+      await expect(search).toBeVisible();
+      await captureScreenshot(page, `conversation-search-entry-${theme}`);
+      await search.click();
+      const dialog = page.getByRole('dialog', {
+        name: 'Search this conversation',
+        exact: true,
+      });
+      await dialog.getByRole('combobox').fill('search-marker');
+      await expect(dialog.locator('mark')).toHaveText('search-marker');
+      await captureScreenshot(page, `conversation-search-dialog-${theme}`);
+    });
+
     test(`session transcript`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [

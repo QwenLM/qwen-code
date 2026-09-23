@@ -986,31 +986,100 @@ export interface CompoundCommandSegment {
  *
  * See {@link splitCompoundCommand} for the string-only form and for examples;
  * this is the same split, and that function is a projection of this one.
+ *
+ * Scanned twice and split wherever either scan finds an operator: comments,
+ * backtick bodies and heredocs are not modelled, and quotes inside them can
+ * fool bash's backslash reading where the pre-fix reading still splits.
  */
 export function splitCompoundCommandSegments(
   command: string,
 ): CompoundCommandSegment[] {
+  // The two readings differ only at a backslash, so one scan is enough without.
+  const boundaries = command.includes('\\')
+    ? [
+        ...findOperatorBoundaries(command, 'bash'),
+        ...findOperatorBoundaries(command, 'escape-everywhere'),
+      ].sort((a, b) => a.start - b.start)
+    : findOperatorBoundaries(command, 'bash');
+
   const segments: CompoundCommandSegment[] = [];
+  let lastSplit = 0;
+  for (const { start, end, operator } of boundaries) {
+    if (start < lastSplit) {
+      continue;
+    }
+    // bash reads a CRLF's `\r` as part of the last word, but it is dropped here
+    // as a line ending unless it is the whole redirection target of the line.
+    // A lone `\r` is a bash word character and stays.
+    const raw = command.substring(lastSplit, start);
+    const dropsLineEndingCR =
+      operator === '\n' && !CR_IS_WHOLE_REDIRECT_TARGET.test(raw);
+    const segment = trimBashWordSeparators(
+      dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
+    );
+    if (segment) {
+      segments.push({ command: segment, terminator: operator });
+    }
+    lastSplit = end;
+  }
+
+  // Add the last segment
+  const lastSegment = trimBashWordSeparators(command.substring(lastSplit));
+  if (lastSegment) {
+    segments.push({ command: lastSegment, terminator: '' });
+  }
+
+  return segments;
+}
+
+interface OperatorBoundary {
+  start: number;
+  end: number;
+  operator: string;
+}
+
+type BackslashReading = 'bash' | 'escape-everywhere';
+
+function findOperatorBoundaries(
+  command: string,
+  reading: BackslashReading,
+): OperatorBoundary[] {
+  const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
   let inDouble = false;
+  let inAnsiC = false;
+  let dollarPending = false;
   let escaped = false;
-  let lastSplit = 0;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
 
     if (escaped) {
       escaped = false;
       continue;
     }
-    if (ch === '\\') {
+    // In bash a backslash is literal inside a plain `'…'` (so `'a\'` closes)
+    // but escapes inside ANSI-C `$'…'` (so `$'a\''` closes at the third quote).
+    if (
+      ch === '\\' &&
+      (reading === 'escape-everywhere' || !(inSingle && !inAnsiC))
+    ) {
+      // `$\⏎'…'` is still ANSI-C, so the pending `$` survives a continuation.
+      if (command[i + 1] === '\n') {
+        dollarPending = ansiCIntroducer;
+        i++;
+        continue;
+      }
       escaped = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
       inSingle = !inSingle;
       continue;
     }
@@ -1019,6 +1088,11 @@ export function splitCompoundCommandSegments(
       continue;
     }
     if (inSingle || inDouble) {
+      continue;
+    }
+    if (ch === '$') {
+      // The second `$` of `$$` (the PID) cannot open `$'…'`.
+      dollarPending = !ansiCIntroducer;
       continue;
     }
 
@@ -1044,31 +1118,13 @@ export function splitCompoundCommandSegments(
       if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
         continue;
       }
-      // A CRLF pair ends a line, so the `\r` in front of a `\n` terminator is
-      // dropped with it; a lone `\r` is a bash word character and stays. The
-      // exception is a `\r` that *is* the whole redirection target of the line.
-      const raw = command.substring(lastSplit, i);
-      const dropsLineEndingCR =
-        op === '\n' && !CR_IS_WHOLE_REDIRECT_TARGET.test(raw);
-      const segment = trimBashWordSeparators(
-        dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
-      );
-      if (segment) {
-        segments.push({ command: segment, terminator: op });
-      }
-      lastSplit = i + op.length;
-      i = lastSplit - 1; // -1 because the loop will i++
+      boundaries.push({ start: i, end: i + op.length, operator: op });
+      i += op.length - 1; // -1 because the loop will i++
       break;
     }
   }
 
-  // Add the last segment
-  const lastSegment = trimBashWordSeparators(command.substring(lastSplit));
-  if (lastSegment) {
-    segments.push({ command: lastSegment, terminator: '' });
-  }
-
-  return segments;
+  return boundaries;
 }
 
 /**

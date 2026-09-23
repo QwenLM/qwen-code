@@ -1,4 +1,10 @@
 import './styles/globals.css';
+import {
+  useMessageNavigation,
+  type WebShellMessageNavigationRequest,
+  type WebShellMessageNavigationResult,
+} from './hooks/useMessageNavigation';
+import { ConversationSearch } from './components/ConversationSearch';
 import { useWebShellNavigation } from './navigation';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
@@ -375,6 +381,7 @@ import {
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
+import { buildSessionWorkflowProjection } from './components/workflow/session-workflow-model';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -1130,6 +1137,10 @@ export type SessionChangeEvent =
   | { type: 'turn_complete'; sessionId: string; error?: Error };
 
 export interface WebShellApi {
+  /** 按持久化记录 ID 定位当前会话消息，包含尚未渲染的历史。宿主先切换会话。 */
+  navigateToMessage: (
+    request: WebShellMessageNavigationRequest,
+  ) => Promise<WebShellMessageNavigationResult>;
   /** Open the in-window split view, matching the built-in sidebar button. */
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
@@ -1445,6 +1456,8 @@ export interface WebShellProps {
   markdownTableMode?: MarkdownTableMode;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
+  /** 会话消息数超过此阈值时显示搜索入口，默认 10。 */
+  conversationSearchThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
   /**
@@ -3210,6 +3223,7 @@ export function App({
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
+  conversationSearchThreshold = 10,
   markdown,
   loadingPhrases,
   onAgentTasksChange,
@@ -7719,6 +7733,9 @@ export function App({
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
   const editorRef = useRef<EditorHandle | null>(null);
+  const restoreConversationSearchFocus = useCallback(() => {
+    editorRef.current?.focus();
+  }, []);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
   const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
     useState(false);
@@ -8943,6 +8960,9 @@ export function App({
     | 'workspaces'
     | null
   >(initialConnectionsSettingsCategory ? 'settings' : null);
+  const chatActive =
+    !activePanel && mainView === 'chat' && !artifactPanelFullscreen;
+  const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
   const activePanelRef = useRef(activePanel);
   const [collaborationThread, setCollaborationThread] = useState<
     { id: string; cwd: string; server: string } | undefined
@@ -11815,6 +11835,27 @@ export function App({
         : [],
     [floatingTodosState, messages, tasksDialogMessage],
   );
+  // One projection per render for every session-workflow surface. The
+  // cockpit, the artifact-panel inspector and the graph embedded in the
+  // cockpit each used to derive their own copy of the same projection; they
+  // now share this one, which also carries the single task-execution index
+  // they all read from.
+  const sessionWorkflowProjection = useMemo(
+    () =>
+      sessionWorkflowEnabled
+        ? buildSessionWorkflowProjection(
+            sessionWorkflowTodos,
+            planAgentTools,
+            environmentAgentTasks,
+          )
+        : undefined,
+    [
+      environmentAgentTasks,
+      planAgentTools,
+      sessionWorkflowEnabled,
+      sessionWorkflowTodos,
+    ],
+  );
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -14113,6 +14154,7 @@ export function App({
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
+      navigateToMessage,
       openSplitView: () => {
         closeMobileDrawer();
         requestOpenSplitView();
@@ -14128,6 +14170,7 @@ export function App({
       respondToPendingPermission,
     }),
     [
+      navigateToMessage,
       closeMobileDrawer,
       createNewSession,
       createSideTask,
@@ -18661,6 +18704,7 @@ export function App({
           todos: sessionWorkflowTodos,
           tools: planAgentTools,
           tasks: environmentAgentTasks,
+          projection: sessionWorkflowProjection,
           artifacts,
           selectedTodoId: selectedWorkflowTodoId,
           onSelectedTodoIdChange: setSelectedWorkflowTodoId,
@@ -20207,6 +20251,7 @@ export function App({
                     todos={sessionWorkflowTodos}
                     tools={planAgentTools}
                     tasks={environmentAgentTasks}
+                    projection={sessionWorkflowProjection}
                     selectedTodoId={selectedWorkflowTodoId}
                     onSelectedTodoIdChange={setSelectedWorkflowTodoId}
                     onBackToChat={closeCockpit}
@@ -20383,6 +20428,16 @@ export function App({
                               .join(' ');
 
                             const messageListContent = (
+                              <ConversationSearch
+                                key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
+                                threshold={conversationSearchThreshold}
+                                active={chatActive}
+                                registerInteractionBlocker={registerInteractionBlocker}
+                                messageListRef={messageListRef}
+                                className={styles.conversationSearchButton}
+                                onRestoreFocus={restoreConversationSearchFocus}
+                              >
+                                {(searchTrigger) => (
                               <LiveMessageList
                                 ref={messageListRef}
                                 sessionKey={connection.sessionId}
@@ -20428,6 +20483,7 @@ export function App({
                                       activeTurnStartedAt)
                                 }
                                 workspaceCwd={connection.workspaceCwd || ''}
+                                timelineAction={connection.sessionId ? searchTrigger : undefined}
                                 hideSessionTimeline={
                                   effectiveChatWidthMode === 'wide'
                                 }
@@ -20499,6 +20555,8 @@ export function App({
                                     : undefined
                                 }
                               />
+                                )}
+                              </ConversationSearch>
                             );
                             const messageListWithWorkflowDetails = (
                               <WorkflowDetailsProvider tasks={sessionTasks}>
