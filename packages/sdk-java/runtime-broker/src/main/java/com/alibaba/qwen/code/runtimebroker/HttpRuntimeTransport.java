@@ -96,12 +96,9 @@ public final class HttpRuntimeTransport {
                 result.completeExceptionally(exception);
             }
         });
-        return result.orTimeout(requestTimeout.toMillis(),
-                TimeUnit.MILLISECONDS).whenComplete((value, error) -> {
-                    if (error != null) {
-                        exchange.cancel(true);
-                    }
-                }).handle((value, error) -> {
+        CompletableFuture<RuntimeAttestation> returned = result
+                .orTimeout(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                .handle((value, error) -> {
                     if (error == null) {
                         return value;
                     }
@@ -111,6 +108,13 @@ public final class HttpRuntimeTransport {
                     }
                     throw unavailable(cause);
                 });
+        returned.whenComplete((value, error) -> {
+            if (error != null || returned.isCancelled()) {
+                exchange.cancel(true);
+                result.cancel(false);
+            }
+        });
+        return returned;
     }
 
     private static Throwable unwrap(Throwable error) {

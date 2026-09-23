@@ -235,6 +235,12 @@ class HttpRuntimeTransportTest {
             assertEquals(503, failure.getStatusCode());
             assertTrue(failure.isRetryable());
             assertTrue(System.nanoTime() - started < 1_500_000_000L);
+            java.util.concurrent.CompletableFuture<RuntimeAttestation> pending =
+                    impatient.attest(lease,
+                            new RuntimeProvisionRequest(scope, "session-1"),
+                            seed).toCompletableFuture();
+            assertTrue(pending.cancel(true));
+            assertTrue(pending.isCancelled());
         } finally {
             stalled.stop(0);
         }
