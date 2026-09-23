@@ -17,8 +17,8 @@ commands/skills/agents 目录。在安装了较多扩展的机器上，这主导
   （extensionManager.ts）通过 `scheduleWithConcurrency` 以
   `EXTENSION_SCAN_CONCURRENCY = 8` 将各扩展并发调度。该层自身不打开任何
   描述符，只负责调度各扩展的加载。
-- **每个扩展的子资源** —— 每个扩展内部的 commands（`glob`）、skills、
-  agents 与 workflows 并发加载。skill/agent/plugin 的清单读取器经由
+- **每个扩展的子资源** —— 每个扩展内部的 commands（递归 `readdir`）、
+  skills、agents 与 workflows 并发加载。skill/agent/plugin 的清单读取器经由
   `mapWithConcurrency`，每次单文件读取都要先从一个模块级信号量
   （`SKILL_LOAD_CONCURRENCY = 8`）取得许可，因此无论各层如何嵌套，
   在途清单读取的预算都由所有受控加载器共享。8 相对 64 实测无墙钟损失
@@ -45,9 +45,10 @@ commands/skills/agents 目录。在安装了较多扩展的机器上，这主导
 系统级 ENFILE），读取会在扫描中途以 `EMFILE`/`ENFILE`/`EAGAIN`/
 `ENOMEM`（`isResourceExhaustion`）失败。这些 errno 会被重抛——而不是
 像解析失败一样被吞掉——在每个曾经吞掉它们的入口：各单条目加载器、
-每个加载器的目录枚举、扩展根目录的 `readdirSync`、install-metadata
-sidecar 读取、`loadExtensionWorkflows`，以及 `loadExtension` 的兜底
-catch。refresh 随之拒绝，既有缓存与指纹基线保持不动，下一次
+每个加载器的目录枚举（含 commands 枚举）、每扩展 manifest config
+读取、hooks sidecar 读取、扩展根目录的 `readdirSync`、
+install-metadata sidecar 读取、`loadExtensionWorkflows`，以及
+`loadExtension` 的兜底 catch。refresh 随之拒绝，既有缓存与指纹基线保持不动，下一次
 `refreshCacheIfSourcesChanged` 会重试——而不是把一个被截断（或为空）的
 扩展集提交并盖上"已是最新"的戳。
 
@@ -55,15 +56,16 @@ catch。refresh 随之拒绝，既有缓存与指纹基线保持不动，下一�
 声明了 `executor`/`executionBackend` 但校验失败的文件会记录在
 `extension.agentExecutorRefusals` 中，使按名分派拒绝而不是回退到同名
 内置 agent。这些 refusal 在重抛耗尽错误之前按 `readdir` 顺序并入调用方
-的 map，且 `loadExtension` 会记录一个不含子资源的 tombstone，由
-`refreshCacheWithSnapshot` 在重抛 refresh 拒绝时并入缓存——因此即使该
-扩展缺席，refusal 仍然拦截分派。
+的 map，且 `loadExtension` 会把本次尝试记录的 refusal 交给
+`refreshCacheWithSnapshot`，在重抛 refresh 拒绝时并入缓存：缺席的扩展
+得到一个不含子资源的 tombstone，已在缓存中的扩展保留其完整条目并并入
+新的 refusal——因此 refusal 在两种情况下都拦截分派。
 
 ### 描述符预算之外
 
-gate 只约束清单回调的准入数。commands 的 `glob` 遍历（glob@10/
-path-scurry——没有 worker 调节项，实测占用很小）、同步的 config/hooks
-读取、`loadExtensionWorkflows`，以及受管技能加载器
+gate 只约束清单回调的准入数。commands 的递归 `readdir`（单次 libuv
+线程池遍历，无 worker 调节项）、同步的 config/hooks 读取、
+`loadExtensionWorkflows`，以及受管技能加载器
 `SkillManager.loadSkillsFromDir`（skill-manager.ts）都在其外。
 
 ## 约束与风险

@@ -19,8 +19,8 @@ Loading is parallel at three levels, coordinated from
   (extensionManager.ts) fans extensions out through
   `scheduleWithConcurrency` with `EXTENSION_SCAN_CONCURRENCY = 8`. This level
   opens no descriptors itself; it only schedules the per-extension loads.
-- **Per-extension subresources** — commands (`glob`), skills, agents and
-  workflows load concurrently inside each extension. The skill/agent/plugin
+- **Per-extension subresources** — commands (recursive `readdir`), skills,
+  agents and workflows load concurrently inside each extension. The skill/agent/plugin
   manifest readers go through `mapWithConcurrency`, which admits each
   per-file read through one module-wide semaphore
   (`SKILL_LOAD_CONCURRENCY = 8`), so the in-flight manifest-read budget is
@@ -51,9 +51,10 @@ Under a low `RLIMIT_NOFILE` (daemons holding pipes/sockets, containers,
 system-wide ENFILE), reads fail mid-scan with `EMFILE`/`ENFILE`/`EAGAIN`/
 `ENOMEM` (`isResourceExhaustion`). These errnos are rethrown — not treated
 like parse failures — at every entrance that used to swallow them: the
-per-entry loaders, each loader's directory enumeration, the extensions-root
-`readdirSync`, the install-metadata sidecar read, `loadExtensionWorkflows`,
-and `loadExtension`'s catch-all. The refresh then rejects, the previous
+per-entry loaders, each loader's directory enumeration (the commands
+enumeration included), the per-extension manifest config read, the hooks
+sidecar read, the extensions-root `readdirSync`, the install-metadata
+sidecar read, `loadExtensionWorkflows`, and `loadExtension`'s catch-all. The refresh then rejects, the previous
 cache and fingerprint baseline stay in place, and the next
 `refreshCacheIfSourcesChanged` retries — instead of committing a truncated
 (or empty) extension set stamped as up to date.
@@ -63,16 +64,17 @@ even when the scan dies. A file that declares an `executor`/`executionBackend`
 but fails validation is recorded in `extension.agentExecutorRefusals` so a
 by-name dispatch refuses instead of falling through to a same-named
 builtin. The refusals are folded into the caller's map in `readdir` order
-before the exhaustion error is rethrown, and `loadExtension` records a
-subresource-free tombstone that `refreshCacheWithSnapshot` merges into the
-cache when it rethrows — so the refusal still gates dispatch while the
-extension is absent.
+before the exhaustion error is rethrown, and `loadExtension` records the
+attempt's refusals for `refreshCacheWithSnapshot` to merge into the cache
+when it rethrows: an absent extension gets a subresource-free tombstone,
+an already-cached one keeps its complete entry and gains the fresh
+refusals — so the refusal gates dispatch either way.
 
 ### Outside the descriptor budget
 
 The gate bounds admissions to the manifest callbacks only. The commands
-`glob` traversal (glob@10/path-scurry — no worker knob, small measured
-footprint), the sync config/hooks reads, `loadExtensionWorkflows`, and the
+recursive `readdir` (one libuv-threadpool traversal, no worker knob), the
+sync config/hooks reads, `loadExtensionWorkflows`, and the
 managed `SkillManager.loadSkillsFromDir` (skill-manager.ts) sit outside it.
 
 ## Constraints and risks

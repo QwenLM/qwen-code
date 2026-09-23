@@ -143,8 +143,11 @@ vi.mock('os', async (importOriginal) => {
 // node:fs namespace is non-configurable.)
 const fsProbe = vi.hoisted(() => ({
   failReadFileFor: undefined as string | undefined,
+  delayReadFileFor: undefined as string | undefined,
   failReadFileSyncFor: undefined as string | undefined,
+  failReadFileSyncSkip: 0,
   failReaddirSyncFor: undefined as string | undefined,
+  failReaddirFor: undefined as string | undefined,
   readdirSyncCalls: 0,
 }));
 const emfileError = (): Error =>
@@ -158,7 +161,14 @@ vi.mock('node:fs', async (importOriginal) => {
         fsProbe.failReadFileSyncFor !== undefined &&
         String(args[0]).endsWith(fsProbe.failReadFileSyncFor)
       ) {
-        throw emfileError();
+        // Armed reads may be let through first (the manifest path reads
+        // plugin.json more than once per load) so a test can fault a
+        // specific read in the sequence.
+        if (fsProbe.failReadFileSyncSkip > 0) {
+          fsProbe.failReadFileSyncSkip -= 1;
+        } else {
+          throw emfileError();
+        }
       }
       return actual.readFileSync(...args);
     },
@@ -180,12 +190,27 @@ vi.mock('node:fs', async (importOriginal) => {
         ...args: Parameters<typeof actual.promises.readFile>
       ) => {
         if (
+          fsProbe.delayReadFileFor !== undefined &&
+          String(args[0]).includes(fsProbe.delayReadFileFor)
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (
           fsProbe.failReadFileFor !== undefined &&
           String(args[0]).includes(fsProbe.failReadFileFor)
         ) {
           throw emfileError();
         }
         return actual.promises.readFile(...args);
+      },
+      readdir: async (...args: Parameters<typeof actual.promises.readdir>) => {
+        if (
+          fsProbe.failReaddirFor !== undefined &&
+          String(args[0]).includes(fsProbe.failReaddirFor)
+        ) {
+          throw emfileError();
+        }
+        return actual.promises.readdir(...args);
       },
     },
   };
@@ -196,12 +221,27 @@ vi.mock('fs/promises', async (importOriginal) => {
     ...actual,
     readFile: async (...args: Parameters<typeof actual.readFile>) => {
       if (
+        fsProbe.delayReadFileFor !== undefined &&
+        String(args[0]).includes(fsProbe.delayReadFileFor)
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (
         fsProbe.failReadFileFor !== undefined &&
         String(args[0]).includes(fsProbe.failReadFileFor)
       ) {
         throw emfileError();
       }
       return actual.readFile(...args);
+    },
+    readdir: async (...args: Parameters<typeof actual.readdir>) => {
+      if (
+        fsProbe.failReaddirFor !== undefined &&
+        String(args[0]).includes(fsProbe.failReaddirFor)
+      ) {
+        throw emfileError();
+      }
+      return actual.readdir(...args);
     },
   };
 });
@@ -3946,6 +3986,364 @@ describe('extension tests', () => {
           SubagentError,
         );
       });
+
+      it("merges a dying scan's refusals even when the surfaced rejection is not the exhaustion errno", async () => {
+        // aaa-dangling's statSync ENOENT sorts ahead of emfile-agents-ext's
+        // EMFILE in the settled batch (scheduleWithConcurrency rethrows the
+        // lowest-index rejection), so the refresh rejects with the symlink's
+        // errno — the refusal merge must key on what the attempt recorded,
+        // not on which error happened to surface.
+        fs.symlinkSync(
+          path.join(userExtensionsDir, 'missing-target'),
+          path.join(userExtensionsDir, 'aaa-dangling'),
+        );
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'emfile-agents-ext',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+        fs.writeFileSync(
+          path.join(agentsDir, 'other.md'),
+          '---\nname: other\ndescription: Other agent\n---\nYou are a benchmark agent prompt.',
+        );
+
+        const disarm = armReadFileProbe('other.md');
+        const manager = createExtensionManager();
+        await expect(manager.refreshCache()).rejects.toThrow(/aaa-dangling/);
+        const tombstone = manager
+          .getLoadedExtensions()
+          .find((extension) => extension.name === 'emfile-agents-ext');
+        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
+          SubagentError,
+        );
+        disarm();
+      });
+
+      it('fails the refresh closed when the commands enumeration hits resource exhaustion', async () => {
+        // The commands listing must surface its errno: swallowing an EMFILE
+        // here would commit `commands: []` and stamp it up to date, silently
+        // uninstalling every extension's slash commands for the session.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'cmd-ext',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'deploy.md'), 'Deploy it');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions()[0]?.commands).toEqual(['deploy']);
+
+        fsProbe.failReaddirFor = `${path.sep}commands`;
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.failReaddirFor = undefined;
+        }
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'cmd-ext',
+        ]);
+      });
+
+      it('fails the refresh closed when a hooks sidecar read hits resource exhaustion', async () => {
+        // A missing or unparsable hooks file stays warn-and-continue (hooks
+        // are optional), but an EMFILE there must not be parsed as "bad
+        // hooks file" — that would commit a load that silently lost the
+        // extension's hooks.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'hooks-ext',
+        });
+        const hooksDir = path.join(extDir, 'hooks');
+        fs.mkdirSync(hooksDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(hooksDir, 'hooks.json'),
+          JSON.stringify({ hooks: {} }),
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+        fsProbe.failReadFileSyncFor = 'hooks.json';
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.failReadFileSyncFor = undefined;
+        }
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'hooks-ext',
+        ]);
+      });
+
+      it('fails the refresh closed when a manifest config read hits resource exhaustion', async () => {
+        // The manifest rewrap drops `code`, so an EMFILE from the config
+        // read must be rethrown unwrapped — otherwise the classification at
+        // loadExtension's catch misreads it as a parse failure and drops the
+        // whole extension from a load reported as successful.
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'good-ext',
+        });
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+        fsProbe.failReadFileSyncFor = EXTENSIONS_CONFIG_FILENAME;
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.failReadFileSyncFor = undefined;
+        }
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'good-ext',
+        ]);
+      });
+
+      it('fails the refresh closed when an Agent Plugins manifest probe read hits resource exhaustion', async () => {
+        // getAgentPluginSchemaStatus reads plugin.json before the manifest
+        // branch runs; its blanket "unrelated" catch must not launder an
+        // EMFILE into a skip of the whole extension.
+        const pluginRoot = path.join(userExtensionsDir, 'plugin-ext');
+        createAgentPlugin(pluginRoot, { name: 'plugin-ext' });
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'plugin-ext',
+        ]);
+
+        fsProbe.failReadFileSyncFor = 'plugin.json';
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.failReadFileSyncFor = undefined;
+        }
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'plugin-ext',
+        ]);
+      });
+
+      it('fails the refresh closed when an Agent Plugins manifest config read hits resource exhaustion', async () => {
+        // Same errno preservation as the qwen manifest branch: the status
+        // probe reads pass (skipped here), and the fault lands on
+        // loadAgentPluginManifest's own read — the rewrap there must not
+        // strip `code`, or the extension is dropped from a "successful"
+        // load.
+        const pluginRoot = path.join(userExtensionsDir, 'plugin-ext');
+        createAgentPlugin(pluginRoot, { name: 'plugin-ext' });
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'plugin-ext',
+        ]);
+
+        // plugin.json is read by the fingerprint's schema probe and by the
+        // loader's schema probe before loadAgentPluginManifest reads it;
+        // let those two through and fault the manifest read itself.
+        fsProbe.failReadFileSyncFor = 'plugin.json';
+        fsProbe.failReadFileSyncSkip = 2;
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.failReadFileSyncFor = undefined;
+          fsProbe.failReadFileSyncSkip = 0;
+        }
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'plugin-ext',
+        ]);
+      });
+
+      it('keeps executor refusals dispatchable when a sibling loader dies first', async () => {
+        // The skills leg rejects per-entry while the agents leg folds its
+        // refusals into the caller's map only after its whole batch settles.
+        // A fast-rejecting Promise.all would read the map before that fold
+        // ran; the delayed agent read pins the ordering deterministically.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'race-ext',
+        });
+        const skillDir = path.join(extDir, 'skills', 's1');
+        fs.mkdirSync(skillDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(skillDir, 'SKILL.md'),
+          '---\nname: s1\ndescription: S1\n---\nBody',
+        );
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+
+        const manager = createExtensionManager();
+        fsProbe.failReadFileFor = `${path.sep}skills${path.sep}`;
+        fsProbe.delayReadFileFor = `${path.sep}agents${path.sep}`;
+        try {
+          await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.failReadFileFor = undefined;
+          fsProbe.delayReadFileFor = undefined;
+        }
+        const tombstone = manager
+          .getLoadedExtensions()
+          .find((extension) => extension.name === 'race-ext');
+        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
+          SubagentError,
+        );
+      });
+
+      it("keeps a dying refresh's refusals when an overlapping refresh starts mid-settle", async () => {
+        // Refresh A records its refusal tombstone quickly but cannot merge
+        // it until slow-ext's delayed read settles. Refresh B, started
+        // inside that window, used to synchronously clear() the shared
+        // per-instance map — wiping A's record before A's merge — and then
+        // die at the manifest config read before recording anything of its
+        // own. Per-attempt ledgers make the two refreshes untouchable.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'emfile-agents-ext',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'explore.md'),
+          '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
+        );
+        fs.writeFileSync(
+          path.join(agentsDir, 'other.md'),
+          '---\nname: other\ndescription: Other agent\n---\nYou are a benchmark agent prompt.',
+        );
+        const slowDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'slow-ext',
+        });
+        const slowSkillDir = path.join(slowDir, 'skills', 's1');
+        fs.mkdirSync(slowSkillDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(slowSkillDir, 'SKILL.md'),
+          '---\nname: s1\ndescription: S1\n---\nBody',
+        );
+
+        fsProbe.failReadFileFor = 'other.md';
+        fsProbe.delayReadFileFor = 'slow-ext';
+        const manager = createExtensionManager();
+        try {
+          const refreshA = manager.refreshCache();
+          // Let A's dying scan record its tombstone, then start B with the
+          // faults re-aimed at the manifest config read — which the
+          // fingerprint never performs — so every one of B's extension
+          // loads dies before recording any refusal.
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          fsProbe.failReadFileFor = undefined;
+          fsProbe.delayReadFileFor = undefined;
+          fsProbe.failReadFileSyncFor = EXTENSIONS_CONFIG_FILENAME;
+          const refreshB = manager.refreshCache();
+          await expect(refreshA).rejects.toThrow('EMFILE');
+          await expect(refreshB).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.failReadFileFor = undefined;
+          fsProbe.delayReadFileFor = undefined;
+          fsProbe.failReadFileSyncFor = undefined;
+        }
+        const tombstone = manager
+          .getLoadedExtensions()
+          .find((extension) => extension.name === 'emfile-agents-ext');
+        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
+          SubagentError,
+        );
+      });
+
+      it('unions fresh refusals into the cached entry when a warm rescan dies of resource exhaustion', async () => {
+        // Prime the cache with a complete entry; the next refresh records a
+        // refusal for a newly added agent and then dies on the skills leg.
+        // The cached entry must keep its loaded subresources AND gain the
+        // fresh refusal — skipping the merge wholesale because the extension
+        // is already cached would re-open the builtin fall-through.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'warm-ext',
+        });
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'good.md'),
+          '---\nname: good\ndescription: Good agent\n---\nYou are a benchmark agent prompt.',
+        );
+        const skillDir = path.join(extDir, 'skills', 's1');
+        fs.mkdirSync(skillDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(skillDir, 'SKILL.md'),
+          '---\nname: s1\ndescription: S1\n---\nBody',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(
+          manager.getLoadedExtensions()[0]?.agents?.map((a) => a.name),
+        ).toEqual(['good']);
+
+        fs.writeFileSync(
+          path.join(agentsDir, 'reviewer.md'),
+          '---\nname: reviewer\ndescription: Review agent\nexecutor: {kind: invalid, command: runner}\n---\nReview carefully.',
+        );
+        const disarm = armReadFileProbe(`${path.sep}skills${path.sep}`);
+        await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        disarm();
+
+        const cached = manager
+          .getLoadedExtensions()
+          .find((extension) => extension.name === 'warm-ext');
+        expect(cached?.agents?.map((a) => a.name)).toEqual(['good']);
+        expect(cached?.skills?.map((s) => s.name)).toEqual(['s1']);
+        expect(cached?.agentExecutorRefusals?.get('reviewer')).toBeInstanceOf(
+          SubagentError,
+        );
+      });
+
+      it('keeps refusals an extension recorded when a sibling kills the refresh', async () => {
+        // aaa-refusal-ext scans cleanly and records reviewer's refusal, but
+        // the refresh rejects on dying-ext's exhaustion — the successful
+        // scan's fresh entry is discarded with the batch, so the refusal
+        // must reach the cache through the attempt ledger, not only through
+        // tombstones of extensions whose own load died.
+        const refusalDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'aaa-refusal-ext',
+        });
+        const agentsDir = path.join(refusalDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'reviewer.md'),
+          '---\nname: reviewer\ndescription: Review agent\nexecutor: {kind: invalid, command: runner}\n---\nReview carefully.',
+        );
+        const dyingDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'dying-ext',
+        });
+        const dyingSkillDir = path.join(dyingDir, 'skills', 's1');
+        fs.mkdirSync(dyingSkillDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(dyingSkillDir, 'SKILL.md'),
+          '---\nname: s1\ndescription: S1\n---\nBody',
+        );
+
+        const disarm = armReadFileProbe(`${path.sep}dying-ext${path.sep}`);
+        const manager = createExtensionManager();
+        await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
+        disarm();
+        const tombstone = manager
+          .getLoadedExtensions()
+          .find((extension) => extension.name === 'aaa-refusal-ext');
+        expect(
+          tombstone?.agentExecutorRefusals?.get('reviewer'),
+        ).toBeInstanceOf(SubagentError);
+      });
     });
   });
 
@@ -4610,6 +5008,45 @@ describe('extension tests', () => {
       ).rejects.toMatchObject({ code: 'extension_credential_unavailable' });
       expect(mockGit.clone).not.toHaveBeenCalled();
       expect(mockGit.listRemote).not.toHaveBeenCalled();
+    });
+
+    it('emits a terminal ERROR callback when the install-metadata read hits resource exhaustion', async () => {
+      // loadInstallMetadata rethrows resource exhaustion; the call in
+      // updateExtension runs after the UPDATING callback and outside the
+      // try whose catch emits the terminal ERROR, so an escaping throw
+      // would pin the update row at "Updating…" for the rest of the
+      // session.
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/owner/repo',
+          gitCommit: '0123456789abcdef0123456789abcdef01234567',
+        },
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager.getLoadedExtensions()[0]!;
+      const states: ExtensionUpdateState[] = [];
+
+      fsProbe.failReadFileSyncFor = INSTALL_METADATA_FILENAME;
+      try {
+        await expect(
+          manager.updateExtension(
+            extension,
+            ExtensionUpdateState.UPDATE_AVAILABLE,
+            (_name, state) => {
+              states.push(state);
+            },
+          ),
+        ).rejects.toThrow('EMFILE');
+      } finally {
+        fsProbe.failReadFileSyncFor = undefined;
+      }
+      expect(states).toEqual([
+        ExtensionUpdateState.UPDATING,
+        ExtensionUpdateState.ERROR,
+      ]);
     });
 
     it('updates an old-Git public GitHub extension through a new archive SHA', async () => {

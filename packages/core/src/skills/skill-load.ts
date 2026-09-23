@@ -54,7 +54,7 @@ export function isResourceExhaustion(error: unknown): boolean {
  * per-file reads), so a per-level cap cannot express a shared budget.
  *
  * The gate bounds admissions to those manifest callbacks, not every open
- * descriptor in the process: the commands `glob` traversal
+ * descriptor in the process: the commands `readdir` enumeration
  * (`loadCommandsFromDir` in extensionManager.ts), the extensions-root
  * readdir, the per-extension sync config/hooks reads, `loadExtensionWorkflows`
  * and the managed `SkillManager.loadSkillsFromDir` (skill-manager.ts, an
