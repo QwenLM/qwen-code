@@ -184,17 +184,21 @@ function mergeSkillListing(
 /**
  * Skill-listing reminders that landed *after* the startup prelude. A skill
  * enabled mid-session is announced by a tail `<system-reminder>` carrying an
- * `<available_skills>` block (`buildChangedSkillsReminder`, and the
- * scheduler's path-activation block, which becomes its own text part when a
- * tool returns parts), which `getStartupContextLength` never inspects. Those
- * tokens are listing cost, not conversation, so they are measured here and
- * billed with the startup listing under `skills` — otherwise the entry is
- * billed to `messages` while its detail row prints `0`.
+ * `<available_skills>` block (`buildChangedSkillsReminder`), which
+ * `getStartupContextLength` never inspects. Those tokens are listing cost, not
+ * conversation, so they are measured here and billed with the startup listing
+ * under `skills` — otherwise the entry is billed to `messages` while its
+ * detail row prints `0`.
  *
  * Only core's own listing reminders qualify (`isSkillListingReminder`); other
  * text that mentions `<available_skills>` stays in `messages`. A qualifying
  * reminder with no `<skill>` entry is left there too: only measured listings
  * are excluded from `messages`.
+ *
+ * The scheduler's path-activation block is deliberately not covered:
+ * `coreToolScheduler` folds that envelope into `functionResponse.response.output`
+ * via `convertToFunctionResponse`, so it never reaches this scan as `part.text`
+ * and stays billed to `messages` with no detail row (#12235).
  */
 function measureTailSkillListings(conversation: Content[]): {
   listing: SkillListingCost;

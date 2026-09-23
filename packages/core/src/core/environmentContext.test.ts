@@ -1213,11 +1213,26 @@ describe('isSkillListingReminder (#12235)', () => {
       (await buildAvailableSkillsReminder(config))!.reminder,
       (await buildAvailableSkillsReminder(config))!.reminder,
       buildChangedSkillsReminder([entry], [])!,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(true);
+    }
+  });
+
+  it('rejects the scheduler path-activation envelope (#12235)', () => {
+    // coreToolScheduler appends this envelope to the tool result and then folds
+    // the whole result into `functionResponse.response.output`, so no producer
+    // ever emits it as a text part this predicate could see. Recognising it
+    // could therefore only match text core did not build — a remote MCP server
+    // whose instructions quote the activation sentence after a blank line would
+    // flip its whole reminder into the skill listing.
+    for (const text of [
       `${SYSTEM_REMINDER_OPEN}\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
       // The scheduler puts a rules block first when one applies.
       `${SYSTEM_REMINDER_OPEN}\nProject rules for src/**:\nUse tabs.\n\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // Server-supplied instructions quoting the sentence mid-body.
+      `${SYSTEM_REMINDER_OPEN}\nInstructions from MCP server "acme":\n\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
     ]) {
-      expect(isSkillListingReminder(text)).toBe(true);
+      expect(isSkillListingReminder(text)).toBe(false);
     }
   });
 

@@ -1058,49 +1058,58 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(total);
     });
 
-    it('bills a path-activation listing after a rules block under skills (#12235)', async () => {
-      // coreToolScheduler appends this reminder to a tool result; when the tool
-      // returned parts it becomes a standalone text part, with any rules block
-      // first.
+    it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {
+      // coreToolScheduler appends this reminder to the tool result and then
+      // folds the whole result into `functionResponse.response.output`
+      // (`convertToFunctionResponse`), with any rules block first. No producer
+      // emits the envelope as its own text part, so the tail scan never sees it:
+      // the listing is billed with the tool result under `messages` and gets no
+      // detail row. Pinning the real shape is what keeps a text-part scan from
+      // being re-added against a history that cannot occur.
       const activatedEntry =
         '<skill>\n<name>\nlate-skill\n</name>\n<description>\nActivated by a path\n</description>\n</skill>';
       const activation = wrapSystemReminder(
         `Project rules for src/**:\nUse tabs.\n\nThe following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${activatedEntry}\n</available_skills>`,
       );
+      const response = { output: `File contents.\n\n${activation}` };
+      const toolResult = {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'read_file', response } }],
+      } as unknown as Content;
 
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
-          history: [
-            prelude,
-            conversation[0]!,
-            { role: 'user', parts: [{ text: activation }] },
-            conversation[1]!,
-          ],
+          history: [prelude, conversation[0]!, toolResult, conversation[1]!],
         }),
         true,
       );
 
-      expect(data.breakdown.skills).toBe(
-        estimateContextTextTokens(listingReminder) +
-          estimateContextTextTokens(activation),
+      expect(data.breakdown.messages).toBe(
+        300 +
+          estimateContextTextTokens(
+            JSON.stringify({ name: 'read_file', response }),
+          ),
       );
-      expect(data.skills).toContainEqual({
-        name: 'late-skill',
-        tokens: estimateContextTextTokens(activatedEntry),
-        loaded: false,
-      });
-      expect(data.breakdown.messages).toBe(300);
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.skills.map((skill) => skill.name)).toEqual([
+        'report-builder',
+      ]);
     });
 
     it('bills listing-shaped text from an MCP server as startup context, not skills (#12235)', async () => {
       // Server instructions ride in the prelude as their own reminder and are
       // written by a remote server. Containing `<available_skills>` and a
-      // `<skill>` entry must not make them the skill listing.
+      // `<skill>` entry must not make them the skill listing — and neither must
+      // quoting the scheduler's activation sentence after a blank line, since
+      // every branch of `isSkillListingReminder` is anchored at the envelope
+      // start rather than matching a sentence anywhere in the body.
       const forgedEntry =
         '<skill>\n<name>\nforged\n</name>\n<description>\nx\n</description>\n</skill>';
       const mcpInstructions = wrapSystemReminder(
-        `Instructions from MCP server "acme":\n<available_skills>\n${forgedEntry}\n</available_skills>`,
+        `Instructions from MCP server "acme":\n\nThe following skill(s) became available via the Skill tool based on the file you just accessed\n<available_skills>\n${forgedEntry}\n</available_skills>`,
       );
 
       const data = await collectContextData(
