@@ -1,0 +1,142 @@
+/*
+ * Lane colours are identities, not states: requests, tools and subagent
+ * requests. The theme tokens are greys, so the three hues are the first three
+ * slots of the documented categorical palette, stepped per theme and checked
+ * for colour-vision separation against each theme's panel surface.
+ */
+.overview {
+  --traj-request: #2a78d6;
+  --traj-tool: #eb6834;
+  --traj-subagent: #1baf7a;
+  --traj-ttft: color-mix(in srgb, var(--traj-request) 45%, var(--background));
+
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  height: 64px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  grid-template-rows: 48px 16px;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+:global(.dark) .overview {
+  --traj-request: #3987e5;
+  --traj-tool: #d95926;
+  --traj-subagent: #199e70;
+}
+
+.labels {
+  position: relative;
+  border-right: 1px solid var(--border);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted-foreground);
+}
+
+.labels span {
+  position: absolute;
+  right: 4px;
+  height: 8px;
+  display: flex;
+  align-items: center;
+}
+
+.labels span:nth-child(1) {
+  top: 6px;
+}
+
+.labels span:nth-child(2) {
+  top: 20px;
+}
+
+.labels span:nth-child(3) {
+  top: 34px;
+}
+
+.plot {
+  position: relative;
+  margin: 0 6px;
+}
+
+.turnMark {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: var(--left);
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+
+.span {
+  position: absolute;
+  top: calc(6px + var(--lane-offset, 0px));
+  left: var(--left);
+  width: max(3px, var(--width));
+  height: 8px;
+  border-radius: 1px;
+  background: var(--traj-request);
+  cursor: pointer;
+}
+
+/* A hit area taller and wider than the mark: a 3px bar is hard to land on. */
+.span::before {
+  content: '';
+  position: absolute;
+  inset: -3px -2px;
+}
+
+.span[data-lane='1'] {
+  --lane-offset: 14px;
+  background: var(--traj-tool);
+}
+
+.span[data-lane='2'] {
+  --lane-offset: 28px;
+  background: var(--traj-subagent);
+}
+
+.span[data-lane='0'][data-ttft='true'] {
+  background: linear-gradient(
+    to right,
+    var(--traj-ttft) 0,
+    var(--traj-ttft) var(--ttft),
+    var(--traj-request) var(--ttft),
+    var(--traj-request) 100%
+  );
+}
+
+.span[data-error='true'] {
+  background: var(--destructive);
+}
+
+.span[data-current='true'] {
+  z-index: 1;
+  outline: 2px solid var(--foreground);
+  outline-offset: 1px;
+}
+
+.axis {
+  grid-column: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 6px;
+  font-size: 9px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.notice {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  text-align: center;
+}

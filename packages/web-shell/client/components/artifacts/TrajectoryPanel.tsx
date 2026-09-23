@@ -32,6 +32,11 @@ import type {
   TrajectoryToolRow,
   TrajectoryTurn,
 } from '../../trajectory/types';
+import {
+  buildTimeline,
+  type TimelineSpan,
+} from '../../trajectory/buildTimeline';
+import { TrajectoryOverview } from './TrajectoryOverview';
 import styles from './TrajectoryPanel.module.css';
 
 /** Every row is one line and every row is this tall, turn headers included. */
@@ -114,9 +119,8 @@ function metricsOf(
   }
   if (row.kind === 'tool') {
     const parts: string[] = [];
-    // A tool frame carries only a duration — the tool logger stamps a whole
-    // batch at the batch's end, so there is no honest per-tool start time and
-    // nothing to derive one from.
+    // Only the duration: where a call started is what the overview above
+    // the table shows, and a clock time per row would crowd the column.
     if (row.timing) parts.push(formatDuration(row.timing.durationMs));
     if (row.subagentSummary) {
       const { requests, tools, requestMs } = row.subagentSummary;
@@ -423,6 +427,40 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     visualRows.length > 0 &&
     !hasAnyTiming(trajectory);
 
+  const timeline = useMemo(
+    () => (trajectory ? buildTimeline(trajectory) : undefined),
+    [trajectory],
+  );
+
+  /** A span stands for one row: select it and bring it into view. */
+  const selectSpan = useCallback(
+    (rowKey: string) => {
+      const index = visualRows.findIndex((row) => row.key === rowKey);
+      if (index < 0) return;
+      selectRow(rowKey);
+      virtualizer.scrollToIndex(index, { align: 'auto' });
+    },
+    [selectRow, virtualizer, visualRows],
+  );
+
+  // Named the way the row reads, which already says a failed request failed
+  // in words — the red of the span is never the only signal.
+  const describeSpan = useCallback(
+    (span: TimelineSpan) => {
+      const parts = [labelOf(span.row, t).text];
+      parts.push(formatDuration(span.end - span.start));
+      if (span.ttftEnd !== undefined) {
+        parts.push(
+          t('trajectory.ttft', {
+            duration: formatDuration(span.ttftEnd - span.start),
+          }),
+        );
+      }
+      return parts.filter(Boolean).join(' · ');
+    },
+    [t],
+  );
+
   return (
     <div className={styles.panel} data-testid="trajectory-panel">
       <div className={styles.header}>
@@ -457,6 +495,18 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         </div>
       </div>
 
+      {/* Mounted from the start at a fixed height, whatever it holds: it is a
+          flex sibling of the scrolled rows, so a box that appeared or grew
+          would move every row under the reader. The no-timing notice lives
+          inside it for the same reason. */}
+      <TrajectoryOverview
+        model={timeline}
+        {...(timingAbsent ? { notice: t('trajectory.noTiming') } : {})}
+        selectedKey={selectedKey}
+        onSelect={selectSpan}
+        describe={describeSpan}
+      />
+
       {error !== undefined && (
         <div className={styles.error} role="alert">
           <span>
@@ -472,11 +522,6 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           >
             {t('common.retry')}
           </button>
-        </div>
-      )}
-      {timingAbsent && (
-        <div className={styles.notice} role="status">
-          {t('trajectory.noTiming')}
         </div>
       )}
 
