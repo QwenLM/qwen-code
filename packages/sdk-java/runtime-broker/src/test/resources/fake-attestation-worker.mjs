@@ -1,4 +1,6 @@
+import { Buffer } from 'node:buffer';
 import { createServer } from 'node:http';
+import process from 'node:process';
 
 const boot = JSON.parse(await new Promise((resolve, reject) => {
   const chunks = [];
@@ -11,9 +13,9 @@ const server = createServer((request, response) => {
   const chunks = [];
   request.on('data', (chunk) => chunks.push(chunk));
   request.on('end', () => {
-    const url = new URL(request.url, 'http://127.0.0.1');
+    const path = request.url.split('?')[0];
     if (request.method === 'POST'
-        && url.pathname === '/internal/managed-runtime/v2/attest') {
+        && path === '/internal/managed-runtime/v2/attest') {
       const body = JSON.stringify({
         protocolVersion: 2,
         runtimeInstanceId: boot.runtimeInstanceId,
