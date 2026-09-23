@@ -174,6 +174,45 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
 
+  mysql-integration:
+    name: 'Runtime Broker MariaDB / Java 21'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    services:
+      mariadb:
+        image: 'mariadb:10.11.18'
+        env:
+          MARIADB_DATABASE: 'runtime_broker_test'
+          MARIADB_ROOT_PASSWORD: 'runtime-broker'
+        ports:
+          - '3306:3306'
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+          cache-dependency-path: 'packages/sdk-java/runtime-broker/pom.xml'
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Run Runtime Broker MySQL integration tests'
+        working-directory: 'packages/sdk-java/runtime-broker'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -Pmysql-integration
+          -Dmysql.url='jdbc:mysql://127.0.0.1:3306/runtime_broker_test?allowPublicKeyRetrieval=true&useSSL=false'
+          -Dmysql.user=root -Dmysql.password=runtime-broker clean verify
+
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
