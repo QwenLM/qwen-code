@@ -113,6 +113,101 @@ function describeLiveRun(
   }
 }
 
+interface TeamMember {
+  name: string;
+  agentId?: string;
+  color?: string;
+  lead: boolean;
+  /** The live run if there is one, otherwise the latest. */
+  run?: RunView;
+}
+
+/** Everyone who has worked on or been handed this thread, lead first. */
+function teamMembers(
+  thread: ThreadDetailView,
+  agents: readonly { id: string; name: string }[],
+): TeamMember[] {
+  const byName = new Map<string, TeamMember>();
+  const add = (name: string, patch: Partial<TeamMember> = {}) => {
+    const current = byName.get(name) ?? { name, lead: false };
+    byName.set(name, { ...current, ...patch });
+  };
+  if (thread.assigneeName) add(thread.assigneeName, { lead: true });
+  for (const post of thread.posts) {
+    if (post.authorKind === 'agent') add(post.authorName);
+  }
+  for (const run of thread.runs) {
+    const current = byName.get(run.agentName)?.run;
+    const live = (r?: RunView) =>
+      r !== undefined &&
+      ['queued', 'running', 'finishing', 'cancelling'].includes(r.status);
+    const newer =
+      !current ||
+      (live(run) && !live(current)) ||
+      (live(run) === live(current) &&
+        (run.startedAt ?? 0) >= (current.startedAt ?? 0));
+    add(run.agentName, {
+      agentId: run.agentId,
+      ...(run.agentColor ? { color: run.agentColor } : {}),
+      ...(newer ? { run } : {}),
+    });
+  }
+  for (const member of byName.values()) {
+    member.agentId ??= agents.find((agent) => agent.name === member.name)?.id;
+  }
+  return [...byName.values()].sort((a, b) => Number(b.lead) - Number(a.lead));
+}
+
+/** A member's one-word state, for the team list. */
+function memberStatus(
+  member: TeamMember,
+  agents: readonly { id: string; runtime?: { status: string } }[],
+  now: number,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): { text: string; tone: string } {
+  const run = member.run;
+  const muted = 'text-muted-foreground';
+  const attention = 'text-[var(--status-attention-fg)]';
+  const running = 'text-[var(--status-running-fg)]';
+  if (!run) return { text: t('collab.member.idle'), tone: muted };
+  switch (run.status) {
+    case 'queued':
+      return agents.find((agent) => agent.id === run.agentId)?.runtime
+        ?.status === 'offline'
+        ? { text: t('collab.member.offline'), tone: attention }
+        : { text: t('collab.member.queued'), tone: muted };
+    case 'running':
+    case 'finishing':
+    case 'cancelling': {
+      const progress = run.progress;
+      if (progress?.permission)
+        return { text: t('collab.member.approval'), tone: attention };
+      if (progress && now - progress.activityAt >= STALL_NOTICE_MS)
+        return { text: t('collab.member.stalled'), tone: attention };
+      if (progress?.stage === 'tool' && progress.detail)
+        return {
+          text: t('collab.member.tool', { tool: progress.detail }),
+          tone: running,
+        };
+      if (progress?.stage === 'thinking')
+        return { text: t('collab.member.thinking'), tone: running };
+      if (progress?.stage === 'responding')
+        return { text: t('collab.member.responding'), tone: running };
+      return { text: t('collab.member.starting'), tone: running };
+    }
+    case 'failed':
+      return {
+        text:
+          run.error === 'agent_run_stalled'
+            ? t('collab.member.timedOut')
+            : t('collab.member.failed'),
+        tone: attention,
+      };
+    default:
+      return { text: t('collab.member.done'), tone: muted };
+  }
+}
+
 export function ThreadChat({
   thread,
   agents,
@@ -221,30 +316,116 @@ export function ThreadChat({
       ),
     [thread.id, thread.body, thread.posts, thread.runs],
   );
-  if (activityOnly)
+  if (activityOnly) {
+    const members = teamMembers(thread, agents);
     return (
       <section
         className="h-full overflow-y-auto p-4"
-        aria-label="智能体运行详情"
+        aria-label={t('collab.team.title')}
       >
-        <h2 className="mb-3 text-sm font-medium">智能体运行详情</h2>
-        <p className="mb-3 text-xs text-muted-foreground">{thread.title}</p>
-        {live.map((row) => (
-          <RunRowView
-            key={row.run.id}
-            row={row}
-            agent={agents.find((agent) => agent.id === row.run.agentId)}
-            onOpenAgentSession={onOpenAgentSession}
-            onCancelRun={pending ? undefined : onCancelRun}
-          />
-        ))}
-        {live.length === 0 && (
-          <p className="text-xs text-muted-foreground">暂无执行中的智能体</p>
+        <h2 className="mb-1 text-sm font-medium">{t('collab.team.title')}</h2>
+        <p className="mb-4 truncate text-xs text-muted-foreground">
+          {thread.title}
+        </p>
+        <h3 className="mb-1 text-xs text-muted-foreground">
+          {t('collab.team.members', { count: members.length })}
+        </h3>
+        {members.length === 0 && (
+          <p className="mb-3 text-xs text-muted-foreground">
+            {t('collab.team.empty')}
+          </p>
+        )}
+        <ul className="mb-4">
+          {members.map((member) => {
+            const { text, tone } = memberStatus(member, agents, now, t);
+            const sessionId = member.run?.sessionId;
+            return (
+              <li key={member.name}>
+                <button
+                  type="button"
+                  disabled={!sessionId || !onOpenAgentSession}
+                  onClick={() => sessionId && onOpenAgentSession?.(sessionId)}
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left enabled:hover:bg-muted disabled:cursor-default"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="mt-1.5 size-2 shrink-0 rounded-full bg-muted-foreground"
+                    style={
+                      member.color ? { background: member.color } : undefined
+                    }
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm">
+                      {member.name}
+                      {member.lead && (
+                        <span className="ml-1.5 text-xs text-muted-foreground">
+                          {t('collab.team.lead')}
+                        </span>
+                      )}
+                    </span>
+                    <span className={`block truncate text-xs ${tone}`}>
+                      {text}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+        {live.length > 0 && (
+          <>
+            <h3 className="mb-1 text-xs text-muted-foreground">
+              {t('collab.team.live')}
+            </h3>
+            <div className="mb-4">
+              {live.map((row) => (
+                <RunRowView
+                  key={row.run.id}
+                  row={row}
+                  agent={agents.find((agent) => agent.id === row.run.agentId)}
+                  onOpenAgentSession={onOpenAgentSession}
+                  onCancelRun={pending ? undefined : onCancelRun}
+                />
+              ))}
+            </div>
+          </>
+        )}
+        {!!thread.children?.length && (
+          <>
+            <h3 className="mb-1 text-xs text-muted-foreground">
+              {t('collab.team.tasks', { count: thread.children.length })}
+            </h3>
+            <ul className="mb-4">
+              {thread.children.map((child) => (
+                <li key={child.id}>
+                  <button
+                    type="button"
+                    className="block w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+                    onClick={() => onOpenThread(child.id)}
+                  >
+                    <span className="block truncate">{child.title}</span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {child.reason}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {thread.parent && (
+          <Button
+            variant="link"
+            className="mb-3 h-auto p-0"
+            onClick={() => onOpenThread(thread.parent!.id)}
+          >
+            {t('collab.team.parent', { title: thread.parent.title })}
+          </Button>
         )}
         {past.length > 0 && (
-          <details className="mt-3">
+          <details>
             <summary className="cursor-pointer text-xs text-muted-foreground">
-              历史运行（{past.length}）
+              {t('collab.team.history', { count: past.length })}
             </summary>
             {past.map((row) => (
               <RunRowView
@@ -255,42 +436,17 @@ export function ThreadChat({
             ))}
           </details>
         )}
-        {thread.parent && (
-          <Button
-            variant="link"
-            onClick={() => onOpenThread(thread.parent!.id)}
-          >
-            父任务：{thread.parent.title}
-          </Button>
-        )}
-        {!!thread.children?.length && (
-          <section className="mt-6 border-t border-border pt-4">
-            <h2 className="mb-3 text-sm font-medium">子任务</h2>
-            {thread.children.map((child) => (
-              <button
-                key={child.id}
-                type="button"
-                className="mb-3 block w-full text-left text-sm hover:underline"
-                onClick={() => onOpenThread(child.id)}
-              >
-                {child.title}
-                <span className="block text-xs text-muted-foreground">
-                  {child.reason}
-                </span>
-              </button>
-            ))}
-          </section>
-        )}
       </section>
     );
+  }
   const actions = (
     <div className="flex shrink-0 items-center gap-1">
       {thread.status === 'in_review' && (
         <Button
           variant="ghost"
           size="icon"
-          title="验收并完成"
-          aria-label="验收并完成"
+          title={t('collab.markDone')}
+          aria-label={t('collab.markDone')}
           disabled={pending}
           onClick={onMarkDone}
         >
@@ -300,8 +456,8 @@ export function ThreadChat({
       <Button
         variant="ghost"
         size="icon"
-        title="任务详情"
-        aria-label="任务详情"
+        title={t('collab.details')}
+        aria-label={t('collab.details')}
         onClick={onDetails}
       >
         <ListTodo className="size-4" />
@@ -310,8 +466,8 @@ export function ThreadChat({
         <Button
           variant="ghost"
           size="icon"
-          title="运行详情"
-          aria-label="运行详情"
+          title={t('collab.team.title')}
+          aria-label={t('collab.team.title')}
           onClick={onOpenActivity}
         >
           <Activity className="size-4" />

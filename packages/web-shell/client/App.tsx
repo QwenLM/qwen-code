@@ -20323,7 +20323,7 @@ export function App({
                     headerActionsContainer={collaborationHeaderActions}
                     onTitleChange={updateCollaborationTitle}
                     onOpenActivity={(threadId, workspaceCwd) => {
-                      const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: '运行详情', threadId, workspaceCwd };
+                      const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: t('collab.team.title'), threadId, workspaceCwd };
                       setArtifactPanelTabs((tabs) => tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab]);
                       setActiveArtifactPanelTabId(tab.id);
                       setArtifactPanelWidth((width) => artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth());
