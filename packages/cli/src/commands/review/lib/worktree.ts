@@ -1090,8 +1090,9 @@ export interface FilterScreen {
    */
   reachedExempt: string[];
   /**
-   * Attribution limitations that leave the exemption empty without weakening
-   * the local walk. Informational only: callers must not refuse on these.
+   * Diagnostic copy of trusted-origin attribution limitations. A failed
+   * origin listing with known filter records also lands in `unread`; when
+   * all attribution reads are unavailable, the local walk still decides.
    */
   attribution: string[];
   /**
@@ -1377,7 +1378,7 @@ export function filterCommandsIn(
     root: string,
     file: string,
     explicitGitDir = false,
-  ): boolean | null => {
+  ): 'tracked' | 'untracked' | 'outside-root' | 'unknown' => {
     let absoluteRoot: string;
     let absoluteFile: string;
     try {
@@ -1394,17 +1395,17 @@ export function filterCommandsIn(
               const identity = lstatSync(join(parent, candidate));
               return identity.dev === entry.dev && identity.ino === entry.ino;
             });
-        if (name === undefined) return null;
+        if (name === undefined) return 'unknown';
         absoluteFile = join(parent, name);
       } else {
         absoluteFile = realpathSync.native(file);
       }
     } catch {
-      return null;
+      return 'unknown';
     }
-    if (!isSubpath(absoluteRoot, absoluteFile)) return false;
+    if (!isSubpath(absoluteRoot, absoluteFile)) return 'outside-root';
     const pathspec = relative(absoluteRoot, absoluteFile);
-    if (!pathspec) return false;
+    if (!pathspec) return 'outside-root';
     const args = [
       '--literal-pathspecs',
       '-c',
@@ -1426,9 +1427,9 @@ export function filterCommandsIn(
       env: sanitizedGitEnv(),
     });
     if (result.error || (result.status !== 0 && result.status !== 1)) {
-      return null;
+      return 'unknown';
     }
-    return result.status === 0;
+    return result.status === 0 ? 'tracked' : 'untracked';
   };
   const adminRoots = [resolve(commonDir), resolve(gitDir)];
   const adminRealpaths = adminRoots.map(pathIdentity);
@@ -1467,9 +1468,12 @@ export function filterCommandsIn(
         const tracked =
           'value' in discoveredTop
             ? trackedAt(discoveredTop.value, file)
-            : null;
-        verdict = tracked === true ? 'controlled' : 'unknown';
-        if (tracked === false && 'value' in discoveredTop) {
+            : 'unknown';
+        verdict = tracked === 'tracked' ? 'controlled' : 'unknown';
+        if (
+          (tracked === 'untracked' || tracked === 'outside-root') &&
+          'value' in discoveredTop
+        ) {
           // core.worktree can redirect --show-toplevel even to an ancestor,
           // where a different relative path produces a misleading index miss.
           const discoveredGitDir = gitOutput(
@@ -1492,9 +1496,9 @@ export function filterCommandsIn(
       } else if (configuredWorktree !== null) {
         const tracked = trackedAt(configuredWorktree, file, true);
         verdict =
-          tracked === true
+          tracked === 'tracked'
             ? 'controlled'
-            : tracked === false &&
+            : (tracked === 'untracked' || tracked === 'outside-root') &&
                 rootNamesGitDir(configuredWorktree, commonDir)
               ? 'outside'
               : 'unknown';
@@ -1520,27 +1524,26 @@ export function filterCommandsIn(
       env: sanitizedGitEnv(),
     });
     if (result.error || (result.status !== 0 && result.status !== 1)) {
-      attribution.add(
-        `the global/system config graph could not be read (${
-          result.error
-            ? result.error.message
-            : `git config exited ${result.status}`
-        }) — an included filter cannot be attributed to a user-owned origin`,
-      );
+      const reason = `the global/system config graph could not be read (${
+        result.error
+          ? result.error.message
+          : `git config exited ${result.status}`
+      }) — an included filter cannot be attributed to a user-owned origin`;
+      attribution.add(reason);
       return null;
     }
     if (result.status === 1) return [];
     if (typeof result.stdout !== 'string') {
-      attribution.add(
-        'the global/system config graph returned no readable output — an included filter cannot be attributed to a user-owned origin',
-      );
+      const reason =
+        'the global/system config graph returned no readable output — an included filter cannot be attributed to a user-owned origin';
+      attribution.add(reason);
       return null;
     }
     const records = parseTrustedConfigRecords(result.stdout);
     if (records === null) {
-      attribution.add(
-        'the global/system config graph returned malformed origin records — an included filter cannot be attributed to a user-owned origin',
-      );
+      const reason =
+        'the global/system config graph returned malformed origin records — an included filter cannot be attributed to a user-owned origin';
+      attribution.add(reason);
     }
     return records;
   };
@@ -1570,9 +1573,7 @@ export function filterCommandsIn(
     '--list',
   ]);
   if (trustedOriginRecords === null && trustedFilterRecords?.length) {
-    unread.add(
-      'the global/system graph delivers filter commands but its origins could not be read completely - not screened',
-    );
+    for (const reason of attribution) unread.add(reason);
   }
   if (trustedFilterRecords !== null && trustedOriginRecords !== null) {
     // Git's native global/system slots remain user-owned when another

@@ -317,7 +317,8 @@ describe('runScratchTree', () => {
       const savedPath = process.env['PATH'];
       try {
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
-        expect(run().available).toBe(true);
+        const result = run();
+        expect(result.available).toBe(true);
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;
