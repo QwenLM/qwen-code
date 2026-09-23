@@ -416,6 +416,7 @@ export {
 export {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonStandaloneProtocolError,
+  DaemonStartupConfigError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
   STANDALONE_SESSIONS_CAPABILITY,
   isStandaloneCreationOutcomeUnknown,

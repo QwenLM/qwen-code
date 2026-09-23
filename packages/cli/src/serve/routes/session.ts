@@ -3628,19 +3628,24 @@ export function registerSessionRoutes(
       }
       // A definite startup-config rejection already closed the live
       // session in the bridge, but the recording the spawn persisted
-      // survives — and reserveCreate would answer every retry of this
-      // caller-supplied id with 409 session_id_conflict. Roll the
-      // recording back the way the other spawn-failure paths do.
-      // Uncertain outcomes keep it: the close result is unknown.
+      // survives — and reserveCreate would answer every retry of the
+      // caller-supplied id with 409 session_id_conflict, while a
+      // daemon-generated id leaves a listed, resumable phantom. Roll the
+      // recording back the way the other spawn-failure paths do, naming
+      // the session the rejection was actually applied to. Uncertain
+      // outcomes keep it: the close result is unknown.
+      const rejectedSessionId =
+        (isSessionStartupConfigError(err) ? err.sessionId : undefined) ??
+        requestedSessionId;
       if (
-        requestedSessionId !== undefined &&
+        rejectedSessionId !== undefined &&
         isSessionStartupConfigError(err) &&
         err.code === 'startup_config_rejected'
       ) {
         let rollbackError: unknown;
         const removed = await runWithWorkspaceRuntimeStorage(runtime, () =>
           deleteDaemonSessionIfOrphan({
-            sessionId: requestedSessionId,
+            sessionId: rejectedSessionId,
             service: createWorkspaceRuntimeSessionService(runtime),
             bridge: runtime.bridge,
             coordinator: archiveCoordinator,
@@ -3656,7 +3661,7 @@ export function registerSessionRoutes(
           daemonLog?.warn(
             'startup rejection recording rollback was inconclusive; the session id may stay occupied',
             {
-              sessionId: requestedSessionId,
+              sessionId: rejectedSessionId,
               ...(rollbackError === undefined
                 ? {}
                 : {

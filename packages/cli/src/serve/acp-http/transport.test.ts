@@ -7002,7 +7002,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       error: { code: number; data: Record<string, unknown> };
     }>;
     expect(frame.error).toMatchObject({
-      code: -32603,
+      // A rejected selection is caller input, not a daemon fault; the
+      // REST-equivalent status travels in data.httpStatus.
+      code: -32602,
       data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
     });
   });
@@ -7034,7 +7036,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       error: { code: number; data: Record<string, unknown> };
     };
     expect(frame.error).toMatchObject({
-      code: -32603,
+      code: -32602,
       data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
     });
     expect(bridge.killed).toContain(sessionId);
@@ -7049,6 +7051,119 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       result: { sessionId: string };
     };
     expect(retryFrame.result.sessionId).toBe(sessionId);
+    reader.close();
+  });
+
+  it('session/new rolls back the persisted recording after a definite startup rejection when the daemon generated the id', async () => {
+    // No `_meta['qwen-code/sessionId']`: only the rejection's own
+    // `sessionId` can name the recording the spawn persisted before the
+    // selection was rejected.
+    const spawnedId = '550e8400-e29b-41d4-a716-446655440098';
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(spawnedId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+        spawnedId,
+      );
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 449,
+      method: 'session/new',
+      params: { startupConfig: { modelServiceId: 'm' } },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(bridge.killed).toContain(spawnedId);
+    await expect(
+      new SessionService(TEST_WORKSPACE).findSessionIdIgnoringCase(spawnedId),
+    ).resolves.toBeUndefined();
+    reader.close();
+  });
+
+  it('session/new logs when the definite-rejection recording rollback is refused', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440097';
+    // The session reads as live only after the spawn attempt — reporting it
+    // earlier would trip the admission's live-conflict before the spawn.
+    let spawned = false;
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      spawned = true;
+      await writeStoredSession(sessionId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+        sessionId,
+      );
+    });
+    // The orphan kill is refused (the session stays live), so the rollback
+    // removes nothing — the refusal must still leave a diagnostic.
+    vi.spyOn(bridge, 'killSession').mockResolvedValue(false);
+    const realGetSummary = bridge.getSessionSummary.bind(bridge);
+    bridge.getSessionSummary = (id: string) => {
+      if (spawned && id === sessionId) {
+        return {
+          sessionId: id,
+          workspaceCwd: TEST_WORKSPACE,
+          createdAt: '2026-06-30T00:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+        };
+      }
+      return realGetSummary(id);
+    };
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 450,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+      ),
+    );
+
+    // The rollback was refused, so the id stays occupied: a retry of the
+    // same id conflicts with the still-live session instead of attaching.
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 451,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(retryFrame.error).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'live',
+      },
+    });
     reader.close();
   });
 

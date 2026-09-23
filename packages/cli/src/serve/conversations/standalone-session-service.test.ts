@@ -544,6 +544,25 @@ describe('StandaloneSessionService', () => {
     expect(harness.reservation.release).toHaveBeenCalledOnce();
   });
 
+  it('rejects an invalid startupConfig at the service boundary before any side effect', async () => {
+    // Callers that build service requests without a route parser
+    // (live-task-service, create-sub-session) get the same validation:
+    // the legacy modelServiceId combination is refused and nothing spawns.
+    const harness = createHarness();
+    await expect(
+      harness.service.createWithInitialPrompt(
+        {
+          sessionId,
+          startupConfig: { modelServiceId: 'gpt-5.4(openai)' },
+          modelServiceId: 'gpt-4.1(openai)',
+        },
+        'hello',
+      ),
+    ).rejects.toMatchObject({ code: 'invalid_startup_config' });
+    expect(harness.bridge.spawnStandaloneSession).not.toHaveBeenCalled();
+    expect(harness.bridge.setSessionConfigOption).not.toHaveBeenCalled();
+  });
+
   it('applies startup selection after commit and before release and initial prompt', async () => {
     mockDurableStandalone();
     const harness = createHarness();

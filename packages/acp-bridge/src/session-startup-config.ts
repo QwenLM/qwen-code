@@ -29,6 +29,14 @@ export class SessionStartupConfigError extends Error {
   constructor(
     readonly code: 'invalid_startup_config' | 'startup_config_rejected',
     message: string,
+    /**
+     * The session the rejected selection was applied to. Present on
+     * `startup_config_rejected` so a caller that never supplied an id (or
+     * whose id the child did not honor) can still name the orphaned
+     * recording for rollback; absent on `invalid_startup_config`, which is
+     * raised before any session exists.
+     */
+    readonly sessionId?: string,
   ) {
     super(message);
   }
@@ -36,7 +44,7 @@ export class SessionStartupConfigError extends Error {
 
 export function isSessionStartupConfigError(
   error: unknown,
-): error is Pick<SessionStartupConfigError, 'code' | 'message'> {
+): error is Pick<SessionStartupConfigError, 'code' | 'message' | 'sessionId'> {
   // Split bundles can load distinct constructors for the same error contract.
   return (
     error !== null &&
@@ -94,7 +102,7 @@ export function parseSessionStartupConfig(
   };
 }
 
-function rejectInvalidSelection(error: unknown): never {
+function rejectInvalidSelection(error: unknown, sessionId: string): never {
   if (
     error === null ||
     typeof error !== 'object' ||
@@ -113,6 +121,7 @@ function rejectInvalidSelection(error: unknown): never {
     throw new SessionStartupConfigError(
       'startup_config_rejected',
       error.message,
+      sessionId,
     );
   }
   throw error;
@@ -129,7 +138,7 @@ export async function applySessionStartupConfig(
       configId: 'model',
       value: config.modelServiceId,
     })
-    .catch(rejectInvalidSelection);
+    .catch((error: unknown) => rejectInvalidSelection(error, sessionId));
   const modelServiceId = model.configOptions?.find(
     (option) => option.id === 'model',
   )?.currentValue;
@@ -137,6 +146,7 @@ export async function applySessionStartupConfig(
     throw new SessionStartupConfigError(
       'startup_config_rejected',
       'The session did not confirm its model selection.',
+      sessionId,
     );
   }
   if (config.reasoningEffort === undefined) return { modelServiceId };
@@ -146,7 +156,7 @@ export async function applySessionStartupConfig(
       configId: 'reasoning_effort',
       value: config.reasoningEffort,
     })
-    .catch(rejectInvalidSelection);
+    .catch((error: unknown) => rejectInvalidSelection(error, sessionId));
   const reasoning = result.configOptions?.find(
     (option) => option.id === 'reasoning_effort',
   );
@@ -163,6 +173,7 @@ export async function applySessionStartupConfig(
     throw new SessionStartupConfigError(
       'startup_config_rejected',
       'The session did not confirm its model and reasoning selection.',
+      sessionId,
     );
   }
   const meta = reasoning?._meta?.['qwenCode/reasoning'];

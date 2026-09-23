@@ -732,11 +732,12 @@ export function toRpcError(err: unknown): {
     };
   }
   if (isSessionStartupConfigError(err)) {
+    // Both kinds are caller-input rejections — a malformed config and a
+    // selection the provider refused alike — so both map to the JSON-RPC
+    // client-fault code. `data.httpStatus` keeps the REST-equivalent
+    // status, and SDK transports key on it rather than on this code.
     return {
-      code:
-        err.code === 'invalid_startup_config'
-          ? RPC.INVALID_PARAMS
-          : RPC.INTERNAL_ERROR,
+      code: RPC.INVALID_PARAMS,
       message: err.message,
       data: {
         errorKind: err.code,
@@ -1964,19 +1965,35 @@ export class AcpDispatcher {
               .catch(async (error: unknown) => {
                 // Mirror the REST route: a definite startup rejection
                 // already closed the live session, but the recording the
-                // spawn persisted survives — roll it back so the
-                // caller-supplied id stays retryable. Uncertain outcomes
-                // keep it: the close result is unknown.
+                // spawn persisted survives — roll it back so the id stays
+                // retryable, naming the session the rejection was actually
+                // applied to (a daemon-generated id otherwise leaves a
+                // listed, resumable phantom). Uncertain outcomes keep it:
+                // the close result is unknown.
+                const rejectedSessionId =
+                  (isSessionStartupConfigError(error)
+                    ? error.sessionId
+                    : undefined) ?? requestedSessionId;
                 if (
-                  requestedSessionId !== undefined &&
+                  rejectedSessionId !== undefined &&
                   isSessionStartupConfigError(error) &&
                   error.code === 'startup_config_rejected'
                 ) {
-                  await this.removeOrphanSession(
-                    requestedSessionId,
+                  const removed = await this.removeOrphanSession(
+                    rejectedSessionId,
                     true,
                     sessionRuntime,
                   );
+                  if (!removed) {
+                    // Matches the REST route: the definite rejection still
+                    // owes the caller its error, so a refused rollback (the
+                    // session stayed live) is a log line, not a throw —
+                    // otherwise a permanently occupied id has no
+                    // diagnostic at all.
+                    writeStderrLine(
+                      `qwen serve: startup rejection recording rollback was inconclusive; the session id may stay occupied (${logSafe(rejectedSessionId)})`,
+                    );
+                  }
                 }
                 throw error;
               });

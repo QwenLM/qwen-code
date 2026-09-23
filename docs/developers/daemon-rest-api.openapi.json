@@ -286,7 +286,7 @@
             }
           },
           "422": {
-            "description": "startup_config_rejected: the requested selection was rejected or could not be confirmed. The daemon attempts to close the new live session and rolls back the persisted recording of a caller-supplied sessionId, both on a best-effort basis; a close or rollback it could not complete is logged and the definite rejection is still returned. Retryability of a caller-supplied id is self-certifying: retry the create; a 409 session_id_conflict means the id is still occupied.",
+            "description": "startup_config_rejected: the requested selection was rejected or could not be confirmed. The daemon attempts to close the new live session and rolls back the rejected session's persisted recording (named by the rejection even when the daemon generated the id), both on a best-effort basis; a close or rollback it could not complete is logged and the definite rejection is still returned. Retryability of a caller-supplied id is self-certifying: retry the create; a 409 session_id_conflict means the id is still occupied.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3246,7 +3246,7 @@
           },
           "modelApplied": {
             "type": "boolean",
-            "description": "Present for legacy modelServiceId or startupConfig creation. Always true for successful startupConfig preparation."
+            "description": "Only present on a fresh spawn (attached: false) that carried modelServiceId or startupConfig. Always true for successful startupConfig preparation; for legacy model selection, false means the switch was rejected (surfaced via the model_switch_failed event) and the session runs the agent default model. An attach omits the key or, when it coalesced with an in-flight spawn, reports the spawn owner's outcome — on attach, model_switch_failed is the caller's signal."
           },
           "worktree": {
             "type": "object",

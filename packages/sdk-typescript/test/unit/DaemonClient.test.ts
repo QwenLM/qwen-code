@@ -3636,15 +3636,20 @@ describe('DaemonClient', () => {
     it('rejects startup conflicts before any transport call', async () => {
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      // The local rejection carries the daemon's stable code, so one
+      // code-based catch covers both sides of the transport.
       await expect(
         client.createOrAttachSession({ startupConfig, sessionScope: 'single' }),
-      ).rejects.toThrow('Invalid startupConfig');
+      ).rejects.toMatchObject({ code: 'invalid_startup_config' });
       await expect(
         client.createOrAttachSession({
           startupConfig,
           modelServiceId: 'legacy',
         }),
-      ).rejects.toThrow('Invalid startupConfig');
+      ).rejects.toMatchObject({
+        code: 'invalid_startup_config',
+        message: expect.stringContaining('Invalid startupConfig'),
+      });
       expect(calls).toEqual([]);
     });
 

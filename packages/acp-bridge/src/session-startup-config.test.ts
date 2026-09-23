@@ -57,6 +57,15 @@ describe('session startup configuration', () => {
     expect(() => parseSessionStartupConfig(value)).toThrow();
   });
 
+  it('rejects a whitespace-only modelServiceId and trims surrounding whitespace', () => {
+    expect(() =>
+      parseSessionStartupConfig({ modelServiceId: ' ' }),
+    ).toThrowError(expect.objectContaining({ code: 'invalid_startup_config' }));
+    expect(
+      parseSessionStartupConfig({ modelServiceId: ' gpt-5.4(openai) ' }),
+    ).toEqual({ modelServiceId: 'gpt-5.4(openai)' });
+  });
+
   it('preserves omission and rejects mixed selectors and attach scope', () => {
     expect(
       parseSessionStartupConfig(undefined, { modelServiceId: 'legacy' }),
@@ -71,8 +80,8 @@ describe('session startup configuration', () => {
     ).toThrow();
   });
 
-  it.each(REASONING_EFFORT_TIERS)(
-    'accepts the core reasoning tier %s',
+  it.each([...REASONING_EFFORT_TIERS, 'default', 'none'] as const)(
+    'accepts the reasoning selection %s',
     (reasoningEffort) => {
       expect(
         parseSessionStartupConfig({ modelServiceId: 'm', reasoningEffort }),
@@ -367,6 +376,10 @@ describe('session startup configuration', () => {
       ).rejects.toMatchObject({
         code: 'startup_config_rejected',
         message: expect.stringContaining('unsupported effort'),
+        // The rejection names the session it was applied to, so rollback
+        // sites can name the orphaned recording even when the caller never
+        // supplied an id.
+        sessionId: 'failed',
       });
       expect(() => bridge.getSessionSummary('failed')).toThrow();
       expect(bridge.getSessionSummary('sibling')).toBeDefined();

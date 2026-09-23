@@ -24,7 +24,9 @@ import { RPC } from './json-rpc.js';
 describe('startup errors across bundle boundaries', () => {
   it.each([
     ['invalid_startup_config', 400, RPC.INVALID_PARAMS],
-    ['startup_config_rejected', 422, RPC.INTERNAL_ERROR],
+    // A rejected selection is caller input too — the JSON-RPC code agrees
+    // with the REST 4xx classification, and data.httpStatus keeps the 422.
+    ['startup_config_rejected', 422, RPC.INVALID_PARAMS],
   ] as const)(
     'maps %s by its stable contract',
     (errorKind, httpStatus, code) => {

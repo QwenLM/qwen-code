@@ -16,6 +16,16 @@ const REASONING_EFFORTS = DAEMON_REASONING_SELECTIONS.filter(
   (selection) => selection !== 'none' && selection !== 'default',
 );
 
+/**
+ * Pre-transport rejection of a malformed `startupConfig`. Stays a
+ * `TypeError` (an argument-shape violation) while carrying the daemon's
+ * stable `code`, so one `code`-based catch covers both this local
+ * rejection and the daemon's `400 invalid_startup_config` response.
+ */
+export class DaemonStartupConfigError extends TypeError {
+  readonly code = 'invalid_startup_config' as const;
+}
+
 function isSelection(value: unknown): value is ReasoningSelection {
   return (
     typeof value === 'string' &&
@@ -45,7 +55,7 @@ export function validateStartupConfigRequest(request: {
     request.modelServiceId !== undefined ||
     request.sessionScope === 'single'
   ) {
-    throw new TypeError(
+    throw new DaemonStartupConfigError(
       'Invalid startupConfig: provide modelServiceId (1-256 characters) and an optional valid reasoningEffort without legacy modelServiceId or single session scope.',
     );
   }

@@ -38,6 +38,7 @@ import type {
 import {
   ApprovalMode,
   AuthType,
+  ModelsConfig,
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -8109,6 +8110,41 @@ describe('Session', () => {
         expect(mockSettings.setValue).not.toHaveBeenCalled();
       },
     );
+
+    it('maps the refusal core actually throws, not a hand-written copy of its message', async () => {
+      // The classifier matches core's human-readable switchModel messages;
+      // driving the real ModelsConfig keeps that string contract honest — a
+      // reworded core message turns this red instead of silently degrading
+      // the definite caller rejection into an internal error.
+      const realModels = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            { id: 'chat-model' },
+            { id: 'image-model', imageOnly: true },
+          ],
+        },
+      });
+      switchModelSpy.mockImplementation((authType: AuthType, modelId: string) =>
+        realModels.switchModel(authType, modelId),
+      );
+
+      for (const modelId of ['qwen-typo', 'image-model']) {
+        const rejection: unknown = await session
+          .setModel({
+            sessionId: 'test-session-id',
+            modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+          })
+          .then(
+            () => {
+              throw new Error('expected setModel to reject');
+            },
+            (error: unknown) => error,
+          );
+        expect(rejection).toBeInstanceOf(RequestError);
+        expect((rejection as RequestError).code).toBe(-32602);
+      }
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
 
     it('keeps daemon-side switchModel faults as internal errors', async () => {
       const fault = new Error(
