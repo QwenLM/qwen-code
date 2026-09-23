@@ -46,6 +46,14 @@ export interface ConnectExistingInput {
   allowHttp: boolean;
 }
 
+function onlineIds(runtimes: readonly RuntimeSummary[]): Set<string> {
+  return new Set(
+    runtimes
+      .filter((runtime) => runtime.status === 'online')
+      .map((runtime) => runtime.id),
+  );
+}
+
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 function joinCommands(address: string, join: JoinToken) {
@@ -113,7 +121,9 @@ export function AddRuntimeDialog({
   const [method, setMethod] = useState<'command' | 'existing'>('command');
   const [address, setAddress] = useState(serverUrl);
   const [join, setJoin] = useState<JoinToken>();
-  // Runtimes present when we started waiting; a new one is the one that joined.
+  // Runtimes online when we started waiting; one that is online now and was
+  // not is the one that joined. Online, not present: a machine that joined
+  // before reuses its saved identity and comes back under the same id.
   const [watch, setWatch] = useState<{
     at: number;
     known: ReadonlySet<string>;
@@ -127,7 +137,9 @@ export function AddRuntimeDialog({
       watch
         ? runtimes.find(
             (runtime) =>
-              runtime.kind === 'external' && !watch.known.has(runtime.id),
+              runtime.kind === 'external' &&
+              runtime.status === 'online' &&
+              !watch.known.has(runtime.id),
           )
         : undefined,
     [watch, runtimes],
@@ -156,7 +168,7 @@ export function AddRuntimeDialog({
       setJoin(await onCreateJoinToken());
       setWatch({
         at: Date.now(),
-        known: new Set(runtimes.map((runtime) => runtime.id)),
+        known: onlineIds(runtimes),
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -171,7 +183,7 @@ export function AddRuntimeDialog({
     const data = new FormData(event.currentTarget);
     setBusy(true);
     setError(undefined);
-    const known = new Set(runtimes.map((runtime) => runtime.id));
+    const known = onlineIds(runtimes);
     try {
       const ok = await onConnectExisting({
         remoteUrl: String(data.get('remoteUrl')),

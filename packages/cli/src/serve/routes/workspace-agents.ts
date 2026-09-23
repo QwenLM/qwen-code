@@ -91,6 +91,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
 import {
+  AGENT_HOST_ONLINE_WINDOW_MS,
   subscribeAgentEvents,
   type AgentLiveEvent,
 } from '../workspace-agents/agent-events.js';
@@ -116,7 +117,6 @@ const LIVE_RUN_STATUSES = new Set([
   'cancelling',
 ]);
 const ACTIVE_RUN_STATUSES = new Set(['running', 'finishing', 'cancelling']);
-const AGENT_HOST_ONLINE_WINDOW_MS = 15_000;
 
 function liveRunCount(thread: Thread): number {
   return thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).length;

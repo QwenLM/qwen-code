@@ -21,7 +21,13 @@ import { mkdir } from 'node:fs/promises';
 import {
   getAgentsDir,
   getThreadsDir,
+  readAgentHosts,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+
+/** A runtime counts as online while its last heartbeat is this recent. */
+export const AGENT_HOST_ONLINE_WINDOW_MS = 15_000;
+const HOST_LIVENESS_CHECK_MS = 5_000;
+const HOSTS_FILE = 'hosts.json';
 
 export interface AgentPermissionPrompt {
   requestId: string;
@@ -55,6 +61,8 @@ interface Hub {
   watchers: FSWatcher[];
   pending: Set<string>;
   timer?: ReturnType<typeof setTimeout>;
+  hostsKey?: string;
+  liveness?: ReturnType<typeof setInterval>;
 }
 
 const hubs = new Map<string, Hub>();
@@ -86,12 +94,34 @@ function queueChange(hub: Hub, threadId: string): void {
   }, CHANGE_DEBOUNCE_MS);
 }
 
-function watchDir(hub: Hub, dir: string, threadIds: boolean): void {
+/**
+ * Heartbeats rewrite hosts.json every few seconds. Only what a person can see
+ * is news: a runtime joined or left, went on- or offline, or changed what it
+ * offers. Called on every hosts.json write and on a timer, since a runtime
+ * that died goes offline precisely by writing nothing.
+ */
+async function checkHosts(hub: Hub, workspaceCwd: string): Promise<void> {
+  const now = Date.now();
+  const hosts = await readAgentHosts(workspaceCwd).catch(() => []);
+  const key = JSON.stringify(
+    hosts.map(({ lastSeenAt, ...host }) => ({
+      ...host,
+      online:
+        lastSeenAt !== undefined &&
+        now - lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS,
+    })),
+  );
+  const known = hub.hostsKey !== undefined;
+  if (key === hub.hostsKey) return;
+  hub.hostsKey = key;
+  if (known) queueChange(hub, WORKSPACE_CHANGE);
+}
+
+function watchDir(hub: Hub, dir: string, onFile: (name: string) => void): void {
   try {
     const watcher = watch(dir, (_event, name) => {
       // Lock directories and atomic-write temp files are not state.
-      if (!name?.endsWith('.json')) return;
-      queueChange(hub, threadIds ? name.slice(0, -5) : WORKSPACE_CHANGE);
+      if (name?.endsWith('.json')) onFile(name);
     });
     watcher.on('error', () => watcher.close());
     watcher.unref();
@@ -112,12 +142,29 @@ export async function subscribeAgentEvents(
 ): Promise<() => void> {
   let hub = hubs.get(workspaceCwd);
   if (!hub) {
-    hub = { listeners: new Set(), watchers: [], pending: new Set() };
-    hubs.set(workspaceCwd, hub);
+    const created: Hub = {
+      listeners: new Set(),
+      watchers: [],
+      pending: new Set(),
+    };
+    hub = created;
+    hubs.set(workspaceCwd, created);
     const threadsDir = getThreadsDir(workspaceCwd);
     await mkdir(threadsDir, { recursive: true }).catch(() => {});
-    watchDir(hub, getAgentsDir(workspaceCwd), false);
-    watchDir(hub, threadsDir, true);
+    await checkHosts(created, workspaceCwd);
+    watchDir(created, getAgentsDir(workspaceCwd), (name) =>
+      name === HOSTS_FILE
+        ? void checkHosts(created, workspaceCwd)
+        : queueChange(created, WORKSPACE_CHANGE),
+    );
+    watchDir(created, threadsDir, (name) =>
+      queueChange(created, name.slice(0, -5)),
+    );
+    created.liveness = setInterval(
+      () => void checkHosts(created, workspaceCwd),
+      HOST_LIVENESS_CHECK_MS,
+    );
+    created.liveness.unref();
   }
   const current = hub;
   current.listeners.add(listener);
@@ -127,6 +174,7 @@ export async function subscribeAgentEvents(
       return;
     hubs.delete(workspaceCwd);
     if (current.timer) clearTimeout(current.timer);
+    clearInterval(current.liveness);
     for (const watcher of current.watchers) watcher.close();
   };
 }
