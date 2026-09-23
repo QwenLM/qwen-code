@@ -155,18 +155,6 @@ interface AgentPromptArgs {
    */
   hunks?: string;
   /**
-   * The fingerprint `fix-delta --since` printed for that hunks file — a
-   * SHA-256 of its exact bytes. The hunks are the fix auditor's whole
-   * input, and the file sits in a directory the reviewed tree can write
-   * to, so nothing about it is self-certifying: a rewrite that keeps every
-   * `diff --git` header byte-identical and substitutes the bodies is
-   * invisible to every check below. The one channel a planted process
-   * cannot rewrite is the orchestrator's own argument construction, so the
-   * build refuses to read the file without the hex, and refuses a file
-   * that no longer matches it.
-   */
-  hunksFingerprint?: string;
-  /**
    * Which round of a findings role this build is (1-based). Baked into the
    * identity line and the record key by the CLI, because the orchestrator
    * otherwise bakes it in by hand: dogfooded, two same-findings reverse-audit
@@ -2661,259 +2649,20 @@ export function findingsSection(
   );
 }
 
-/** The `/`-normalised form both sides of a path comparison are reduced to. */
-function normalizeAuditPath(path: string): string {
-  return path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
-}
-
-/**
- * Decode one of git's C-quoted path tokens — `"…"` around `\t`, `\n`,
- * `\"`, `\\`, the other single-letter escapes and octal `\NNN` bytes.
- *
- * Git quotes a header name that holds a TAB, a quote, a backslash or a
- * control character even under the `core.quotePath=false` the hunks are
- * rendered with (that setting only stops the quoting of non-ASCII bytes),
- * so such a file contributed no path to the header list and its finding
- * was annotated as uncorroborated — or, when every `fixed` finding sat in
- * such a name, a consistent build was refused wholesale. Null for anything
- * that is not one complete quoted token or carries an escape this decoder
- * does not know: the list this feeds may over-match, never invent, and a
- * garbled decode must contribute nothing rather than a name that happens
- * to corroborate the wrong finding.
- */
-function unquoteGitPath(token: string): string | null {
-  if (token.length < 2 || !token.startsWith('"') || !token.endsWith('"')) {
-    return null;
-  }
-  const body = token.slice(1, -1);
-  const simple: Record<string, number> = {
-    a: 7,
-    b: 8,
-    t: 9,
-    n: 10,
-    v: 11,
-    f: 12,
-    r: 13,
-    '"': 34,
-    '\\': 92,
-  };
-  const bytes: number[] = [];
-  // By CODE POINT, never by UTF-16 code unit: under `core.quotePath=false`
-  // git keeps non-ASCII bytes raw inside a quoted token, and an astral
-  // character (an emoji) is two code units — fed to `Buffer.from` one at
-  // a time each lone surrogate encodes to U+FFFD, and the decoded name
-  // matched nothing. Escapes are single ASCII characters, so the escape
-  // handling is unchanged.
-  const chars = Array.from(body);
-  for (let i = 0; i < chars.length; i++) {
-    const ch = chars[i];
-    if (ch === '"') return null;
-    if (ch !== '\\') {
-      bytes.push(...Buffer.from(ch, 'utf8'));
-      continue;
-    }
-    const next = chars[i + 1];
-    if (next === undefined) return null;
-    if (next in simple) {
-      bytes.push(simple[next]);
-      i += 1;
-      continue;
-    }
-    const octal = chars.slice(i + 1, i + 4).join('');
-    if (!/^[0-7]{3}$/.test(octal)) return null;
-    bytes.push(parseInt(octal, 8));
-    i += 3;
-  }
-  return Buffer.from(bytes).toString('utf8');
-}
-
-/**
- * Split the rest of a `diff --git` line into its two name tokens, each
- * either C-quoted (`"a/…"`) or bare. Git quotes each side on its own, so a
- * rename from a quoted name to a plain one mixes the two shapes.
- */
-function diffGitTokens(rest: string): string[] {
-  const tokens: string[] = [];
-  let pos = 0;
-  while (pos < rest.length && tokens.length < 2) {
-    if (rest[pos] === '"') {
-      let end = pos + 1;
-      while (end < rest.length && rest[end] !== '"') {
-        end += rest[end] === '\\' ? 2 : 1;
-      }
-      if (end >= rest.length) return tokens;
-      tokens.push(rest.slice(pos, end + 1));
-      pos = end + 1;
-    } else {
-      const quoted = rest.indexOf(' "', pos);
-      // A bare first token ends where the quoted second begins; a bare
-      // second token, or a bare-only line, is everything that is left —
-      // the generous split in `hunkHeaderPaths` handles that shape.
-      const end = tokens.length === 0 && quoted !== -1 ? quoted : rest.length;
-      tokens.push(rest.slice(pos, end));
-      pos = end;
-    }
-    if (rest[pos] === ' ') pos += 1;
-  }
-  return tokens;
-}
-
-/**
- * The paths the hunks actually touch, taken from the patch's own headers.
- *
- * `--- a/…` / `+++ b/…` are the unambiguous pair and are read first; a
- * rename with no content change and a bare mode change emit neither, so
- * `rename from|to` and the `diff --git` line back them up. Each production
- * is admitted in its C-quoted form too (`--- "a/…"`, `diff --git "a/…"
- * "b/…"`, `rename from "…"`), decoded by `unquoteGitPath`. The bare
- * `diff --git` split is deliberately GENEROUS — `a/<from> b/<to>` cannot be
- * split unambiguously when a name holds ' b/' — and every candidate is
- * kept: this list is used to decide whether a finding's claim is
- * CORROBORATED, so an over-wide list can only fail to raise a question,
- * never invent one. The quoted productions keep that guarantee by
- * contributing nothing on a decode they cannot complete, and the hunk-body
- * tracking below keeps it against content lines that merely LOOK like
- * headers.
- */
-/** Any line git's diff writes a path on: the presence test behind the refusal. */
-const HUNK_HEADER_LINE = /^(?:diff --git |--- |\+\+\+ |rename (?:from|to) )/m;
-
-function hunkHeaderPaths(hunks: string): string[] {
-  const paths = new Set<string>();
-  const add = (path: string): void => {
-    const normalized = normalizeAuditPath(path);
-    if (normalized !== '' && normalized !== 'dev/null') paths.add(normalized);
-  };
-  // A decoded `a/…`/`b/…` token, its prefix stripped; nothing on a garbled
-  // decode or a token that carries no such prefix.
-  const addPrefixed = (token: string, prefix: 'a/' | 'b/'): void => {
-    const decoded = unquoteGitPath(token);
-    if (decoded !== null && decoded.startsWith(prefix)) add(decoded.slice(2));
-  };
-  const addQuoted = (token: string): void => {
-    const decoded = unquoteGitPath(token);
-    if (decoded !== null) add(decoded);
-  };
-  // Header recognition is HUNK-AWARE: inside a hunk body a deleted content
-  // line `-- a/<path>` renders as `--- a/<path>` at column 0 and an added
-  // `++ b/<path>` as `+++ b/<path>`, and a body line read as a header
-  // invents a touched path — the one thing this list must never do. After
-  // a `@@ -l,s +l,s @@` line exactly the counted body lines are consumed
-  // (`\ No newline at end of file` markers do not count), then header
-  // scanning resumes. A `GIT binary patch` section has no `@@` and its
-  // base85 lines match no header prefix, so it needs no state of its own.
-  let oldLeft = 0;
-  let newLeft = 0;
-  for (const line of hunks.split('\n')) {
-    if (oldLeft > 0 || newLeft > 0) {
-      if (line.startsWith('\\')) continue;
-      const mark = line.charAt(0);
-      if (mark === '-') oldLeft -= 1;
-      else if (mark === '+') newLeft -= 1;
-      else {
-        // A context line (or an empty line where a tool stripped the
-        // leading space) counts on both sides.
-        oldLeft -= 1;
-        newLeft -= 1;
-      }
-      if (oldLeft < 0) oldLeft = 0;
-      if (newLeft < 0) newLeft = 0;
-      continue;
-    }
-    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
-    if (hunk !== null) {
-      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
-      newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
-      continue;
-    }
-    if (line.startsWith('--- a/')) add(line.slice(6));
-    else if (line.startsWith('+++ b/')) add(line.slice(6));
-    else if (line.startsWith('--- "')) addPrefixed(line.slice(4), 'a/');
-    else if (line.startsWith('+++ "')) addPrefixed(line.slice(4), 'b/');
-    else if (line.startsWith('rename from "')) addQuoted(line.slice(12));
-    else if (line.startsWith('rename to "')) addQuoted(line.slice(10));
-    else if (line.startsWith('rename from ')) add(line.slice(12));
-    else if (line.startsWith('rename to ')) add(line.slice(10));
-    else if (line.startsWith('diff --git ')) {
-      const rest = line.slice('diff --git '.length);
-      if (rest.includes('"')) {
-        const [from, to] = diffGitTokens(rest);
-        for (const [token, prefix] of [
-          [from, 'a/'],
-          [to, 'b/'],
-        ] as const) {
-          if (token === undefined) continue;
-          if (token.startsWith('"')) addPrefixed(token, prefix);
-          else if (token.startsWith(prefix)) add(token.slice(2));
-        }
-      } else if (rest.startsWith('a/')) {
-        for (
-          let i = rest.indexOf(' b/');
-          i !== -1;
-          i = rest.indexOf(' b/', i + 1)
-        ) {
-          add(rest.slice(2, i));
-          add(rest.slice(i + 3));
-        }
-      }
-    }
-  }
-  return [...paths];
-}
-
-/**
- * True when a finding names a location one of the hunks touches.
- *
- * Compared on a SEGMENT boundary in both directions: a finding's location is
- * repo-relative, while a hunk header is relative to the repository the diff
- * was taken in, and a review of a subdirectory target can leave the two
- * rooted differently. A suffix match is the honest comparison there; an
- * equality-only test would call every such finding unmatched and bury the
- * real mismatches in noise.
- */
-function findingTouchesHunks(
-  finding: Finding,
-  hunkPaths: readonly string[],
-): boolean {
-  return finding.locations.some((loc) => {
-    const a = normalizeAuditPath(loc.file);
-    if (a === '') return false;
-    return hunkPaths.some(
-      (b) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`),
-    );
-  });
-}
-
 /**
  * The fix auditor's one input file: the `fixed` findings, then the hunks
  * `--fix` applied — rendered by the CLI from the outcome-bearing artifact and
  * the `fix-delta` diff, never assembled by the orchestrator.
  *
- * Four refusals, each a state where the audit could only return the
- * all-clear and the all-clear would be a lie: an artifact whose outcomes were
- * never recorded (the audit cannot tell a fixed finding from a skipped one),
- * an artifact with no `fixed` finding AND no hunks (nothing was applied — the
- * skill skips the audit, and a build that reached here was misordered), an
- * artifact with no `fixed` finding BESIDE hunks that landed (the ledger and
- * the tree disagree: edits are on disk that no outcome owns, and asserting
- * "nothing was applied" over them would skip the audit of exactly the
- * assumption-introducing class this step exists to catch), and a hunks file
- * with nothing in it beside a ledger that says something was fixed (a fix
- * that left no hunk in the tree is a claim, not an edit — the snapshot was
- * taken after the edits, or the edits never landed). A non-empty hunks file
- * with no header line at all is refused as not a patch — a header the
- * decoder cannot read is still a header, and leaves its finding annotated.
- *
- * The claim-versus-edit case is annotated, never refused: a `fixed` finding
- * no hunk corroborates is marked in its entry — a fix can legitimately land
- * in a file other than the one the finding names, and a fix round with one
- * finding can legitimately land entirely there (a test file the finding
- * asked for, a caller of the declaration it named) — and the audit proceeds
- * over the hunks that are here, with the auditor told to report the entry on
- * its own `unattested:` line, a form that carries no `assumes:` and no
- * `pin with:` because the auditor holds none of that finding's edit. The
- * brief's own `none` return shape is for a hunk that closes no listed
- * finding.
+ * Refused where the audit could only return an all-clear that is false: an
+ * artifact whose outcomes were never recorded (a fixed finding cannot be told
+ * from a skipped one), no `fixed` finding (nothing was applied — or, beside
+ * hunks that landed, edits no outcome owns), an empty hunks file beside a
+ * ledger that says something was fixed, and a hunks file that is not a patch.
+ * Whether each `fixed` finding's edit is among the hunks is the auditor's
+ * question, not this function's: both are in front of it, and a fix can
+ * legitimately land in a file the finding does not name — which is why no
+ * path is parsed out of the patch here.
  */
 export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   const findings = validateFindings(artifact);
@@ -2933,60 +2682,39 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
     );
   }
   const fixed = findings.filter((f) => f.outcome === 'fixed');
-  const hunkPaths = hunkHeaderPaths(hunks);
   if (fixed.length === 0) {
-    // Consult the tree BEFORE asserting anything about it. The sibling
-    // branch below refuses the mirror state — a ledger claiming an edit the
-    // tree does not hold — as a lie; this direction is the same lie
-    // reversed, and skipping the audit over it drops exactly the edits the
-    // audit exists for: a fixer that edits while recording `skipped` (the
-    // divergence this feature's own docs police), or an out-of-band write
-    // between `fix-delta --snapshot` and `--since`.
-    if (hunks.trim() !== '') {
-      throw new Error(
-        'agent-prompt: --role fix-audit: the ledger records no `fixed` ' +
-          `outcome, but --hunks carries edits (${hunkPaths.length} path(s)` +
-          `${hunkPaths.length > 0 ? `: ${hunkPaths.slice(0, 5).map(inertPath).join(', ')}${hunkPaths.length > 5 ? ', …' : ''}` : ''}). ` +
-          'That is a ledger/tree mismatch, not an empty fix round: edits ' +
-          'landed that no outcome owns, so "nothing was applied" would be ' +
-          'false. A write from outside this flow (a watcher, a formatter, a ' +
-          'background build) is the ordinary such case — revert or set it ' +
-          'aside and re-run the `--since`, and leave the ledger alone: a ' +
-          "foreign edit is not a finding's fix. Correct the ledger only " +
-          'when a finding WAS fixed without record — record the outcomes ' +
-          'the edits actually earned (`review findings --outcomes …`) and ' +
-          'rebuild the artifact — then re-run this command.',
-      );
-    }
     throw new Error(
-      'agent-prompt: --role fix-audit: no finding has outcome `fixed` — ' +
-        'nothing was applied, so there is nothing to audit (a `skipped` or ' +
-        '`no_change_needed` finding has no edit). Skip the audit and say so.',
+      hunks.trim() !== ''
+        ? 'agent-prompt: --role fix-audit: the ledger records no `fixed` ' +
+          'outcome, but --hunks carries edits. Edits landed that no outcome ' +
+          'owns: a write from outside this flow (a watcher, a formatter), or ' +
+          'a fix the ledger never recorded. Only the second is a ledger to ' +
+          "correct; a foreign edit is not a finding's fix."
+        : 'agent-prompt: --role fix-audit: no finding has outcome `fixed` — ' +
+          'nothing was applied, so there is nothing to audit (a `skipped` or ' +
+          '`no_change_needed` finding has no edit). Skip the audit and say so.',
     );
   }
   if (hunks.trim() === '') {
     throw new Error(
       `agent-prompt: --hunks is empty, but the ledger marks ${fixed.length} ` +
-        `finding(s) fixed (${ids(fixed)}). A fix that left no hunk ` +
-        'in the tree is a claim, not an edit: either the snapshot was taken ' +
-        'AFTER the edits — the pre-edit state is gone and the audit cannot ' +
-        'run, so the outcomes stay untouched — or the edits never landed, in ' +
-        'which case those outcomes are wrong and the ledger, not the audit, ' +
-        'is what to correct — or the edit landed where the capture cannot ' +
-        'see it: when `fix-delta --since` printed a blind-spot line beside ' +
-        'this empty file (`… cannot see … The hunks file stays empty`), ' +
-        'that is the cause, and the outcomes stand.',
+        `finding(s) fixed (${ids(fixed)}). A fix that left no hunk is a ` +
+        'claim, not an edit: the snapshot was taken after the edits, the ' +
+        'edits never landed (then the outcomes are wrong), or they landed ' +
+        'outside the scope `fix-delta --since` printed.',
     );
   }
-  // The display copy of a PR-controlled path goes through `inertPath`,
-  // like every other prompt sink in this file: `parseLocations` accepts
-  // any non-empty string as a file, and git permits a newline in a name,
-  // so a raw render let a path end the heading early and open a forged
-  // section — the `applied hunks end` fence included — in the auditor's
-  // one input file. The MATCH in `findingTouchesHunks` stays on the raw
-  // `loc.file`: flattening it there would stop a control-character path
-  // matching its own hunk header and turn a corroborated finding into a
-  // spurious `unattested:` line.
+  if (!/^diff --git /m.test(hunks)) {
+    throw new Error(
+      'agent-prompt: --hunks carries no `diff --git` header, so it is not ' +
+        'the patch `fix-delta --since` wrote. Pass the hunks file that ' +
+        'command produced.',
+    );
+  }
+  // The display copy of a finding path goes through `inertPath`, like every
+  // other prompt sink in this file: git permits a newline in a name, and a
+  // raw render let a path end the heading early and forge a section — the
+  // `applied hunks end` fence included — in the auditor's one input file.
   const where = (f: Finding): string => {
     const first = f.locations[0];
     const loc = first
@@ -2995,39 +2723,6 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
     const more = f.locations.length - 1;
     return more > 0 ? `${loc} (+${more} more location(s))` : loc;
   };
-  // Claim versus edit, per finding. `fixed` says an edit landed; the hunks
-  // are the edits that landed. A `fixed` finding no hunk corroborates is
-  // either an edit that never landed (the tool failed, a later edit reverted
-  // it, it went to the wrong file) or one taken before the snapshot — and
-  // neither the brief's per-hunk method nor either of its return shapes can
-  // express "a listed finding is closed by no hunk", so without this the
-  // claim rides through unexamined and is re-reported to the client as
-  // closed.
-  // …and that annotation carries the all-unmatched case too. A fix can
-  // legitimately land ENTIRELY in files no finding names — the finding
-  // says "no test pins this guard" and the fix is a new test file, or
-  // names a declaration and the fix lands at the caller — and with one
-  // `fixed` finding that is every finding. Refusing there re-classified a
-  // state the previous paragraph concedes is legitimate as fatal, and
-  // routed the orchestrator to a diagnosis that is false in it (a snapshot
-  // taken after the edits, or a ledger to correct). Unattested is what
-  // the auditor is told, per entry; the one input still refused is hunks
-  // with no header LINE at all, which is not a patch.
-  const unmatched = fixed.filter((f) => !findingTouchesHunks(f, hunkPaths));
-  // Refused on the absence of any HEADER LINE, not on the absence of a
-  // decoded path: a header the decoder cannot read (an escape it does not
-  // know) contributes no path and leaves its finding annotated — that is
-  // the over-match-never-invent rule above — but it is a header, and the
-  // file is a patch.
-  if (!HUNK_HEADER_LINE.test(hunks)) {
-    throw new Error(
-      'agent-prompt: --hunks names no path at all — its content carries ' +
-        'no `diff --git`, `---`/`+++` or `rename` header — so it is not a ' +
-        'patch `fix-delta --since` wrote. Pass the hunks file that command ' +
-        'produced.',
-    );
-  }
-  const unmatchedIds = new Set(unmatched.map((f) => f.id));
   const entries = fixed.map((f) =>
     [
       `### ${f.id} — [${f.severity}] ${where(f)}`,
@@ -3035,19 +2730,6 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
       `Failure scenario: ${f.failureScenario}`,
       ...(f.fixWitness ? [`Fix witness: ${f.fixWitness}`] : []),
       ...(f.outcomeNote ? [`Fixer's note: ${f.outcomeNote}`] : []),
-      // Marked, not dropped: the entry still frames the hunks that DID land,
-      // and the reader needs to know which claim nothing here attests.
-      ...(unmatchedIds.has(f.id)
-        ? [
-            "No hunk below touches this finding's location(s) — the fix " +
-              'may have landed in another file, or it may not have landed ' +
-              'at all. Nothing in this input attests that this finding was ' +
-              'closed; audit the hunks that are here and report this entry ' +
-              'on an `unattested:` line — the `(no hunk)` form your brief ' +
-              'gives, which takes no `assumes:` and no `pin with:` clause, ' +
-              'because no edit of this finding is in front of you.',
-          ]
-        : []),
     ].join('\n'),
   );
   return [
@@ -3973,9 +3655,6 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const hasWhole = !!args.wholeDiff;
   const hasRound = args.round !== undefined;
   const hasHunks = typeof args.hunks === 'string' && args.hunks.length > 0;
-  const hasHunksFingerprint =
-    typeof args.hunksFingerprint === 'string' &&
-    args.hunksFingerprint.length > 0;
   const bad = (msg: string): never => {
     throw new Error(`agent-prompt: ${msg}`);
   };
@@ -3989,15 +3668,14 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       hasFile ||
       hasFindings ||
       hasHunks ||
-      hasHunksFingerprint ||
       hasWhole ||
       args.allChunks ||
       hasRound
     ) {
       bad(
         '--roster builds every prompt the plan requires; it takes no --chunk, ' +
-          '--role, --file, --findings, --hunks, --hunks-fingerprint, ' +
-          '--whole-diff, --all-chunks or --round. ' +
+          '--role, --file, --findings, --hunks, --whole-diff, --all-chunks or ' +
+          '--round. ' +
           '(Step 4/5 verify and reverse-audit prompts are built per round, ' +
           'with --role and --findings.)',
       );
@@ -4011,12 +3689,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       hasFile ||
       hasFindings ||
       hasHunks ||
-      hasHunksFingerprint ||
       args.allChunks ||
       hasRound
     ) {
       bad(
-        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file, --findings, --hunks, --hunks-fingerprint, --all-chunks or --round.',
+        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file, --findings, --hunks, --all-chunks or --round.',
       );
     }
   } else if (hasRole) {
@@ -4110,26 +3787,6 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       bad(
         `--hunks hands the applied hunks to a --role fix-audit block; role ` +
           `"${role}" does not take it.`,
-      );
-    }
-    // The hunks are the audit's WHOLE input, and the file lives in a
-    // directory the reviewed tree can write to — so the build reads it back
-    // only against the hex `fix-delta --since` printed beside it, exactly
-    // as `fix-delta --since` reads the snapshot only against `--fingerprint`.
-    // Required, not optional: an anchor a caller may omit anchors nothing.
-    if (role === 'fix-audit' && !hasHunksFingerprint) {
-      bad(
-        '--role fix-audit needs --hunks-fingerprint <hex> — the fingerprint ' +
-          '`fix-delta --since` printed beside the hunks file. That file lives ' +
-          'in the tree the reviewed code can write to, so it is read only ' +
-          'against the record the orchestrator kept; never recompute it from ' +
-          'the file.',
-      );
-    }
-    if (hasHunksFingerprint && !hasHunks) {
-      bad(
-        '--hunks-fingerprint fingerprints the --hunks file; pass the file it ' +
-          'was printed for.',
       );
     }
     // `--round` labels a repeat launch of a role that runs more than once —
@@ -4364,24 +4021,6 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         throw new Error(
           `agent-prompt: cannot read the hunks ${args.hunks}: ` +
             `${(err as Error).message}. Pass the file \`fix-delta --since\` wrote.`,
-        );
-      }
-      // The anchor: the hunks are the audit's whole input and this is a
-      // SEPARATE PROCESS from the one that wrote them, over a file inside
-      // the tree the reviewed code can write to. Ruled on the RAW bytes —
-      // the decode below is lossy for a patch holding names git could not
-      // represent, and a lossy copy cannot anchor anything.
-      const actualHunks = createHash('sha256').update(hunksBytes).digest('hex');
-      const expectedHunks = (args.hunksFingerprint as string)
-        .trim()
-        .toLowerCase();
-      if (actualHunks !== expectedHunks) {
-        throw new Error(
-          `agent-prompt: the hunks ${args.hunks} fingerprint is ` +
-            `${actualHunks}, not the ${args.hunksFingerprint} ` +
-            '`fix-delta --since` printed — the file was rewritten since that ' +
-            'command wrote it, and hunks this run cannot anchor are not the ' +
-            "audit's input. Never recompute the fingerprint from the file.",
         );
       }
       // utf8 on purpose: the artifact holds git's raw patch bytes, and
@@ -4780,15 +4419,6 @@ export const agentPromptCommand: CommandModule = {
           'outcome-bearing artifact, the command renders the `fixed` findings ' +
           'above the hunks into the one list file the block points at.',
       })
-      .option('hunks-fingerprint', {
-        type: 'string',
-        describe:
-          'With --role fix-audit: the `hunks fingerprint <hex>` line ' +
-          '`fix-delta --since` printed for the --hunks file. Required — the ' +
-          'file lives in the tree the reviewed code can write to, so it is ' +
-          'read only against that hex, and a file that no longer matches it ' +
-          'is refused. Never recompute it from the file.',
-      })
       .option('round', {
         type: 'number',
         describe:
@@ -4810,7 +4440,6 @@ export const agentPromptCommand: CommandModule = {
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,
       hunks: argv['hunks'] as string | undefined,
-      hunksFingerprint: argv['hunks-fingerprint'] as string | undefined,
       round: argv['round'] as number | undefined,
     });
   },
