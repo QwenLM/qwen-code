@@ -234,7 +234,12 @@ export function buildTrajectory(
       return;
     }
     if ((fromSubagent !== undefined) !== row.depth > 0) return;
-    row.timing = { durationMs: timing.durationMs };
+    row.timing = {
+      durationMs: timing.durationMs,
+      ...(timing.startedAt !== undefined
+        ? { startedAt: timing.startedAt }
+        : {}),
+    };
     if (timing.toolStatus !== undefined) row.toolStatus = timing.toolStatus;
   };
 

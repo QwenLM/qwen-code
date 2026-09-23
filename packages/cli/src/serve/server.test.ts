@@ -3268,11 +3268,94 @@ describe('createServeApp', () => {
     },
   );
 
-  it('rejects unwired admission before creating the app', () => {
+  it.each(['admit', 'enforce'] as const)(
+    'rejects unwired %s before creating the app',
+    (mode) => {
+      expect(() =>
+        createServeAppImpl({ ...baseOpts, childHeapMode: mode }),
+      ).toThrow('managed child process wiring');
+    },
+  );
+
+  it('rejects an enforce status snapshot without managed process wiring', () => {
+    const policy = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+      mode: 'enforce',
+    });
     expect(() =>
-      createServeAppImpl({ ...baseOpts, childHeapMode: 'admit' }),
+      createServeAppImpl({ ...baseOpts, childHeapMode: 'enforce' }, undefined, {
+        bridge: fakeBridge(),
+        getChildHeapPolicySnapshot: () => policy.snapshot(),
+      }),
     ).toThrow('managed child process wiring');
   });
+
+  it.each(['off', 'observe', 'admit'] as const)(
+    'rejects enforce backed by a %s policy',
+    (mode) => {
+      expect(() =>
+        createServeAppImpl(
+          { ...baseOpts, childHeapMode: 'enforce' },
+          undefined,
+          {
+            managedChildProcesses: {
+              registry: new ProcessRegistry(),
+              policy: createChildHeapPolicy({
+                budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+                mode,
+              }),
+            },
+          },
+        ),
+      ).toThrow('managed child process wiring');
+    },
+  );
+
+  it.each(['missing-owner', 'unowned-bridge', 'registry-only'] as const)(
+    'rejects enforce with %s wiring',
+    (wiring) => {
+      const bridge = fakeBridge();
+      expect(() =>
+        createServeAppImpl(
+          { ...baseOpts, childHeapMode: 'enforce' },
+          undefined,
+          {
+            ...(wiring === 'registry-only'
+              ? {
+                  workspaceRegistry: createWorkspaceRegistry([
+                    makeWorkspaceRuntimeForTest({
+                      workspaceId: 'primary',
+                      workspaceCwd: '/tmp/enforce-primary',
+                      primary: true,
+                      bridge,
+                    }),
+                    makeWorkspaceRuntimeForTest({
+                      workspaceId: 'secondary',
+                      workspaceCwd: '/tmp/enforce-secondary',
+                      primary: false,
+                      bridge: fakeBridge(),
+                    }),
+                  ]),
+                }
+              : { bridge }),
+            managedChildProcesses: {
+              registry: new ProcessRegistry(),
+              policy: createChildHeapPolicy({
+                budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8192 }),
+                mode: 'enforce',
+              }),
+              ...(wiring === 'missing-owner'
+                ? {}
+                : {
+                    ownsBridge: (candidate: AcpSessionBridge) =>
+                      wiring === 'registry-only' && candidate === bridge,
+                  }),
+            },
+          },
+        ),
+      ).toThrow('managed bridge ownership');
+    },
+  );
 
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
@@ -4340,6 +4423,87 @@ describe('createServeApp', () => {
       expect(res.status).toBe(404);
       expect(res.text).not.toContain('<div id="root">');
     });
+
+    it.each([
+      '/plugins',
+      '/channels',
+      '/scheduled-tasks',
+      '/goals',
+      '/settings',
+    ])(
+      'serves page document %s without bypassing API authentication',
+      async (pagePath) => {
+        const app = createServeApp(
+          { ...baseOpts, token: 'secret' },
+          undefined,
+          { webShellDir },
+        );
+        for (const path of [pagePath, `${pagePath}/`, pagePath.toUpperCase()]) {
+          const document = await request(app)
+            .get(path)
+            .set('Host', host)
+            .set('Accept', 'text/html');
+          expect(document.status).toBe(200);
+          expect(document.text).toContain('<div id="root">');
+        }
+        await request(app)
+          .head(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(200)
+          .expect('Content-Type', /text\/html/);
+        await request(app)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', '*/*')
+          .set('Sec-Fetch-Mode', 'navigate')
+          .expect(200);
+        for (const path of [
+          pagePath,
+          `${pagePath}/data`,
+          `${pagePath}%2fdata`,
+        ]) {
+          await request(app)
+            .get(path)
+            .set('Host', host)
+            .set('Accept', 'application/json')
+            .expect(401);
+        }
+        await request(app)
+          .post(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(401);
+        const api = await request(app)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'application/json')
+          .set('Authorization', 'Bearer secret');
+        expect(api.text).not.toContain('<div id="root">');
+        if (pagePath === '/goals') {
+          expect(api.status).toBe(200);
+          expect(api.headers['content-type']).toContain('application/json');
+          expect(api.body.goals).toEqual([]);
+        }
+        const apiOnly = createServeApp(
+          { ...baseOpts, token: 'secret', serveWebShell: false },
+          undefined,
+          { webShellDir },
+        );
+        const apiWithoutShell = await request(apiOnly)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'application/json')
+          .set('Authorization', 'Bearer secret');
+        expect(api.status).toBe(apiWithoutShell.status);
+        expect(api.body).toEqual(apiWithoutShell.body);
+        await request(apiOnly)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(401);
+      },
+    );
 
     it('serves the shell for /session/:id document navigations (pre-auth route)', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });

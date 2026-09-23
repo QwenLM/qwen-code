@@ -365,13 +365,13 @@ vi.mock('../../services/review-worktree-lease.js', () => {
       return lease
         ? {
             lease,
-            path: `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+            path: `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
           }
         : null;
     },
     reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
-    reviewLeasePath: (repositoryRoot: string, target: string) =>
-      `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+    reviewLeasePath: (_repositoryRoot: string, target: string) =>
+      `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
   };
 });
 

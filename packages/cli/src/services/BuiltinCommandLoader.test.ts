@@ -144,6 +144,18 @@ describe('BuiltinCommandLoader', () => {
     });
   });
 
+  it('skips automatic IDE process detection in tool sandbox', async () => {
+    const { ideCommand } = await import('../ui/commands/ideCommand.js');
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ backend: 'bwrap' });
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
+  });
+
   it('should correctly pass the config object to restore command factory', async () => {
     const loader = new BuiltinCommandLoader(mockConfig);
     await loader.loadCommands(new AbortController().signal);

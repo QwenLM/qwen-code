@@ -93,6 +93,11 @@ import {
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
+import {
+  BWRAP_MIGRATION_MESSAGE,
+  validateExecutionSandboxSelection,
+} from './execution-sandbox-settings.js';
+import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
@@ -762,6 +767,21 @@ export async function parseArguments(): Promise<CliArgs> {
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
+          const optionArgs = rawArgv.slice(
+            0,
+            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
+          );
+          if (
+            optionArgs.some(
+              (arg, index) =>
+                arg === '--sandbox=bwrap' ||
+                arg === '-s=bwrap' ||
+                ((arg === '--sandbox' || arg === '-s') &&
+                  optionArgs[index + 1] === 'bwrap'),
+            )
+          ) {
+            return BWRAP_MIGRATION_MESSAGE;
+          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -1643,26 +1663,21 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
-  const requestedShellExecutionSandbox = hostPolicy?.shellExecutionSandbox;
-  const shellExecutionSandbox = requestedShellExecutionSandbox
-    ? {
-        ...requestedShellExecutionSandbox,
-        maskedPaths: [
-          ...(requestedShellExecutionSandbox.maskedPaths ?? []),
-          path.join(
-            requestedShellExecutionSandbox.workspace,
-            '.qwen',
-            'review-leases',
-          ),
-        ],
-      }
-    : undefined;
-  const sandboxEnabled = Boolean(shellExecutionSandbox);
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings,
+    argv,
+  );
+  const sandboxEnabled = Boolean(
+    executionSandboxSettings || hostPolicy?.shellExecutionSandbox,
+  );
+  if (executionSandboxSettings && hostPolicy?.shellExecutionSandbox) {
+    throw new Error(
+      'Choose operator settings or a programmatic execution sandbox policy, not both.',
+    );
+  }
   if (
     sandboxEnabled &&
-    (!bareMode ||
-      !argv.prompt ||
-      argv.promptInteractive !== undefined ||
+    (argv.promptInteractive !== undefined ||
       argv.inputFormat === 'stream-json' ||
       argv.acp ||
       argv.experimentalAcp ||
@@ -1676,7 +1691,7 @@ export async function loadCliConfig(
       provisionalWorkspace)
   ) {
     throw new Error(
-      'The internal tool execution sandbox requires bare noninteractive mode without ACP, worktrees, LSP, MCP, extensions or provisional workspaces.',
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
     );
   }
   const safeMode =
@@ -1717,6 +1732,13 @@ export async function loadCliConfig(
   if (!Storage.hasRuntimeBaseDirContext()) {
     Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
   }
+  const requestedShellExecutionSandbox =
+    hostPolicy?.shellExecutionSandbox ??
+    (executionSandboxSettings
+      ? createExecutionSandboxPolicy(executionSandboxSettings, cwd)
+      : undefined);
+  const shellExecutionSandbox = requestedShellExecutionSandbox;
+
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;

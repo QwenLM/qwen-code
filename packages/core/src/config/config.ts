@@ -153,6 +153,7 @@ import {
   resetDenialState,
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
+import { clearSessionCommits } from '../permissions/destructive-commands.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -1083,7 +1084,7 @@ export interface ConfigParameters {
    */
   toolInvocationGuard?: ToolInvocationGuard;
   /** Internal trusted-host integration; never loaded from workspace settings. */
-  shellExecutionSandbox?: Readonly<BwrapPolicy>;
+  shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1538,6 +1539,10 @@ export interface ConfigParameters {
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
+}
+
+export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
+  requestedBackend?: 'auto' | 'bwrap';
 }
 
 export type TerminalImageRenderSupport =
@@ -2539,7 +2544,9 @@ export function deriveConfig(
 }
 
 export class Config {
-  private readonly shellExecutionSandbox: Readonly<BwrapPolicy> | undefined;
+  private readonly shellExecutionSandbox:
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
   private sessionSourceId?: string;
@@ -8397,6 +8404,31 @@ export class Config {
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
+      // ...and the session-commit registry behind the AUTO-mode
+      // `git commit --amend` exemption, per its contract ("cleared on session
+      // end or mode switch"): exemptions must not carry across a boundary
+      // where the user re-decides how much the agent may do unattended.
+      // Clearing is fail-closed. Gated on a real transition so a no-op re-set,
+      // which several callers do, cannot drop registrations still in use.
+      // Root Config only, like the workflow-revision stamp above: a derived
+      // overlay's `setApprovalMode` delegates here, and a subagent flipping
+      // its own mode is child-local, not a decision about the root session's
+      // autonomy. Clearing there cost the root a false "not made by the agent
+      // in this session" block on its own commit.
+      //
+      // PLAN is excluded on both legs for the same reason. `enter_plan_mode`
+      // is model-callable from AUTO and `exit_plan_mode` restores it, so the
+      // round trip is two real transitions that end in the posture it started
+      // in — and PLAN cannot execute a commit, so the excursion cannot add an
+      // exemption either. Clearing on it bought nothing and cost the agent a
+      // false block on its own commit, with no escape from inside AUTO.
+      if (
+        !isDerivedConfig(this) &&
+        mode !== ApprovalMode.PLAN &&
+        fromMode !== ApprovalMode.PLAN
+      ) {
+        clearSessionCommits();
+      }
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
@@ -11055,7 +11087,9 @@ export class Config {
     return this.toolInvocationGuard;
   }
 
-  getShellExecutionSandbox(): Readonly<BwrapPolicy> | undefined {
+  getShellExecutionSandbox():
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined {
     return this.shellExecutionSandbox;
   }
 
