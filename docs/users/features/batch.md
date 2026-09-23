@@ -202,6 +202,8 @@ Nothing polls a model while you wait. Later:
 qwen batch collect <task-id> [--wait]   # validate + write target files
 qwen batch list                          # every task recorded under .qwen/batch
 qwen batch retry <task-id>               # resubmit only the failed items
+qwen batch retry <task-id> --max-output-tokens 8192  # include truncated ones
+qwen batch check                         # verify setup; nothing is billed
 qwen batch cancel --task <task-id>       # partial results are still billed
 ```
 
@@ -209,7 +211,8 @@ qwen batch cancel --task <task-id>       # partial results are still billed
 **held** (the source changed after submission, or the target already exists
 with different content — resolve and re-run collect, no new request is made),
 or **failed** (truncated, empty, provider error — `retry` resubmits just
-these). Re-running `collect` is always safe: results are parsed from the
+these; truncated items only when `--max-output-tokens` raises the limit,
+since resending them unchanged would fail and bill again). Re-running `collect` is always safe: results are parsed from the
 local record, delivered items are never redone, and repeated collects never
 double-count usage. After results are safely on disk the remote input and
 output files are deleted (`--keep-remote` keeps them).
@@ -225,7 +228,10 @@ with an "in use" message.
 
 Cost estimates are token-based unless you provide unit prices via
 `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` and `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`
-(a plan's `maxCostUsd` budget is only enforced when prices are set). Batch
+(a plan's `maxCostUsd` is an estimate gate, not a cap on the bill; without
+prices a plan that sets it is refused). A run freezes your current sampling
+parameters, output limit and thinking mode, so Batch runs the way your
+realtime session does, and retries reuse them. Batch
 usage is recorded in the task ledger, separate from the interactive session's
 cache statistics. The design contract for this workflow is
 [`docs/design/2026-09-23-agent-prepared-batch-api.md`](../design/2026-09-23-agent-prepared-batch-api.md).

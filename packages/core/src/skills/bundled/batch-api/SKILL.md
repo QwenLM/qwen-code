@@ -19,6 +19,24 @@ turn the user's task into a small **plan file** that the deterministic
 executor (`qwen batch run`) submits. You never write request JSONL by hand
 and never call the Batch API yourself.
 
+## 0. Check readiness before anything else
+
+Run every `qwen batch …` command with the shell tool as
+`"${QWEN_CODE_CLI:-qwen}" batch …` — `QWEN_CODE_CLI` names the CLI running
+this session, so a plain `qwen` on PATH (possibly an older install without
+these subcommands) is only the fallback. First:
+
+```
+"${QWEN_CODE_CLI:-qwen}" batch check
+```
+
+It proves the credentials, endpoint and Batch route work and shows the model,
+thinking mode and output limit a run would freeze from the user's current
+settings — without a billed request. If it fails (for example Qwen OAuth,
+which has no Batch route), relay its message and stop: do not read files or
+draft a plan the executor cannot submit. Pass its `note:` lines on to the
+user.
+
 ## 1. Decide suitability honestly — this is your main job
 
 Suitable: many independent, single-turn transforms whose input materials are
@@ -85,28 +103,29 @@ Rules:
   paths. Results that arrive to a changed source or an occupied target are
   held, not written.
 - Optional fields: `completionWindow` (default `24h`, max `14d`),
-  `maxOutputTokens`, `expectedOutputTokensPerItem` (improves the cost
-  estimate), `maxCostUsd` (hard budget — only enforceable when unit prices
-  are configured, see executor output), `enableThinking` (the executor sends
-  thinking off by default — set `true` only when the transform genuinely
-  needs reasoning, since thinking tokens are billed as output).
+  `maxOutputTokens` (set it when outputs can be long — a truncated item can
+  only be retried with a larger limit), `expectedOutputTokensPerItem`
+  (improves the cost estimate), `maxCostUsd` (an estimate gate: `run` and
+  `retry` refuse to submit when the estimate exceeds it — it is NOT a cap on
+  the bill, and only works when `check` reports unit prices).
+- Do NOT set `enableThinking` unless the user asked for a thinking mode:
+  the executor freezes the thinking mode, sampling parameters and output
+  limit from the user's current settings, so Batch runs the same way their
+  realtime session does. Changing it silently changes both cost and quality.
 - If you are unsure about model, prices, or provider limits, leave them to
   the executor — do not invent numbers.
 
 ## 4. Submit through the executor
 
-Run exactly this with the shell tool — `QWEN_CODE_CLI` names the CLI running
-this session, so a plain `qwen` on PATH (possibly an older install without
-these subcommands) is only the fallback:
+Run exactly this with the shell tool:
 
 ```
 "${QWEN_CODE_CLI:-qwen}" batch run .qwen/batch/plans/<slug>.json
 ```
 
-Run every `qwen batch …` command below the same way when you run it yourself.
-
 Then report to the user, verbatim from the command output: the task id, item
-count, cost estimate, and the collect command. If the command fails, relay
+count, the frozen model/thinking/output-limit line, the cost estimate, and
+the collect command. If the command fails, relay
 its error and fix the plan (or stop) — never work around the executor by
 hand-crafting requests or calling the API directly.
 
@@ -118,7 +137,10 @@ Tell the user:
   `qwen batch collect <task-id>` (add `--wait` to poll until it settles).
   You can run this for them whenever they ask — it needs no model judgment.
 - Failed items can be resubmitted after the underlying problem is fixed:
-  `qwen batch retry <task-id>`.
+  `qwen batch retry <task-id>`. Items truncated at the output limit are
+  skipped unless a larger limit is given:
+  `qwen batch retry <task-id> --max-output-tokens <n>`. Every retry is a new
+  billed request.
 - Held results (source changed / target conflict) are delivered by re-running
   `qwen batch collect <task-id>` after the conflict is resolved.
 - `qwen batch list` shows all recorded tasks; `qwen batch cancel --task <task-id>`

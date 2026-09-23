@@ -14,6 +14,7 @@ import {
   retryTask,
   cancelTask,
   listTasks,
+  checkReadiness,
   type WorkflowApi,
   type WorkflowDeps,
 } from './batch-workflow.js';
@@ -33,6 +34,29 @@ const outputLine = (customId: string, content: string) =>
       },
     },
   });
+
+const truncatedLine = (customId: string) =>
+  JSON.stringify({
+    custom_id: customId,
+    response: {
+      status_code: 200,
+      body: {
+        choices: [
+          {
+            finish_reason: 'length',
+            message: { role: 'assistant', content: '# partial' },
+          },
+        ],
+      },
+    },
+  });
+
+/** Request bodies uploaded for the n-th submission (1-based). */
+const uploadedBodies = (h: Harness, n: number) =>
+  (h.api.uploadJsonl.mock.calls[n - 1][1] as string)
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line).body as Record<string, unknown>);
 
 const jobOf = (
   id: string,
@@ -660,12 +684,114 @@ describe('retryTask', () => {
     expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
   });
 
+  it('skips truncated items unless a larger output limit is given', async () => {
+    const h = (harness = setup({ maxOutputTokens: 1000 }));
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${truncatedLine('b#1')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).items[1]).toMatchObject({
+      state: 'failed',
+      truncated: true,
+    });
+
+    // Same limit would fail the same way and bill again: nothing is sent.
+    await retryTask(h.deps, taskId);
+    expect(h.out.join('\n')).toMatch(/skipping 1 truncated item/);
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+
+    await expect(
+      retryTask(h.deps, taskId, { maxOutputTokens: 1000 }),
+    ).rejects.toThrow(/truncated at 1000/);
+    expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+
+    await retryTask(h.deps, taskId, { maxOutputTokens: 4000 });
+    expect(uploadedBodies(h, 2)).toEqual([
+      expect.objectContaining({ max_tokens: 4000 }),
+    ]);
+    expect(h.store.load(taskId).attempts[1].maxOutputTokens).toBe(4000);
+  });
+
   it('reports when nothing is retryable', async () => {
     const h = (harness = setup());
     await runPlan(h.deps, h.planPath);
     await retryTask(h.deps, taskIdOf(h));
     expect(h.out.join('\n')).toMatch(/nothing to retry/);
     expect(h.api.uploadJsonl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('frozen request parameters', () => {
+  it('runs with the realtime settings and retries reuse them after the config changes', async () => {
+    const h = (harness = setup());
+    h.deps.ep = {
+      ...h.deps.ep,
+      generationConfig: {
+        samplingParams: { temperature: 0.2 },
+        extra_body: { enable_thinking: true },
+      },
+    };
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${JSON.stringify({ custom_id: 'b#1', response: { status_code: 500, body: {} } })}\n`,
+    });
+    expect(uploadedBodies(h, 1)[0]).toMatchObject({
+      temperature: 0.2,
+      enable_thinking: true,
+    });
+    expect(h.out.join('\n')).toMatch(/model qwen-plus, thinking on/);
+
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    h.deps.ep = { ...h.deps.ep, generationConfig: { reasoning: false } };
+    await retryTask(h.deps, taskId);
+    expect(uploadedBodies(h, 2)[0]).toMatchObject({
+      temperature: 0.2,
+      enable_thinking: true,
+    });
+  });
+
+  it('refuses a plan that disables thinking on a thinking-mandatory model', async () => {
+    const h = (harness = setup({ enableThinking: false }));
+    h.deps.ep = {
+      ...h.deps.ep,
+      generationConfig: { thinkingMandatory: true },
+    };
+    await expect(runPlan(h.deps, h.planPath)).rejects.toThrow(
+      /requires thinking/,
+    );
+    expect(h.api.uploadJsonl).not.toHaveBeenCalled();
+    expect(h.store.list()).toHaveLength(0);
+  });
+});
+
+describe('checkReadiness', () => {
+  it('probes the Batch route and shows what a run would freeze', async () => {
+    const h = (harness = setup());
+    const probe = vi.fn(async () => undefined);
+    h.deps.api = { ...h.api, probe };
+    h.deps.ep = {
+      ...h.deps.ep,
+      generationConfig: { samplingParams: { max_tokens: 2048 } },
+    };
+    await checkReadiness(h.deps);
+    expect(probe).toHaveBeenCalledWith(h.deps.ep);
+    const text = h.out.join('\n');
+    expect(text).toMatch(/ready: fake accepts Batch requests/);
+    expect(text).toMatch(/thinking: provider default, max output 2048 tokens/);
+    expect(text).toMatch(/no unit prices/);
+  });
+
+  it('fails before any preparation when the route is unusable', async () => {
+    const h = (harness = setup());
+    h.deps.api = {
+      ...h.api,
+      probe: async () => {
+        throw new Error('GET /batches?limit=1 -> HTTP 401: invalid key');
+      },
+    };
+    await expect(checkReadiness(h.deps)).rejects.toThrow(/401/);
+    expect(h.out).toEqual([]);
   });
 });
 

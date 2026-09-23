@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import type { FrozenRequest } from './batch-docs.js';
 
 export const BATCH_TASK_SCHEMA_VERSION = 1;
 
@@ -125,6 +126,9 @@ export interface TaskItem {
    * attempt 2 runs must not flip the item back to `failed` (and re-bill it
    * on the next retry). */
   lastAttempt?: number;
+  /** Last failure was truncation at the output limit; retrying needs a
+   * larger limit, not the same request billed again. */
+  truncated?: boolean;
 }
 
 /** Where one upload+create cycle stands. `unknown` means the create request
@@ -157,6 +161,8 @@ export interface TaskAttempt {
     requests: number;
   };
   remoteCleaned?: boolean;
+  /** Output limit this attempt ran with when a retry raised it. */
+  maxOutputTokens?: number;
   /** Settled, downloaded and cleaned up: later collects only re-read the
    * local files and never ask the provider about this batch again. */
   collected?: boolean;
@@ -181,6 +187,8 @@ export interface BatchTask {
   model: string;
   completionWindow: string;
   plan: BatchPlan;
+  /** Realtime request parameters frozen at `run`; retries reuse them. */
+  request?: FrozenRequest;
   items: TaskItem[];
   attempts: TaskAttempt[];
   estimate?: {

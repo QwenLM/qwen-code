@@ -37,6 +37,95 @@ export interface AssembledRequest {
 export class AssemblyError extends Error {}
 
 /**
+ * Request parameters frozen from the realtime generation config when a task
+ * is created, so Batch runs the same sampling and thinking mode the user
+ * already runs — a Batch-only default would make the cost/quality comparison
+ * against realtime meaningless — and every retry reuses them instead of
+ * whatever the config says later.
+ */
+export interface FrozenRequest {
+  /** Chat-completions body fields (sampling, `max_tokens`, `enable_thinking`). */
+  params: Record<string, unknown>;
+  /** The model rejects `enable_thinking: false`. */
+  thinkingMandatory?: boolean;
+  /** Configured settings Batch requests do not reproduce, for the summary. */
+  notes: string[];
+}
+
+// Only fields verified as DashScope chat-completions body parameters; other
+// generation-config keys are SDK/adapter options, not wire JSON.
+const FROZEN_SAMPLING_FIELDS = [
+  'temperature',
+  'top_p',
+  'top_k',
+  'presence_penalty',
+  'frequency_penalty',
+  'repetition_penalty',
+  'seed',
+  'max_tokens',
+] as const;
+
+export interface GenerationConfigLike {
+  samplingParams?: Record<string, unknown>;
+  extra_body?: Record<string, unknown>;
+  reasoning?: false | { effort?: string; budget_tokens?: number };
+  thinkingMandatory?: boolean;
+}
+
+export function freezeRequest(
+  config: GenerationConfigLike | undefined,
+): FrozenRequest {
+  const params: Record<string, unknown> = {};
+  const notes: string[] = [];
+  const sampling = config?.samplingParams ?? {};
+  for (const field of FROZEN_SAMPLING_FIELDS) {
+    if (sampling[field] !== undefined && sampling[field] !== null) {
+      params[field] = sampling[field];
+    }
+  }
+  // Same precedence the realtime DashScope adapter applies: an explicit
+  // sampling switch, then extra_body, then a disabled reasoning config.
+  const thinking =
+    typeof sampling['enable_thinking'] === 'boolean'
+      ? sampling['enable_thinking']
+      : typeof config?.extra_body?.['enable_thinking'] === 'boolean'
+        ? (config.extra_body['enable_thinking'] as boolean)
+        : config?.reasoning === false
+          ? false
+          : undefined;
+  if (thinking === false && config?.thinkingMandatory) {
+    notes.push('thinking cannot be disabled for this model; left on');
+  } else if (thinking !== undefined) {
+    params['enable_thinking'] = thinking;
+  }
+  if (
+    config?.reasoning &&
+    (config.reasoning.effort !== undefined ||
+      config.reasoning.budget_tokens !== undefined) &&
+    thinking === undefined
+  ) {
+    notes.push(
+      'the configured reasoning effort is not reproduced in Batch requests; the provider default thinking mode applies',
+    );
+  }
+  return {
+    params,
+    ...(config?.thinkingMandatory ? { thinkingMandatory: true } : {}),
+    notes,
+  };
+}
+
+/** One-line description of the thinking mode a frozen request runs with. */
+export function describeThinking(request: FrozenRequest | undefined): string {
+  const value = request?.params['enable_thinking'];
+  return value === true
+    ? 'thinking on'
+    : value === false
+      ? 'thinking off'
+      : 'thinking: provider default';
+}
+
+/**
  * Read each item's source and build its request line. Sources are resolved
  * against the project root recorded in the task; anything escaping it
  * (`../`, absolute paths) is refused before a byte leaves the machine.
@@ -47,6 +136,7 @@ export function assembleRequests(
   attempt: number,
   projectRoot: string,
   model: string,
+  request?: FrozenRequest,
 ): AssembledRequest[] {
   const requests: AssembledRequest[] = [];
   for (const item of items) {
@@ -84,13 +174,19 @@ export function assembleRequests(
         `${plan.shared.instructions}\n\n` +
         `<document path="${item.source}">\n${content}\n</document>`,
     });
-    const body: Record<string, unknown> = { model, messages };
+    // Frozen realtime parameters first; the plan only overrides what it
+    // sets explicitly.
+    const body: Record<string, unknown> = {
+      ...request?.params,
+      model,
+      messages,
+    };
     if (plan.maxOutputTokens !== undefined) {
       body['max_tokens'] = plan.maxOutputTokens;
     }
-    // Thinking tokens are billed as output and add nothing to a one-shot
-    // transform, so the executor turns thinking off unless the plan opts in.
-    body['enable_thinking'] = plan.enableThinking ?? false;
+    if (plan.enableThinking !== undefined) {
+      body['enable_thinking'] = plan.enableThinking;
+    }
     const inputTokens = estimateTokens(JSON.stringify(messages));
     requests.push({
       customId: customIdOf(item.id, attempt),
@@ -168,7 +264,12 @@ export function parseOutputJsonl(
 
 export type ResultVerdict =
   | { kind: 'ok'; content: string }
-  | { kind: 'failed'; reason: string };
+  | {
+      kind: 'failed';
+      reason: string;
+      /** Hit the output limit: resending unchanged would fail the same way. */
+      truncated?: boolean;
+    };
 
 /**
  * Turn one provider output line into a delivery decision. A billed request
@@ -204,7 +305,8 @@ export function classifyResult(line: OutputLine): ResultVerdict {
   if (choice.finish_reason === 'length') {
     return {
       kind: 'failed',
-      reason: 'output truncated (finish_reason=length); raise maxOutputTokens',
+      reason: 'output truncated (finish_reason=length)',
+      truncated: true,
     };
   }
   if (choice.finish_reason !== 'stop' && choice.finish_reason != null) {

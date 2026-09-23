@@ -51,6 +51,10 @@ Its `allowedTools` grants read-only tools only; writing the plan and
 
 The skill makes the model do the semantic work only:
 
+0. Run `qwen batch check` first: it proves credentials, endpoint and the
+   Batch route (no billed request) and shows the settings a run would
+   freeze. On failure — e.g. Qwen OAuth, which has no Batch route — stop
+   before spending anything on preparation.
 1. Judge suitability honestly (independent single-turn transforms with all
    materials available now). Unsuitable → explain and stop; never silently
    do the work realtime instead.
@@ -63,13 +67,14 @@ The skill makes the model do the semantic work only:
 
 ### `qwen batch` workflow subcommands (deterministic executor)
 
-| Command                   | Behavior                                                                      |
-| ------------------------- | ----------------------------------------------------------------------------- |
-| `run <plan>`              | Validate plan → assemble → estimate → budget gate → submit → record           |
-| `collect <task-id>`       | Reconcile → poll (optional `--wait`) → download → validate → deliver → report |
-| `retry <task-id>`         | Resubmit only `failed` items as a new attempt                                 |
-| `list`                    | List recorded tasks with progress                                             |
-| `cancel --task <task-id>` | Cancel the task's active batch (partials are still billed)                    |
+| Command                   | Behavior                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------- |
+| `run <plan>`              | Validate plan → assemble → estimate → budget gate → submit → record                      |
+| `collect <task-id>`       | Reconcile → poll (optional `--wait`) → download → validate → deliver → report            |
+| `retry <task-id>`         | Resubmit only `failed` items as a new attempt (`--max-output-tokens` for truncated ones) |
+| `check`                   | Verify credentials/endpoint/Batch route and show what `run` would freeze; nothing billed |
+| `list`                    | List recorded tasks with progress                                                        |
+| `cancel --task <task-id>` | Cancel the task's active batch (partials are still billed)                               |
 
 `run` prints the task id and exits — waiting never burns agent turns.
 `collect` is safe to run any number of times: everything already local is
@@ -127,8 +132,16 @@ Design invariants:
   `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` and
   `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD` are set — a hardcoded price table
   would go stale against the provider's pricing page. A plan may set
-  `maxCostUsd`; without prices the budget cannot be enforced and `run`
-  refuses to submit.
+  `maxCostUsd`, which is an **estimate gate, not a cap on the bill**: `run`
+  and every `retry` refuse to submit when the estimate exceeds it, and
+  refuse outright when no prices are configured. Estimates are rough and
+  the provider bill is authoritative.
+- **Batch runs the user's realtime settings.** At `run` the executor freezes
+  the configured sampling parameters, output limit and thinking mode into
+  the task (only fields verified as chat-completions body parameters), and
+  every retry reuses them. A Batch-only default would make the cost/quality
+  comparison against realtime meaningless. A configured reasoning effort
+  that has no verified Batch equivalent is reported as a note, not guessed.
 
 ## 4. Plan schema (v1)
 
@@ -141,7 +154,6 @@ Design invariants:
   "maxCostUsd": 2.0,
   "maxOutputTokens": 4096,
   "expectedOutputTokensPerItem": 1500,
-  "enableThinking": false,
   "shared": {
     "system": "optional system prompt",
     "instructions": "shared rules: terminology, style, output contract"
@@ -160,9 +172,9 @@ Enforced by `batch-task.ts`: item ids match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`
 (they ride inside provider custom_ids), ids and targets are unique, unknown
 fields are rejected (an agent's typo must fail loudly, not silently change
 behavior). Only the optional fields above are optional; `kind` is literal —
-new kinds get their own schema version. `enableThinking` defaults to `false`
-in the executor: thinking tokens are billed as output and buy nothing in a
-one-shot transform, so a plan must opt in.
+new kinds get their own schema version. `enableThinking` exists only for a
+user who explicitly asks for a different thinking mode; left unset, the
+frozen setting applies, and `false` is refused for thinking-mandatory models.
 
 The first product contract is **one source document → one complete target
 document**. The model returns content only; paths or commands inside its
@@ -172,24 +184,24 @@ is not semantic quality, which remains the user's acceptance call.
 
 ## 5. Boundary behaviors
 
-| Boundary                                             | Behavior                                                                                    |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Unsuitable task (needs iterative feedback)           | Skill explains and stops; no silent realtime fallback                                       |
-| Source path escapes project root (incl. via symlink) | Assembly refuses before anything is uploaded                                                |
-| Assembled line > 1 MB                                | Refused with a pointer to raw `qwen batch submit` (workflow cap, below the provider's 6 MB) |
-| Create returns definite 4xx                          | Orphan upload deleted, items `failed`, `retry` is safe                                      |
-| Create answer lost (5xx / dropped socket)            | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                   |
-| Reconcile finds 0 or 2+ candidates                   | Report and stop; the provider list is the source of truth                                   |
-| Batch not settled at collect                         | Report status; `--wait` polls with 10s→60s backoff up to `--timeout`                        |
-| Result line truncated / tool calls / empty           | Item `failed` with the reason; billed-failure costs stay visible                            |
-| Result custom_id unknown or duplicated               | Ignored with a warning, never mapped onto another item                                      |
-| Error-file line                                      | Item `failed` with the provider's error                                                     |
-| Item missing from all result files                   | Item `failed` ("no result line")                                                            |
-| Source changed after submission                      | Delivery `held` with the reason; re-collect after reverting                                 |
-| Target exists with different content                 | Delivery `held`; user resolves, re-collect delivers from the local record                   |
-| Target path symlinks out of the project              | Delivery `held`                                                                             |
-| `--task` cancel on a settled batch                   | Points at `collect` instead of pretending to cancel                                         |
-| Remote cleanup after collect                         | Input/output/error files deleted (after local persistence); `--keep-remote` opts out        |
+| Boundary                                             | Behavior                                                                                                                                                            |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unsuitable task (needs iterative feedback)           | Skill explains and stops; no silent realtime fallback                                                                                                               |
+| Source path escapes project root (incl. via symlink) | Assembly refuses before anything is uploaded                                                                                                                        |
+| Assembled line > 1 MB                                | Refused with a pointer to raw `qwen batch submit` (workflow cap, below the provider's 6 MB)                                                                         |
+| Create returns definite 4xx                          | Orphan upload deleted, items `failed`, `retry` is safe                                                                                                              |
+| Create answer lost (5xx / dropped socket)            | `submit-unknown`; `collect` reconciles via the provider list; no resubmit                                                                                           |
+| Reconcile finds 0 or 2+ candidates                   | Report and stop; the provider list is the source of truth                                                                                                           |
+| Batch not settled at collect                         | Report status; `--wait` polls with 10s→60s backoff up to `--timeout`                                                                                                |
+| Result line truncated / tool calls / empty           | Item `failed` with the reason; billed-failure costs stay visible. A truncated item is skipped by `retry` unless `--max-output-tokens` raises the limit it failed at |
+| Result custom_id unknown or duplicated               | Ignored with a warning, never mapped onto another item                                                                                                              |
+| Error-file line                                      | Item `failed` with the provider's error                                                                                                                             |
+| Item missing from all result files                   | Item `failed` ("no result line")                                                                                                                                    |
+| Source changed after submission                      | Delivery `held` with the reason; re-collect after reverting                                                                                                         |
+| Target exists with different content                 | Delivery `held`; user resolves, re-collect delivers from the local record                                                                                           |
+| Target path symlinks out of the project              | Delivery `held`                                                                                                                                                     |
+| `--task` cancel on a settled batch                   | Points at `collect` instead of pretending to cancel                                                                                                                 |
+| Remote cleanup after collect                         | Input/output/error files deleted (after local persistence); `--keep-remote` opts out                                                                                |
 
 Retry semantics: only `failed` items (plus items whose only submission is
 confirmed never to have become a batch), as a new attempt with fresh

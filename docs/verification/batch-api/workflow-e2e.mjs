@@ -241,6 +241,14 @@ const env = {
 };
 
 try {
+  // 0. check: proves the route before any preparation, bills nothing
+  const checkOut = await run(project, env, ['check']);
+  check(
+    'check reports a ready endpoint and submits nothing',
+    /ready: /.test(checkOut.stdout) && state.jobs.size === 0,
+    checkOut.stdout + checkOut.stderr,
+  );
+
   // 1. run
   const runOut = await run(project, env, ['run', 'plan.json']);
   const taskId = /task (\S+):/.exec(runOut.stdout)?.[1];
@@ -356,9 +364,22 @@ try {
     !fs.existsSync(path.join(project, 'docs', 'en', 'b2.md')),
   );
 
-  // 7. retry resubmits only the failed item; this time it succeeds
+  // 7. a truncated item is not resent with the same limit (it would fail
+  // and bill again); raising the limit resubmits only that item
   state.failItem = null;
-  const retryOut = await run(project, env, ['retry', taskId2]);
+  const skipOut = await run(project, env, ['retry', taskId2]);
+  check(
+    'retry skips a truncated item without a larger limit',
+    /skipping 1 truncated item/.test(skipOut.stdout) &&
+      !/batch job:/.test(skipOut.stdout),
+    skipOut.stdout,
+  );
+  const retryOut = await run(project, env, [
+    'retry',
+    taskId2,
+    '--max-output-tokens',
+    '8192',
+  ]);
   check(
     'retry prints a new batch job',
     /batch job: batch-3/.test(retryOut.stdout),

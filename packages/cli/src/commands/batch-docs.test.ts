@@ -13,7 +13,9 @@ import {
   AssemblyError,
   classifyResult,
   deliverResult,
+  describeThinking,
   estimateTokens,
+  freezeRequest,
   parseOutputJsonl,
   sha256,
 } from './batch-docs.js';
@@ -138,15 +140,76 @@ describe('assembleRequests', () => {
     }
   });
 
-  it('turns thinking off unless the plan opts in', () => {
-    const bodyOf = (p: typeof plan) =>
-      assembleRequests(p, [item()], 1, root, 'qwen-plus')[0].line['body'] as {
-        enable_thinking?: boolean;
-      };
-    expect(bodyOf(plan).enable_thinking).toBe(false);
-    expect(bodyOf({ ...plan, enableThinking: true }).enable_thinking).toBe(
-      true,
+  it('sends the frozen realtime parameters and lets the plan override only what it sets', () => {
+    const request = freezeRequest({
+      samplingParams: { temperature: 0.3, max_tokens: 2048 },
+      extra_body: { enable_thinking: true },
+    });
+    const bodyOf = (p: typeof plan, r = request) =>
+      assembleRequests(p, [item()], 1, root, 'qwen-plus', r)[0].line[
+        'body'
+      ] as Record<string, unknown>;
+    expect(bodyOf(plan)).toMatchObject({
+      model: 'qwen-plus',
+      temperature: 0.3,
+      max_tokens: 2048,
+      enable_thinking: true,
+    });
+    expect(
+      bodyOf({ ...plan, maxOutputTokens: 8192, enableThinking: false }),
+    ).toMatchObject({ max_tokens: 8192, enable_thinking: false });
+    // Nothing configured: nothing injected, the provider default applies.
+    expect(bodyOf(plan, freezeRequest(undefined))).not.toHaveProperty(
+      'enable_thinking',
     );
+  });
+});
+
+describe('freezeRequest', () => {
+  it('keeps only verified wire fields from the sampling params', () => {
+    const { params } = freezeRequest({
+      samplingParams: {
+        temperature: 0.2,
+        top_p: 0.9,
+        max_tokens: 1000,
+        some_sdk_option: true,
+      },
+    });
+    expect(params).toEqual({ temperature: 0.2, top_p: 0.9, max_tokens: 1000 });
+  });
+
+  it('resolves the thinking switch with the realtime precedence', () => {
+    expect(
+      freezeRequest({
+        samplingParams: { enable_thinking: false },
+        extra_body: { enable_thinking: true },
+      }).params['enable_thinking'],
+    ).toBe(false);
+    expect(
+      freezeRequest({ extra_body: { enable_thinking: true } }).params[
+        'enable_thinking'
+      ],
+    ).toBe(true);
+    expect(freezeRequest({ reasoning: false }).params['enable_thinking']).toBe(
+      false,
+    );
+  });
+
+  it('never disables thinking on a thinking-mandatory model', () => {
+    const frozen = freezeRequest({
+      reasoning: false,
+      thinkingMandatory: true,
+    });
+    expect(frozen.params).not.toHaveProperty('enable_thinking');
+    expect(frozen.thinkingMandatory).toBe(true);
+    expect(frozen.notes.join()).toMatch(/cannot be disabled/);
+  });
+
+  it('reports a reasoning effort it cannot reproduce instead of guessing', () => {
+    const frozen = freezeRequest({ reasoning: { effort: 'high' } });
+    expect(frozen.params).not.toHaveProperty('enable_thinking');
+    expect(frozen.notes.join()).toMatch(/not reproduced/);
+    expect(describeThinking(frozen)).toBe('thinking: provider default');
   });
 });
 
@@ -209,7 +272,10 @@ describe('classifyResult', () => {
       response: { status_code: 200, body: okBody('# Intro', 'length') },
     });
     expect(verdict.kind).toBe('failed');
-    if (verdict.kind === 'failed') expect(verdict.reason).toMatch(/truncated/);
+    if (verdict.kind === 'failed') {
+      expect(verdict.reason).toMatch(/truncated/);
+      expect(verdict.truncated).toBe(true);
+    }
   });
 
   it('rejects tool calls — this workflow executes none of them', () => {

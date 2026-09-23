@@ -37,8 +37,10 @@ import {
   listTasks,
   retryTask,
   cancelTask,
+  checkReadiness,
   type WorkflowDeps,
 } from './batch-workflow.js';
+import type { GenerationConfigLike } from './batch-docs.js';
 
 export { assertValidWindow };
 
@@ -49,6 +51,8 @@ export interface BatchEndpoint {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /** The realtime generation config, frozen into workflow requests. */
+  generationConfig?: GenerationConfigLike;
 }
 
 export interface BatchJob {
@@ -80,7 +84,7 @@ export function resolveEndpoint(
       `qwen batch needs an API key (auth type "openai") for a DashScope endpoint; current auth type is "${selectedAuthType ?? 'none'}".`,
     );
   }
-  const { apiKey, baseUrl, model, warnings, authType } =
+  const { apiKey, baseUrl, model, warnings, authType, generationConfig } =
     resolveCliGenerationConfig({
       argv: {},
       settings,
@@ -112,6 +116,7 @@ export function resolveEndpoint(
     apiKey,
     baseUrl: (baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, ''),
     model,
+    generationConfig,
   };
 }
 
@@ -670,16 +675,43 @@ const retryWorkflowCommand: CommandModule = {
   command: 'retry <task-id>',
   describe: 'Resubmit only the failed items of a workflow task',
   builder: (yargs) =>
-    yargs.positional('task-id', {
-      describe: 'Task id',
-      type: 'string',
-      demandOption: true,
-    }),
+    yargs
+      .positional('task-id', {
+        describe: 'Task id',
+        type: 'string',
+        demandOption: true,
+      })
+      .option('max-output-tokens', {
+        describe:
+          'Output limit for the new attempt; required to resend items that were truncated',
+        type: 'number',
+      })
+      .check((argv) =>
+        argv['max-output-tokens'] === undefined ||
+        (Number.isInteger(argv['max-output-tokens']) &&
+          (argv['max-output-tokens'] as number) > 0)
+          ? true
+          : '--max-output-tokens must be a positive integer',
+      ),
   handler: (argv) =>
     run(async () => {
       await retryTask(
         workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
         argv['task-id'] as string,
+        { maxOutputTokens: argv['max-output-tokens'] as number | undefined },
+      );
+    }),
+};
+
+const checkWorkflowCommand: CommandModule = {
+  command: 'check',
+  describe:
+    'Verify credentials and the Batch route, and show the settings a run would freeze (no billed request)',
+  builder: (yargs) => yargs,
+  handler: (argv) =>
+    run(async () => {
+      await checkReadiness(
+        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
       );
     }),
 };
@@ -709,6 +741,7 @@ export const batchCommand: CommandModule = {
       .command(collectWorkflowCommand)
       .command(retryWorkflowCommand)
       .command(listWorkflowCommand)
+      .command(checkWorkflowCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},

@@ -25,6 +25,7 @@ import {
   listBatchJobs,
   downloadRemoteFile,
   deleteRemoteFile,
+  batchRequest,
 } from './batch-client.js';
 import type { BatchApiError } from './batch-client.js';
 import type { BatchEndpoint, BatchJob } from './batch.js';
@@ -49,6 +50,8 @@ import {
   classifyResult,
   deliverResult,
   sha256,
+  freezeRequest,
+  describeThinking,
 } from './batch-docs.js';
 
 // Product-level cap for one assembled request line. The provider accepts
@@ -85,6 +88,8 @@ export interface WorkflowApi {
   ): Promise<void>;
   deleteFile(ep: BatchEndpoint, fileId: string): Promise<void>;
   cancelBatch(ep: BatchEndpoint, id: string): Promise<BatchJob>;
+  /** Cheapest authenticated call that proves the Batch route exists. */
+  probe?(ep: BatchEndpoint): Promise<void>;
 }
 
 const liveApi: WorkflowApi = {
@@ -95,6 +100,9 @@ const liveApi: WorkflowApi = {
   downloadFile: downloadRemoteFile,
   deleteFile: deleteRemoteFile,
   cancelBatch: cancelBatchJob,
+  probe: async (ep) => {
+    await batchRequest(ep, '/batches?limit=1');
+  },
 };
 
 export interface WorkflowDeps {
@@ -135,14 +143,18 @@ function assembleAttempt(
   task: BatchTask,
   attemptNumber: number,
   itemIds: string[],
+  maxOutputTokens?: number,
 ): AttemptAssembly {
   const items = task.items.filter((item) => itemIds.includes(item.id));
   const assembled = assembleRequests(
-    task.plan,
+    maxOutputTokens === undefined
+      ? task.plan
+      : { ...task.plan, maxOutputTokens },
     items,
     attemptNumber,
     task.projectRoot,
     task.model,
+    task.request,
   );
   let jsonl = '';
   let inputTokens = 0;
@@ -230,8 +242,22 @@ function markSubmitted(task: BatchTask, attempt: TaskAttempt): void {
       item.lastAttempt = attempt.attempt;
       item.lastError = undefined;
       item.heldReason = undefined;
+      item.truncated = undefined;
     }
   }
+}
+
+/** The output limit an attempt's requests carried, if one was set. */
+function outputLimitOf(
+  task: BatchTask,
+  attempt: TaskAttempt | undefined,
+): number | undefined {
+  const frozen = task.request?.params['max_tokens'];
+  return (
+    attempt?.maxOutputTokens ??
+    task.plan.maxOutputTokens ??
+    (typeof frozen === 'number' ? frozen : undefined)
+  );
 }
 
 /**
@@ -254,7 +280,13 @@ async function submitAttempt(
 
   const attemptDir = store.attemptDir(task.id, attempt.attempt);
   const assembly =
-    preassembled ?? assembleAttempt(task, attempt.attempt, attempt.itemIds);
+    preassembled ??
+    assembleAttempt(
+      task,
+      attempt.attempt,
+      attempt.itemIds,
+      attempt.maxOutputTokens,
+    );
   fs.mkdirSync(attemptDir, { recursive: true });
   fs.writeFileSync(path.join(attemptDir, 'input.jsonl'), assembly.jsonl);
 
@@ -330,6 +362,8 @@ export async function runPlan(
   assertValidWindow(window);
   const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
   const task = store.create(plan, deps.cwd, deps.ep.model);
+  const request = freezeRequest(deps.ep.generationConfig);
+  task.request = request;
 
   const attemptNumber = 1;
   const attempt: TaskAttempt = {
@@ -341,6 +375,11 @@ export async function runPlan(
   let assembly: AttemptAssembly;
   let cost: { text: string; costUsd?: number };
   try {
+    if (plan.enableThinking === false && request.thinkingMandatory) {
+      throw new Error(
+        `plan sets enableThinking=false but ${task.model} requires thinking; remove the field.`,
+      );
+    }
     assembly = assembleAttempt(task, attemptNumber, attempt.itemIds);
     cost = costLine(assembly.inputTokens, assembly.outputTokens, deps.env);
     enforceBudget(plan, cost);
@@ -360,6 +399,24 @@ export async function runPlan(
   deps.out(
     `task ${task.id}: ${task.items.length} item(s), window ${task.completionWindow}`,
   );
+  const effective = {
+    ...request,
+    params: {
+      ...request.params,
+      ...(plan.enableThinking === undefined
+        ? {}
+        : { enable_thinking: plan.enableThinking }),
+    },
+  };
+  const limit = outputLimitOf(task, attempt);
+  deps.out(
+    `model ${task.model}, ${describeThinking(effective)}, ` +
+      `max output ${limit === undefined ? 'provider default' : `${limit} tokens`} ` +
+      `(frozen from your current settings; retries reuse them)`,
+  );
+  for (const note of request.notes) {
+    deps.err(`[batch] note: ${note}`);
+  }
   deps.out(cost.text);
   await store.withLock(task.id, () =>
     submitAttempt(deps, task, attempt, store, assembly),
@@ -576,6 +633,7 @@ async function collectLocked(
           item.state = 'failed';
           item.lastError = verdict.reason;
           item.heldReason = undefined;
+          item.truncated = verdict.truncated || undefined;
           continue;
         }
         const outcome = deliverResult(
@@ -687,18 +745,25 @@ async function collectLocked(
   }
 }
 
+export interface RetryOptions {
+  /** Output limit for the new attempt; required to resend truncated items. */
+  maxOutputTokens?: number;
+}
+
 export async function retryTask(
   deps: WorkflowDeps,
   taskId: string,
+  options: RetryOptions = {},
 ): Promise<void> {
   const store = new BatchTaskStore(batchHomeDir(deps.cwd, deps.env));
-  await store.withLock(taskId, () => retryLocked(deps, store, taskId));
+  await store.withLock(taskId, () => retryLocked(deps, store, taskId, options));
 }
 
 async function retryLocked(
   deps: WorkflowDeps,
   store: BatchTaskStore,
   taskId: string,
+  options: RetryOptions,
 ): Promise<void> {
   const task = store.load(taskId);
   const api = deps.api ?? liveApi;
@@ -715,12 +780,41 @@ async function retryLocked(
       .filter((attempt) => attempt.submitState === 'created')
       .flatMap((attempt) => attempt.itemIds),
   );
-  const retryItems = task.items.filter(
+  const candidates = task.items.filter(
     (item) =>
       item.state === 'failed' ||
       (item.state === 'pending' && !createdIds.has(item.id)),
   );
+  // A truncated item resent with the same output limit fails the same way
+  // and is billed again: it needs a larger limit, not another attempt.
+  const truncated = candidates.filter((item) => item.truncated);
+  const newLimit = options.maxOutputTokens;
+  if (newLimit !== undefined) {
+    for (const item of truncated) {
+      const previous = outputLimitOf(
+        task,
+        task.attempts.find((a) => a.attempt === item.lastAttempt),
+      );
+      if (previous !== undefined && newLimit <= previous) {
+        throw new Error(
+          `item "${item.id}" was truncated at ${previous} output tokens; ` +
+            `--max-output-tokens ${newLimit} would fail the same way. Pass a larger value.`,
+        );
+      }
+    }
+  } else if (truncated.length > 0) {
+    deps.out(
+      `skipping ${truncated.length} truncated item(s) (${truncated.map((item) => item.id).join(', ')}): ` +
+        `resending with the same output limit would fail the same way and be billed again. ` +
+        `Retry them with --max-output-tokens <larger limit>.`,
+    );
+  }
+  const retryItems =
+    newLimit === undefined
+      ? candidates.filter((item) => !item.truncated)
+      : candidates;
   if (retryItems.length === 0) {
+    if (truncated.length > 0) return;
     deps.out(
       `task ${taskId}: nothing to retry — no failed items ` +
         `(held items need their conflicts resolved; then run \`qwen batch collect ${taskId}\`).`,
@@ -750,6 +844,7 @@ async function retryLocked(
     attempt: attemptNumber,
     itemIds: retryItems.map((item) => item.id),
     submitState: 'intent',
+    ...(newLimit === undefined ? {} : { maxOutputTokens: newLimit }),
   };
   task.attempts.push(attempt);
   const perItem = task.estimate
@@ -766,10 +861,39 @@ async function retryLocked(
   // The plan's budget binds every submission, not just the first.
   enforceBudget(task.plan, cost);
   deps.out(
-    `retrying ${retryItems.length} item(s) as attempt ${attemptNumber}: ${cost.text}`,
+    `retrying ${retryItems.length} item(s) as attempt ${attemptNumber}` +
+      `${newLimit === undefined ? '' : ` with max output ${newLimit} tokens`}: ${cost.text}`,
   );
   await submitAttempt(deps, task, attempt, store);
   deps.out(`collect later with: qwen batch collect ${task.id}`);
+}
+
+/**
+ * Preflight for `/batch-api`: prove the credentials, endpoint and Batch
+ * route work, and show what a run would freeze — before the agent spends
+ * anything on preparation. Makes no billed request.
+ */
+export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
+  const api = deps.api ?? liveApi;
+  await api.probe?.(deps.ep);
+  const request = freezeRequest(deps.ep.generationConfig);
+  const frozenLimit = request.params['max_tokens'];
+  deps.out(
+    `ready: ${new URL(deps.ep.baseUrl).host} accepts Batch requests with these credentials (nothing was billed)`,
+  );
+  deps.out(
+    `model ${deps.ep.model}, ${describeThinking(request)}, max output ` +
+      `${typeof frozenLimit === 'number' ? `${frozenLimit} tokens` : 'provider default'}`,
+  );
+  for (const note of request.notes) deps.out(`note: ${note}`);
+  const priced =
+    unitPrice(deps.env, ENV_PRICE_INPUT) !== undefined &&
+    unitPrice(deps.env, ENV_PRICE_OUTPUT) !== undefined;
+  deps.out(
+    priced
+      ? 'unit prices configured: runs show a dollar estimate and can apply a maxCostUsd gate'
+      : `no unit prices (${ENV_PRICE_INPUT}, ${ENV_PRICE_OUTPUT}): estimates are token-only and a plan must not set maxCostUsd`,
+  );
 }
 
 export async function listTasks(deps: WorkflowDeps): Promise<void> {
