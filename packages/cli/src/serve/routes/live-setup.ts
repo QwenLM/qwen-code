@@ -95,6 +95,21 @@ function parseUpdate(body: Record<string, unknown>): LiveSetupUpdate {
     }
     update[field] = value;
   }
+  if (body['endpoint'] !== undefined) {
+    const value = body['endpoint'];
+    if (
+      typeof value !== 'string' ||
+      value.trim().length === 0 ||
+      value.length > 2048
+    ) {
+      throw new LiveSetupError(
+        'endpoint must be a non-empty URL.',
+        'invalid_live_endpoint',
+        400,
+      );
+    }
+    update.endpoint = value;
+  }
   if (Object.keys(update).length === 0) {
     throw new LiveSetupError(
       'At least one Live Voice setting is required.',

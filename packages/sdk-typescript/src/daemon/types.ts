@@ -4056,6 +4056,14 @@ export interface DaemonLiveSetupStatus {
   modelError?: string;
   /** Absent on daemons that predate selectable Live Voice models. */
   voice?: string;
+  /**
+   * The Realtime WebSocket endpoint the selected model connects to. With
+   * `keySource: 'route'` it follows the route's `baseUrl` and cannot be set.
+   * Absent on daemons that predate a configurable endpoint.
+   */
+  endpoint?: string;
+  /** Why the stored endpoint would be refused at call time. */
+  endpointError?: string;
   /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
   models?: Array<{ id: string; provider: string; name?: string }>;
   /**
@@ -4077,9 +4085,19 @@ export interface DaemonLiveSetupUpdate {
   enabled?: boolean;
   shortcut?: string;
   apiKey?: DaemonLiveSetupApiKeyMutation;
-  /** `modelId` or `provider:modelId` of a `realtimeOnly` route. */
+  /**
+   * `modelId` or `provider:modelId` of a `realtimeOnly` route, or any model
+   * id used with the stored `endpoint` and key.
+   */
   model?: string;
   voice?: string;
+  /**
+   * A Realtime WebSocket URL (`wss://…/api-ws/v1/realtime`) or an
+   * OpenAI-compatible base URL (`https://…/compatible-mode/v1`); DashScope
+   * hosts only. Refused with `live_endpoint_unused` when the model follows a
+   * `realtimeOnly` route.
+   */
+  endpoint?: string;
 }
 
 export interface DaemonLiveMuteUpdate {

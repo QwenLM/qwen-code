@@ -14,6 +14,7 @@ import {
   findLiveRealtimeRoute,
   listLiveRealtimeRoutes,
   LiveProviderConfigError,
+  normalizeLiveRealtimeEndpoint,
   readLiveVoiceConfiguration,
   resolveLiveProviderCredential,
 } from './provider-credentials.js';
@@ -338,6 +339,43 @@ describe('Live provider credentials', () => {
       );
       // The upstream sees the bare model id, not the selector.
       expect(credential.realtimeModel).toBe(route.id);
+    });
+  });
+
+  describe('normalizeLiveRealtimeEndpoint', () => {
+    it.each([
+      [
+        'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime',
+        'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime',
+      ],
+      [
+        'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime',
+      ],
+      [
+        '  https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/  ',
+        'wss://llm-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime',
+      ],
+      [
+        'https://dashscope.aliyuncs.com/api-ws/v1/realtime',
+        'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+      ],
+    ])('accepts %s', (input, expected) => {
+      expect(normalizeLiveRealtimeEndpoint(input)).toBe(expected);
+    });
+
+    it.each([
+      'not a url',
+      'wss://example.com/api-ws/v1/realtime',
+      'https://example.com/compatible-mode/v1',
+      'http://dashscope.aliyuncs.com/compatible-mode/v1',
+      'ws://dashscope.aliyuncs.com/api-ws/v1/realtime',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1?api_key=secret',
+      'https://user:pass@dashscope.aliyuncs.com/compatible-mode/v1',
+    ])('refuses %s', (input) => {
+      expect(() => normalizeLiveRealtimeEndpoint(input)).toThrow(
+        LiveProviderConfigError,
+      );
     });
   });
 });

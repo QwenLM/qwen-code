@@ -13,11 +13,14 @@ import type {
   LiveHostInstallStatus,
 } from './live-host-installer.js';
 import {
+  DEFAULT_LIVE_ENDPOINT,
   findLiveRealtimeRoute,
   listLiveRealtimeRoutes,
   LiveProviderConfigError,
+  normalizeLiveRealtimeEndpoint,
   readLiveVoiceConfiguration,
   resolveLiveProviderCredential,
+  resolveLiveRouteEndpoint,
   type LiveProviderCredential,
 } from './provider-credentials.js';
 import { openQwenRealtimeSession } from './qwen-realtime-session.js';
@@ -58,6 +61,14 @@ export interface LiveSetupStatus {
   modelError?: string;
   model: string;
   voice: string;
+  /**
+   * The Realtime WebSocket endpoint the selected model connects to. Follows
+   * `keySource`: a `route` derives it from its `baseUrl` and it cannot be
+   * set; `settings` reads `liveVoice.endpoint` (default: Beijing DashScope).
+   */
+  endpoint: string;
+  /** Why `endpoint` would be refused at call time; absent when it is valid. */
+  endpointError?: string;
   /** `realtimeOnly` routes from user-scope `modelProviders`, for a picker. */
   models: Array<{ id: string; provider: string; name?: string }>;
   /** Whether the native macOS Host can attach on this daemon. */
@@ -78,6 +89,11 @@ export interface LiveSetupUpdate {
   /** `modelId` or `provider:modelId`. */
   model?: string;
   voice?: string;
+  /**
+   * A Realtime WebSocket URL or an OpenAI-compatible HTTPS base URL; stored
+   * as the normalized `wss://…/api-ws/v1/realtime` form.
+   */
+  endpoint?: string;
 }
 
 interface SettingsWrite {
@@ -136,6 +152,7 @@ function candidateSettings(
   shortcut: string,
   model: string,
   voice: string,
+  endpoint: string,
 ): Settings {
   return {
     ...settings,
@@ -148,6 +165,7 @@ function candidateSettings(
         shortcut,
         model,
         voice,
+        endpoint,
       },
     },
   } as Settings;
@@ -175,6 +193,26 @@ export class LiveSetupController {
         error instanceof LiveProviderConfigError
           ? error.message
           : 'The Live Voice model could not be resolved.';
+    }
+    let endpoint = live.endpoint;
+    let endpointError: string | undefined;
+    if (modelError === undefined) {
+      try {
+        endpoint = route
+          ? resolveLiveRouteEndpoint(route)
+          : normalizeLiveRealtimeEndpoint(live.endpoint);
+      } catch (error) {
+        // A route's broken baseUrl is already named through keyError; show
+        // what the route declares rather than the unused free-standing value.
+        if (route) {
+          endpoint = route.baseUrl ?? '';
+        } else {
+          endpointError =
+            error instanceof LiveProviderConfigError
+              ? error.message
+              : 'experimental.liveVoice.endpoint is invalid.';
+        }
+      }
     }
     let keyConfigured: boolean;
     let keyError: string | undefined;
@@ -214,6 +252,8 @@ export class LiveSetupController {
       ...(modelError ? { modelError } : {}),
       model: live.model,
       voice: live.voice,
+      endpoint,
+      ...(endpointError ? { endpointError } : {}),
       models: listLiveRealtimeRoutes(settings).map((route) => ({
         id: route.id,
         provider: route.provider,
@@ -280,8 +320,24 @@ export class LiveSetupController {
         400,
       );
     }
+    let nextEndpoint = current.endpoint;
+    if (update.endpoint !== undefined) {
+      try {
+        nextEndpoint = normalizeLiveRealtimeEndpoint(update.endpoint);
+      } catch (error) {
+        throw new LiveSetupError(
+          error instanceof LiveProviderConfigError
+            ? error.message
+            : 'experimental.liveVoice.endpoint is invalid.',
+          'invalid_live_endpoint',
+          400,
+        );
+      }
+    }
     const providerChanged =
-      nextModel !== current.model || nextVoice !== current.voice;
+      nextModel !== current.model ||
+      nextVoice !== current.voice ||
+      nextEndpoint !== current.endpoint;
     const currentKey = configuredKey(settings);
     const nextKey =
       update.apiKey?.operation === 'replace'
@@ -339,6 +395,15 @@ export class LiveSetupController {
         400,
       );
     }
+    // Likewise a route connects to the endpoint its baseUrl derives; a stored
+    // liveVoice.endpoint would be unused and never validated.
+    if (usesRoute && update.endpoint !== undefined) {
+      throw new LiveSetupError(
+        `Live Voice model '${nextModel}' takes its endpoint from its modelProviders route baseUrl; experimental.liveVoice.endpoint is not used.`,
+        'live_endpoint_unused',
+        400,
+      );
+    }
     // A realtimeOnly route brings its own key through envKey; only the
     // free-standing path needs liveVoice.apiKey.
     if (nextEnabled && !usesRoute && !nextKey && routeError === undefined) {
@@ -365,6 +430,7 @@ export class LiveSetupController {
             nextShortcut,
             nextModel,
             nextVoice,
+            nextEndpoint,
           ),
           {
             apiKey: nextKey,
@@ -402,6 +468,15 @@ export class LiveSetupController {
         scope: SettingScope.User,
         key: 'experimental.liveVoice.model',
         value: nextModel,
+      });
+    }
+    if (update.endpoint !== undefined) {
+      writes.push({
+        scope: SettingScope.User,
+        key: 'experimental.liveVoice.endpoint',
+        // The default stays implicit, so a later default change reaches it.
+        value:
+          nextEndpoint === DEFAULT_LIVE_ENDPOINT ? undefined : nextEndpoint,
       });
     }
     if (update.voice !== undefined) {

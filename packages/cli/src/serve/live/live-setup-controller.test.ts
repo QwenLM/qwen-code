@@ -20,6 +20,7 @@ function createHarness(
   options: {
     initiallyEnabled?: boolean;
     apiKey?: string;
+    endpoint?: string;
     modelProviders?: Record<string, unknown[]>;
     env?: Record<string, string | undefined>;
   } = {},
@@ -31,6 +32,7 @@ function createHarness(
         enabled: initiallyEnabled,
         shortcut: 'Command+E',
         ...(options.apiKey ? { apiKey: options.apiKey } : {}),
+        ...(options.endpoint ? { endpoint: options.endpoint } : {}),
       },
     },
     ...(options.modelProviders
@@ -477,5 +479,129 @@ describe('LiveSetupController', () => {
     });
     expect(socket.sent.join('')).not.toContain('host.set_shortcut');
     harness.coordinator.dispose();
+  });
+
+  describe('endpoint', () => {
+    const intl = 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+
+    it('reports the default endpoint and a stored one', async () => {
+      const fresh = createHarness({ apiKey: 'realtime-secret' });
+      expect(await fresh.controller.getStatus()).toMatchObject({
+        endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+      });
+
+      const stored = createHarness({ endpoint: intl });
+      const status = await stored.controller.getStatus();
+      expect(status.endpoint).toBe(intl);
+      expect(status.endpointError).toBeUndefined();
+    });
+
+    it('names a stored endpoint that a call would refuse', async () => {
+      const harness = createHarness({
+        endpoint: 'wss://example.com/api-ws/v1/realtime',
+      });
+      const status = await harness.controller.getStatus();
+      expect(status.endpoint).toBe('wss://example.com/api-ws/v1/realtime');
+      expect(status.endpointError).toMatch(/DashScope WebSocket endpoint/);
+    });
+
+    it('stores a compatible-mode base URL as its Realtime endpoint', async () => {
+      const harness = createHarness({ apiKey: 'realtime-secret' });
+      const status = await harness.controller.update({
+        endpoint:
+          'https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      });
+
+      expect(harness.settings().experimental?.liveVoice?.endpoint).toBe(
+        'wss://llm-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime',
+      );
+      expect(status.endpoint).toBe(
+        'wss://llm-abc.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime',
+      );
+      // Live is off: nothing to validate until it is turned on.
+      expect(harness.validateCredential).not.toHaveBeenCalled();
+    });
+
+    it('keeps the default implicit when it is picked again', async () => {
+      const harness = createHarness({ endpoint: intl });
+      await harness.controller.update({
+        endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+      });
+      expect(
+        harness.settings().experimental?.liveVoice?.endpoint,
+      ).toBeUndefined();
+    });
+
+    it('refuses a host outside the DashScope allow-list without writing', async () => {
+      const harness = createHarness({ apiKey: 'realtime-secret' });
+      await expect(
+        harness.controller.update({
+          endpoint: 'https://example.com/compatible-mode/v1',
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_live_endpoint', status: 400 });
+      expect(harness.persistSettings).not.toHaveBeenCalled();
+    });
+
+    it('validates a new endpoint with a new key together while Live is on', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        apiKey: 'old-secret',
+      });
+      await harness.controller.update({
+        endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        apiKey: { operation: 'replace', value: 'intl-secret' },
+      });
+
+      expect(harness.validateCredential).toHaveBeenCalledOnce();
+      const [[credential]] = harness.validateCredential.mock
+        .calls as unknown as Array<[{ endpoint: string; apiKey: string }]>;
+      expect(credential.endpoint).toBe(intl);
+      expect(credential.apiKey).toBe('intl-secret');
+      expect(harness.settings().experimental?.liveVoice).toMatchObject({
+        endpoint: intl,
+        apiKey: 'intl-secret',
+      });
+    });
+
+    it('keeps the old endpoint when the new one fails validation', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        apiKey: 'beijing-secret',
+      });
+      harness.validateCredential.mockRejectedValueOnce(
+        new Error('Realtime provider rejected the WebSocket upgrade (401).'),
+      );
+      await expect(
+        harness.controller.update({ endpoint: intl }),
+      ).rejects.toMatchObject({
+        code: 'live_provider_validation_failed',
+        status: 409,
+      });
+      expect(harness.persistSettings).not.toHaveBeenCalled();
+    });
+
+    it('refuses an endpoint for a model that follows its route', async () => {
+      const harness = createHarness({
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3.5-omni-plus-realtime',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+              realtimeOnly: true,
+            },
+          ],
+        },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      expect(await harness.controller.getStatus()).toMatchObject({
+        keySource: 'route',
+        endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+      });
+      await expect(
+        harness.controller.update({ endpoint: intl }),
+      ).rejects.toMatchObject({ code: 'live_endpoint_unused', status: 400 });
+      expect(harness.persistSettings).not.toHaveBeenCalled();
+    });
   });
 });

@@ -116,8 +116,19 @@ Two rules are deliberate:
   working unchanged. A `provider:modelId` selector whose provider exists but
   has no such route is an error instead: a deleted or mistyped route never
   falls back to a stored key silently.
-- While a route is selected, `experimental.liveVoice.apiKey` is unused, and the
-  setup API refuses to store a new one.
+- While a route is selected, `experimental.liveVoice.apiKey` and
+  `experimental.liveVoice.endpoint` are unused, and the setup API refuses to
+  store new ones.
+
+On the free-standing path the Web Shell's Qwen Live settings set the endpoint
+and model directly. The endpoint defaults to Beijing
+(`wss://dashscope.aliyuncs.com/api-ws/v1/realtime`); pick the region or
+dedicated domain your key belongs to, otherwise the key is rejected with `401`.
+Both the Realtime WebSocket URL and the OpenAI-compatible base URL
+(`https://<host>/compatible-mode/v1`) are accepted and stored as
+`wss://<host>/api-ws/v1/realtime`, and the host must be a DashScope or
+`*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new endpoint is
+checked with a Realtime handshake before it is saved.
 
 ## Override reasoning capabilities
 
