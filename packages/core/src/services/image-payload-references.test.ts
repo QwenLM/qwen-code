@@ -444,30 +444,95 @@ describe('buildReattachParts', () => {
     expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
   });
 
+  // Pairs every replayed image with the label in front of it, keyed by the
+  // image's own content id so a mis-paired label cannot pass.
+  function labeledImages(
+    parts: Part[],
+    store: InMemoryImagePayloadStore,
+  ): Array<{ data: string | undefined; label: string | undefined }> {
+    return parts.flatMap((part, index) => {
+      if (!part.inlineData) return [];
+      const id = store.put(part).id;
+      const label = parts[index - 1]?.text;
+      return [
+        {
+          data: part.inlineData.data,
+          label: label?.startsWith(`Image #${id}: `) ? label : undefined,
+        },
+      ];
+    });
+  }
+
   it('labels each replayed image so an older one is not read as current (#12544)', () => {
     const store = new InMemoryImagePayloadStore();
     const contents = [
       toolImageTurn('a'),
       toolImageTurn('b'),
+      toolImageTurn('c'),
       { role: 'user', parts: [{ text: 'what changed?' }] },
     ];
     replaceImagePayloadsInPlace(contents, store);
 
-    const parts = buildReattachParts([], 2, contents, store);
+    const parts = buildReattachParts([], 3, contents, store);
 
-    expect(
-      parts.slice(1).map((part) => part.inlineData?.data ?? part.text),
-    ).toEqual([
-      expect.stringMatching(
-        /^Image #[a-f0-9]{12}: read earlier, NOT part of the current message$/,
-      ),
-      'a',
-      expect.stringMatching(
-        /^Image #[a-f0-9]{12}: read earlier, NOT part of the current message$/,
-      ),
-      'b',
+    expect(parts[0]?.text).toContain(
+      'Each image below is labeled with whether it belongs to the current user turn.',
+    );
+    const earlier = (label: string | undefined) =>
+      label?.endsWith(
+        ': from an earlier user turn, NOT part of the current one',
+      );
+    const images = labeledImages(parts, store);
+    expect(images.map((image) => image.data)).toEqual(['a', 'b', 'c']);
+    expect(images.every((image) => earlier(image.label))).toBe(true);
+  });
+
+  it('labels a screenshot from the prompt as current on a tool-call continuation', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      toolImageTurn('old'),
+      {
+        role: 'user',
+        parts: [
+          { text: 'what does this show?' },
+          { inlineData: { mimeType: 'image/png', data: 'new-shot' } },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-read', name: 'read_file' } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-read',
+              name: 'read_file',
+              response: { output: 'read' },
+            },
+          },
+        ],
+      },
+    ];
+    // Eviction on the continuation request no longer skips the prompt.
+    replaceImagePayloadsInPlace(contents, store, contents.at(-1));
+
+    const images = labeledImages(
+      buildReattachParts([], 2, contents, store),
+      store,
+    );
+
+    expect(images).toEqual([
+      {
+        data: 'old',
+        label: expect.stringMatching(/: from an earlier user turn, NOT part/),
+      },
+      {
+        data: 'new-shot',
+        label: expect.stringMatching(/: part of the current user turn$/),
+      },
     ]);
-    expect(parts[1]?.text).toContain(store.put(parts[2]!).id);
   });
 
   it('labels a replayed marker from the current user turn as current', () => {
@@ -475,12 +540,17 @@ describe('buildReattachParts', () => {
     const contents = [toolImageTurn('current')];
     replaceImagePayloadsInPlace(contents, store);
 
-    const parts = buildReattachParts([], 0, contents, store);
-
-    expect(parts.at(-2)?.text).toMatch(
-      /^Image #[a-f0-9]{12}: attachment of the current message$/,
+    const images = labeledImages(
+      buildReattachParts([], 0, contents, store),
+      store,
     );
-    expect(parts.at(-1)?.inlineData?.data).toBe('current');
+
+    expect(images).toEqual([
+      {
+        data: 'current',
+        label: expect.stringMatching(/: part of the current user turn$/),
+      },
+    ]);
   });
 
   it('does not reattach an image already inline in a tool response', () => {

@@ -98,6 +98,9 @@ export function buildReattachParts(
   const lastReferencedIds = collectReferencedImageIds(
     last?.role === 'user' ? [last] : [],
   );
+  const currentTurnIds = collectReferencedImageIds(
+    currentTurnContents(referencedContents),
+  );
   const candidates: CollectedImage[] = replaced
     .filter(
       (image) => !inlineIds.has(image.id) && !lastReferencedIds.has(image.id),
@@ -134,7 +137,7 @@ export function buildReattachParts(
       partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
     ...recent.flatMap((image) =>
-      labeledReattachParts(image, lastReferencedIds.has(image.id)),
+      labeledReattachParts(image, currentTurnIds.has(image.id)),
     ),
   ];
 }
@@ -377,7 +380,7 @@ function reattachContextText(ids: readonly string[]): string {
   return (
     'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
     ids.map((id) => `Image #${id}`).join(', ') +
-    '. Each image below is labeled with whether it belongs to the current message.'
+    '. Each image below is labeled with whether it belongs to the current user turn.'
   );
 }
 
@@ -386,12 +389,30 @@ function reattachContextText(ids: readonly string[]): string {
 // the new ones" (#12544). Label every replayed image on its own.
 function labeledReattachParts(
   stored: StoredImagePayload,
-  fromCurrentMessage: boolean,
+  fromCurrentTurn: boolean,
 ): Part[] {
-  const label = fromCurrentMessage
-    ? `Image #${stored.id}: attachment of the current message`
-    : `Image #${stored.id}: read earlier, NOT part of the current message`;
+  const label = fromCurrentTurn
+    ? `Image #${stored.id}: part of the current user turn`
+    : `Image #${stored.id}: from an earlier user turn, NOT part of the current one`;
   return [{ text: label }, storedImageToPart(stored)];
+}
+
+// The current user turn runs from the last user prompt (a user content with
+// no function responses) to the end. On a tool-call continuation the last
+// content is the tool result, but a screenshot the user sent with the prompt
+// still belongs to this turn and may have been evicted into a marker since.
+function currentTurnContents(contents: Content[]): Content[] {
+  for (let index = contents.length - 1; index >= 0; index--) {
+    const content = contents[index];
+    if (
+      content?.role === 'user' &&
+      !content.parts?.some((part) => part.functionResponse)
+    ) {
+      return contents.slice(index);
+    }
+  }
+  // No prompt in view: fall back to the last content, as before.
+  return contents.at(-1)?.role === 'user' ? contents.slice(-1) : [];
 }
 
 function safeImageMimeType(mimeType: string): string {
