@@ -176,6 +176,7 @@ export interface DaemonWorkspaceCapability {
   id: string;
   cwd: string;
   displayName?: string;
+  ssh?: { host: string; port?: number; directory: string };
   primary: boolean;
   trusted: boolean;
   /** Whether new sessions in this workspace can use Workflow. */
@@ -959,10 +960,10 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /**
-       * False, and required: modeled child heap ceilings are not applied.
-       * Count enforcement is reported separately by `childHeap.admissionEnforced`.
+       * True only when managed child-count admission and the fixed old-space
+       * ceiling are both applied. Does not bound total process RSS.
        */
-      enforced: false;
+      enforced: boolean;
       /**
        * Adaptive live-journal growth derived from the budget: session journal caps really do grow
        * within this daemon-wide pool mid-turn. `null` when growth is
@@ -975,11 +976,11 @@ export interface DaemonStatusReport {
         baselineMaxBytes: number;
       } | null;
       /**
-       * The per-child heap partition the daemon models but does not apply.
+       * The fixed per-child heap partition, applied only under `enforce`.
        * `null` when no policy was built; absent on daemons predating it.
        */
       childHeap?: {
-        mode: 'off' | 'observe' | 'admit';
+        mode: 'off' | 'observe' | 'admit' | 'enforce';
         admissionEnforced?: boolean;
         /**
          * `null` under `off`, which models nothing — distinct from `0`,
@@ -993,9 +994,10 @@ export interface DaemonStatusReport {
         perChildCeilingMb: number | null;
         /**
          * Admission pressure only. 0 does not mean the partition is safe to
-         * apply: children still run on the host-derived ceiling. A channel
-         * swap at full occupancy also books one, and on a host too small to
-         * model a partition this equals the total ACP spawn count.
+         * apply. Under `observe` and `admit`, children retain legacy heap
+         * arguments. A channel swap at full occupancy also books one, and on
+         * a host too small to model a partition this equals the total ACP
+         * spawn count.
          */
         refusals: number;
       } | null;
@@ -1790,6 +1792,40 @@ export interface DaemonSessionListPage {
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
+}
+
+export interface DaemonSessionCatalogWorkspace {
+  /** Registered workspace id or absolute cwd. */
+  workspace: string;
+  /** This workspace's opaque cursor from a previous catalog batch. */
+  cursor?: string;
+}
+
+export interface DaemonSessionCatalogRequest {
+  /** 1–20 entries; `all` excludes internal workspaces. */
+  workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+  /** Shared filters; pageSize is 1–100, default 20. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  includeGroups?: boolean;
+}
+
+export interface DaemonSessionCatalogPage extends DaemonSessionListPage {
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+  groups?: DaemonSessionGroupCatalog;
+}
+
+export interface DaemonSessionCatalogError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonSessionCatalogResult {
+  /** One page or explicit error per selected workspace, in selection order. */
+  workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
 }
 
 /** One content-search hit: the matching session plus an excerpt of the match. */
@@ -3336,10 +3372,19 @@ export interface DaemonSessionWorkflowTaskStatus {
    */
   isHistorical?: boolean;
   /**
-   * The run was launched with `args` too large for its snapshot to keep, so
-   * it cannot be retried or rerun from history.
+   * The run was launched with `args` too large for its snapshot to keep. It
+   * is one reason for {@link argsUnavailable}, reported separately so a
+   * client can say which.
    */
   argsOmitted?: true;
+  /**
+   * The run cannot be retried or rerun from history because its history does
+   * not have the `args` to start it with: they were too large to keep
+   * (`argsOmitted`), or the snapshot predates keeping them at all and so
+   * cannot say whether the run had any. Offer neither action when this is
+   * set -- the daemon answers both with `workflow_args_unavailable`.
+   */
+  argsUnavailable?: true;
   sourceRunId?: string;
   startMode?: 'retry' | 'rerun';
   label: string;

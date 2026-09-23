@@ -5,12 +5,10 @@ import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { StandaloneContext } from './config/standalone';
 import { isKnownDaemonTarget } from './config/daemon';
 import { isRemoteConnectionKnown } from './config/remote-connections';
+import { exchangePairingCode } from './config/pairing';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
-import {
-  DaemonWorkspaceProvider,
-  type DaemonProductSessionContext,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { StandaloneAuth } from './components/StandaloneAuth';
@@ -26,7 +24,8 @@ import {
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
-import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
+import { inferStandaloneBasePath } from './utils/sessionPath';
+
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
@@ -47,6 +46,7 @@ const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
 const BRAND_STORAGE_KEY = 'qwen-code-web-shell-brand';
+const MACOS_TITLEBAR_CLASS = 'qwen-code-macos-titlebar';
 
 /**
  * Cached for index.html's pre-paint script so a renamed deployment does not
@@ -95,6 +95,13 @@ function applyBrandToDocument(brand: WebShellResolvedBrand): void {
     if (link) link.href = brand.logoDataUri;
   }
   storeBrand(brand);
+}
+
+function hasMacOSOverlayTitlebar(): boolean {
+  return (
+    (window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean })
+      .__QWEN_CODE_MACOS_TITLEBAR__ === true
+  );
 }
 
 function parseTheme(value: string | null): WebShellTheme | undefined {
@@ -164,56 +171,8 @@ function getInitialLanguage(): WebShellLanguage | undefined {
   return readStoredLanguage();
 }
 
-function getSessionIdFromUrl(): string | undefined {
-  return parseSessionId(window.location.pathname);
-}
-
-function getWorkspaceIdFromUrl(): string | undefined {
-  return (
-    new URLSearchParams(window.location.search).get('workspace') || undefined
-  );
-}
-
-function getSessionContextFromUrl(): DaemonProductSessionContext | undefined {
-  const context = new URLSearchParams(window.location.search).get('context');
-  return context === 'standalone' || context === 'live'
-    ? { kind: context }
-    : undefined;
-}
-
-function replaceStandaloneSessionUrl(
-  sessionId: string | undefined,
-  workspaceId?: string,
-  sessionContext?: DaemonProductSessionContext,
-): void {
-  const url = new URL(window.location.href);
-  url.pathname = buildSessionPathname(url.pathname, sessionId);
-  if (
-    sessionId &&
-    (sessionContext?.kind === 'standalone' || sessionContext?.kind === 'live')
-  ) {
-    url.searchParams.set('context', sessionContext.kind);
-    url.searchParams.delete('workspace');
-  } else if (sessionId && workspaceId) {
-    url.searchParams.set('workspace', workspaceId);
-    url.searchParams.delete('context');
-  } else {
-    url.searchParams.delete('workspace');
-    url.searchParams.delete('context');
-  }
-  // Strip one-shot query params so bookmarked / shared URLs do not
-  // permanently override stored preferences on every page load.
-  url.searchParams.delete('theme');
-  url.searchParams.delete('language');
-  url.searchParams.delete('lang');
-  // Boot already scrubbed ?token= (dev included), so drop it here too.
-  // `daemon` is connection identity, not a one-shot preference: keep it so
-  // session navigation and refresh stay on the selected remote daemon.
-  url.searchParams.delete('token');
-  window.history.replaceState(null, '', url);
-}
-
 export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+  const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
   // The entry's own opinion — an explicit URL param or a stored in-app
   // choice. Passed down as the `theme`/`language` host props; `undefined`
   // lets App resolve the daemon's effective settings instead (#11955).
@@ -234,15 +193,9 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [documentLanguage, setDocumentLanguage] = useState<WebShellLanguage>(
     () => language ?? normalizeLanguage(navigator.language),
   );
-  const [sessionId, setSessionId] = useState<string | undefined>(() =>
-    getSessionIdFromUrl(),
+  const [navigationBasePath] = useState(() =>
+    inferStandaloneBasePath(window.location.pathname),
   );
-  const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
-    getWorkspaceIdFromUrl(),
-  );
-  const [sessionContext, setSessionContext] = useState<
-    DaemonProductSessionContext | undefined
-  >(() => getSessionContextFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
   // initializers above; strip them once mounted so a bookmarked URL cannot
@@ -255,7 +208,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     url.searchParams.delete('language');
     url.searchParams.delete('lang');
     if (url.search !== before) {
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
     }
   }, []);
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
@@ -302,29 +255,6 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const handleBrandResolved = useCallback((brand: WebShellResolvedBrand) => {
     applyBrandToDocument(brand);
   }, []);
-  const handleSessionIdChange = useCallback(
-    (
-      nextSessionId?: string,
-      nextWorkspaceId?: string,
-      _nextWorkspaceCwd?: string,
-      nextSessionContext?: DaemonProductSessionContext,
-    ) => {
-      setSessionId(nextSessionId);
-      const nonWorkspaceContext =
-        nextSessionContext?.kind === 'standalone' ||
-        nextSessionContext?.kind === 'live'
-          ? nextSessionContext
-          : undefined;
-      setSessionContext(nonWorkspaceContext);
-      setWorkspaceId(nonWorkspaceContext ? undefined : nextWorkspaceId);
-      replaceStandaloneSessionUrl(
-        nextSessionId,
-        nextWorkspaceId,
-        nonWorkspaceContext,
-      );
-    },
-    [],
-  );
 
   return (
     <ErrorBoundary
@@ -356,7 +286,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               if (theme !== undefined) url.searchParams.set('theme', theme);
               if (language !== undefined)
                 url.searchParams.set('language', language);
-              window.history.replaceState(null, '', url);
+              window.history.replaceState(window.history.state, '', url);
               window.location.reload();
             }}
             retryMode={canReload ? 'reload' : 'reset'}
@@ -365,6 +295,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         );
       }}
     >
+      {macosOverlayTitlebar && (
+        <div
+          className="qwen-code-macos-titlebar-drag-region"
+          data-tauri-drag-region=""
+          aria-hidden="true"
+        />
+      )}
       <BrowserTurnNotifications
         language={documentLanguage}
         options={{ defaultEnabled: true }}
@@ -372,9 +309,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         <StandaloneContext.Provider value={true}>
           <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
             <WorkspaceSessionProvider
-              sessionId={sessionId}
-              workspaceId={workspaceId}
-              sessionContext={sessionContext}
+              urlNavigation={{ basePath: navigationBasePath }}
               chromeTheme={documentTheme}
               chromeLanguage={documentLanguage}
               webShellProps={{
@@ -385,8 +320,10 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onLanguageChange: handleLanguageChange,
                 onLanguageResolved: handleLanguageResolved,
                 onBrandResolved: handleBrandResolved,
-                onSessionIdChange: handleSessionIdChange,
                 sidebar: { enabled: true, showLive: true },
+                className: macosOverlayTitlebar
+                  ? MACOS_TITLEBAR_CLASS
+                  : undefined,
                 header: {
                   items: [
                     'title',
@@ -397,7 +334,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                   ],
                 },
                 rightPanel: {
-                  items: ['review', 'sideTask', 'terminal', 'webPreview'],
+                  items: [
+                    'review',
+                    'sideTask',
+                    'terminal',
+                    'webPreview',
+                    'trajectory',
+                  ],
                 },
                 environmentPanel: {
                   items: [
@@ -433,7 +376,7 @@ async function main() {
     const url = new URL(window.location.href);
     if (url.searchParams.has('token')) {
       url.searchParams.delete('token');
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
     }
   } else {
     removeDaemonTokenFromUrl();
@@ -445,7 +388,11 @@ async function main() {
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
+  const pairing = await exchangePairingCode(
+    INVALID_DAEMON_TARGET ? '' : baseUrl,
+  );
   const daemonToken =
+    pairing?.token ??
     storedToken ??
     (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
       ? await waitForDaemonTokenMessage()
@@ -464,6 +411,7 @@ async function main() {
       <StandaloneAuth
         baseUrl={baseUrl}
         initialToken={daemonToken}
+        pairingFailed={Boolean(pairing?.failed)}
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.

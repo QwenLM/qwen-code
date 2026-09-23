@@ -38,6 +38,7 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -133,6 +134,7 @@ import {
   type Extension,
 } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import * as sandboxPolicy from '../sandbox/runtime-shell-policy.js';
 import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
@@ -162,6 +164,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
+  Object.defineProperty(ToolMock.prototype, 'name', { value: toolName });
   Object.defineProperty(ToolMock, 'Name', {
     value: toolName,
     writable: true,
@@ -2982,7 +2985,209 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  describe('tool sandbox initialization', () => {
+    const parameters = () => ({
+      ...baseParams,
+      sandbox: undefined,
+      cwd: TARGET_DIR,
+      interactive: true,
+      bareMode: false,
+      enableAutoSkill: true,
+      shellExecutionSandbox: {
+        workspace: path.resolve(TARGET_DIR),
+        installation: path.resolve('/installation'),
+        state: path.resolve('/sandbox-state'),
+        filesystem: 'workspace-write' as const,
+        network: 'closed' as const,
+      },
+    });
+
+    it('stops before recording, hooks, skills and registry setup when probing fails', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockRejectedValue(new Error('probe unavailable'));
+      try {
+        const config = new Config(parameters());
+        const record = vi.spyOn(
+          config as unknown as { activateChatRecording: () => unknown },
+          'activateChatRecording',
+        );
+        await expect(config.initialize()).rejects.toThrow('probe unavailable');
+        expect(record).not.toHaveBeenCalled();
+        expect(HookSystem).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+        expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalled();
+      } finally {
+        probe.mockRestore();
+      }
+    });
+
+    it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue();
+      try {
+        const config = new Config(parameters());
+        const refreshExtensions = vi.spyOn(
+          config.getExtensionManager(),
+          'refreshCache',
+        );
+        await config.initialize();
+        expect(probe).toHaveBeenCalledWith(
+          config.getShellExecutionSandbox(),
+          undefined,
+        );
+        expect(HookSystem).not.toHaveBeenCalled();
+        expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+        expect(refreshExtensions).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.refreshCache).toHaveBeenCalled();
+        expect(
+          (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual([
+          ToolNames.SHELL,
+          ToolNames.TASK_STOP,
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+          ToolNames.MONITOR,
+          ToolNames.AGENT,
+          ToolNames.GLOB,
+          ToolNames.LS,
+          ToolNames.ASK_USER_QUESTION,
+        ]);
+        expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+      } finally {
+        probe.mockRestore();
+      }
+    });
+
+    it('omits user-interaction tools from the admitted headless registry', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue();
+      try {
+        const config = new Config({
+          ...parameters(),
+          interactive: false,
+          bareMode: true,
+        });
+        await config.initialize();
+        expect(
+          (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual([
+          ToolNames.SHELL,
+          ToolNames.TASK_STOP,
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+          ToolNames.MONITOR,
+          ToolNames.AGENT,
+          ToolNames.GLOB,
+          ToolNames.LS,
+        ]);
+      } finally {
+        probe.mockRestore();
+      }
+    });
+  });
+
   describe('derived Config ownership', () => {
+    it('preserves the shell sandbox ceiling and rejects relocation before state mutation', async () => {
+      const policy = {
+        workspace: path.resolve(TARGET_DIR),
+        installation: path.resolve('/installation'),
+        state: path.resolve('/sandbox-state'),
+        filesystem: 'workspace-write' as const,
+        network: 'closed' as 'closed' | 'open',
+      };
+      const parent = new Config({
+        ...baseParams,
+        sandbox: undefined,
+        cwd: TARGET_DIR,
+        bareMode: false,
+        interactive: true,
+        fileCheckpointingEnabled: true,
+        ideMode: true,
+        enableManagedAutoMemory: true,
+        enableManagedAutoDream: true,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+        agentTeamEnabled: true,
+        workflowsEnabled: true,
+        sessionWorkflowEnabled: true,
+        cronEnabled: true,
+        shellExecutionSandbox: policy,
+      });
+      const snapshot = parent.getShellExecutionSandbox();
+      policy.network = 'open';
+      expect(snapshot?.network).toBe('closed');
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(parent.getCoreTools()).toEqual([
+        ToolNames.SHELL,
+        ToolNames.TASK_STOP,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+        ToolNames.MONITOR,
+        ToolNames.AGENT,
+        ToolNames.EXEC,
+        ToolNames.GLOB,
+        ToolNames.LS,
+        ToolNames.ASK_USER_QUESTION,
+        ToolNames.STRUCTURED_OUTPUT,
+      ]);
+      expect(parent.getBareMode()).toBe(false);
+      expect(parent.getIdeMode()).toBe(false);
+      expect(() => parent.setIdeMode(true)).toThrow('does not support IDE');
+      expect(parent.getDisableAllHooks()).toBe(true);
+      expect(parent.getHookSystem()).toBeUndefined();
+      expect(parent.getManagedAutoMemoryEnabled()).toBe(false);
+      expect(parent.isManagedMemoryAvailable()).toBe(false);
+      expect(parent.getManagedAutoDreamEnabled()).toBe(false);
+      expect(parent.getTeamMemoryEnabled()).toBe(false);
+      expect(parent.getTeamMemorySyncEnabled()).toBe(false);
+      expect(parent.getAutoSkillEnabled()).toBe(false);
+      expect(parent.isAgentTeamEnabled()).toBe(false);
+      expect(parent.isWorkflowsEnabled()).toBe(false);
+      expect(parent.isSessionWorkflowEnabled()).toBe(false);
+      expect(parent.isCronEnabled()).toBe(false);
+      expect(parent.isLspEnabled()).toBe(false);
+      expect(parent.getFileCheckpointingEnabled()).toBe(false);
+      expect(() => parent.enableFileCheckpointing()).toThrow('unavailable');
+      expect(() =>
+        parent.addMcpServers({ remote: { command: 'node' } }),
+      ).toThrow('does not support MCP');
+      expect(() =>
+        parent.addRuntimeMcpServer('remote', { command: 'node' }),
+      ).toThrow('does not support MCP');
+      await expect(
+        parent.reinitializeMcpServers({ remote: { command: 'node' } }),
+      ).rejects.toThrow('does not support MCP');
+      expect(parent.getMcpServers()).toEqual({});
+      expect(parent.getExtensions()).toEqual([]);
+      const fileService = parent.getFileSystemService();
+      expect(() => parent.setFileSystemService(fileService)).toThrow(
+        'delegated filesystem',
+      );
+      expect(parent.getFileSystemService()).toBe(fileService);
+      const child = deriveWorktreeConfig(
+        parent,
+        path.join(TARGET_DIR, 'child'),
+      );
+      expect(child.getShellExecutionSandbox()).toBe(snapshot);
+      expect(() => deriveWorktreeConfig(parent, '/other')).toThrow(
+        'admitted workspace',
+      );
+      await expect(parent.relocateWorkingDirectory('/other')).rejects.toThrow(
+        'admitted workspace',
+      );
+      expect(parent.getTargetDir()).toBe(path.resolve(TARGET_DIR));
+    });
     it('keeps session approval independent of nested agent and worktree modes', () => {
       const parent = new Config({
         ...baseParams,
@@ -11533,6 +11738,68 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('uses a main-session execution environment and disposes it once', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const dispose = vi
+        .spyOn(environment, 'dispose')
+        .mockResolvedValue(undefined);
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+        todoWriteEnabled: true,
+        mcpServers: { local: { command: 'must-not-start' } },
+      });
+      expect(config.getExecutionEnvironment()).toBe(environment);
+      expect(config.getMcpServers()).toEqual({});
+      await config.createToolRegistry();
+      const registered = vi
+        .mocked(ToolRegistry.prototype.registerFactory)
+        .mock.calls.map(([name]) => name);
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.SHELL);
+      for (const name of [
+        ToolNames.STRUCTURED_OUTPUT,
+        ToolNames.WEB_FETCH,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
+        ToolNames.TODO_WRITE,
+      ])
+        expect(registered).toContain(name);
+      expect(registered).not.toContain(ToolNames.TASK_STOP);
+      expect(registered).not.toContain(ToolNames.NOTEBOOK_EDIT);
+      expect(registered).not.toContain(ToolNames.CREATE_SUB_SESSION);
+      await config.shutdownExecutionEnvironments();
+      await config.shutdownExecutionEnvironments();
+      expect(dispose).toHaveBeenCalledOnce();
+    });
+    it('skips host project hooks, skills, extensions and memory during SSH initialization', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        enableAutoSkill: true,
+      });
+      const refreshExtensions = vi.spyOn(
+        config.getExtensionManager(),
+        'refreshCache',
+      );
+      await config.initialize({ skipLlmInitialization: true });
+      await config.refreshHierarchicalMemory();
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.refreshCache).not.toHaveBeenCalled();
+      expect(refreshExtensions).not.toHaveBeenCalled();
+      expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+      await config.shutdown();
+    });
+
     it('registers zoom_image unconditionally so it survives model switches', async () => {
       const config = new Config(baseParams);
       // A first-run / text-only session reports no image modality, yet the tool

@@ -64,6 +64,7 @@ export type ExecutionConfirmation =
 
 /** One tool session; the owner must dispose it before releasing its workspace. */
 export interface ExecutionEnvironment {
+  readonly toolNames?: ReadonlySet<string>;
   /** Temporary output store shared with the harness and owned by this session. */
   readonly outputDirectory?: string;
   prepare(

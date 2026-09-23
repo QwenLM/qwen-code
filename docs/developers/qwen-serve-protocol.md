@@ -32,7 +32,7 @@ When the flag is on, the global `bearerAuth` middleware gates **every normal API
 
 **`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser clients hitting the daemon cross-origin are blocked by default — a request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. One exception precedes the wall on a non-loopback bind with a token: a same-origin request (`Origin` equal to the direct socket scheme plus the normalized `Host` authority) is bearer-authenticated and its `Origin` stripped **on the primary listener** — with a valid bearer the route's own status follows, with a missing or invalid bearer a `401`, **except the pre-auth Web Shell document, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/mcp-app-sandbox` routes, which are served without a credential as in every other mode** — and only cross-origin or non-matching `Origin` values keep the `403` envelope. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
 
-- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id` document navigations) remain pre-auth unless `--no-web` removes them.
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
 - A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input. Without a resolved token — which after generation means a loopback bind — HTTP(S) entries are limited to loopback hosts; a non-loopback browser origin requires a token because it can otherwise drive the full operator API, including code execution as the daemon user. Explicit browser-extension origins keep their existing tokenless local-automation path. Startup logs the authority granted to any tokenless allowed browser origin.
 
 Matched origins receive the standard CORS response headers on every request:
@@ -209,7 +209,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ['health', 'capabilities', 'session_create', 'session_id_override', 'session_scope_override',
  'session_load', 'session_resume', 'session_transcript',
  'unstable_session_resume',
- 'session_list', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
+ 'session_list', 'session_catalog_batch', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
  'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
@@ -617,10 +617,23 @@ operator diagnostic snapshot documented below.
 | `browser_automation_mcp`            | ACP HTTP is enabled, `cdp_tunnel_over_ws` is active, no bearer token blocks `/cdp`, and `QWEN_CDP_MCP_COMMAND` names an external stdio MCP adapter. The main CLI package does not bundle a browser automation adapter; without this tag, Chrome extension side-panel chat may still work, but console/network/screenshot/click tools are not registered by default.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `voice_transcribe`                  | the Voice WebSocket endpoint is mounted; a configured Voice model is still required for a successful transcription.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `realtime_voice`                    | the macOS WebShell daemon has Live Voice enabled and native Host integration active. `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `realtime_voice_web`                | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform (the native Host and `realtime_voice` stay macOS-only). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture is unavailable in that mode, and a shortcut change is stored for the next native Host rather than registered.                     |
+| `realtime_voice_web`                | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform (the native Host and `realtime_voice` stay macOS-only). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture needs a shared screen (below), and a shortcut change is stored for the next native Host rather than registered.                   |
 | `web_terminal`                      | ACP HTTP is enabled, so the authenticated Web Terminal endpoint is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 <!-- conditional-serve-features:end -->
+
+A browser Host answers `host.capture_visual` only while the user is sharing a
+screen with the page, which the page reports in its hello as
+`selfChecks.screenShare`. Sharing is a separate, explicit act — the model asks
+mid-turn, and `getDisplayMedia` needs a user gesture — so the page holds the
+stream and takes one frame per request. With nothing shared it answers
+`success: false` immediately rather than letting the request time out.
+
+Because a page cannot write to the daemon's filesystem, it sends only the JPEG.
+The daemon ignores any `screenshotPath` a browser lease reports and stores the
+image itself, under a name it chooses, in the same private capture directory a
+native Host writes to. A native Host still persists its own PNG and passes the
+path, as before.
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
@@ -821,10 +834,48 @@ issue code `channel_worker_exited`.
 
 Daemon-managed channel worker startup from an explicit `qwen serve --channel
 ...` remains fail-fast and takes precedence over persisted startup settings.
-A flagless boot restores `serve.channels` from the trusted primary workspace.
-Secondary workspaces do not independently restore their own `serve.channels`.
-With no explicit or primary-workspace selection, channel runtime loading stays
-lazy.
+A flagless boot restores `serve.channels` from every trusted registered
+workspace, each contributing the list in its own workspace-scope settings. The
+restored names form one selection whose owners are resolved as usual, with the
+workspace that listed a name breaking an otherwise ambiguous ownership tie.
+That boot attribution lasts as long as the daemon runs: a `PUT
+/workspace/channel` re-enabling such a name resolves it the way boot did, even
+after the selection was stopped in between. A name a non-primary workspace
+contributed is dropped, with a log identifying it, when it cannot be resolved,
+so one workspace's stale entry does not strand the others; a name the primary
+workspace listed still fails the restore as a whole, whether or not another
+workspace lists it too.
+`all` remains primary-only: it is ignored, and reported, anywhere else.
+
+A trusted non-primary workspace registered after boot restores its own
+`serve.channels` too, loading the channel runtime and reserving the
+channel-service lease if nothing else has. That restore:
+
+- happens **once per daemon run** — recorded as soon as the workspace asks for
+  anything — so a later removal and re-registration, or a trust
+  re-materialization, does not undo an operator who stopped one of those
+  channels in between;
+- does not happen under an explicit `--channel` selection, which no workspace
+  registered later extends;
+- does not happen after `DELETE /workspace/channel` stopped hosting, until a
+  `PUT /workspace/channel` commits a selection again or the daemon restarts;
+- leaves a committed `all` selection as it is;
+- adds that workspace's names to the committed selection in one change, one
+  late restore at a time. Unlike boot, which drops a name it cannot host and
+  keeps the rest, a name that cannot be attributed leaves that workspace's
+  whole list unrestored, with the error logged.
+
+Registration does not wait on channel control at all. The restore is queued
+on the channel-control lane and the response is written without waiting for
+it, and so is the reconcile a registration or trust change triggers for
+channels the daemon already hosts. A worker that never becomes ready therefore
+delays only the channel work queued behind it, never another registration or a
+trust reconcile. The flip side is that a `201` from `POST /workspaces` does not
+mean that workspace's channels are up, or that an already-hosted channel it
+owns has finished restarting; read `GET /workspace/channel` for that.
+
+Without an explicit selection, a boot-time `serve.channels` restore, or a
+registration like the one above, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
@@ -2302,7 +2353,11 @@ with `args` too large to keep, so neither action applies to it. Neither does a
 snapshot written before `args` were kept, which carries neither `argsOmitted`
 nor `argsRecorded`: a run's journal is keyed from a hash of its `args`, so
 restarting one whose `args` its history cannot name would replay nothing and
-re-dispatch every agent. Both refusals are `workflow_args_unavailable`.
+re-dispatch every agent. Both refusals are `workflow_args_unavailable`, and
+`GET /session/:id/tasks` reports both as `argsUnavailable` on the entry, so a
+client can withhold the two actions instead of discovering the refusal by
+making the call. `argsOmitted` stays beside it as the reason, for a client
+that wants to say which. The `args` themselves are never put on the wire.
 
 `run-script` passes no definition name, so the run is labelled by the script's own
 `export const meta` — a compiled script should declare one, or the run shows
@@ -2326,14 +2381,20 @@ unknown `action`, a `run-script` with no `script`, a `sourceRef` that is not
 because of invalid syntax or a determinism violation. Workflow start input
 errors carry `workflow_invalid_params` and retain the rejection message.
 
-Three refusals come from the run's stored state rather than the request, and
-are a `409` (`-32602` over ACP, with `data.httpStatus: 409`):
+Four refusals come from the run's stored state rather than the request. Each
+is `-32602` over ACP, carrying its `errorKind` and its `data.httpStatus`.
+Three are a `409`; the fourth, `workflow_not_recorded`, is a `503`, because
+nothing was started and the same call may simply be made again: a `retry`
+records that the run is running again before it starts — that record is what
+keeps another process from starting it a second time — and the record could
+not be written.
 
-| `code` / `errorKind`           | When                                                                                                                                                          | What to do                                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `workflow_journal_unavailable` | a `retry` whose run has no journal on disk, or one that cannot be read                                                                                        | `rerun` it, which starts it from the beginning                 |
-| `workflow_args_unavailable`    | a `retry` or `rerun` of a history entry that carries `argsOmitted`                                                                                            | start it again with `run-saved` or `run-script` and its `args` |
-| `workflow_run_live_elsewhere`  | a `retry` of a run whose checkpoint records a process that has not been seen to exit — one still running, one on another machine, or one whose pid was reused | `rerun` it, which takes a new run id                           |
+| `code` / `errorKind`           | HTTP  | When                                                                                                                                                          | What to do                                                     |
+| ------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `workflow_journal_unavailable` | `409` | a `retry` whose run has no journal on disk, or one that cannot be read                                                                                        | `rerun` it, which starts it from the beginning                 |
+| `workflow_args_unavailable`    | `409` | a `retry` or `rerun` of a history entry marked `argsUnavailable`: its `args` were too large to keep, or its snapshot predates keeping them                    | start it again with `run-saved` or `run-script` and its `args` |
+| `workflow_run_live_elsewhere`  | `409` | a `retry` of a run whose checkpoint records a process that has not been seen to exit — one still running, one on another machine, or one whose pid was reused | `rerun` it, which takes a new run id                           |
+| `workflow_not_recorded`        | `503` | a `retry` whose record that the run is running again could not be written, so it did not start                                                                | make the same call again; the run is untouched                 |
 
 `workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
 `runSavedArgs` and `runScript`; a daemon without them accepts neither the start
@@ -2853,6 +2914,61 @@ Additional fields may appear on each session when `view=organized`:
 ```
 
 Trusted active lists include live daemon overlay fields such as `clientCount`, `hasActivePrompt`, and `activeWorkState`. Untrusted-secondary and archived lists are storage-only: live overlay fields remain absent or false, and archived entries set `isArchived` to `true`. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+
+### `POST /sessions/catalog`
+
+Read independently paginated session catalogs for several registered workspaces in one request. Pre-flight `session_catalog_batch` once; older daemons retain the workspace-qualified session-list and group endpoints. Each batch member has persisted-workspace ownership: authentication and request admission are process-global, while each entry resolves and reads only its owning workspace. It never registers a workspace, creates a session, starts ACP, or falls back to the primary runtime.
+
+```json
+{
+  "workspaces": [
+    { "workspace": "workspace-a", "cursor": "previous-a-cursor" },
+    { "workspace": "/canonical/workspace-b" }
+  ],
+  "options": {
+    "size": 20,
+    "archiveState": "active",
+    "view": "organized",
+    "group": "all"
+  },
+  "includeGroups": true
+}
+```
+
+`workspaces` is an ordered array of 1–20 `{ workspace, cursor? }` entries, or `"all"` to select all public registered workspaces. Selectors resolve as exact ids before canonical absolute paths. `all` excludes internal Conversations and removed entries, includes temporarily unavailable entries, and fails if more than 20 entries would be selected; callers must then split explicit selections. An empty public registry returns an empty result. Explicit internal selectors return an entry error without booting the internal runtime.
+
+Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `view`, `group`, `parentSessionId`, `sourceType`, and `sourceId` with the existing list filters and combinations. `group` and `parentSessionId` are limited to 256 characters. `includeGroups` defaults to false. Each workspace has its own cursor. Batch default pages use activity ordering and opaque cursors, including for live-only sessions; these cursors are not interchangeable with legacy numeric list cursors. Continue with that entry's returned `cwd` and `nextCursor`, preserving the filters. There is no global sort or global pagination cursor.
+
+```json
+{
+  "workspaces": [
+    {
+      "workspace": "workspace-a",
+      "workspaceId": "workspace-a",
+      "cwd": "/canonical/workspace-a",
+      "sessions": [],
+      "groups": {
+        "groups": [],
+        "colorOptions": ["red", "orange", "yellow", "green", "blue", "purple"]
+      }
+    },
+    {
+      "workspace": "/canonical/workspace-b",
+      "error": {
+        "code": "workspace_not_found",
+        "message": "Workspace is not registered with this daemon.",
+        "status": 404
+      }
+    }
+  ]
+}
+```
+
+The result preserves selection order and the original selector as `workspace`. Successful entries include canonical `cwd`, `workspaceId`, and the existing page fields (`sessions`, optional `nextCursor`, `truncated`, and `liveMergeFailed`). Every returned session's `workspaceCwd` is normalized to its enclosing entry's canonical `cwd`. When requested, `groups` contains the complete group catalog; group identities are scoped to their enclosing workspace. Group reads retain the existing normalization and warn-and-empty fallback for malformed or unreadable organization stores. Failed entries contain `error: { code, message, status }` and resolved identity when available, without a successful empty `sessions` list. Valid batches return HTTP 200 even when some entries fail. Malformed request envelopes return HTTP 400 before storage reads.
+
+Unknown, internal, and removed workspaces produce `404 workspace_not_found`; unavailable or changed runtime generations produce `503 workspace_runtime_unavailable`; an untrusted primary produces `403 untrusted_workspace`. Untrusted secondaries keep the existing persisted-only catalog policy without live bridge reads, repair writes, or debug-session logging. Thrown cursor and group failures retain their existing codes; other thrown read failures become `500 session_catalog_failed`. Trusted active entries can merge existing live bridge state; archived entries remain storage-only.
+
+The daemon runs at most four workspace reads concurrently per batch, limits selectors to 4096 characters and cursors to 16384 characters, and caps each serialized successful entry at 512 KiB. An oversized entry returns `413 catalog_response_too_large`; reduce `size` or omit groups before retrying. This bounds a batch response to approximately 10 MiB plus envelope/error overhead. Client disconnect cancels pending reads and prevents additional workspace reads from starting. The existing daemon JSON body limit and persisted scan limits also apply. Catalog requests use the read rate-limit tier.
 
 ### `GET /workspaces/:workspace/sessions/live-state`
 
