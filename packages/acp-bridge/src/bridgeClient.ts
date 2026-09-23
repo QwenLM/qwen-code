@@ -1010,6 +1010,15 @@ export class BridgeClient implements Client {
     const permissionOriginator =
       appClientId ??
       (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+    // Reserve model permission capacity within the existing session cap.
+    if (
+      appClientId &&
+      entry.pendingPermissionIds.size >=
+        Math.min(8, Math.max(0, this.maxPendingPerSession - 1))
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+
     // Bd1z5: per-session cap. Reject before issuing so we never
     // grow `pendingPermissionIds` past the limit.
     if (entry.pendingPermissionIds.size >= this.maxPendingPerSession) {

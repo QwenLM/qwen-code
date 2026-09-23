@@ -2470,6 +2470,71 @@ describe('DiscoveredMCPTool', () => {
       expect(display.fallbackText).not.toContain('Warning');
     });
 
+    it.each(['repair', 'guarded', 'cancelled'] as const)(
+      'handles an App connection failure without replaying (%s)',
+      async (mode) => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        const mockMcpClient: McpDirectClient = {
+          callTool: vi.fn().mockImplementation(async () => {
+            if (mode === 'cancelled') controller.abort();
+            throw new Error('Connection closed');
+          }),
+        };
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const reconnectedClient: McpDirectClient = {
+          callTool: vi.fn().mockResolvedValue({ content: [] }),
+        };
+        const reconnectedTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          undefined,
+          reconnectedClient,
+        );
+        const ensureTool = vi.fn().mockResolvedValue(reconnectedTool);
+        const received = vi.fn();
+        const mockConfig = {
+          isTrustedFolder: () => true,
+          getToolInvocationGuard: () => (mode === 'guarded' ? {} : undefined),
+          getToolRegistry: () => ({
+            discoverToolsForServer,
+            ensureTool,
+          }),
+        };
+
+        updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+        const appTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          mockConfig as unknown as Config,
+          mockMcpClient,
+        );
+
+        await expect(
+          appTool.buildForApp(params, received).execute(controller.signal),
+        ).rejects.toThrow(
+          mode === 'cancelled' ? /abort/i : 'MCP App tool call failed.',
+        );
+
+        expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(
+          mode === 'repair' ? 1 : 0,
+        );
+        expect(received).not.toHaveBeenCalled();
+        expect(reconnectedClient.callTool).not.toHaveBeenCalled();
+      },
+    );
+
     it('does not reconnect a guarded invocation after an ambiguous connection error', async () => {
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {

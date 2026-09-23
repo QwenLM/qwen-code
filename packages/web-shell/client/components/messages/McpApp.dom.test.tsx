@@ -284,10 +284,24 @@ describe('McpApp host lifetime', () => {
     }
   });
 
-  it('explains initialization failure for an HTML-only App and closes its frame', async () => {
+  it('does not update a closed bridge after theme change', async () => {
     vi.useFakeTimers();
     try {
-      const { container } = renderApp(appDisplay({ fallbackText: '' }));
+      const display = appDisplay({ fallbackText: '' });
+      const container = document.createElement('div');
+      document.body.append(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const wrap = (
+        theme: (typeof WebShellThemeId)[keyof typeof WebShellThemeId],
+      ) => (
+        <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+          <ThemeProvider value={theme}>
+            <McpApp display={display} />
+          </ThemeProvider>
+        </McpAppHostContext.Provider>
+      );
+      act(() => root.render(wrap(WebShellThemeId.Dark)));
       await act(async () => {
         appBridgeMocks.last?.onsandboxready?.();
         await vi.advanceTimersByTimeAsync(30_000);
@@ -295,6 +309,9 @@ describe('McpApp host lifetime', () => {
       expect(container.textContent).toContain('MCP App could not initialize.');
       expect(container.querySelector('iframe')?.getAttribute('src')).toBeNull();
       expect(appBridgeMocks.close).toHaveBeenCalledOnce();
+      appBridgeMocks.setHostContext.mockClear();
+      act(() => root.render(wrap(WebShellThemeId.Light)));
+      expect(appBridgeMocks.setHostContext).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

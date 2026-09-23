@@ -96,20 +96,22 @@ MCP App 展示的 `html` 整体丢弃（回放只在 `html` 非空时挂载 ifra
 压缩回放先移除较旧 App 段落的 HTML，再淘汰旧段落。只有保留的回放仍超出预算时，
 才移除最新 App 的 HTML，因此仅淘汰旧文字即可满足预算时会保留最新 App。
 
-守护进程未认证的 `/mcp-app-sandbox` 路由默认返回不缓存的重定向，目标为绑定到
+对 HTTP 回环宿主，守护进程未认证的 `/mcp-app-sandbox` 路由返回不缓存的重定向，目标为绑定到
 `127.0.0.1` 随机端口的专用静态监听器。每次渲染获得新的 `<uuid>.localhost` 源。
 监听器仅响应已注册的 Host、GET 方法和资源路径，在唯一一次成功响应前删除注册，
 且不提供守护进程 API 或 WebSocket 端点。注册固定经校验的宿主来源和资源 CSP，
 查询参数不能替换该策略。
 
-两层 iframe 均授予 `allow-same-origin`。App 与其代理共享每次渲染的源，可互相访问
+使用独立监听器时，两层 iframe 均授予 `allow-same-origin`。App 与其代理共享每次渲染的源，可互相访问
 DOM 和该源的存储；二者构成同一个信任边界。它们与 WebShell、守护进程及其他 App
 均不同源，因此不能读取 WebShell `sessionStorage`，也不能作为同源客户端调用
 守护进程 API。`Origin-Agent-Cluster: ?1` 防止通过 `document.domain` 放宽每次渲染的
 来源边界。HTTP 响应通过 CSP 强制执行 `sandbox allow-scripts allow-forms allow-same-origin`，
-因此修改 iframe 属性不能移除顶层导航、弹窗及其他未授予能力的限制。独立来源
-不可达时，经 daemon 连接回退到不含 `allow-same-origin` 的不透明 CSP 沙箱响应；
-详见下方链接的 App 设计。
+因此修改 iframe 属性不能移除顶层导航、弹窗及其他未授予能力的限制。远端或 HTTPS
+宿主使用现有 daemon 连接上的静态代理；本地独立来源不可达时，10 秒后也切换到此路径。
+其响应 CSP 仍包含 `sandbox allow-scripts allow-forms allow-same-origin`，
+内层 App 因文档采用 `data:` URL 而保持不透明来源。可信代理保留 daemon 来源；
+App 隔离依赖 data 来源与现有 API 校验。详见下方链接的 App 设计。
 
 AppBridge 和 postMessage 向内层 iframe 传递 HTML、工具输入及结果。代理校验父子
 来源，以 HTTP 响应头应用资源 CSP，并转发消息。宿主 AppBridge 按 schema 校验
@@ -127,9 +129,11 @@ AppBridge 和 postMessage 向内层 iframe 传递 HTML、工具输入及结果�
 - 现代缓存为每个客户端实例私有，不跨工作区或授权主体共享结果。
 - MCP App HTML 默认限制为 1 MiB，可按服务器调到最多 4 MiB，且从不进入模型上下文。
 - App HTML 在双层 iframe 沙箱中运行，两层均带 `allow-same-origin`。
-  隔离依赖专用静态回环监听器上的每次渲染独立来源、一次性注册和
-  `Origin-Agent-Cluster: ?1`。隔离响应强制执行服务器声明的资源 CSP。
-- 隔离源不可用时，WebShell 显示普通工具文本，不渲染 App。
+  HTTP 回环宿主先使用专用静态监听器上的每次渲染独立来源、一次性注册和
+  `Origin-Agent-Cluster: ?1`。远端或 HTTPS 宿主经 daemon 连接使用不透明 data 文档。
+  两条路径都强制执行服务器声明的资源 CSP。
+- 本地隔离源不可用时，WebShell 经 data 路径重试一次。data 握手超过 10 秒
+  或 App 初始化超过 30 秒才显示工具文本或明确的失败说明。
 - 压缩按用途区分。终端交互历史保留 `type: 'mcp_app'`，但将 `html` 置空并保留原
   `fallbackText`，TUI 渲染文本而不挂载空沙箱。持久化会话记录在配置的资源限制内
   保留 App `html`，供 WebShell 回放挂载，并仅在序列化结果符合保留展示预算

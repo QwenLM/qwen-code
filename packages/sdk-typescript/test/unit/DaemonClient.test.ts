@@ -142,6 +142,81 @@ function recordingFetch(
 }
 
 describe('DaemonClient', () => {
+  describe('MCP App request deadlines', () => {
+    afterEach(() => vi.useRealTimers());
+    const input = {
+      serverName: 'demo',
+      resourceUri: 'ui://app',
+      name: 'slow',
+      arguments: {},
+    };
+
+    it('allows the bridge deadline response to arrive before the outer timeout', async () => {
+      vi.useFakeTimers();
+      const { fetch, calls } = recordingFetch(
+        ({ signal }) =>
+          new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () =>
+                resolve(
+                  jsonResponse(504, {
+                    error: 'bridge_timeout',
+                    message: 'App bridge deadline',
+                  }),
+                ),
+              300_050,
+            );
+            signal?.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer);
+                reject(signal.reason);
+              },
+              { once: true },
+            );
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://fixture', fetch });
+      const result = client
+        .callMcpAppTool('session', input, 'client')
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(calls[0].signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await result).toBeInstanceOf(DaemonHttpError);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each(['deadline', 'caller'] as const)(
+      'cleans up a stalled App call after %s cancellation',
+      async (mode) => {
+        vi.useFakeTimers();
+        const { fetch, calls } = recordingFetch(
+          ({ signal }) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal?.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://fixture', fetch });
+        const controller = new AbortController();
+        const result = client
+          .callMcpAppTool('session', input, 'client', controller.signal)
+          .catch((error: unknown) => error);
+        if (mode === 'deadline') {
+          await vi.advanceTimersByTimeAsync(305_000);
+          expect(calls[0].signal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(5_000);
+        } else controller.abort();
+        expect(await result).toMatchObject({
+          name: mode === 'deadline' ? 'TimeoutError' : 'AbortError',
+        });
+        expect(calls[0].signal?.aborted).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+  });
   it('calls MCP App tools through authenticated REST with bound client identity', async () => {
     const raw = { content: [], _meta: { token: 'private-test' } };
     const { fetch, calls } = recordingFetch(() => jsonResponse(200, raw));

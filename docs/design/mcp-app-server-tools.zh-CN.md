@@ -14,7 +14,7 @@ Tableau MCP App 4.8.1 的 335,305 字节 HTML 可以载入 Qwen WebShell，但�
 
 WebShell 提供绑定到所显示会话的执行回调。AppBridge 仅在具有该回调时声明 `serverTools`。宿主从已渲染 App 固定服务端和资源 URI，只接受 iframe 提交的精确原始工具名与参数。历史分页在停用来源和反馈控件时，仍保留 transcript 的 App 会话绑定。未绑定会话的独立 transcript 仅展示内容。
 
-受 mutation 保护的 REST 端点解析实时会话所属运行时，并验证已注册客户端，不回退到其他运行时。bridge 分别记录 App 调用及其发起客户端，将请求交给对应会话的 ACP 子进程，并在断开时取消。子进程要求同一服务端已声明对应 App 资源，且目标工具允许 App 访问。可撤销的关闭闸门拒绝新调用，但不终止已有调用。实时恢复与迁移按现有时限等待工作结束；超时后释放闸门并保留 App 调用。强制关闭、managed shutdown 与销毁会显式中止 App 调用。App 调用可以与模型 prompt 共存；现有权限队列串行显示审批，审批发起者不继承当前模型 prompt。
+受 mutation 保护的 REST 端点解析实时会话所属运行时，并验证已注册客户端，不回退到其他运行时。bridge 分别记录 App 调用及其发起客户端，将请求交给对应会话的 ACP 子进程，并在断开时取消。子进程要求同一服务端已声明对应 App 资源，且目标工具允许 App 访问。可撤销的关闭闸门拒绝新调用，但不终止已有调用。实时恢复与迁移按现有时限等待工作结束；超时后释放闸门并保留 App 调用。强制关闭、managed shutdown 与销毁会显式中止 App 调用。App 调用可以与模型 prompt 共存；现有权限队列串行显示审批，审批发起者不继承当前模型 prompt。只有待处理审批总数低于八和会话上限减一两者的较小值（最低为零）时，才接纳 App 审批。这样在不提高原总上限的前提下为模型预留容量；超额 App 请求收到 cancelled 审批结果。检查针对每次审批请求，同一 App 调用重复发起的审批也受限。未配置执行 guard 的 App 调用遇到 MCP 断线时仅为后续调用修复连接，不重放结果不确定的尝试；取消和受 guard 约束的调用不会触发修复。
 
 复用 Session.runTool 的启用检查、权限规则、审批模式、hooks、调用守卫和取消。受信任的内部 App 执行参数提供已验证工具与 buildForApp invocation。App 执行通过临时回调原样返回 MCP content、structuredContent、isError、\_meta，普通工具流程仅收到固定摘要。不把原始 App 结果发送或持久化到模型历史、遥测、hooks 或 transcript 输出。这类调用不再次加载 App HTML。
 
@@ -24,7 +24,7 @@ Daemon 的 `/mcp-app-sandbox` 路由默认返回不缓存的重定向；不可�
 
 服务端注册固定经过验证的 CSP 与 hostOrigin。注册在 60 秒后过期，最多保留 256 条待消费记录，并在唯一一次成功响应前删除。查询参数不能改变独立文档的策略，也不能重新填充已消费的来源。独立 listener 路径仅接受普通 HTTP(S) loopback 父页面来源，拒绝沙箱子域。data 路径还接受由现有动态来源白名单或主 listener 同源规则允许的规范 HTTP(S) 父页面来源。沙箱来源不会加入 daemon 受信任来源集合，其 CORS、Host 和 bearer 检查保持不变。
 
-两层 iframe 均允许 scripts、forms 和 same-origin。独立来源的 HTTP 响应还强制执行 `Content-Security-Policy: sandbox allow-scripts allow-forms allow-same-origin`，App 无法通过修改 iframe 属性移除此策略。顶层导航、弹窗及其他未授予能力由响应策略保持限制。嵌套 Tableau iframe 因而可以保留自己的来源而非 `null`；App 不会获得 daemon 来源。代理校验父页面来源，并同时校验子窗口和子窗口来源。它还发送 `Origin-Agent-Cluster: ?1`。Listener 闭包持有注册表和关闭函数；两条应用关闭路径都会清空注册并关闭连接。若关闭与按需启动发生竞争，待完成的启动会拒绝，而不是让请求永久悬挂。
+两层 iframe 均允许 scripts、forms 和 same-origin。独立来源的 HTTP 响应还强制执行 `Content-Security-Policy: sandbox allow-scripts allow-forms allow-same-origin`，App 无法通过修改 iframe 属性移除此策略。顶层导航、弹窗及其他未授予能力由响应策略保持限制。嵌套 Tableau iframe 因而可以保留自己的来源而非 `null`；App 不会获得 daemon 来源。代理校验父页面来源，并同时校验子窗口和子窗口来源。独立监听器还发送 `Origin-Agent-Cluster: ?1`；data 模式代理不发送此头。Listener 闭包持有注册表和关闭函数；两条应用关闭路径都会清空注册并关闭连接。若关闭与按需启动发生竞争，待完成的启动会拒绝，而不是让请求永久悬挂。
 
 ## 涉及层
 
@@ -57,4 +57,4 @@ App 工具可能产生副作用，不允许新增绕过既有权限或 hook 策�
 
 验收项包括 HTTPS 主机名和代理前缀、本地 listener 不可达时仅切换一次 data 模式、真实第三方请求来源、显示／筛选／重载、Unicode／大 HTML、卸载／会话切换，以及 API 来源和认证拒绝保持不变。真实服务的 frame-ancestor 和浏览器 cookie 策略仍取决于服务。此模式不能把 App 自身设为任意指定第三方来源。
 
-内联握手同样限时 10 秒；任一种握手之后的 App 初始化限时 30 秒。失败时显示回退文字或明确说明并关闭 bridge。这些期限不限制 App 服务器工具调用。声明 MCP progress token 的调用每 30 秒收到一次不含业务内容的进度通知，token 原样传回；完成、失败、取消或卸载均停止定时器，daemon 与工具的执行时限仍生效。
+内联握手同样限时 10 秒；任一种握手之后的 App 初始化限时 30 秒。失败时显示回退文字或明确说明并关闭 bridge。这些期限不限制 App 服务器工具调用。声明 MCP progress token 的调用每 30 秒收到一次不含业务内容的进度通知，token 原样传回；完成、失败、取消或卸载均停止定时器，App 调用另有包含审批等待的五分钟 bridge 上限，即使 MCP 工具配置了更长时限也不例外。SDK REST 超时为 310 秒，让 bridge 先返回结构化超时；更短的工具时限或调用方取消仍会提前结束调用。

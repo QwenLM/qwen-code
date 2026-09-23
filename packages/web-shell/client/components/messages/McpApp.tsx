@@ -225,6 +225,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       active = false;
       appAbort.abort();
       iframe.removeAttribute('src');
+      bridgeRef.current = null;
       void bridge.close().catch(() => {});
       setError('sandbox-load-failed');
     };

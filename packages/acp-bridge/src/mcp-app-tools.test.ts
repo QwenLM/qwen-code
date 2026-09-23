@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 
 const input = {
@@ -118,4 +119,131 @@ describe('MCP App call ownership', () => {
       await bridge.shutdown();
     }
   });
+});
+
+const options = [
+  { optionId: 'allow', name: 'Allow once', kind: 'allow_once' as const },
+];
+
+describe('App permission capacity', () => {
+  it.each([64, 2, 1])(
+    'reserves model capacity with total cap %i and recovers App capacity after abort',
+    async (totalCap) => {
+      let permissionsPerCall = totalCap;
+      let cancelled = 0;
+      const handle: ReturnType<typeof makeChannel> = makeChannel({
+        extMethodImpl: async (method, params) => {
+          if (method !== 'qwen/session/mcp-app/call') return {};
+          const callId = String(params['callId']);
+          const results: RequestPermissionResponse[] = await Promise.all(
+            Array.from({ length: permissionsPerCall }, async (_, i) => {
+              const result = await handle.agentConnection.requestPermission({
+                sessionId: String(params['sessionId']),
+                toolCall: { toolCallId: callId, title: `App permission ${i}` },
+                options,
+                _meta: { mcpAppCallId: callId },
+              });
+              if (result.outcome.outcome === 'cancelled') cancelled += 1;
+              return result;
+            }),
+          );
+          return {
+            content: [],
+            isError: results.some((r) => r.outcome.outcome === 'cancelled'),
+          };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        ...(totalCap === 64
+          ? {}
+          : { maxPendingPermissionsPerSession: totalCap }),
+      });
+      const abort = new AbortController();
+      let pending: Promise<unknown> | undefined;
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        pending = bridge.callMcpAppTool(
+          session.sessionId,
+          input,
+          abort.signal,
+          { clientId: session.clientId! },
+        );
+        await vi.waitFor(() =>
+          expect(bridge.pendingPermissionCount + cancelled).toBe(totalCap),
+        );
+
+        let modelResolved = false;
+        const model = handle.agentConnection
+          .requestPermission({
+            sessionId: session.sessionId,
+            toolCall: {
+              toolCallId: 'model-call',
+              title: 'Primary model permission',
+            },
+            options,
+          })
+          .then((value) => {
+            modelResolved = true;
+            return value;
+          });
+        const findModel = () =>
+          bridge
+            .getSessionSummary(session.sessionId)
+            .pendingInteractions?.find(
+              (p) =>
+                p.kind === 'permission' &&
+                p.action?.title === 'Primary model permission',
+            );
+        await vi.waitFor(() =>
+          expect(modelResolved || !!findModel()).toBe(true),
+        );
+        const modelRequest = findModel();
+        if (modelRequest)
+          expect(
+            bridge.respondToPermission(
+              modelRequest.requestId,
+              { outcome: { outcome: 'selected', optionId: 'allow' } },
+              { clientId: session.clientId! },
+            ),
+          ).toBe(true);
+        await expect(model).resolves.toMatchObject({
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        });
+        expect(bridge.pendingPermissionCount).toBe(Math.min(8, totalCap - 1));
+        expect(bridge.pendingPermissionCount).toBeLessThan(totalCap);
+
+        abort.abort();
+        await pending;
+        await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(0));
+        permissionsPerCall = 1;
+        const next = bridge.callMcpAppTool(
+          session.sessionId,
+          input,
+          new AbortController().signal,
+          { clientId: session.clientId! },
+        );
+        if (totalCap > 1) {
+          await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+          const request = bridge.getSessionSummary(session.sessionId)
+            .pendingInteractions![0];
+          expect(
+            bridge.respondToPermission(
+              request.requestId,
+              { outcome: { outcome: 'selected', optionId: 'allow' } },
+              { clientId: session.clientId! },
+            ),
+          ).toBe(true);
+          await expect(next).resolves.toMatchObject({ isError: false });
+        } else {
+          await expect(next).resolves.toMatchObject({ isError: true });
+        }
+        expect(bridge.pendingPermissionCount).toBe(0);
+      } finally {
+        abort.abort();
+        await pending?.catch(() => undefined);
+        await bridge.shutdown();
+      }
+    },
+  );
 });

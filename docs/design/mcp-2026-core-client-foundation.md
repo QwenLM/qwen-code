@@ -132,7 +132,7 @@ Compacted replay first removes HTML from older App segments, then evicts older
 segments. It removes the newest App's HTML only if the retained replay still
 exceeds its budget, preserving that App when evicting old text is sufficient.
 
-The daemon's unauthenticated `/mcp-app-sandbox` route defaults to an uncached
+For HTTP loopback hosts, the daemon's unauthenticated `/mcp-app-sandbox` route uses an uncached
 redirect to a dedicated static-only listener bound to `127.0.0.1` on a random
 port. Each render receives a fresh `<uuid>.localhost` origin. The listener
 serves only the registered Host, GET method and resource path, deletes the
@@ -140,16 +140,20 @@ registration before its sole successful response, and provides no daemon API
 or WebSocket endpoint. The registration pins the validated host origin and
 resource CSP; query parameters cannot replace that policy.
 
-Both iframe layers grant `allow-same-origin`. The App and its proxy share the
+On the dedicated listener, both iframe layers grant `allow-same-origin`. The App and its proxy share the
 per-render origin and can access each other's DOM and origin-scoped storage;
 they are one trust boundary. They share no origin with WebShell, the daemon or
 another App, so they cannot read WebShell `sessionStorage` or call daemon APIs
 as same-origin clients. `Origin-Agent-Cluster: ?1` prevents `document.domain`
 from relaxing the per-render origin boundary. The HTTP response enforces `sandbox allow-scripts allow-forms allow-same-origin`
 in CSP, so editing iframe attributes cannot remove restrictions on top
-navigation, popups and other ungranted capabilities. An unreachable isolated
-origin falls back through the daemon connection to a response with opaque
-CSP sandboxing (without `allow-same-origin`); see the linked App design.
+navigation, popups and other ungranted capabilities. Remote/HTTPS hosts use a
+static proxy on the existing daemon connection; an unreachable local isolated
+origin switches to that path after 10 seconds. Its response retains
+`sandbox allow-scripts allow-forms allow-same-origin` in CSP, while the inner
+App stays opaque because its document is a `data:` URL. The trusted proxy
+retains the daemon origin; App isolation relies on the data origin and existing
+API checks. See the linked App design.
 
 AppBridge and postMessage deliver HTML, tool input and tool results to the
 inner iframe. The proxy validates parent and child origins, applies resource
@@ -171,11 +175,13 @@ for the origin lifecycle, capability boundary and validation limits.
 - MCP App HTML defaults to a 1 MiB limit, can be configured up to 4 MiB per
   server, and never enters model context.
 - App HTML runs in a double-iframe sandbox with `allow-same-origin` on both
-  frames. Isolation uses a fresh per-render origin on a dedicated static-only
-  loopback listener, one-use registration and `Origin-Agent-Cluster: ?1`.
-  The isolated response enforces server-declared resource CSP.
-- If the isolation origin is unavailable, WebShell displays the ordinary tool
-  text rather than rendering the App.
+  frames. HTTP loopback hosts first use a fresh per-render origin on a dedicated
+  static-only listener, one-use registration and `Origin-Agent-Cluster: ?1`.
+  Remote/HTTPS hosts use an opaque data document through the daemon connection.
+  Both paths enforce server-declared resource CSP.
+- If the local isolation origin is unavailable, WebShell retries once through
+  the data path. A failed 10-second data handshake or 30-second App
+  initialization falls back to tool text or an explicit failure explanation.
 - Compaction splits by purpose. Terminal (interactive) history keeps
   `type: 'mcp_app'` with empty `html` and the original `fallbackText`, and the
   TUI renders that text instead of mounting an empty sandbox. A recorded

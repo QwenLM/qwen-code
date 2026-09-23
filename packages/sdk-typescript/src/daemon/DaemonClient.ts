@@ -6431,7 +6431,7 @@ export class DaemonClient {
         body: request,
         clientId,
         signal,
-        timeoutMs: 300_000,
+        timeoutMs: 310_000,
         mode: 'rest',
       },
     );

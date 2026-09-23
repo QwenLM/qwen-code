@@ -769,7 +769,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             ToolErrorType.EXECUTION_TIMEOUT,
           );
         }
-        // Neither server errors nor a repeated side effect belong in App replay.
+        // Repair the connection for later calls without replaying this attempt.
+        if (this.shouldAttemptReconnect(error)) await this.attemptReconnect();
         throw new StructuredToolError(
           'MCP App tool call failed.',
           ToolErrorType.EXECUTION_FAILED,
