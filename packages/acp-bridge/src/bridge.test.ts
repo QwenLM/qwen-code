@@ -477,16 +477,17 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    // R1-17 (#11768): the six `!!entry.backgroundTurn` disjuncts added to the
-    // branch/fork/rewind admission and queue callbacks had no test — the
-    // existing busy-guard table only ever produced the busy state with an
-    // in-flight prompt. An admitted background notification turn is a
-    // different way to reach the same guard. The pins are per-arm: rewind's
-    // admission disjunct is pinned individually, while branch and fork each
-    // have an admission + queue-callback pair throwing the same error type,
-    // so a single-disjunct mutation is masked and only the observable
-    // rejection is pinned. The side-task term (`session-control-plane.ts`
-    // :10816) is a concurrent-release decision and is not pinned here.
+    // R1-17 (#11768): the backgroundTurn disjuncts in branch/fork/rewind
+    // admission and queue callbacks had no test — the existing busy-guard
+    // table only ever produced the busy state with an in-flight prompt. An
+    // admitted background notification turn is a different way to reach the
+    // same guard. The pins are per-arm: rewind's admission disjunct and the
+    // queued-cd table below pin branch and fork admission individually. The
+    // branch/fork queue-callback disjuncts (`session-control-plane.ts:10836`,
+    // `:13674`) remain masked by their own admission checks and are the
+    // residual R1-17 gap. The side-task term (`concurrentSideTask` in
+    // `session-control-plane.ts`) is a concurrent-release decision and is not
+    // pinned here.
     const admittedBackgroundTurn = {
       turnId: 'notification-1',
       taskId: 'Explore-1',
