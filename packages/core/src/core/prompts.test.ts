@@ -119,6 +119,29 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('instructs the model to answer from conversation history before investigating', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    // The context-first mandate establishes history as working memory and
+    // requires checking it before any investigation tool call.
+    expect(prompt).toContain('**Answer From Context First:**');
+    expect(prompt).toContain('The conversation history is your working memory');
+    expect(prompt).toContain(
+      'first check whether the answer is already present in the conversation history',
+    );
+    // It must not weaken the verify-before-done rule.
+    expect(prompt).toContain(
+      'This bias is about *answering*, not about *claiming work is done*',
+    );
+    // And it must carry the stale-context guardrail.
+    expect(prompt).toContain('Guard against stale context');
+    // The Codebase Search guidance reinforces the same rule.
+    expect(prompt).toContain(
+      'Before searching, check whether the answer is already in the conversation history',
+    );
+  });
+
   it.each([
     [
       'interactive',
@@ -1347,20 +1370,22 @@ describe('resident tool gating (#12032)', () => {
     return [guidance, examples];
   }
 
-  it('saves about 1.4k characters of policy text for a file-work allowlist', () => {
+  it('saves about 1.6k characters of policy text for a file-work allowlist', () => {
     const full = promptFor();
     const trimmed = promptFor(FILE_WORK_TOOLS);
 
-    // 1,421 characters (~355 tokens) with the monitor bullet gated too, all
+    // ~1,615 characters (~400 tokens) with the monitor bullet gated too, all
     // of it policy bullets: the examples only call file tools and the shell,
-    // so this allowlist keeps every one of them. 1,104 is the subagent and
-    // codebase bullets; the remaining 317 is the monitor bullet, which goes
-    // because `monitor` is not in this allowlist either. The band is loose
-    // enough for wording edits and tight enough that a lost saving, or newly
-    // added ungated tool text, shows up here instead of silently.
+    // so this allowlist keeps every one of them. ~1,298 is the subagent and
+    // codebase bullets (the codebase bullet carries the context-first
+    // "answer from history before searching" line, which is gated with it);
+    // the remaining 317 is the monitor bullet, which goes because `monitor`
+    // is not in this allowlist either. The band is loose enough for wording
+    // edits and tight enough that a lost saving, or newly added ungated tool
+    // text, shows up here instead of silently.
     const saved = full.length - trimmed.length;
     expect(saved).toBeGreaterThan(900);
-    expect(saved).toBeLessThan(1_500);
+    expect(saved).toBeLessThan(1_700);
     expect(countExamples(trimmed)).toBe(countExamples(full));
   });
 
