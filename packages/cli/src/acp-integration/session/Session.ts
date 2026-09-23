@@ -13540,7 +13540,11 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const invocation = appExecution
-            ? appExecution.tool.buildForApp(args, appExecution.onResult)
+            ? appExecution.tool.buildForApp(
+                args,
+                appExecution.onResult,
+                this.config,
+              )
             : tool.build(args);
           const callIdAware = invocation as {
             setCallId?: (id: string) => void;

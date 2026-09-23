@@ -2383,7 +2383,7 @@ describe('DiscoveredMCPTool', () => {
 
       expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
       expect(newMockMcpClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       expect(ensureTool).toHaveBeenCalledWith(reconnectTool.name);
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
@@ -2530,6 +2530,9 @@ describe('DiscoveredMCPTool', () => {
         expect(discoverToolsForServer).toHaveBeenCalledTimes(
           mode === 'repair' ? 1 : 0,
         );
+        if (mode === 'repair') {
+          expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, true);
+        }
         expect(received).not.toHaveBeenCalled();
         expect(reconnectedClient.callTool).not.toHaveBeenCalled();
       },
@@ -2903,7 +2906,7 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
@@ -2951,7 +2954,7 @@ describe('DiscoveredMCPTool', () => {
           tool.build({ param: 'test' }).execute(new AbortController().signal),
         ).rejects.toThrow(unsafeReplayErrorMessage);
 
-        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       },
     );
 
@@ -2997,7 +3000,7 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 

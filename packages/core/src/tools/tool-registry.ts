@@ -673,7 +673,10 @@ export class ToolRegistry {
    * Discover or re-discover tools for a single MCP server.
    * @param serverName - The name of the server to discover tools from.
    */
-  async discoverToolsForServer(serverName: string): Promise<void> {
+  async discoverToolsForServer(
+    serverName: string,
+    reconnect = false,
+  ): Promise<void> {
     this.removeMcpToolsByServer(serverName);
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
@@ -682,6 +685,7 @@ export class ToolRegistry {
     await this.mcpClientManager.discoverMcpToolsForServer(
       serverName,
       this.config,
+      reconnect,
     );
   }
 

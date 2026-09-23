@@ -441,7 +441,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         `Attempting to reconnect MCP server '${this.serverName}'...`,
       );
       const toolRegistry = this.cliConfig.getToolRegistry();
-      await toolRegistry.discoverToolsForServer(this.serverName);
+      await toolRegistry.discoverToolsForServer(
+        this.serverName,
+        this.onAppResult !== undefined,
+      );
 
       const newTool = await toolRegistry.ensureTool(this.registeredToolName);
       if (newTool instanceof DiscoveredMCPTool) {
@@ -1312,15 +1315,17 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   buildForApp(
     params: ToolParams,
     onResult: (result: McpAppToolResult) => void,
+    cliConfig: Config | undefined = this.cliConfig,
   ): ToolInvocation<ToolParams, ToolResult> {
     const validationError = this.validateToolParams(params);
     if (validationError) throw new Error(validationError);
-    return this.createInvocation(params, onResult);
+    return this.createInvocation(params, onResult, cliConfig);
   }
 
   protected createInvocation(
     params: ToolParams,
     onAppResult?: (result: McpAppToolResult) => void,
+    cliConfig: Config | undefined = this.cliConfig,
   ): ToolInvocation<ToolParams, ToolResult> {
     return new DiscoveredMCPToolInvocation(
       this.mcpTool,
@@ -1331,7 +1336,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.permissionAliases,
       this.trust,
       params,
-      this.cliConfig,
+      cliConfig,
       this.mcpClient,
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,

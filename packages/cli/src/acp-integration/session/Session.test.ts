@@ -1149,10 +1149,16 @@ describe('Session', () => {
     }
 
     it('requests permission and returns raw data only to the App', async () => {
-      const { raw, callTool } = installAppTool();
+      const { raw, callTool, tool } = installAppTool();
+      const buildForApp = vi.spyOn(tool, 'buildForApp');
       await expect(
         session.callMcpAppTool('mcp-app-1', request),
       ).resolves.toEqual(raw);
+      expect(buildForApp).toHaveBeenCalledWith(
+        request.arguments,
+        expect.any(Function),
+        mockConfig,
+      );
       expect(mockClient.requestPermission).toHaveBeenCalledOnce();
       expect(callTool).toHaveBeenCalledOnce();
       expect(

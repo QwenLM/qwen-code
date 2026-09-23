@@ -11,15 +11,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MCPServerConfig, type Config } from '../config/config.js';
 import type { PoolEntry } from './mcp-pool-entry.js';
 import { connectionIdOf } from './mcp-pool-key.js';
-import type { PromptRegistry } from '../prompts/prompt-registry.js';
-import type { ResourceRegistry } from '../resources/resource-registry.js';
+import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   McpTransportPool,
   type McpTransportPoolOptions,
 } from './mcp-transport-pool.js';
 import { SessionMcpView } from './session-mcp-view.js';
-import type { ToolRegistry } from './tool-registry.js';
+import { ToolRegistry } from './tool-registry.js';
 
 vi.mock('@modelcontextprotocol/client', async (importOriginal) => {
   const actual =
@@ -163,6 +163,111 @@ describe('McpTransportPool', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('repairs only the calling App session pooled fingerprint without replay', async () => {
+    vi.useRealTimers();
+    function serverClient() {
+      const client = mockMcpSuccess({
+        toolNames: ['app-only'],
+        resourceNames: ['ui://srv/app'],
+      });
+      client.listTools.mockResolvedValue({
+        tools: [
+          {
+            name: 'app-only',
+            inputSchema: { type: 'object' },
+            _meta: { ui: { visibility: ['app'] } },
+          },
+        ],
+      });
+      const callTool = vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('Session not found'), { code: -32001 }),
+        );
+      Object.assign(client, { callTool });
+      return { client, callTool };
+    }
+    const bootstrapClient = serverClient();
+    const prompts = new PromptRegistry();
+    const resources = new ResourceRegistry();
+    const bootstrapConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: { command: 'node' } }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => process.cwd(),
+      getResourceRegistry: () => resources,
+      getPromptRegistry: () => prompts,
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'bootstrap',
+      isMcpServerDisabled: () => false,
+      getMcpToolIdleTimeoutMs: () => 0,
+      getDisabledTools: () => new Set<string>(),
+      getMcpTransportPool: () => pool,
+      getToolRegistry: () => bootstrapRegistry,
+    } as unknown as Config;
+    const pool = new McpTransportPool(
+      bootstrapConfig,
+      mkPoolOptions({ drainDelayMs: 0 }),
+    );
+    const bootstrapRegistry = new ToolRegistry(bootstrapConfig);
+    const targetResources = new ResourceRegistry();
+    let targetRegistry: ToolRegistry | undefined;
+    try {
+      const bootstrapManager = bootstrapRegistry.getMcpClientManager();
+      await bootstrapManager.discoverAllMcpTools(bootstrapConfig);
+      await bootstrapManager.discoverAllMcpTools(bootstrapConfig);
+      expect(bootstrapClient.client.connect).toHaveBeenCalledOnce();
+      expect(bootstrapRegistry.getMcpAppTool('srv', 'app-only')).toBeDefined();
+      const targetClient = serverClient();
+      const targetConfig = {
+        ...bootstrapConfig,
+        getSessionId: () => 'target',
+        getMcpServers: () => ({
+          srv: { command: 'node', args: ['different-fingerprint'] },
+        }),
+        getPromptRegistry: () => new PromptRegistry(),
+        getResourceRegistry: () => targetResources,
+        getToolRegistry: () => targetRegistry!,
+      } as unknown as Config;
+      targetRegistry = new ToolRegistry(targetConfig);
+      await targetRegistry
+        .getMcpClientManager()
+        .discoverAllMcpTools(targetConfig);
+      expect(pool.getSnapshot().byName['srv'].entryCount).toBe(2);
+      const tool = targetRegistry.getMcpAppTool('srv', 'app-only');
+      expect(tool).toBeDefined();
+      const received = vi.fn();
+      await expect(
+        tool!
+          .buildForApp({}, received, targetConfig)
+          .execute(new AbortController().signal),
+      ).rejects.toThrow('MCP App tool call failed.');
+      expect(targetClient.callTool).toHaveBeenCalledOnce();
+      expect(received).not.toHaveBeenCalled();
+      expect(targetClient.client.connect).toHaveBeenCalledTimes(2);
+      expect(bootstrapClient.client.connect).toHaveBeenCalledOnce();
+      expect(bootstrapClient.client.close).not.toHaveBeenCalled();
+      expect(bootstrapRegistry.getMcpAppTool('srv', 'app-only')).toBeDefined();
+      expect(resources.getAllResources()).toHaveLength(1);
+      expect(targetResources.getAllResources()).toHaveLength(1);
+      const repaired = targetRegistry.getMcpAppTool('srv', 'app-only');
+      expect(repaired).toBeDefined();
+      targetClient.callTool.mockResolvedValue({
+        content: [{ type: 'text', text: 'repaired' }],
+      });
+      await repaired!
+        .buildForApp({}, received, targetConfig)
+        .execute(new AbortController().signal);
+      expect(targetClient.callTool).toHaveBeenCalledTimes(2);
+      expect(received).toHaveBeenCalledOnce();
+    } finally {
+      await targetRegistry?.getMcpClientManager().stop();
+      await bootstrapRegistry.getMcpClientManager().stop();
+      await pool.drainAll({ timeoutMs: 1000 });
+    }
   });
 
   describe('acquire / release lifecycle', () => {
