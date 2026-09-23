@@ -19,9 +19,13 @@ expression in `release.yml` (`QWEN_CI_VITEST_MAX_WORKERS` with the
 `ecs-qwen-` guard), `scripts/tests/no-ak-integration-ci.test.js` pins the
 worker-cap expression in `ci.yml`, and
 `scripts/tests/release-workflow.test.js` pins the `release.yml` retry and
-timeout expressions. `package-scripts.test.js` also checks this table's
-defaults against both workflows. If the docs and the workflows
-ever disagree, trust the workflows and update this page in the same change.
+`scripts/tests/package-scripts.test.js` also checks this table's defaults
+against both workflows. Because this guard runs on the full-profile CI lane
+(`test:scripts`) rather than on docs-only checks, verify edits confined to this
+page locally before opening a pull request with `npm run test:scripts` (or
+`npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/package-scripts.test.js`).
+If the docs and the workflows ever disagree, trust the workflows and update
+this page in the same change.
 
 ## Variables
 
@@ -65,6 +69,15 @@ test regression.
 `1`) on the reserved self-hosted runners whose name starts with `ecs-qwen-`.
 The variable is exported only by the main CI workspace-test step and the
 release `workspace_tests` and `quality_scripts` steps; other Vitest
-invocations that land on the same reserved pool (the web-shell E2E smoke and
-the integration suites) do not consume it. On GitHub-hosted runners the
-variable is ignored and Vitest uses its own defaults.
+invocations that land on the same reserved pool (the `integration_no_ak` and
+`integration_cli` suites) do not consume it. The web-shell E2E smoke is pinned
+to `ubuntu-latest`, so the cap can never apply to it. On GitHub-hosted runners
+the variable is ignored and Vitest uses its own defaults.
+
+### Related variables outside test execution
+
+`release.yml` also exposes `QWEN_RELEASE_STATIC_TIMEOUT_MINUTES` (default `60`,
+controlling the `quality_static` lint lane) and
+`QWEN_RELEASE_BUILD_TIMEOUT_MINUTES` (default `45`, controlling the
+`quality_build` packaging lane). Because they govern static linting and artifact
+builds rather than test execution, they are outside this page's test execution scope.

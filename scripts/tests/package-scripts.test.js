@@ -50,31 +50,79 @@ const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
 describe('package scripts', () => {
   it('keeps documented CI variable defaults in sync with workflows', () => {
     const guide = readWorkflow('docs/developers/development/ci-variables.md');
-    const defaults = new Map(
-      [...guide.matchAll(/^\|\s*`(QWEN_\w+)`\s*\|\s*`([^`]+)`\s*\|/gm)].map(
-        ([, name, value]) => [name, value],
-      ),
+    const docRows = new Map(
+      [
+        ...guide.matchAll(
+          /^\|\s*`(QWEN_\w+)`\s*\|\s*`([^`]+)`\s*\|\s*([^|]+)\s*\|/gm,
+        ),
+      ].map(([, name, value, usedIn]) => [
+        name,
+        {
+          defaultVal: value,
+          files: [...usedIn.matchAll(/`([^`]+\.yml)`/g)].map(([, f]) => f),
+        },
+      ]),
     );
-    const variables = {
-      'ci.yml': ['QWEN_CI_VITEST_RETRY', 'QWEN_CI_VITEST_MAX_WORKERS'],
-      'release.yml': [
-        'QWEN_RELEASE_VITEST_RETRY',
-        'QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES',
-        'QWEN_CI_VITEST_MAX_WORKERS',
-      ],
-    };
-    for (const [file, names] of Object.entries(variables)) {
+
+    // Non-test execution variables excluded by design from this table:
+    const excludedNonTestVariables = new Set([
+      'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES',
+      'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES',
+    ]);
+
+    const workflowFiles = ['ci.yml', 'release.yml'];
+    const workflowVars = new Map();
+
+    for (const file of workflowFiles) {
       const workflow = readWorkflow(`.github/workflows/${file}`);
-      for (const name of names) {
-        const fallbacks = [
-          ...workflow.matchAll(
-            new RegExp(`vars\\.${name}\\s*\\|\\|\\s*'([^']+)'`, 'g'),
-          ),
-        ];
-        expect(fallbacks.length, `${file}: ${name}`).toBeGreaterThan(0);
-        for (const [, fallback] of fallbacks) {
-          expect(defaults.get(name), `${file}: ${name}`).toBe(fallback);
+      const matches = [
+        ...workflow.matchAll(/vars\.(QWEN_\w+)\s*\|\|\s*'([^']+)'/g),
+      ];
+      for (const [, name, fallback] of matches) {
+        if (excludedNonTestVariables.has(name)) {
+          continue;
         }
+        if (!workflowVars.has(name)) {
+          workflowVars.set(name, { fallbacks: new Set(), files: new Set() });
+        }
+        const entry = workflowVars.get(name);
+        entry.fallbacks.add(fallback);
+        entry.files.add(file);
+      }
+    }
+
+    // 1. All test-related workflow variables must be present in the doc table
+    for (const [name, info] of workflowVars.entries()) {
+      expect(
+        docRows.has(name),
+        `Workflow variable ${name} missing from docs`,
+      ).toBe(true);
+      const docEntry = docRows.get(name);
+      for (const fallback of info.fallbacks) {
+        expect(docEntry.defaultVal, `Default mismatch for ${name}`).toBe(
+          fallback,
+        );
+      }
+      for (const file of info.files) {
+        expect(
+          docEntry.files,
+          `Used-in mismatch for ${name} in ${file}`,
+        ).toContain(file);
+      }
+    }
+
+    // 2. All doc table variables must exist in the workflows with matching files
+    for (const [name, docEntry] of docRows.entries()) {
+      expect(
+        workflowVars.has(name),
+        `Documented variable ${name} not found in test workflows`,
+      ).toBe(true);
+      const wfInfo = workflowVars.get(name);
+      for (const file of docEntry.files) {
+        expect(
+          wfInfo.files,
+          `Doc specifies ${file} for ${name} but workflow does not reference it`,
+        ).toContain(file);
       }
     }
   });
