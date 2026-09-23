@@ -528,6 +528,18 @@ for (const theme of THEMES) {
       // no row in the window, so it has nowhere to be drawn.
       await expect(page.getByTestId('trajectory-span')).toHaveCount(6);
       await captureScreenshot(page, `trajectory-${theme}`);
+
+      // The same run with a stretch of it selected on the overview.
+      const plot = await page.getByTestId('trajectory-plot').boundingBox();
+      expect(plot).not.toBeNull();
+      const y = plot!.y + 10;
+      await page.mouse.move(plot!.x + plot!.width * 0.3, y);
+      await page.mouse.down();
+      await page.mouse.move(plot!.x + plot!.width * 0.7, y, { steps: 8 });
+      await page.mouse.up();
+      await expect(page.getByTestId('trajectory-range')).toBeVisible();
+      await expect(page.getByTestId('trajectory-range-status')).toBeVisible();
+      await captureScreenshot(page, `trajectory-range-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {
@@ -952,12 +964,13 @@ for (const theme of THEMES) {
                 envResolvable: true,
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 default: 'allowlist',
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'open', label: 'Open' },
@@ -1058,7 +1071,7 @@ for (const theme of THEMES) {
               config: {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
-                senderPolicy: 'pairing',
+                privatePolicy: 'pairing',
                 groupPolicy: 'disabled',
                 sessionScope: 'user',
               },
@@ -1205,11 +1218,12 @@ for (const theme of THEMES) {
                 ],
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'open', label: 'Open' },

@@ -378,6 +378,173 @@ test.describe('trajectory panel', () => {
     expect(after[1]!.y).toBe(before[1]!.y);
   });
 
+  test.describe('time selection', () => {
+    /** Centre of a span, where a press lands on it rather than beside it. */
+    async function centreOf(span: Locator) {
+      const box = await span.boundingBox();
+      expect(box).not.toBeNull();
+      return { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+    }
+
+    /** A real press, travel and release, as a hand makes it. */
+    async function dragBetween(
+      page: Page,
+      from: { x: number; y: number },
+      to: { x: number; y: number },
+    ) {
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x, to.y, { steps: 8 });
+      await page.mouse.up();
+    }
+
+    /**
+     * Drag from the middle of turn 11's request to the middle of turn 15's.
+     * Idle time is cut, so the stretch covers all of turns 12–14, turn 11's
+     * request and the tool after it, and turn 15's request but not its tool.
+     * Each kept turn keeps its header and prompt, and no answer ran in time:
+     * 5 headers + 5 prompts + 5 requests + 4 tools.
+     */
+    const NARROWED_ROWS = 19;
+    const requestSpan = (page: Page, turn: number) =>
+      overviewSpans(page).nth(2 * (turn - 1));
+
+    async function narrow(page: Page) {
+      await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+      await dragBetween(
+        page,
+        await centreOf(requestSpan(page, 11)),
+        await centreOf(requestSpan(page, 15)),
+      );
+    }
+
+    test('narrows the table to the dragged time @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const from = await centreOf(requestSpan(page, 11));
+      const to = await centreOf(requestSpan(page, 15));
+
+      await narrow(page);
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      await expect(page.getByTestId('trajectory-range-status')).toHaveText(
+        `Showing ${NARROWED_ROWS - 5} of ${TURNS * (ROWS_PER_TURN - 1)} rows in the selected time`,
+      );
+      // The band spans what the hand travelled, to within a pixel either end.
+      const band = await page.getByTestId('trajectory-range').boundingBox();
+      expect(band).not.toBeNull();
+      expect(Math.abs(band!.x - from.x)).toBeLessThanOrEqual(1.5);
+      expect(Math.abs(band!.x + band!.width - to.x)).toBeLessThanOrEqual(1.5);
+      await expect(
+        overviewSpans(page).and(page.locator('[data-dimmed]')),
+      ).toHaveCount(2 * TURNS - 9);
+    });
+
+    test('a click without a drag selects the span and leaves the table whole @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const point = await centreOf(requestSpan(page, 3));
+      await page.mouse.click(point.x, point.y);
+
+      await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(TURNS * ROWS_PER_TURN),
+      );
+      const row = await activeRowOf(page, grid);
+      await expect(row).toContainText('qwen3.8-max');
+    });
+
+    test('Escape and the clear button bring every row back @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const all = String(TURNS * ROWS_PER_TURN);
+
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      await grid.focus();
+      await page.keyboard.press('Escape');
+      await expect(grid).toHaveAttribute('aria-rowcount', all);
+      await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
+
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      await page.getByTestId('trajectory-range-clear').click();
+      await expect(grid).toHaveAttribute('aria-rowcount', all);
+      await expect(page.getByTestId('trajectory-range-clear')).toHaveCount(0);
+    });
+
+    test('a right click on the overview clears the selection @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+
+      const point = await centreOf(requestSpan(page, 30));
+      await page.mouse.click(point.x, point.y, { button: 'right' });
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(TURNS * ROWS_PER_TURN),
+      );
+      await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
+    });
+
+    test('holds the table where it is while it narrows and widens @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+      );
+      const before = await grid.boundingBox();
+
+      await narrow(page);
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(NARROWED_ROWS),
+      );
+      const narrowed = await grid.boundingBox();
+      await page.getByTestId('trajectory-range-clear').click();
+      await expect(page.getByTestId('trajectory-range-clear')).toHaveCount(0);
+      const after = await grid.boundingBox();
+
+      // The header grows a button and says something else, and neither may
+      // move the rows: the header and the overview are fixed-height siblings
+      // of the scrolled box.
+      expect(narrowed!.y).toBe(before!.y);
+      expect(after!.y).toBe(before!.y);
+    });
+  });
+
   test.describe('walking back through pages', () => {
     /** Turns per served page; each page is a different run of records. */
     const PAGE_TURNS = 20;

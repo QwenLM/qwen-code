@@ -146,6 +146,7 @@ function assertSharedField(
     );
   }
   const enumValues: Record<string, ReadonlySet<string>> = {
+    privatePolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
@@ -210,7 +211,7 @@ function assertSharedField(
             Number.isFinite(nestedValue)) ||
           (nestedKey === 'senders' &&
             typeof nestedValue === 'string' &&
-            ['inherit', 'open', 'allowlist'].includes(nestedValue)) ||
+            ['open', 'allowlist'].includes(nestedValue)) ||
           (nestedKey === 'allowedUsers' &&
             Array.isArray(nestedValue) &&
             nestedValue.every((item) => typeof item === 'string'));
@@ -218,6 +219,7 @@ function assertSharedField(
           known &&
           !valid &&
           !(
+            nestedKey !== 'senders' &&
             Object.hasOwn(previousGroup, nestedKey) &&
             isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
             !containsUnsafeObjectKey(nestedValue)
