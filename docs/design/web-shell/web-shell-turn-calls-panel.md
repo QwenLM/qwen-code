@@ -183,7 +183,7 @@ correctness. Results are recorded in
 ## Risks and limits
 
 - The tool-calls API requires a daemon build that includes this route. Older daemons produce an explicit load error; the prompt picker honors the existing `session_turn_navigation` capability. No separate capability is introduced.
-- Dock restoration stores durable identities and up to 160 characters of the prompt label in browser localStorage, alongside the existing dock state.
+- Dock restoration stores durable identities only in browser localStorage. Prompt labels are rebuilt from the session index; previously stored labels are ignored.
 
 - Agent children are omitted from the summary list; opening the agent uses
   the existing detail page to fetch its complete transcript.

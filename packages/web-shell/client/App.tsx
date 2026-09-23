@@ -1774,7 +1774,8 @@ interface ArtifactPanelPersistedState {
 }
 
 type PersistedArtifactPanelTab =
-  | Extract<ArtifactPanelTab, { kind: 'web_preview' | 'turn_calls' }>
+  | Extract<ArtifactPanelTab, { kind: 'web_preview' }>
+  | Omit<Extract<ArtifactPanelTab, { kind: 'turn_calls' }>, 'promptLabel'>
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'review' }>,
       | 'id'
@@ -1884,7 +1885,6 @@ function parsePersistedArtifactPanelTab(
     'parentSessionId',
     'recordId',
     'promptId',
-    'promptLabel',
   ];
   if (
     optionalStrings.some(
@@ -1918,7 +1918,6 @@ function parsePersistedArtifactPanelTab(
         turnId: tab['turnId'],
         recordId: tab['recordId'] as string | undefined,
         promptId: tab['promptId'] as string | undefined,
-        promptLabel: tab['promptLabel'] as string | undefined,
       };
     case 'review':
       return {
@@ -2099,7 +2098,6 @@ function serializeArtifactPanelTabs(
             turnId: tab.turnId,
             recordId: tab.recordId,
             promptId: tab.promptId,
-            promptLabel: tab.promptLabel,
           },
         ];
       case 'review':

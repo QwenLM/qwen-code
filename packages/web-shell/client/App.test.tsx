@@ -3825,11 +3825,11 @@ describe('task activity key', () => {
           kind: 'turn_calls',
           recordId: 'selected-record',
           promptId: 'selected-prompt',
-          promptLabel: 'Selected prompt label',
         },
       ],
     });
     expect(persisted.tabs).toHaveLength(1);
+    expect(persisted.tabs[0]).not.toHaveProperty('promptLabel');
     act(() => first.unmount());
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
@@ -3837,7 +3837,13 @@ describe('task activity key', () => {
         v: 1,
         ['/tmp/project\0session-1']: {
           ...persisted,
-          tabs: [{ ...persisted.tabs[0], title: 'Turn calls' }],
+          tabs: [
+            {
+              ...persisted.tabs[0],
+              title: 'Turn calls',
+              promptLabel: 'Outdated persisted prompt label',
+            },
+          ],
         },
       }),
     );

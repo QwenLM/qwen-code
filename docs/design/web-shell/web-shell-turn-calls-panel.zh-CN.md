@@ -66,7 +66,7 @@ ACP 审批通过后的通知带有工具名、已批准参数与测量起点，�
 ## 风险与限制
 
 - 工具调用接口要求 daemon 版本包含此路由；旧 daemon 明确显示加载失败。prompt 选择器遵守已有 `session_turn_navigation` 能力声明，不新增独立能力标志。
-- 面板恢复将持久化标识与最长 160 字符的 prompt 摘要保存到浏览器 localStorage，与既有面板状态共存。
+- 面板恢复只将持久化标识保存到浏览器 localStorage。prompt 摘要从会话索引重建，忽略此前保存的摘要。
 
 - summary 列表省略 Agent 子调用，点击后由现有详情页获取完整子会话。
 - 一个 Shell 脚本即使调用多个 API，仍然只是一条调用。
