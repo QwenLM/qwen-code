@@ -136,7 +136,8 @@ export async function runAutoMemoryExtract(params: {
       'Managed auto-memory extraction requires config for forked-agent execution.',
     );
   }
-  const expectedSessionId = params.config.getSessionId();
+  const config = params.config;
+  const expectedSessionId = config.getSessionId();
   const earlyMismatch = getSessionMismatchResult(
     params.sessionId,
     expectedSessionId,
@@ -198,10 +199,10 @@ export async function runAutoMemoryExtract(params: {
 
   const agentResult = await withCoalescedMemoryChanges(
     params.projectRoot,
-    params.config.getMemoryHookDeliveryId?.(),
+    config.getMemoryHookDeliveryId?.(),
     async () => {
       const result = await runAutoMemoryExtractionByAgent(
-        params.config,
+        config,
         params.projectRoot,
       );
 
@@ -240,7 +241,7 @@ export async function runAutoMemoryExtract(params: {
             )
           : Promise.resolve();
         await Promise.all([projectRebuild, userRebuild]);
-        await refreshMemoryInstruction(params.config, {
+        await refreshMemoryInstruction(config, {
           logContext: 'managed auto-memory extraction',
         });
       }
