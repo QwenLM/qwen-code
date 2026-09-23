@@ -618,15 +618,10 @@ export async function createContentGenerator(
         loadBaseGenerator(),
         import('./loggingContentGenerator/index.js'),
       ]);
-      // Capture wraps outside logging so it records the request as the model
-      // receives it, after every other decorator has had its say. Absent the
-      // capture env var this returns the logging generator untouched.
-      const { withRequestCapture } = await import(
-        './request-capture-content-generator.js'
-      );
-      return withRequestCapture(
-        new LoggingContentGenerator(baseGenerator, config, generatorConfig),
+      return new LoggingContentGenerator(
+        baseGenerator,
         config,
+        generatorConfig,
       );
     } catch (error) {
       throw wrapProviderLoadError(error, authType);

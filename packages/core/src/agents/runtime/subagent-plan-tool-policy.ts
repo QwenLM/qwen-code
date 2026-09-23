@@ -10,7 +10,6 @@ import type { ToolResult } from '../../tools/tools.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
-import { isAgentRun } from '../workspace-agents/run-context.js';
 import {
   getCurrentAgentId,
   isTopLevelSession,
@@ -129,33 +128,17 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
  * prepareTools (declaration-level) and the tool_call bridge
  * (resolveDeferredToolCall, invocation-level) so both enforce the same set.
  */
-const THREAD_TOOLS = [
-  ToolNames.THREAD_POST,
-  ToolNames.THREAD_WAIT,
-  ToolNames.THREAD_BLOCK,
-  ToolNames.THREAD_REVIEW,
-  ToolNames.THREAD_CREATE,
-  ToolNames.THREAD_READ,
-] as const;
-
-function exposeThreadTools(excluded: ReadonlySet<string>): ReadonlySet<string> {
-  if (!isAgentRun()) return excluded;
-  const current = new Set(excluded);
-  for (const name of THREAD_TOOLS) current.delete(name);
-  return current;
-}
-
 export function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
   if (!isTeammate()) {
-    return exposeThreadTools(EXCLUDED_TOOLS_FOR_SUBAGENTS);
+    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
   }
   if (!isPlanRequiredTeammateContext()) {
-    return exposeThreadTools(EXCLUDED_TOOLS_FOR_TEAMMATES);
+    return EXCLUDED_TOOLS_FOR_TEAMMATES;
   }
 
   const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
   excluded.delete(ToolNames.EXIT_PLAN_MODE);
-  return exposeThreadTools(excluded);
+  return excluded;
 }
 
 export const READ_ONLY_INSPECTION_TOOLS: readonly string[] = [

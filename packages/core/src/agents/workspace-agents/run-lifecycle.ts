@@ -364,23 +364,6 @@ export async function closeRunInTransaction(
     ),
   };
 
-  if (input.request.kind === 'blocked') {
-    next = enqueue(
-      next,
-      {
-        kind: 'notification',
-        causedByRunId: run.id,
-        payload: {
-          event: 'blocker_raised',
-          threadId: thread.id,
-          agentId: context.agentId,
-          messageId: message?.id,
-        },
-      },
-      now,
-    );
-  }
-
   return {
     thread: await transaction.writeThread(next),
     ...(message ? { message } : {}),
@@ -443,16 +426,6 @@ export async function applyAggregateStatus(
         now,
       );
     }
-    if (!alreadyReported('thread_in_review')) {
-      next = enqueue(
-        next,
-        {
-          kind: 'notification',
-          payload: { event: 'thread_in_review', threadId: next.id },
-        },
-        now,
-      );
-    }
   }
 
   if (
@@ -484,21 +457,6 @@ export async function applyAggregateStatus(
     );
   }
 
-  if (resolution.status === 'blocked' && !alreadyReported('thread_blocked')) {
-    next = enqueue(
-      next,
-      {
-        kind: 'notification',
-        payload: {
-          event: 'thread_blocked',
-          threadId: next.id,
-          reason: resolution.reason,
-        },
-      },
-      now,
-    );
-  }
-
   return next;
 }
 
@@ -518,7 +476,6 @@ export async function finishRunInTransaction(
       attempt?: number;
       error?: string;
       failureStage?: string;
-      transcriptEndOffset?: number;
     };
     now?: number;
   },
@@ -595,9 +552,6 @@ export async function finishRunInTransaction(
             ...(terminalFailureStage
               ? { failureStage: terminalFailureStage }
               : {}),
-            ...(input.outcome.transcriptEndOffset !== undefined
-              ? { transcriptEndOffset: input.outcome.transcriptEndOffset }
-              : {}),
           }
         : run,
     ),
@@ -663,31 +617,6 @@ export async function finishRunInTransaction(
           threadId: next.id,
           parentThreadId: next.parentThreadId,
           ...(terminalError ? { error: terminalError } : {}),
-        },
-      },
-      now,
-    );
-  }
-
-  if (
-    terminalStatus === 'failed' &&
-    target.attempts >= 2 &&
-    !next.outbox.some(
-      (event) =>
-        event.payload['event'] === 'run_failed_after_retry' &&
-        event.causedByRunId === target.id,
-    )
-  ) {
-    next = enqueue(
-      next,
-      {
-        kind: 'notification',
-        causedByRunId: target.id,
-        payload: {
-          event: 'run_failed_after_retry',
-          threadId: next.id,
-          agentId: target.agentId,
-          error: terminalError,
         },
       },
       now,

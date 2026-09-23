@@ -53,7 +53,6 @@ export const DEFAULT_RUN_LEASE_MS = 60_000;
 export type LeaseRefusal =
   | 'no_such_run'
   | 'not_leasable'
-  | 'held_by_other_host'
   | 'stale_lease'
   | 'attempt_moved_on';
 
@@ -105,59 +104,6 @@ function withRun(
 }
 
 /**
- * Hand one run to one Host for a bounded time.
- *
- * Refuses while another Host's lease is live, and does not extend that Host's
- * hold by being asked — a lease is a promise about a window, not about a
- * worker, so a second Host asking must not shorten or lengthen the first's.
- */
-export async function acquireRunLease(
-  projectRoot: string,
-  input: {
-    threadId: string;
-    runId: string;
-    hostId: string;
-    ttlMs?: number;
-  },
-  now = Date.now(),
-): Promise<LeaseResult<RunLease>> {
-  const ttl = input.ttlMs ?? DEFAULT_RUN_LEASE_MS;
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(input.threadId);
-    if (!thread) return { ok: false, reason: 'no_such_run' as const };
-    const run = thread.runs.find((candidate) => candidate.id === input.runId);
-    if (!run) return { ok: false, reason: 'no_such_run' as const };
-    // Only work that is waiting or in flight can be leased. A terminal run
-    // handed to a Host would have it do work whose result nothing will accept.
-    if (
-      run.status !== 'queued' &&
-      run.status !== 'running' &&
-      run.status !== 'finishing'
-    ) {
-      return { ok: false, reason: 'not_leasable' as const };
-    }
-    const held = liveLease(run, now);
-    if (held && held.hostId !== input.hostId) {
-      return { ok: false, reason: 'held_by_other_host' as const };
-    }
-    const lease: RunLease = {
-      hostId: input.hostId,
-      // A fresh id even when the same Host re-acquires: the point of the id is
-      // to identify one hold, and reusing it would let a request issued under
-      // the previous hold be accepted under this one.
-      leaseId: randomBytes(16).toString('hex'),
-      attempt: run.attempts,
-      expiresAt: now + ttl,
-      acquiredAt: now,
-    };
-    await transaction.writeThread(
-      withRun(thread, input.runId, (target) => ({ ...target, lease })),
-    );
-    return { ok: true as const, value: lease };
-  });
-}
-
-/**
  * Extend a hold the caller still legitimately has.
  *
  * A heartbeat, not a claim: it refuses an expired lease rather than reviving
@@ -196,33 +142,6 @@ export async function renewRunLease(
     );
     return { ok: true as const, value: lease };
   });
-}
-
-/**
- * Check whether a Host may write a result for this run, right now.
- *
- * Both halves matter and they fail differently. The `leaseId` catches a worker
- * whose hold was taken over; the attempt catches the subtler case where the run
- * was requeued and started again — possibly by the very same Host — so an id
- * from the previous attempt would otherwise still look current.
- *
- * Returning a verdict rather than performing the write keeps the decision
- * testable apart from whatever the transport does with it, and keeps this
- * module out of the business of what a result contains.
- */
-export async function checkRunLease(
-  projectRoot: string,
-  input: {
-    threadId: string;
-    runId: string;
-    leaseId: string;
-    attempt?: number;
-  },
-  now = Date.now(),
-): Promise<LeaseResult<RunLease>> {
-  return withAgentStoreTransaction(projectRoot, (transaction) =>
-    checkRunLeaseInTransaction(transaction, input, now),
-  );
 }
 
 export async function reportHostRunProgress(
@@ -279,6 +198,14 @@ export async function reportHostRunProgress(
   });
 }
 
+/**
+ * Check whether a Host may write a result for this run, right now.
+ *
+ * Both halves matter and they fail differently. The `leaseId` catches a worker
+ * whose hold was taken over; the attempt catches the subtler case where the run
+ * was requeued and started again — possibly by the very same Host — so an id
+ * from the previous attempt would otherwise still look current.
+ */
 export async function checkRunLeaseInTransaction(
   transaction: AgentStoreTransaction,
   input: {
@@ -581,30 +508,5 @@ export async function applyHostRunResult(
       ok: true as const,
       value: { thread, alreadyApplied: false },
     };
-  });
-}
-
-/**
- * Give a lease back without waiting for it to lapse.
- *
- * A Host that knows it is stopping should say so — waiting out the window
- * leaves work idle for no reason. Refuses a lease the caller does not hold, so
- * one Host cannot free another's work.
- */
-export async function releaseRunLease(
-  projectRoot: string,
-  input: { threadId: string; runId: string; leaseId: string },
-): Promise<LeaseResult<true>> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(input.threadId);
-    const run = thread?.runs.find((candidate) => candidate.id === input.runId);
-    if (!thread || !run) return { ok: false, reason: 'no_such_run' as const };
-    if (!run.lease || run.lease.leaseId !== input.leaseId) {
-      return { ok: false, reason: 'stale_lease' as const };
-    }
-    await transaction.writeThread(
-      withRun(thread, input.runId, ({ lease: _dropped, ...rest }) => rest),
-    );
-    return { ok: true as const, value: true as const };
   });
 }

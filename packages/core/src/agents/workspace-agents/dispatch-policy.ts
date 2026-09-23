@@ -66,11 +66,6 @@ export interface BudgetState {
   tokensUsed: number;
 }
 
-export interface BudgetLimits {
-  autoTurns?: number;
-  tokens?: number;
-}
-
 export interface DispatchContext {
   thread: Thread;
   /** The post being routed. Must already be appended to `thread.messages`. */
@@ -87,7 +82,6 @@ export interface DispatchContext {
    * this thread (those coalesce instead of queueing).
    */
   agentQueuedElsewhere: number;
-  limits?: BudgetLimits;
 }
 
 /**
@@ -131,9 +125,7 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
   // The loop breaker. A person posting is the signal that the conversation is
   // wanted, and resets this thread's turn counter at the call site.
   if (message.from !== HUMAN_AUTHOR_ID) {
-    const turnLimit =
-      context.limits?.autoTurns ?? DEFAULT_THREAD_AUTO_TURN_BUDGET;
-    if (context.budget.autoTurnsUsed >= turnLimit) {
+    if (context.budget.autoTurnsUsed >= DEFAULT_THREAD_AUTO_TURN_BUDGET) {
       return { kind: 'skip', reason: 'turn_budget_exhausted' };
     }
   }
@@ -141,8 +133,7 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
   // Token spend is a hard tree-wide cap, including human-authored triggers.
   // A person can start a fresh root thread rather than silently bypass money
   // already spent by this one.
-  const tokenLimit = context.limits?.tokens ?? DEFAULT_THREAD_TOKEN_BUDGET;
-  if (context.budget.tokensUsed >= tokenLimit) {
+  if (context.budget.tokensUsed >= DEFAULT_THREAD_TOKEN_BUDGET) {
     return { kind: 'skip', reason: 'token_budget_exhausted' };
   }
 

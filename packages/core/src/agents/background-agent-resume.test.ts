@@ -98,14 +98,6 @@ describe('BackgroundAgentResumeService', () => {
           : null,
       ),
       createAgentHeadless: vi.fn(),
-      convertToRuntimeConfig: vi.fn().mockResolvedValue({
-        promptConfig: {},
-        modelConfig: {},
-        runConfig: {},
-        toolConfig: {
-          tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL],
-        },
-      }),
     };
     const hookSystem =
       options.hookSystem !== undefined
@@ -221,7 +213,6 @@ describe('BackgroundAgentResumeService', () => {
       getToolRegistry: () => stubToolRegistry,
       createToolRegistry: vi.fn().mockResolvedValue(overrideToolRegistry),
       getPermissionManager: () => permissionManager,
-      getToolInvocationGuard: () => undefined,
     } as unknown as Config;
 
     return {
@@ -1020,96 +1011,6 @@ describe('BackgroundAgentResumeService', () => {
       (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
     ).toBe(true);
 
-    await vi.waitFor(() => {
-      expect(registry.get(agentId)?.status).toBe('completed');
-    });
-  });
-
-  it('restores this subsystem capability ceiling on cold resume', async () => {
-    const sessionId = 'session-agent-resume';
-    const agentId = 'agent-ag_alice';
-    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
-    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
-    writeAgentMeta(metaPath, {
-      agentId,
-      workspaceAgentId: 'ag_alice',
-      agentType: 'researcher',
-      description: 'Review',
-      parentSessionId: sessionId,
-      parentAgentId: null,
-      createdAt: '2026-04-20T00:00:00.000Z',
-      status: 'running',
-      subagentName: 'researcher',
-      resolvedApprovalMode: 'auto-edit',
-    });
-    fs.writeFileSync(
-      outputFile,
-      JSON.stringify({
-        uuid: 'u1',
-        parentUuid: null,
-        sessionId,
-        timestamp: '2026-04-20T00:00:00.000Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'Review' }] },
-      }) + '\n',
-      'utf8',
-    );
-    registry.register({
-      agentId,
-      description: 'Review',
-      subagentType: 'researcher',
-      isBackgrounded: true,
-      status: 'paused',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      prompt: 'Review',
-      outputFile,
-      metaPath,
-    });
-    const subagent = {
-      execute: vi.fn(async () => {}),
-      setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({
-        totalTokens: 0,
-        outputTokens: 0,
-        totalDurationMs: 0,
-      }),
-      getTerminateMode: () => AgentTerminateMode.GOAL,
-      getFinalText: () => 'done',
-    };
-    const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue({
-      subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
-    });
-
-    await service.resumeBackgroundAgent(agentId, 'continue');
-
-    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1)!;
-    // The ceiling this path restores is the workspace-Agent one, which is
-    // read-only: `run_shell_command` is denied, not merely absent, and the six
-    // thread tools are always added. Expecting SHELL here described a ceiling
-    // that no workspace Agent has.
-    expect(createCall[2]?.toolConfigOverride).toMatchObject({
-      tools: expect.arrayContaining([
-        ToolNames.READ_FILE,
-        ToolNames.THREAD_POST,
-      ]),
-      disallowedTools: expect.arrayContaining([ToolNames.EDIT]),
-    });
-    expect(createCall[2]?.toolConfigOverride?.tools).not.toContain(
-      ToolNames.SHELL,
-    );
-    const guard = (createCall[1] as Config).getToolInvocationGuard();
-    await expect(
-      guard?.({
-        callId: 'call-edit',
-        toolName: ToolNames.EDIT,
-        args: {},
-        signal: new AbortController().signal,
-      }),
-    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
@@ -4120,13 +4021,9 @@ describe('BackgroundAgentResumeService', () => {
       oldSessionMtime.getTime(),
     );
 
-    expect(
-      registry.continueResidentAgent(
-        agentId,
-        'tighten the summary',
-        'delivery-2',
-      ),
-    ).toBe('continued');
+    expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
+      'continued',
+    );
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
@@ -4134,14 +4031,7 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
     const hotContextArg = execute.mock.calls[1]?.[0];
-    expect(hotContextArg?.get('task_prompt')).toBeUndefined();
-    expect(hotContextArg?.get('external_inputs_override')).toEqual([
-      {
-        kind: 'message',
-        text: 'tighten the summary',
-        deliveryId: 'delivery-2',
-      },
-    ]);
+    expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
     expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
     expect(dispose).not.toHaveBeenCalled();
 

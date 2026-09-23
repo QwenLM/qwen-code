@@ -28,12 +28,11 @@
  * binding that *is* authoritative is the ambient run frame in `run-context.ts`.
  */
 
-import {
-  MAX_THREAD_MESSAGES,
-  type WorkspaceAgent,
-  type Thread,
-  type ThreadMessage,
-  type ThreadRun,
+import type {
+  WorkspaceAgent,
+  Thread,
+  ThreadMessage,
+  ThreadRun,
 } from './types.js';
 import { mentionToken } from './mentions.js';
 import { THREAD_TOOL_NAMES } from './capability.js';
@@ -42,10 +41,10 @@ import { THREAD_TOOL_NAMES } from './capability.js';
 export type AgentDeliveryKind = 'first' | 'replay-after-gap' | 'retry';
 
 /** Recent posts always restated, however far the watermark has advanced. */
-export const DEFAULT_RECENT_POST_COUNT = 20;
+const DEFAULT_RECENT_POST_COUNT = 20;
 
 /** Per-post character budget before the body is elided mid-post. */
-export const DEFAULT_POST_CHAR_BUDGET = 4_000;
+const DEFAULT_POST_CHAR_BUDGET = 4_000;
 
 export interface AssembleAgentPromptInput {
   workspaceId: string;
@@ -56,8 +55,6 @@ export interface AssembleAgentPromptInput {
   thread: Thread;
   /** Full workspace roster; disabled agents and self are filtered out. */
   roster: readonly WorkspaceAgent[];
-  /** Content hash of the agent definition in force, when known (§9.4). */
-  definitionVersion?: string;
   recentPostCount?: number;
   postCharBudget?: number;
 }
@@ -72,8 +69,6 @@ export interface AssembleAgentPromptResult {
   delivery: AgentDeliveryKind;
   /** Posts known to be missing between the watermark and what is retained. */
   gapCount: number;
-  /** Message ids this prompt actually shows, for the delivery watermark. */
-  includedMessageIds: string[];
 }
 
 /**
@@ -162,9 +157,7 @@ export function assembleAgentPrompt(
 
   const lines: string[] = [];
   lines.push('YOUR RUN');
-  lines.push(
-    `  workspace=${input.workspaceId} agent=${agent.id} definition=${input.definitionVersion ?? 'unversioned'}`,
-  );
+  lines.push(`  workspace=${input.workspaceId} agent=${agent.id}`);
   lines.push(
     `  run=${run.id} attempt=${run.attempts} thread=${thread.id} root=${thread.rootThreadId}`,
   );
@@ -254,13 +247,5 @@ export function assembleAgentPrompt(
     contextThroughSequence,
     delivery,
     gapCount,
-    includedMessageIds: recent.map((message) => message.id),
   };
 }
-
-/**
- * Retention bound restated for callers sizing a window. Kept here so a future
- * change to the store's bound cannot silently make a prompt claim history the
- * store no longer keeps.
- */
-export const PROMPT_RETENTION_BOUND = MAX_THREAD_MESSAGES;

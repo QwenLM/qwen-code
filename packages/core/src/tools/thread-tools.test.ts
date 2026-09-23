@@ -21,10 +21,11 @@ import {
 import { runWithAgentRunContext } from '../agents/workspace-agents/run-context.js';
 import type { AgentRunContext } from '../agents/workspace-agents/run-context.js';
 import {
-  THREAD_TOOLS,
+  ThreadBlockTool,
   ThreadCreateTool,
   ThreadPostTool,
   ThreadReadTool,
+  ThreadReviewTool,
   ThreadWaitTool,
 } from './thread-tools.js';
 import type {
@@ -113,7 +114,14 @@ describe('thread tools', () => {
       'from',
       'idempotency_key',
     ];
-    for (const Tool of THREAD_TOOLS) {
+    for (const Tool of [
+      ThreadPostTool,
+      ThreadWaitTool,
+      ThreadBlockTool,
+      ThreadReviewTool,
+      ThreadCreateTool,
+      ThreadReadTool,
+    ]) {
       const tool = new Tool(config);
       const schema = tool.schema.parametersJsonSchema as {
         properties?: Record<string, unknown>;

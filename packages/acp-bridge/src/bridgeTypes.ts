@@ -10,7 +10,6 @@ import type {
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
-  DispatchRecord,
   SessionGroupPresetColor,
   SessionSourceInput,
   SessionSourcesResult,
@@ -719,8 +718,6 @@ export interface BridgeForkAgentResult {
   description: string;
   launched: boolean;
 }
-
-export type BridgeAgentDispatchRecord = DispatchRecord;
 
 export interface BridgeConversationDirectoryExpectation {
   canonicalSessionId: string;
@@ -2210,11 +2207,6 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
 
-  /** Launch one configured agent identity inside its hidden host session. */
-
-  /** Dispatch durable agent bookings inside their hidden host session. */
-
-  /** Control a run, delete history, or start a saved workflow definition. */
   /**
    * Control a run, delete history, or start a new one — from a saved
    * definition (`run-saved`, where `taskId` is the definition name) or from a

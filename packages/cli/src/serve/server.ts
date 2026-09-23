@@ -3374,9 +3374,6 @@ export function createServeApp(
     registerWorkspaceAgentRoutes(app, {
       workspaceRegistry,
       mutate,
-      ...(deps.deliverChannelMessage
-        ? { deliverChannelMessage: deps.deliverChannelMessage }
-        : {}),
     });
   } else if (!opts.agentHostWorker) {
     // Close out runs the switch left mid-flight (architecture §6). Recovery

@@ -75,15 +75,7 @@ function readHostResult(
   if (rawClose !== undefined) {
     if (typeof rawClose !== 'object' || rawClose === null) return undefined;
     const value = rawClose as Record<string, unknown>;
-    if (value['kind'] === 'waiting') {
-      close = { kind: 'waiting' };
-    } else if (
-      value['kind'] === 'blocked' &&
-      typeof value['question'] === 'string' &&
-      value['question'].trim()
-    ) {
-      close = { kind: 'blocked', question: value['question'].trim() };
-    } else if (
+    if (
       value['kind'] === 'review' &&
       typeof value['summary'] === 'string' &&
       value['summary'].trim()

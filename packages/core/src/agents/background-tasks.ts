@@ -806,17 +806,12 @@ export class BackgroundTaskRegistry {
   continueResidentAgent(
     agentId: string,
     message: string,
-    deliveryId?: string,
   ): ResidentAgentContinuationResult {
     const entry = this.agents.get(agentId);
     const resident = this.residentAgents.get(agentId);
     if (entry?.status !== 'completed') return 'not_completed';
     if (!resident) return 'fallback';
-    return resident.continue(
-      deliveryId !== undefined
-        ? { kind: 'message', text: message, deliveryId }
-        : message,
-    );
+    return resident.continue(message);
   }
 
   unregisterResidentAgent(
@@ -1022,19 +1017,6 @@ export class BackgroundTaskRegistry {
     this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
-  }
-
-  /** Remove one background body and all in-memory state without notification. */
-  forget(agentId: string): boolean {
-    const entry = this.agents.get(agentId);
-    if (!entry) return false;
-    entry.abortController.abort();
-    entry.notified = true;
-    this.rejectPendingApprovals(entry);
-    const deleted = this.deleteAgent(agentId);
-    this.emitStatusChange(entry);
-    this.drainWaitQueue();
-    return deleted;
   }
 
   // Emit the terminal cancelled notification once the agent's natural

@@ -633,13 +633,3 @@ export class ThreadReadTool extends BaseDeclarativeTool<
     return new ThreadReadInvocation(this.config, params);
   }
 }
-
-/** Every thread tools, in the order the run frame lists them. */
-export const THREAD_TOOLS = [
-  ThreadPostTool,
-  ThreadWaitTool,
-  ThreadBlockTool,
-  ThreadReviewTool,
-  ThreadCreateTool,
-  ThreadReadTool,
-] as const;

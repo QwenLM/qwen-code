@@ -148,8 +148,6 @@ describe('agent run lifecycle', () => {
     expect(result.thread.runs[0]?.closeKind).toBe('blocked');
     expect(result.thread.runs[0]?.finalMessageId).toBe(result.message?.id);
     expect(result.thread.status).toBe('in_progress');
-    expect(result.thread.outbox).toHaveLength(1);
-    expect(result.thread.outbox[0]?.payload['event']).toBe('blocker_raised');
   });
 
   it('refuses a wait that nothing could ever wake', async () => {
@@ -259,11 +257,6 @@ describe('agent run lifecycle', () => {
 
     expect(finished.runs[0]?.closeKind).toBe('unclosed');
     expect(finished.status).toBe('blocked');
-    expect(
-      finished.outbox.some(
-        (event) => event.payload['event'] === 'thread_blocked',
-      ),
-    ).toBe(true);
   });
 
   it('reports a child in review to its parent exactly once', async () => {
@@ -358,11 +351,6 @@ describe('agent run lifecycle', () => {
 
     expect(posted.dispatched).toHaveLength(0);
     expect(posted.thread.status).toBe('blocked');
-    expect(
-      posted.thread.outbox.some(
-        (event) => event.payload['event'] === 'thread_blocked',
-      ),
-    ).toBe(true);
   });
 
   it('leaves a thread in_progress while another run is still live', async () => {

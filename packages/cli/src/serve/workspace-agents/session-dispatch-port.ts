@@ -20,7 +20,6 @@
  */
 
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
-import { LOCAL_AGENT_RUNTIME_ID } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { withAgentStoreTransaction } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -329,25 +328,10 @@ export function createSessionDispatchPort(
     // Same rule `start` applies below, asked ahead of time so the dispatcher
     // can name the session on the run before the runtime creates it.
     plannedSessionId({ agent, threadId, sessionId }): string | undefined {
-      if (
-        agent.runtimeId !== undefined &&
-        agent.runtimeId !== LOCAL_AGENT_RUNTIME_ID
-      ) {
-        return undefined;
-      }
       return sessionId ?? agentThreadSessionId(agent.id, threadId);
     },
 
     async inspect({ agent, threadId, sessionId }): Promise<AgentBodyState> {
-      if (
-        agent.runtimeId !== undefined &&
-        agent.runtimeId !== LOCAL_AGENT_RUNTIME_ID
-      ) {
-        return {
-          kind: 'unavailable',
-          error: `Runtime "${agent.runtimeId}" is not registered in this daemon.`,
-        };
-      }
       const expected = sessionId ?? agentThreadSessionId(agent.id, threadId);
       const execution = executions.get(expected);
       if (execution) return execution;
@@ -361,8 +345,7 @@ export function createSessionDispatchPort(
       if (!session) return { kind: 'absent' };
       // A session with a prompt in flight is working. One that is idle is
       // ready for the next turn — which is what `completed` means to the
-      // dispatcher, and why there is no `paused` here: a session process is
-      // either alive or gone, with nothing in between for the bridge to hold.
+      // dispatcher.
       return session.hasActivePrompt
         ? { kind: 'running' }
         : { kind: 'completed' };
@@ -429,7 +412,6 @@ export function createSessionDispatchPort(
         return {
           status: 'started',
           sessionId,
-          consumedOnStart: false,
           activate() {
             const execution: AgentBodyState = {
               kind: 'running',

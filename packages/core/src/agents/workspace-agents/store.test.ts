@@ -47,8 +47,6 @@ vi.mock('../../utils/atomicFileWrite.js', async (importOriginal) => {
 import { Storage } from '../../config/storage.js';
 import {
   allocateRunSequence,
-  deleteThread,
-  enqueueThreadEvent,
   getAgentsFilePath,
   getThreadPath,
   getWorkspaceFilePath,
@@ -62,7 +60,6 @@ import {
   setWorkspaceAgentEnabled,
   isAgentAddressable,
   updateWorkspaceAgents,
-  updateThread,
   withAgentStoreTransaction,
   writeThread,
 } from './store.js';
@@ -72,6 +69,7 @@ import {
   AGENTS_SCHEMA_VERSION,
   type WorkspaceAgent,
   type Thread,
+  type ThreadEvent,
   type ThreadRun,
 } from './types.js';
 
@@ -385,52 +383,16 @@ describe('agent versioned store', () => {
     });
   });
 
-  it('refuses to change a thread id through updateThread', async () => {
-    await writeThread(PROJECT_ROOT, thread());
-
-    await expect(
-      updateThread(PROJECT_ROOT, 'th_root', (current) => ({
-        ...current,
-        id: 'th_other',
-      })),
-    ).rejects.toThrow(/cannot change its id/);
-  });
-
-  it('refuses deletion while an outbox event is pending', async () => {
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        outbox: [
-          {
-            id: 'ev_pending',
-            kind: 'notification',
-            payload: { text: 'blocked' },
-            status: 'pending',
-            attempts: 0,
-            createdAt: 2,
-          },
-        ],
-      }),
-    );
-
-    await expect(deleteThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
-      /pending events/,
-    );
-  });
-
-  it('refuses deletion while a run is non-terminal', async () => {
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'finishing' })] }),
-    );
-
-    await expect(deleteThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
-      /active runs/,
-    );
-  });
-
   it('replays an outbox apply exactly once at the target', async () => {
     await writeThread(PROJECT_ROOT, thread({ assigneeAgentId: BOB.id }));
+    const event: ThreadEvent = {
+      id: 'ev_report',
+      kind: 'parent_report',
+      payload: { targetThreadId: 'th_root' },
+      status: 'pending',
+      attempts: 0,
+      createdAt: 3,
+    };
     await writeThread(
       PROJECT_ROOT,
       thread({
@@ -438,14 +400,9 @@ describe('agent versioned store', () => {
         title: 'Child',
         rootThreadId: 'th_root',
         parentThreadId: 'th_root',
+        outbox: [event],
       }),
     );
-    const event = await enqueueThreadEvent(PROJECT_ROOT, 'th_child', {
-      id: 'ev_report',
-      kind: 'parent_report',
-      payload: { targetThreadId: 'th_root' },
-      createdAt: 3,
-    });
 
     await expect(
       reconcileThreadOutbox(
@@ -498,14 +455,15 @@ describe('agent versioned store', () => {
   });
 
   it('gates a depth-3 tree on run usage instead of a stale root cache', async () => {
-    await writeThread(PROJECT_ROOT, thread({ runs: [run(1, 40)] }));
+    // Each thread is under the tree budget alone; only their sum is over it.
+    await writeThread(PROJECT_ROOT, thread({ runs: [run(1, 400_000)] }));
     await writeThread(
       PROJECT_ROOT,
       thread({
         id: 'th_child',
         rootThreadId: 'th_root',
         parentThreadId: 'th_root',
-        runs: [run(2, 35, { id: 'rn_2' })],
+        runs: [run(2, 350_000, { id: 'rn_2' })],
       }),
     );
     await writeThread(
@@ -515,7 +473,7 @@ describe('agent versioned store', () => {
         rootThreadId: 'th_root',
         parentThreadId: 'th_child',
         assigneeAgentId: ALICE.id,
-        runs: [run(3, 30, { id: 'rn_3' })],
+        runs: [run(3, 300_000, { id: 'rn_3' })],
       }),
     );
     const rootPath = getThreadPath(PROJECT_ROOT, 'th_root');
@@ -526,7 +484,7 @@ describe('agent versioned store', () => {
       PROJECT_ROOT,
       'th_grandchild',
       { from: HUMAN_AUTHOR_ID, text: 'continue' },
-      { agents: [ALICE], limits: { tokens: 100 } },
+      { agents: [ALICE] },
     );
 
     expect(result.outcomes[0]?.decision).toEqual({

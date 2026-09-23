@@ -47,9 +47,7 @@ interface AgentHostBridge {
 }
 
 export interface AgentHostSessionOwner {
-  ensureResident(): Promise<string>;
-  dispatch(): Promise<{ records: DispatchRecord[] }>;
-  tick(): Promise<void>;
+  dispatch(): Promise<void>;
   stop(): void;
 }
 
@@ -57,14 +55,9 @@ export function startAgentHostSessionOwner(options: {
   bridge: AgentHostBridge;
   workspaceCwd: string;
   generationGuard?: WorkspaceGenerationGuard;
-  intervalMs?: number;
-  resumeTimeoutMs?: number;
 }): AgentHostSessionOwner {
   const { bridge, workspaceCwd } = options;
   const assertGenerationOpen = () => options.generationGuard?.assertOpen();
-  const intervalMs = options.intervalMs ?? DEFAULT_AGENT_KEEPALIVE_INTERVAL_MS;
-  const resumeTimeoutMs =
-    options.resumeTimeoutMs ?? DEFAULT_AGENT_RESUME_TIMEOUT_MS;
   const port = createSessionDispatchPort({ bridge, workspaceCwd });
   let ensuring: Promise<string> | undefined;
   let reviving:
@@ -93,7 +86,7 @@ export function startAgentHostSessionOwner(options: {
               sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
               sourceId: workspace.workspaceId,
             },
-            resumeTimeoutMs,
+            DEFAULT_AGENT_RESUME_TIMEOUT_MS,
           );
           const current = {
             ...started,
@@ -201,17 +194,15 @@ export function startAgentHostSessionOwner(options: {
       .finally(() => {
         running = false;
       });
-  }, intervalMs);
+  }, DEFAULT_AGENT_KEEPALIVE_INTERVAL_MS);
   timer.unref?.();
 
   return {
-    ensureResident,
     async dispatch() {
       await ensureResident();
       assertGenerationOpen();
-      return { records: await dispatch() };
+      await dispatch();
     },
-    tick,
     stop,
   };
 }

@@ -10,12 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Storage } from '../../config/storage.js';
-import {
-  createThread,
-  deleteThread,
-  readThread,
-  writeThread,
-} from './store.js';
+import { createThread, readThread, writeThread } from './store.js';
 import {
   countQueuedElsewhere,
   postMessage,
@@ -24,6 +19,7 @@ import {
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
+  DEFAULT_THREAD_AUTO_TURN_BUDGET,
   type WorkspaceAgent,
   type Thread,
   type ThreadRun,
@@ -220,48 +216,35 @@ describe('agent thread actions', () => {
   it('charges agent delivery into a running run against the turn gate', async () => {
     await writeThread(
       PROJECT_ROOT,
-      thread({ runs: [run({ status: 'running' })] }),
+      thread({
+        runs: [run({ status: 'running' })],
+        autoTurnsUsed: DEFAULT_THREAD_AUTO_TURN_BUDGET - 1,
+      }),
     );
 
     const first = await postMessage(
       PROJECT_ROOT,
       'th_root',
       { from: BOB.id, text: '@alice first' },
-      { agents: [ALICE, BOB], limits: { autoTurns: 1 } },
+      { agents: [ALICE, BOB] },
     );
     expect(first.outcomes[0]?.decision).toMatchObject({
       kind: 'coalesce',
       into: 'running',
     });
-    expect(first.thread.autoTurnsUsed).toBe(1);
+    expect(first.thread.autoTurnsUsed).toBe(DEFAULT_THREAD_AUTO_TURN_BUDGET);
 
     const second = await postMessage(
       PROJECT_ROOT,
       'th_root',
       { from: BOB.id, text: '@alice again' },
-      { agents: [ALICE, BOB], limits: { autoTurns: 1 } },
+      { agents: [ALICE, BOB] },
     );
     expect(second.outcomes[0]?.decision).toEqual({
       kind: 'skip',
       reason: 'turn_budget_exhausted',
     });
-    const third = await postMessage(
-      PROJECT_ROOT,
-      'th_root',
-      { from: BOB.id, text: '@alice once more' },
-      { agents: [ALICE, BOB], limits: { autoTurns: 1 } },
-    );
-    expect(third.thread.status).toBe('in_progress');
-    expect(third.thread.outbox).toHaveLength(1);
-    expect(third.thread.outbox[0]).toMatchObject({
-      kind: 'notification',
-      status: 'pending',
-      payload: {
-        event: 'gate_tripped',
-        reason: 'turn_budget_exhausted',
-        messageId: second.message.id,
-      },
-    });
+    expect(second.thread.status).toBe('in_progress');
   });
 
   it('counts only pending runs against the queue limit', () => {
@@ -419,21 +402,5 @@ describe('agent thread actions', () => {
       rootThreadId: 'th_root',
       autoTurnsUsed: 7,
     });
-  });
-
-  it('refuses to delete a root that still owns sub-threads', async () => {
-    await writeThread(PROJECT_ROOT, thread());
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        id: 'th_child',
-        rootThreadId: 'th_root',
-        parentThreadId: 'th_root',
-      }),
-    );
-
-    await expect(deleteThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
-      /with sub-threads/,
-    );
   });
 });

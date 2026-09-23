@@ -81,7 +81,6 @@ import {
   AGENT_TOOL_CLASSIFICATION,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { resolveThreadStatus } from '@qwen-code/qwen-code-core/agents/workspace-agents/thread-status.js';
-import { deliverNotifications } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
@@ -90,7 +89,6 @@ import {
   type AgentLiveEvent,
 } from '../workspace-agents/agent-events.js';
 import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
-import type { ChannelDeliveryRequest } from '../../runtime/channel-delivery-ipc.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -103,14 +101,6 @@ import type {
 export interface RegisterWorkspaceAgentRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
-  /**
-   * Sends one channel message. Absent when no channel worker is running, in
-   * which case notifications stay pending rather than being dropped.
-   */
-  deliverChannelMessage?: (
-    workspaceCwd: string,
-    request: ChannelDeliveryRequest,
-  ) => Promise<unknown>;
 }
 
 const LIVE_RUN_STATUSES = new Set([
@@ -390,35 +380,6 @@ export function registerWorkspaceAgentRoutes(
     res.status(500).json({ error: message });
   };
 
-  /**
-   * Sends whatever the last dispatch queued.
-   *
-   * Runs after dispatch rather than inside it because the channel worker lives
-   * in this process while the dispatch loop runs in the host session. A send
-   * that fails leaves its event pending with its attempt counted, so the next
-   * mutation retries it; the thread state it announces is durable either way.
-   */
-  const flushNotifications = async (
-    runtime: WorkspaceRuntime,
-  ): Promise<void> => {
-    if (!deps.deliverChannelMessage) return;
-    const send = deps.deliverChannelMessage;
-    try {
-      await deliverNotifications(runtime.workspaceCwd, async (input) => {
-        await send(runtime.workspaceCwd, {
-          deliveryId: input.deliveryId,
-          channelName: input.target.channelName,
-          target: input.target.target,
-          text: input.text,
-        });
-      });
-    } catch {
-      // The events stay pending and the next mutation retries them. A
-      // notification failure must not fail the request that produced it: the
-      // work itself already landed.
-    }
-  };
-
   const startBookedRuns = async (
     runtime: WorkspaceRuntime,
   ): Promise<string | undefined> => {
@@ -426,8 +387,6 @@ export function registerWorkspaceAgentRoutes(
       await dispatch(runtime);
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
-    } finally {
-      await flushNotifications(runtime);
     }
     // Explicit: a dispatch that threw returns its message above, and one that
     // did not has no error to report. Falling off the end would say the same
@@ -455,7 +414,12 @@ export function registerWorkspaceAgentRoutes(
           const hasWork = threads.some(
             (thread) =>
               thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)) ||
-              thread.outbox.some((event) => event.status === 'pending'),
+              // Only parent reports are still delivered; a leftover event of a
+              // retired kind must not keep waking recovery every five seconds.
+              thread.outbox.some(
+                (event) =>
+                  event.status === 'pending' && event.kind === 'parent_report',
+              ),
           );
           if (!hasRoster && !hasWork) continue;
           const owner = owners.get(runtime.workspaceCwd);
@@ -526,15 +490,17 @@ export function registerWorkspaceAgentRoutes(
       if (!closed) res.write(': ping\n\n');
     }, 20_000);
     heartbeat.unref?.();
-    let unsubscribe: (() => void) | undefined;
     req.on('close', () => {
       closed = true;
       clearInterval(heartbeat);
-      unsubscribe?.();
     });
-    unsubscribe = await subscribeAgentEvents(runtime.workspaceCwd, send);
-    if (closed) unsubscribe();
-    else send({ type: 'changed' });
+    const unsubscribe = await subscribeAgentEvents(runtime.workspaceCwd, send);
+    if (closed) {
+      unsubscribe();
+      return;
+    }
+    req.on('close', unsubscribe);
+    send({ type: 'changed' });
   });
 
   app.get(`${prefix}/agents`, async (req: Request, res: Response) => {

@@ -40,7 +40,7 @@ import type {
 import { isThreadTerminal } from './types.js';
 
 /** Run states that keep a thread `in_progress` regardless of any obligation. */
-export const LIVE_RUN_STATUSES = new Set([
+const LIVE_RUN_STATUSES = new Set([
   'queued',
   'running',
   'finishing',
@@ -105,7 +105,7 @@ function obligationFor(run: ThreadRun): CloseObligation | undefined {
 }
 
 /** Every close obligation on the thread, acknowledged or not. */
-export function listCloseObligations(thread: Thread): CloseObligation[] {
+function listCloseObligations(thread: Thread): CloseObligation[] {
   return thread.runs
     .map(obligationFor)
     .filter((entry): entry is CloseObligation => entry !== undefined);
@@ -128,7 +128,7 @@ function booksWork(outcome: MessageOutcome): boolean {
  * A post with no outcomes at all is not an admission — a system audit append on
  * a `done` thread, say — and says nothing about whether the thread is stuck.
  */
-export function admissionBookedNothing(message: ThreadMessage): boolean {
+function admissionBookedNothing(message: ThreadMessage): boolean {
   return message.outcomes.length > 0 && !message.outcomes.some(booksWork);
 }
 

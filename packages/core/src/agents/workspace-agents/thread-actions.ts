@@ -5,7 +5,6 @@
  */
 
 import {
-  generateEventId,
   generateMessageId,
   generateRunId,
   prepareThreadInTransaction,
@@ -15,15 +14,11 @@ import {
   maxConcurrentRunsFor,
 } from './store.js';
 import { mentionToken, parseMentions } from './mentions.js';
-import {
-  applyAggregateStatus,
-  finishRunInTransaction,
-} from './run-lifecycle.js';
+import { applyAggregateStatus } from './run-lifecycle.js';
 import { acknowledgeCloseObligations } from './thread-status.js';
 import {
   decideDispatch,
   resolveTargets,
-  type BudgetLimits,
   type DispatchDecision,
 } from './dispatch-policy.js';
 import {
@@ -75,7 +70,6 @@ export interface PostMessageResult {
 
 export interface PostMessageOptions {
   agents?: readonly WorkspaceAgent[];
-  limits?: BudgetLimits;
   now?: number;
   /** Thread state to admit against and persist in the final replacement. */
   threadOverride?: Thread;
@@ -259,7 +253,6 @@ export async function postMessageInTransaction(
         threads.filter((thread) => thread.id !== current.id),
         agentId,
       ),
-      ...(options.limits ? { limits: options.limits } : {}),
     });
 
     if (decision.kind === 'coalesce') {
@@ -329,34 +322,6 @@ export async function postMessageInTransaction(
     }
 
     outcomes.push({ agentId, agentName: target?.name, decision });
-    if (
-      (decision.reason === 'turn_budget_exhausted' ||
-        decision.reason === 'token_budget_exhausted') &&
-      !next.outbox.some(
-        (event) =>
-          event.kind === 'notification' &&
-          event.status === 'pending' &&
-          event.payload['event'] === 'gate_tripped' &&
-          event.payload['reason'] === decision.reason,
-      )
-    ) {
-      next.outbox = [
-        ...next.outbox,
-        {
-          id: generateEventId(),
-          kind: 'notification',
-          status: 'pending',
-          attempts: 0,
-          createdAt: now,
-          payload: {
-            event: 'gate_tripped',
-            threadId: next.id,
-            messageId: message.id,
-            reason: decision.reason,
-          },
-        },
-      ];
-    }
   }
 
   const storedMessage = { ...message, outcomes: outcomes.map(storeOutcome) };
@@ -594,18 +559,10 @@ export interface BindRunSessionInput {
   sessionId: string;
   /**
    * Highest message sequence the prompt for this turn contained. Recorded on
-   * the run and committed to the agent's delivery watermark, because the
-   * initial prompt is consumed the moment the turn starts — unlike input
-   * pushed into a running turn, which is committed only when the runtime
-   * reports draining it.
+   * the run; the agent's delivery watermark moves only when the runtime
+   * reports consuming it.
    */
   contextThroughSequence?: number;
-  /** Whether this runtime path consumes its initial input before returning. */
-  consumedOnStart?: boolean;
-  /** Content hash of the agent definition in force, for drift audit (§9.4). */
-  definitionVersion?: string;
-  /** Byte offset into the agent's transcript where this run's slice begins. */
-  transcriptStartOffset?: number;
   /** The body's cumulative token total at start; the run is charged the delta. */
   usageBaselineTokens?: number;
 }
@@ -614,7 +571,7 @@ export interface BindRunSessionInput {
  * Name, on the claimed run, the session the port is about to create.
  *
  * The full `bindRunSession` below can only run after `start` returns, because
- * it also records the transcript offset and usage baseline the runtime reports.
+ * it also records the usage baseline the runtime reports.
  * Session creation happens inside `start`, though — and creation is where an
  * `sourceType: agent` claim gets checked against the store. So the id is
  * written here first, under the same claimed-attempt guard, and `bindRunSession`
@@ -681,22 +638,8 @@ export async function bindRunSession(
                 message.sequence <= through,
             )
             .map((message) => message.id);
-    const delivery =
-      !input.consumedOnStart || input.contextThroughSequence === undefined
-        ? thread.deliveryByAgent
-        : {
-            ...thread.deliveryByAgent,
-            [target.agentId]: {
-              committedThroughSequence: Math.max(
-                thread.deliveryByAgent[target.agentId]
-                  ?.committedThroughSequence ?? 0,
-                input.contextThroughSequence,
-              ),
-            },
-          };
     return transaction.writeThread({
       ...thread,
-      deliveryByAgent: delivery,
       runs: thread.runs.map((run) =>
         run.id === input.runId
           ? {
@@ -705,22 +648,8 @@ export async function bindRunSession(
               acceptedMessageIds: Array.from(
                 new Set([...run.acceptedMessageIds, ...deliveredMessageIds]),
               ),
-              consumedMessageIds: input.consumedOnStart
-                ? Array.from(
-                    new Set([
-                      ...run.consumedMessageIds,
-                      ...deliveredMessageIds,
-                    ]),
-                  )
-                : run.consumedMessageIds,
               ...(input.contextThroughSequence !== undefined
                 ? { contextThroughSequence: input.contextThroughSequence }
-                : {}),
-              ...(input.definitionVersion
-                ? { definitionVersion: input.definitionVersion }
-                : {}),
-              ...(input.transcriptStartOffset !== undefined
-                ? { transcriptStartOffset: input.transcriptStartOffset }
                 : {}),
               ...(input.usageBaselineTokens !== undefined
                 ? { usageBaselineTokens: input.usageBaselineTokens }
@@ -757,8 +686,6 @@ export async function requeueRun(
               sessionId: undefined,
               startedAt: undefined,
               endedAt: undefined,
-              transcriptStartOffset: undefined,
-              transcriptEndOffset: undefined,
               error: undefined,
               failureStage: undefined,
             }
@@ -767,62 +694,6 @@ export async function requeueRun(
     });
     return true;
   });
-}
-
-export async function releaseRunClaim(
-  projectRoot: string,
-  input: { threadId: string; runId: string; attempt: number },
-): Promise<void> {
-  await withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(input.threadId);
-    if (!thread) return;
-    const target = thread.runs.find((run) => run.id === input.runId);
-    if (
-      !target ||
-      target.status !== 'running' ||
-      target.sessionId ||
-      target.attempts !== input.attempt
-    ) {
-      return;
-    }
-    await transaction.writeThread({
-      ...thread,
-      runs: thread.runs.map((run) =>
-        run.id === target.id
-          ? {
-              ...run,
-              status: 'queued',
-              attempts: run.attempts - 1,
-              startedAt: undefined,
-            }
-          : run,
-      ),
-    });
-  });
-}
-
-/**
- * Records a run's terminal state.
- *
- * Delegates to the lifecycle module so a run has exactly one way to end and
- * the thread's aggregate status is recomputed from the same place every time.
- */
-export async function finishRun(
-  projectRoot: string,
-  threadId: string,
-  runId: string,
-  outcome: {
-    status: 'completed' | 'failed' | 'cancelled';
-    attempt?: number;
-    error?: string;
-    failureStage?: string;
-    transcriptEndOffset?: number;
-  },
-  now = Date.now(),
-): Promise<Thread> {
-  return withAgentStoreTransaction(projectRoot, (transaction) =>
-    finishRunInTransaction(transaction, { threadId, runId, outcome, now }),
-  );
 }
 
 export async function upsertRunUsage(

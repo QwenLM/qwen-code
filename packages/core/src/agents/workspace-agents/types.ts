@@ -44,20 +44,6 @@ export interface AgentHostsFile {
 }
 
 /**
- * Where this workspace's notifications go.
- *
- * There is deliberately no default. A notification is a convenience — the
- * state it announces is already durable in the thread and visible in the UI —
- * so guessing a destination would send a person's work to a channel nobody
- * chose. Until this is set, notification events stay pending, which is the
- * same rule every other unconsumed event kind follows.
- */
-export interface AgentNotifyTarget {
-  channelName: string;
-  target: { type: 'user'; id: string } | { type: 'chat'; id: string };
-}
-
-/**
  * How much an external caller may ask of one agent.
  *
  * `analysis` is read-only work, which is what the plan opens first; `full`
@@ -89,8 +75,6 @@ export interface AgentWorkspaceState {
   workspaceId: string;
   hostSessionId?: string;
   nextRunSequence: number;
-  /** Absent until a person picks one; see {@link AgentNotifyTarget}. */
-  notifyTarget?: AgentNotifyTarget;
   /** External callers allowed in, and to which agent. Absent means none. */
   callerGrants?: A2AGrant[];
 }
@@ -170,11 +154,6 @@ export interface WorkspaceAgent {
   maxConcurrentRuns?: number;
   /** Where this workspace-scoped identity may execute. Absent means local. */
   execution?: WorkspaceAgentExecution;
-  /**
-   * Legacy execution field retained for reading older v1 records. New writes
-   * use `execution` and remove this field.
-   */
-  runtimeId?: string;
 }
 
 /**
@@ -185,21 +164,6 @@ export interface WorkspaceAgent {
  * while it waits. `done` is deliberately a human's call — an agent may push a
  * thread to `in_review`, never past it.
  */
-/**
- * What a person sees beside an agent's name.
- *
- * Derived, never stored: the body's liveness is the runtime's fact, and a
- * stored copy would be wrong every time a process died without saying so.
- * `offline` is the honest reading of "no session", which is also what a
- * retired agent reports.
- */
-export type WorkspaceAgentStatus =
-  | 'offline'
-  | 'idle'
-  | 'working'
-  | 'blocked'
-  | 'error';
-
 export type ThreadStatus =
   | 'open'
   | 'in_progress'
@@ -218,7 +182,7 @@ export type ThreadStatus =
  * at each would have been seven chances to miss one, and the one missed would
  * have kept dispatching work for a task its caller had already cancelled.
  */
-export const TERMINAL_THREAD_STATUSES: ReadonlySet<ThreadStatus> = new Set([
+const TERMINAL_THREAD_STATUSES: ReadonlySet<ThreadStatus> = new Set([
   'done',
   'cancelled',
 ]);
@@ -374,9 +338,6 @@ export interface ThreadRun {
   acceptedMessageIds: string[];
   consumedMessageIds: string[];
   contextThroughSequence?: number;
-  definitionVersion?: string;
-  transcriptStartOffset?: number;
-  transcriptEndOffset?: number;
   closeKind?: RunCloseKind;
   closeAcknowledgedAtSequence?: number;
   finalMessageId?: string;
@@ -506,7 +467,7 @@ export interface AgentDelivery {
   committedThroughSequence: number;
 }
 
-export type ThreadEventKind = 'parent_report' | 'notification';
+export type ThreadEventKind = 'parent_report';
 export type ThreadEventStatus = 'pending' | 'acknowledged';
 
 export interface ThreadEvent {

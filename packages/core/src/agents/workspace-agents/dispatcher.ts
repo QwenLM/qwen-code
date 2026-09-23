@@ -34,21 +34,18 @@ import {
 import {
   applyAggregateStatus,
   finishRunInTransaction,
-  hasLiveDescendant,
 } from './run-lifecycle.js';
 import {
   bindRunSession,
   claimRun,
   postMessageInTransaction,
   requeueRun,
-  releaseRunClaim,
   reserveRunSession,
   SYSTEM_AUTHOR_ID,
   upsertRunUsage,
 } from './thread-actions.js';
 import type {
   WorkspaceAgent,
-  AgentNotifyTarget,
   Thread,
   ThreadEvent,
   ThreadRun,
@@ -60,7 +57,6 @@ import { isThreadTerminal } from './types.js';
 export type AgentBodyState =
   | { kind: 'absent' }
   | { kind: 'unavailable'; error: string }
-  | { kind: 'paused' }
   | { kind: 'completed' }
   | { kind: 'failed'; runId: string; attempt: number; error: string }
   | {
@@ -70,31 +66,13 @@ export type AgentBodyState =
       attempt?: number;
     };
 
-/**
- * How a body is brought back for the next turn.
- *
- * Three, not four. Writing the production adapter showed that "continue the
- * resident chat" and "revive from the transcript" are not a choice the
- * dispatcher can make: the registry decides, because only it knows whether a
- * resident runtime is still attached, and it already reports the fallback as a
- * typed outcome. A dispatcher that picked between them would be guessing at
- * state it cannot see, and would cold-revive a body that was still resident.
- * What the dispatcher does choose is which of the three genuinely distinct
- * entry points applies: build the persona from scratch, restart a paused
- * entry, or continue a completed one.
- */
-export type AgentStartAction = 'launch' | 'resume' | 'continue_completed';
-
 export type AgentStartResult =
   | {
       status: 'started';
       sessionId: string;
-      transcriptStartOffset?: number;
-      consumedOnStart?: boolean;
       /** Start execution only after the session and usage baseline are saved. */
       activate?: () => void;
     }
-  | { status: 'capacity_wait' }
   | { status: 'agent_unavailable'; error: string }
   | { status: 'launch_failed'; error: string; failureStage?: string };
 
@@ -130,7 +108,6 @@ export interface AgentDispatchPort {
     sessionId?: string;
   }): Promise<boolean>;
   start(input: {
-    action: AgentStartAction;
     agent: WorkspaceAgent;
     prompt: string;
     workspaceId: string;
@@ -153,8 +130,6 @@ export interface AgentDispatchPort {
    * pretending to per-round detail the source does not have.
    */
   totalTokens?(target: AgentSessionTarget): Promise<number | undefined>;
-  /** Definition content hash, when the port can supply one (§9.4). */
-  definitionVersion?(agent: WorkspaceAgent): Promise<string | undefined>;
   /**
    * The session id `start` will use, asked before it is used.
    *
@@ -186,7 +161,6 @@ export type DispatchResultKind =
   | 'recovered_terminal'
   | 'recovery_failed'
   | 'busy_other_thread'
-  | 'capacity_wait'
   | 'runtime_unavailable'
   | 'launch_failed'
   | 'agent_unavailable'
@@ -458,17 +432,14 @@ export function selectCandidates(
   return taken;
 }
 
-function actionFor(state: AgentBodyState): AgentStartAction | undefined {
+function canStart(state: AgentBodyState): boolean {
   switch (state.kind) {
     case 'absent':
-      return 'launch';
-    case 'paused':
-      return 'resume';
     case 'completed':
     case 'failed':
-      return 'continue_completed';
+      return true;
     default:
-      return undefined;
+      return false;
   }
 }
 
@@ -761,10 +732,10 @@ async function deliverRunningInputs(
 /**
  * Starts at most one run per idle agent, then delivers parent reports.
  *
- * Returns what happened to each candidate. `capacity_wait` and
- * `busy_other_thread` leave the run queued on purpose: they are observations
- * about this instant, and the next pass re-reads them rather than persisting a
- * decision that was already stale when it was written.
+ * Returns what happened to each candidate. `busy_other_thread` leaves the run
+ * queued on purpose: it is an observation about this instant, and the next
+ * pass re-reads it rather than persisting a decision that was already stale
+ * when it was written.
  */
 /**
  * The synthetic round a session's cumulative reading is recorded under.
@@ -852,8 +823,7 @@ export async function dispatchOnce(
       threadId: thread.id,
       ...(sessionId ? { sessionId } : {}),
     });
-    const action = actionFor(state);
-    if (!action) {
+    if (!canStart(state)) {
       // The store says this agent is free and the runtime says it is not. The
       // runtime is authoritative about its own body, so leave the run queued
       // and report the divergence rather than starting a second one.
@@ -874,7 +844,6 @@ export async function dispatchOnce(
       continue;
     }
 
-    const definitionVersion = await port.definitionVersion?.(agent);
     const claimed = await claimRun(projectRoot, {
       threadId: thread.id,
       runId: run.id,
@@ -888,7 +857,6 @@ export async function dispatchOnce(
       run: claimed.run,
       thread: claimed.thread,
       roster: localAgents,
-      ...(definitionVersion ? { definitionVersion } : {}),
     });
 
     // Reserve the session id before the port creates it. Session creation
@@ -911,7 +879,6 @@ export async function dispatchOnce(
     }
 
     const result = await port.start({
-      action,
       agent,
       prompt: prompt.text,
       workspaceId: workspace.workspaceId,
@@ -950,26 +917,10 @@ export async function dispatchOnce(
         attempt: claimed.run.attempts,
         sessionId: result.sessionId,
         contextThroughSequence: prompt.contextThroughSequence,
-        consumedOnStart: result.consumedOnStart,
-        ...(definitionVersion ? { definitionVersion } : {}),
-        ...(result.transcriptStartOffset !== undefined
-          ? { transcriptStartOffset: result.transcriptStartOffset }
-          : {}),
         ...(usageBaselineTokens !== undefined ? { usageBaselineTokens } : {}),
       });
       result.activate?.();
       records.push({ ...base, kind: 'started' });
-      continue;
-    }
-
-    if (result.status === 'capacity_wait') {
-      // Backpressure, not failure: the run keeps its place and its attempt.
-      await releaseRunClaim(projectRoot, {
-        threadId: thread.id,
-        runId: run.id,
-        attempt: claimed.run.attempts,
-      });
-      records.push({ ...base, kind: 'capacity_wait' });
       continue;
     }
 
@@ -1070,104 +1021,3 @@ export async function deliverParentReports(
   }
   return delivered;
 }
-
-function isNotification(event: ThreadEvent): boolean {
-  return event.kind === 'notification';
-}
-
-/** One line a person can act on, in the words the UI uses for the same state. */
-export function notificationText(thread: Thread, event: ThreadEvent): string {
-  const label = `"${thread.title}"`;
-  switch (event.payload['event']) {
-    case 'blocker_raised':
-      return `${label} needs you: an agent asked a question and is waiting.`;
-    case 'thread_in_review':
-      return `${label} is ready for review.`;
-    case 'gate_tripped':
-      if (event.payload['reason'] === 'turn_budget_exhausted') {
-        return `${label} reached its automatic-turn limit. Reply to reset the turn counter.`;
-      }
-      if (event.payload['reason'] === 'token_budget_exhausted') {
-        return `${label} reached its task-tree token limit. A reply does not reset it; start a new root task to continue.`;
-      }
-      return `${label} reached a dispatch limit.`;
-    case 'thread_blocked': {
-      const reason = event.payload['reason'];
-      return typeof reason === 'string'
-        ? `${label} is blocked: ${reason}`
-        : `${label} is blocked.`;
-    }
-    case 'run_failed_after_retry': {
-      const error = event.payload['error'];
-      return typeof error === 'string'
-        ? `${label} has a run that failed twice: ${error}`
-        : `${label} has a run that failed twice.`;
-    }
-    default:
-      // Never assert a cause the payload does not carry.
-      return `${label} changed and may need you.`;
-  }
-}
-
-export interface AgentNotificationSender {
-  (input: {
-    target: AgentNotifyTarget;
-    text: string;
-    /** Stable per event, so a retry is not a second message downstream. */
-    deliveryId: string;
-  }): Promise<void>;
-}
-
-/**
- * Sends each pending notification once, and only once a destination exists.
- *
- * The workspace record carries no default destination, so with none set this
- * does nothing and the events stay pending — the same rule every unconsumed
- * event kind follows, and the reason the outbox reconciler takes a filter at
- * all. Acknowledging them into silence would be worse than not sending: the
- * thread state they announce is durable and visible either way, but a person
- * who configured a channel later would never learn what they missed.
- *
- * A send that throws leaves its event pending with its attempt counted, so the
- * next pass retries rather than dropping it. Duplicates are possible and
- * accepted; silent loss is not.
- */
-export async function deliverNotifications(
-  projectRoot: string,
-  send: AgentNotificationSender | undefined,
-): Promise<number> {
-  if (!send) return 0;
-  const workspace = await readAgentWorkspace(projectRoot);
-  const target = workspace.notifyTarget;
-  if (!target) return 0;
-
-  const { threads } = await listThreads(projectRoot);
-  let sent = 0;
-  for (const thread of threads) {
-    if (
-      !thread.outbox.some(
-        (event) => event.status === 'pending' && isNotification(event),
-      )
-    ) {
-      continue;
-    }
-    await reconcileThreadOutbox(
-      projectRoot,
-      thread.id,
-      async (_transaction, event) => {
-        await send({
-          target,
-          text: notificationText(thread, event),
-          deliveryId: event.id,
-        });
-        sent += 1;
-      },
-      isNotification,
-    );
-  }
-  return sent;
-}
-
-/** Whether a thread still has a descendant that can wake it. Re-exported for
- * callers that need the same rule the status resolver uses. */
-export { hasLiveDescendant };

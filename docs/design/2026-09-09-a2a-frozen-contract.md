@@ -4,7 +4,7 @@
 
 上游为[接续架构](./2026-09-09-agent-service-collaboration.md)与[实施计划](../plans/2026-09-09-agent-service-collaboration-plan.md)的 P1。本文只记录“说定了什么”，不宣称“跑通了什么”。
 
-可执行部分在 `packages/core/src/agents/workspace-agents/a2a-contract.ts`，由 `scripts/audit/run-workspace-agents.mjs` 第 29 节断言（本轮 227 passed / 0 failed）。文档与代码不一致时以代码为准——文档会过期，断言不会。
+可执行部分在 `packages/core/src/agents/workspace-agents/a2a-contract.ts`（当时由 `scripts/audit/run-workspace-agents.mjs` 第 29 节断言，227 passed / 0 failed；该脚本及只供它断言的常量后已移除）。文档与代码不一致时以代码为准。
 
 ## 1. 冻结的版本与绑定
 

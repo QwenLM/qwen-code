@@ -118,16 +118,6 @@ const { mockRunManagedAutoMemoryDream, mockRunManagedRememberByAgent } =
     mockRunManagedRememberByAgent: vi.fn(),
   }));
 
-const {
-  mockLaunchWorkspaceAgent,
-  mockReadWorkspaceAgents,
-  mockReadAgentWorkspace,
-} = vi.hoisted(() => ({
-  mockLaunchWorkspaceAgent: vi.fn(),
-  mockReadWorkspaceAgents: vi.fn(),
-  mockReadAgentWorkspace: vi.fn(),
-}));
-
 const { mockExecuteGeneration } = vi.hoisted(() => ({
   mockExecuteGeneration: vi.fn(),
 }));
@@ -338,8 +328,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   stripRuntimeSnapshotPrefix: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).stripRuntimeSnapshotPrefix,
-  readWorkspaceAgents: mockReadWorkspaceAgents,
-  readAgentWorkspace: mockReadAgentWorkspace,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -1416,9 +1404,6 @@ describe('runAcpAgent shutdown cleanup', () => {
   beforeEach(() => {
     resetAcpStartupProfilerForTesting();
     vi.clearAllMocks();
-    mockLaunchWorkspaceAgent.mockReset();
-    mockReadWorkspaceAgents.mockReset();
-    mockReadAgentWorkspace.mockReset();
     delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
     delete process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'];
     delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];

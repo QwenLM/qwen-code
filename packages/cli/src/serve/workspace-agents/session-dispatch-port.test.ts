@@ -110,7 +110,6 @@ describe('session dispatch port', () => {
     const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
 
     const result = await port.start({
-      action: 'launch',
       agent: AGENT,
       prompt: 'envelope',
       ...TURN,
@@ -120,7 +119,6 @@ describe('session dispatch port', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
     if (result.status !== 'started')
       throw new Error('Expected prepared session');
-    expect(result.consumedOnStart).toBe(false);
     result.activate?.();
     expect(contextOf(sendPrompt)?.agentRun).toEqual({
       workspaceId: 'ws_1',
@@ -164,7 +162,6 @@ describe('session dispatch port', () => {
     );
     const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
     const result = await port.start({
-      action: 'launch',
       agent: AGENT,
       prompt: 'work',
       ...TURN,
@@ -245,7 +242,6 @@ describe('session dispatch port', () => {
     const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
 
     const result = await port.start({
-      action: 'launch',
       agent: AGENT,
       prompt: 'envelope',
       ...TURN,
@@ -270,7 +266,6 @@ describe('session dispatch port', () => {
       });
       const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
       const result = await port.start({
-        action: 'launch',
         agent: AGENT,
         prompt: 'envelope',
         ...TURN,

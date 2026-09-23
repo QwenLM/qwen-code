@@ -7,8 +7,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  getAgentRunContext,
-  isAgentRun,
   requireAgentRunContext,
   runWithAgentRunContext,
   type AgentRunContext,
@@ -28,8 +26,6 @@ function context(overrides: Partial<AgentRunContext> = {}): AgentRunContext {
 
 describe('agent run context', () => {
   it('is absent outside a agent turn', () => {
-    expect(getAgentRunContext()).toBeUndefined();
-    expect(isAgentRun()).toBe(false);
     expect(() => requireAgentRunContext('thread_post')).toThrow(
       /thread_post requires an active agent run context/,
     );
@@ -40,7 +36,7 @@ describe('agent run context', () => {
       requireAgentRunContext('thread_post'),
     );
     expect(bound.threadId).toBe('th_1');
-    expect(getAgentRunContext()).toBeUndefined();
+    expect(() => requireAgentRunContext('thread_post')).toThrow();
   });
 
   // The reason this is AsyncLocalStorage and not a mutable "current run"

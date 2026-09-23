@@ -13,6 +13,8 @@ import {
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
+  DEFAULT_THREAD_AUTO_TURN_BUDGET,
+  DEFAULT_THREAD_TOKEN_BUDGET,
   type WorkspaceAgent,
   type Thread,
   type ThreadMessage,
@@ -139,8 +141,10 @@ describe('decideDispatch', () => {
       decideDispatch(
         context({
           message: message({ from: 'ag_bob', mentions: ['ag_alice'] }),
-          budget: { autoTurnsUsed: 3, tokensUsed: 0 },
-          limits: { autoTurns: 3 },
+          budget: {
+            autoTurnsUsed: DEFAULT_THREAD_AUTO_TURN_BUDGET,
+            tokensUsed: 0,
+          },
         }),
       ),
     ).toEqual({ kind: 'skip', reason: 'turn_budget_exhausted' });
@@ -151,8 +155,10 @@ describe('decideDispatch', () => {
       decideDispatch(
         context({
           message: message({ from: 'ag_bob', mentions: ['ag_alice'] }),
-          budget: { autoTurnsUsed: 0, tokensUsed: 200_000 },
-          limits: { tokens: 200_000 },
+          budget: {
+            autoTurnsUsed: 0,
+            tokensUsed: DEFAULT_THREAD_TOKEN_BUDGET,
+          },
         }),
       ),
     ).toEqual({ kind: 'skip', reason: 'token_budget_exhausted' });
@@ -163,7 +169,6 @@ describe('decideDispatch', () => {
       decideDispatch(
         context({
           budget: { autoTurnsUsed: 99, tokensUsed: 0 },
-          limits: { autoTurns: 3, tokens: 10 },
         }),
       ),
     ).toEqual({ kind: 'dispatch' });
@@ -173,8 +178,10 @@ describe('decideDispatch', () => {
     expect(
       decideDispatch(
         context({
-          budget: { autoTurnsUsed: 0, tokensUsed: 10 },
-          limits: { tokens: 10 },
+          budget: {
+            autoTurnsUsed: 0,
+            tokensUsed: DEFAULT_THREAD_TOKEN_BUDGET,
+          },
         }),
       ),
     ).toEqual({ kind: 'skip', reason: 'token_budget_exhausted' });

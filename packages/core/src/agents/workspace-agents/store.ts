@@ -31,7 +31,6 @@ import {
   type AgentHostView,
   type AgentHostsFile,
   type WorkspaceAgent,
-  type AgentNotifyTarget,
   type WorkspaceAgentsFile,
   type AgentWorkspaceState,
   type A2AGrant,
@@ -56,8 +55,6 @@ const AGENTS_FILENAME = 'agents.json';
 const HOSTS_FILENAME = 'hosts.json';
 const THREADS_DIRNAME = 'threads';
 const HOST_ENROLLMENT_TTL_MS = 10 * 60 * 1_000;
-
-export const AGENTS_DISPLAY_PATH = `~/.qwen/tmp/<project-hash>/${AGENTS_DIRNAME}`;
 
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
@@ -209,14 +206,11 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
     (value['queueLimit'] === undefined ||
       isPositiveInteger(value['queueLimit'])) &&
     (value['enabled'] === undefined || typeof value['enabled'] === 'boolean') &&
-    (value['backgroundAgentId'] === undefined ||
-      isNonEmptyString(value['backgroundAgentId'])) &&
     (value['retiredAt'] === undefined ||
       isFiniteTimestamp(value['retiredAt'])) &&
     (value['maxConcurrentRuns'] === undefined ||
       isPositiveInteger(value['maxConcurrentRuns'])) &&
-    validExecution &&
-    (value['runtimeId'] === undefined || isNonEmptyString(value['runtimeId']))
+    validExecution
   );
 }
 
@@ -331,10 +325,6 @@ function isValidRun(value: unknown): value is ThreadRun {
     Array.isArray(value['consumedMessageIds']) &&
     value['consumedMessageIds'].every(isValidId) &&
     isOptionalNonNegativeInteger(value['contextThroughSequence']) &&
-    (value['definitionVersion'] === undefined ||
-      isNonEmptyString(value['definitionVersion'])) &&
-    isOptionalNonNegativeInteger(value['transcriptStartOffset']) &&
-    isOptionalNonNegativeInteger(value['transcriptEndOffset']) &&
     (value['closeKind'] === undefined ||
       CLOSE_KINDS.has(value['closeKind'] as RunCloseKind)) &&
     // Malformed fails the record rather than being dropped: a dropped lease
@@ -373,6 +363,8 @@ function isValidEvent(value: unknown): value is ThreadEvent {
   if (!isRecord(value)) return false;
   return (
     isValidId(value['id']) &&
+    // `notification` is a retired kind. Records that still carry one keep
+    // loading; nothing consumes it, so it stays pending and is ignored.
     (value['kind'] === 'parent_report' || value['kind'] === 'notification') &&
     (value['causedByRunId'] === undefined ||
       isValidId(value['causedByRunId'])) &&
@@ -472,24 +464,6 @@ function isValidThread(value: unknown): value is Thread {
   return value['nextMessageSequence'] > previousSequence;
 }
 
-/**
- * Absent is valid: no destination has been chosen yet. A malformed one is not
- * — a half-written target would send somebody's work to the wrong place, and
- * the store's rule is that a file which exists but does not parse is
- * corruption rather than emptiness.
- */
-function isValidNotifyTarget(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!isRecord(value)) return false;
-  const target = value['target'];
-  return (
-    isNonEmptyString(value['channelName']) &&
-    isRecord(target) &&
-    (target['type'] === 'user' || target['type'] === 'chat') &&
-    isNonEmptyString(target['id'])
-  );
-}
-
 function isValidRunLease(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -521,7 +495,6 @@ function isValidWorkspace(value: unknown): value is AgentWorkspaceState {
     (value['hostSessionId'] === undefined ||
       isNonEmptyString(value['hostSessionId'])) &&
     isPositiveInteger(value['nextRunSequence']) &&
-    isValidNotifyTarget(value['notifyTarget']) &&
     // A malformed grant list fails the whole record rather than being dropped.
     // Dropping it would silently revoke every external caller — or, if the
     // malformed entry were the one being read past, silently admit one.
@@ -1133,9 +1106,7 @@ export interface AgentStoreTransaction {
   readThread(threadId: string): Promise<Thread | undefined>;
   listThreads(): Promise<{ threads: Thread[]; unreadable: string[] }>;
   writeThread(thread: Thread): Promise<Thread>;
-  deleteThreadFile(threadId: string): Promise<boolean>;
   allocateRunSequence(): Promise<number>;
-  threadTreeTokens(rootThreadId: string): Promise<number>;
 }
 
 function makeTransaction(
@@ -1151,15 +1122,6 @@ function makeTransaction(
     readThread: (threadId) => readThreadUnlocked(projectRoot, threadId),
     listThreads: () => listThreadsUnlocked(projectRoot),
     writeThread: (thread) => writeThreadUnlocked(projectRoot, thread),
-    deleteThreadFile: async (threadId) => {
-      try {
-        await fs.unlink(getThreadPath(projectRoot, threadId));
-        return true;
-      } catch (error) {
-        if (isNodeError(error) && error.code === 'ENOENT') return false;
-        throw error;
-      }
-    },
     allocateRunSequence: async () => {
       const sequence = workspace.nextRunSequence;
       workspace = { ...workspace, nextRunSequence: sequence + 1 };
@@ -1167,17 +1129,6 @@ function makeTransaction(
         noFollow: true,
       });
       return sequence;
-    },
-    threadTreeTokens: async (rootThreadId) => {
-      const { threads, unreadable } = await listThreadsUnlocked(projectRoot);
-      if (unreadable.length > 0) {
-        throw new Error(
-          `Cannot calculate thread budget while records are unreadable: ${unreadable.join(', ')}.`,
-        );
-      }
-      return threads
-        .filter((thread) => thread.rootThreadId === rootThreadId)
-        .reduce((sum, thread) => sum + sumRunTokens(thread.runs), 0);
     },
   };
 }
@@ -1370,33 +1321,6 @@ export async function authenticateAgentHost(
 }
 
 /**
- * Sets, or clears, where this workspace's notifications go.
- *
- * Separate from every other workspace write because it is the one field a
- * person chooses rather than the system allocates. Passing `undefined` turns
- * notifications off again, and the events that were already queued stay
- * pending rather than being dropped on the way out.
- */
-export async function setAgentNotifyTarget(
-  projectRoot: string,
-  target: AgentNotifyTarget | undefined,
-): Promise<AgentWorkspaceState> {
-  return withWorkspaceLock(projectRoot, async () => {
-    const workspace = await ensureMigratedUnlocked(projectRoot);
-    const next: AgentWorkspaceState = target
-      ? { ...workspace, notifyTarget: target }
-      : (() => {
-          const { notifyTarget: _dropped, ...rest } = workspace;
-          return rest;
-        })();
-    await atomicWriteJSON(getWorkspaceFilePath(projectRoot), next, {
-      noFollow: true,
-    });
-    return next;
-  });
-}
-
-/**
  * Read-modify-write the caller grants under the workspace lock.
  *
  * A read followed by a separate write would let two concurrent issues drop one
@@ -1557,11 +1481,9 @@ export async function setWorkspaceAgentExecution(
       }
     }
     await transaction.writeAgents(
-      agents.map((candidate) => {
-        if (candidate.id !== agentId) return candidate;
-        const { runtimeId: _legacyRuntime, ...rest } = candidate;
-        return { ...rest, execution };
-      }),
+      agents.map((candidate) =>
+        candidate.id === agentId ? { ...candidate, execution } : candidate,
+      ),
     );
     return 'updated';
   });
@@ -1653,12 +1575,6 @@ export function queueLimitFor(agent: WorkspaceAgent): number {
   return agent.queueLimit ?? DEFAULT_QUEUE_LIMIT;
 }
 
-export async function listThreadIds(projectRoot: string): Promise<string[]> {
-  return withAgentStoreTransaction(projectRoot, () =>
-    listThreadIdsUnlocked(projectRoot),
-  );
-}
-
 export async function readThread(
   projectRoot: string,
   threadId: string,
@@ -1682,22 +1598,6 @@ export async function writeThread(
 ): Promise<void> {
   await withAgentStoreTransaction(projectRoot, async (transaction) => {
     await transaction.writeThread(thread);
-  });
-}
-
-export async function updateThread(
-  projectRoot: string,
-  threadId: string,
-  mutate: (thread: Thread) => Thread,
-): Promise<Thread> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(threadId);
-    if (!thread) throw new Error(`No thread with id "${threadId}".`);
-    const next = mutate(thread);
-    if (next.id !== threadId) {
-      throw new Error('A thread update cannot change its id.');
-    }
-    return next === thread ? thread : transaction.writeThread(next);
   });
 }
 
@@ -1791,100 +1691,12 @@ export async function createThread(
   );
 }
 
-export async function readTokenBudgetThread(
-  projectRoot: string,
-  thread: Thread,
-): Promise<Thread> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const root = await transaction.readThread(thread.rootThreadId);
-    if (!root || root.rootThreadId !== root.id) {
-      throw new Error(
-        `No valid root thread with id "${thread.rootThreadId}" for "${thread.id}".`,
-      );
-    }
-    return {
-      ...root,
-      tokensUsed: await transaction.threadTreeTokens(root.id),
-    };
-  });
-}
-
 export async function allocateRunSequence(
   projectRoot: string,
 ): Promise<number> {
   return withAgentStoreTransaction(projectRoot, (transaction) =>
     transaction.allocateRunSequence(),
   );
-}
-
-export async function deleteThread(
-  projectRoot: string,
-  threadId: string,
-): Promise<boolean> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(threadId);
-    if (!thread) return false;
-    if (
-      thread.runs.some(
-        (run) =>
-          run.status === 'queued' ||
-          run.status === 'running' ||
-          run.status === 'finishing' ||
-          run.status === 'cancelling',
-      )
-    ) {
-      throw new Error(`Cannot delete thread "${threadId}" with active runs.`);
-    }
-    if (thread.outbox.some((event) => event.status === 'pending')) {
-      throw new Error(
-        `Cannot delete thread "${threadId}" with pending events.`,
-      );
-    }
-    const { threads, unreadable } = await transaction.listThreads();
-    if (unreadable.length > 0) {
-      throw new Error(
-        `Cannot safely delete thread "${threadId}" while thread records are unreadable.`,
-      );
-    }
-    if (
-      threads.some(
-        (candidate) =>
-          candidate.id !== threadId &&
-          (candidate.parentThreadId === threadId ||
-            (thread.rootThreadId === thread.id &&
-              candidate.rootThreadId === thread.id)),
-      )
-    ) {
-      throw new Error(`Cannot delete thread "${threadId}" with sub-threads.`);
-    }
-    return transaction.deleteThreadFile(threadId);
-  });
-}
-
-export async function enqueueThreadEvent(
-  projectRoot: string,
-  threadId: string,
-  event: Omit<ThreadEvent, 'id' | 'status' | 'attempts' | 'createdAt'> & {
-    id?: string;
-    createdAt?: number;
-  },
-): Promise<ThreadEvent> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(threadId);
-    if (!thread) throw new Error(`No thread with id "${threadId}".`);
-    const stored: ThreadEvent = {
-      ...event,
-      id: event.id ?? generateEventId(),
-      status: 'pending',
-      attempts: 0,
-      createdAt: event.createdAt ?? Date.now(),
-    };
-    await transaction.writeThread({
-      ...thread,
-      outbox: [...thread.outbox, stored],
-    });
-    return stored;
-  });
 }
 
 export async function reconcileThreadOutbox(

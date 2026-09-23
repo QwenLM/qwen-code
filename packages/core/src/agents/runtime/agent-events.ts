@@ -200,8 +200,6 @@ export interface AgentExternalMessageEvent {
   kind?: 'message' | 'notification';
   /** Raw message text (without any framing prefix). */
   text: string;
-  /** Durable delivery identity when the producer has one. */
-  deliveryId?: string;
   timestamp: number;
 }
 

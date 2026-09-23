@@ -23,7 +23,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AgentRunContext } from './workspace-agents/run-context.js';
 import {
   AgentEventType,
   type AgentEventEmitter,
@@ -114,10 +113,6 @@ export function getAgentMetaPath(
 
 export interface AgentMeta {
   agentId: string;
-  /** Durable agent identity when this runtime belongs to the shared-thread agent. */
-  workspaceAgentId?: string;
-  /** The agent run this body's next turn executes. */
-  agentRun?: AgentRunContext;
   agentType: string;
   description: string;
   /** SessionId of the user session that launched this agent. */
@@ -866,14 +861,12 @@ export function attachJsonlTranscriptWriter(
   const recordUserMessage = (
     text: string,
     externalInputKind?: AgentExternalMessageEvent['kind'],
-    externalInputDeliveryId?: string,
   ) => {
     if (!text) return;
     append({
       ...baseFields('user'),
       message: { role: 'user', parts: [{ text }] },
       ...(externalInputKind ? { externalInputKind } : {}),
-      ...(externalInputDeliveryId ? { externalInputDeliveryId } : {}),
     });
   };
 
@@ -889,7 +882,7 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onExternalMessage = (event: AgentExternalMessageEvent) => {
-    recordUserMessage(event.text, event.kind ?? 'message', event.deliveryId);
+    recordUserMessage(event.text, event.kind ?? 'message');
   };
 
   if (options.bootstrapHistory !== undefined) {

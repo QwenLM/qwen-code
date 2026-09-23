@@ -18,7 +18,7 @@ import type { Config } from '../../config/config.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
 import { buildAgentToolConfig } from './capability.js';
 import { readWorkspaceAgents } from './store.js';
-import { LOCAL_AGENT_RUNTIME_ID, type WorkspaceAgent } from './types.js';
+import type { WorkspaceAgent } from './types.js';
 
 export type AgentPersonaResolution =
   | {
@@ -88,15 +88,6 @@ export async function resolveAgentPersona(
     return {
       status: 'unavailable',
       error: `Agent "${agent.name}" is disabled.`,
-    };
-  }
-  if (
-    agent.runtimeId !== undefined &&
-    agent.runtimeId !== LOCAL_AGENT_RUNTIME_ID
-  ) {
-    return {
-      status: 'unavailable',
-      error: `Runtime "${agent.runtimeId}" is unavailable in this daemon.`,
     };
   }
 

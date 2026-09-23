@@ -71,16 +71,6 @@ export function runWithAgentRunContext<T>(
   return store.run(context, fn);
 }
 
-/** The current agent run, or `undefined` outside a agent turn. */
-export function getAgentRunContext(): AgentRunContext | undefined {
-  return store.getStore();
-}
-
-/** True inside a agent turn. Ordinary subagents and the user session are not. */
-export function isAgentRun(): boolean {
-  return store.getStore() !== undefined;
-}
-
 /**
  * The current agent run, or a typed failure naming the tool.
  *

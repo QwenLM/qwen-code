@@ -97,7 +97,6 @@ function assemble(
     run: run(),
     thread: thread(),
     roster: [ALICE, BOB, OFF],
-    definitionVersion: 'def_abc123',
     ...overrides,
   });
 }
@@ -110,9 +109,7 @@ describe('assembleAgentPrompt', () => {
     expect(result.gapCount).toBe(0);
     expect(result.contextThroughSequence).toBe(1);
     expect(result.text).toContain('run=rn_1 attempt=1 thread=th_1 root=th_1');
-    expect(result.text).toContain(
-      'workspace=ws_1 agent=ag_alice definition=def_abc123',
-    );
+    expect(result.text).toContain('workspace=ws_1 agent=ag_alice');
     expect(result.text).toContain('The web-shell smoke test is flaky');
     expect(result.text).toContain('Find out why.');
     expect(result.text).toContain('Status: in_progress');
@@ -271,13 +268,6 @@ describe('assembleAgentPrompt', () => {
       thread: thread({ messages, nextMessageSequence: 31 }),
     });
 
-    expect(result.includedMessageIds).toEqual([
-      'ms_26',
-      'ms_27',
-      'ms_28',
-      'ms_29',
-      'ms_30',
-    ]);
     expect(result.contextThroughSequence).toBe(30);
     expect(result.text).toContain('message window=26..30');
     expect(result.text).not.toContain('post 25');

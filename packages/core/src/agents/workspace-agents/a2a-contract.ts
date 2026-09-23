@@ -44,9 +44,6 @@ export const A2A_AGENT_CARD_PATH = '.well-known/agent-card.json';
 /** Response content type for the HTTP+JSON binding and push payloads. */
 export const A2A_CONTENT_TYPE = 'application/a2a+json';
 
-/** The SDK version these constants were read from. */
-export const A2A_SDK_SPEC = '@a2a-js/sdk@1.1.0';
-
 /**
  * Our protocol extension, declared in `AgentCapabilities.extensions`.
  *
@@ -58,8 +55,7 @@ export const A2A_SDK_SPEC = '@a2a-js/sdk@1.1.0';
  *     local channel for this is `_meta` on the ACP prompt, which is a daemon
  *     trust boundary and deliberately not reachable from outside; an external
  *     task needs its own, and `Task.metadata` under this URI is it.
- *   - token usage, which A2A 1.0 does not model at all (see
- *     `A2A_UNSUPPORTED`).
+ *   - token usage, which A2A 1.0 does not model at all.
  *
  * `required: false` when declared: a client that ignores the extension still
  * gets correct Task and Message semantics, it just cannot see usage.
@@ -83,72 +79,6 @@ export type A2ATaskState =
   | 'TASK_STATE_FAILED'
   | 'TASK_STATE_CANCELED'
   | 'TASK_STATE_REJECTED';
-
-/** The four the spec calls terminal. */
-export const A2A_TERMINAL_STATES: ReadonlySet<A2ATaskState> = new Set([
-  'TASK_STATE_COMPLETED',
-  'TASK_STATE_FAILED',
-  'TASK_STATE_CANCELED',
-  'TASK_STATE_REJECTED',
-]);
-
-/**
- * Operations an A2A server MUST implement, named as `A2ARequestHandler`
- * declares them. Nothing may be advertised as A2A until all of these answer.
- */
-export const A2A_REQUIRED_OPERATIONS = [
-  'sendMessage',
-  'getTask',
-  'listTasks',
-  'cancelTask',
-  'getAuthenticatedExtendedAgentCard',
-] as const;
-
-/**
- * Optional operations and the capability flag each is gated on. We take none
- * of them in the first implementation: streaming and push notifications are
- * both ways of learning about a task sooner, and polling `getTask` answers the
- * same question with no second delivery path to make reliable.
- */
-export const A2A_OPTIONAL_OPERATIONS = {
-  sendMessageStream: 'streaming',
-  resubscribe: 'streaming',
-  createTaskPushNotificationConfig: 'pushNotifications',
-  getTaskPushNotificationConfig: 'pushNotifications',
-  listTaskPushNotificationConfigs: 'pushNotifications',
-  deleteTaskPushNotificationConfig: 'pushNotifications',
-} as const satisfies Record<string, 'streaming' | 'pushNotifications'>;
-
-/**
- * What the protocol does not give us, recorded so nobody has to rediscover it
- * by building on an assumption. Each entry is a thing the plan asked P1 to
- * settle, and the settlement is here rather than in a document nobody links.
- */
-export const A2A_UNSUPPORTED = {
-  /**
-   * A2A 1.0 has no usage or token fields on `Task` or `Message`. So remote
-   * usage is NOT reported by the protocol and cannot be required of a
-   * third-party agent. Ours is published in `Task.metadata` under
-   * `QWEN_A2A_EXTENSION_URI`, and admission must treat a missing figure as
-   * unknown rather than as zero — otherwise a remote agent that declines to
-   * report becomes free to call.
-   */
-  usageReporting: 'absent from the data model; ours rides in Task.metadata',
-  /**
-   * Deduplication is `MAY`, on `Message.messageId`, and the id is minted by
-   * the client. That is not enough on its own: two different callers can
-   * present the same id, so a key has to be scoped. See
-   * {@link externalRequestKey}.
-   */
-  idempotency: 'MAY, via client-minted Message.messageId; no scoping',
-  /**
-   * `TASK_STATE_REJECTED` (the agent declines the work) and
-   * `TASK_STATE_AUTH_REQUIRED` have no counterpart in the local thread model.
-   * Thread-level cancellation was a third gap and is now closed — `cancelled`
-   * is a `ThreadStatus`, so an inbound `cancelTask` has something to become.
-   */
-  localStateGaps: 'REJECTED and AUTH_REQUIRED',
-} as const;
 
 /**
  * Local thread status → A2A task state.
@@ -187,11 +117,6 @@ export function toA2ATaskState(status: ThreadStatus): A2ATaskState {
       throw new Error(`Unmapped thread status: ${String(unreachable)}`);
     }
   }
-}
-
-/** True when a caller polling `getTask` may stop. */
-export function isA2ATerminal(state: A2ATaskState): boolean {
-  return A2A_TERMINAL_STATES.has(state);
 }
 
 /**

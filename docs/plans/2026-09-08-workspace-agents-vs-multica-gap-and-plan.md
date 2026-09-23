@@ -719,7 +719,7 @@ This is one product object and one durable write.
 
 ### How this branch was verified
 
-Everything below is repeatable from `scripts/audit/`, and every one of them was
+Everything below was run from `scripts/audit/` (since removed), and every one of them was
 calibrated by breaking the thing it checks and watching it go red. A green run
 that has never failed is not evidence.
 
@@ -753,7 +753,8 @@ three kinds, and the distinction matters more than the number:
 Retired 2026-09-09 per the successor plan §1: `run-workspace-agents-concurrency.mjs`,
 `run-workspace-agents-crash.mjs` and `fuzz-workspace-agents.mjs`. Their results above
 stand as recorded; the questions they answered were one-time. The orphan sweep, the
-two tsconfigs and `run-workspace-agents.mjs` remain.
+two tsconfigs and `run-workspace-agents.mjs` were removed later with the rest of
+`scripts/audit/`, so none of the checks above can be re-run from this branch.
 
 What none of it covers: the vitest suites, which are larger and still need CI;
 partial-write recovery, since the file lock means two writers never touch one
