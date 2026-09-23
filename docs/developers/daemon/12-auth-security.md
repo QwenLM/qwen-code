@@ -120,7 +120,7 @@ and bearer-authenticates the match before deleting `Origin`, so the built-in Web
 Shell's same-origin HTTP mutations need no `--allow-origin`. Its pre-auth
 predicate (`web-shell-preauth.ts`) exempts the shell entry points (`/`, `//`,
 `/assets*`, `/manifest.webmanifest`, `/sw.js`, `/mcp-app-sandbox`, exact
-`/session/:id` document navigations) from
+`/session/:id`, `/plugins`, `/channels`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) from
 the credential check because browser module-script fetches carry `Origin`
 without `Authorization`. WebSocket upgrades and TLS-front-proxy `https` origins
 are not covered: the upgrade gate keeps its own CSWSH policy (loopback origin,
