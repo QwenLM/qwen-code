@@ -3,7 +3,7 @@
   "private": true,
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.24.4",
+  "version": "0.24.4-nightly.20260923.d0cd622a68",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
