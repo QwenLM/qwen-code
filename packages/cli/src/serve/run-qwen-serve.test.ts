@@ -15235,7 +15235,10 @@ describe('runQwenServe channel worker supervisor', () => {
         Authorization: 'Bearer secret',
         'Content-Type': 'application/json',
       },
-      start: (overrides: Partial<Parameters<typeof runQwenServe>[0]> = {}) =>
+      start: (
+        overrides: Partial<Parameters<typeof runQwenServe>[0]> = {},
+        depsOverrides: Partial<RunQwenServeDeps> = {},
+      ) =>
         runQwenServe(
           {
             port: 0,
@@ -15252,6 +15255,7 @@ describe('runQwenServe channel worker supervisor', () => {
             channelWorkerSupervisorFactory: factory,
             channelServicePidfile: makePidfileDeps(),
             workspaceRegistrationStore: store,
+            ...depsOverrides,
           },
         ),
     };
@@ -15481,6 +15485,169 @@ describe('runQwenServe channel worker supervisor', () => {
         daemon.factory.mock.calls.map(([call]) => call.workspace),
       ).not.toContain(canonicalizeWorkspace(daemon.secondary));
     } finally {
+      await handle.close();
+    }
+  });
+
+  it('still restores a late workspace after channels were only listed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-listed-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      // Listing channels creates the channel manager, and a manager that has
+      // never hosted anything reports the same state as one an operator
+      // stopped. A read must not switch the restore off.
+      const listed = await fetch(`${handle.url}/workspace/channels`, {
+        headers: daemon.headers,
+      });
+      expect(listed.status).toBe(200);
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('still restores a late workspace after an earlier late restore failed', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-after-fail-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const broken = path.join(tmpDir, 'broken');
+    // Asks for a channel no workspace defines, so its restore cannot commit.
+    writeWorkspaceSettings(broken, { serve: { channels: ['ghost'] } });
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const first = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: broken }),
+      });
+      expect(first.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      // Nobody stopped hosting; one workspace's failed restore must not read
+      // as if someone had.
+      const second = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(second.status).toBe(201);
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps both workspaces registered back to back on a channel-less daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-late-pair-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    const tertiary = path.join(tmpDir, 'tertiary');
+    writeWorkspaceSettings(tertiary, {
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    // Creating the channel manager on a TLS daemon waits for this probe, which
+    // holds open the window the race lives in: the first restore has started
+    // but no manager exists yet, so nothing orders the second restore behind
+    // it, and each commit replaces the whole selection.
+    let releaseManager: (() => void) | undefined;
+    const managerGate = new Promise<void>((resolve) => {
+      releaseManager = resolve;
+    });
+    const workerTlsTrustVerifier = vi.fn(async () => {
+      await managerGate;
+      return undefined;
+    });
+    const handle = await daemon.start(
+      { tlsCert: certPath, tlsKey: keyPath },
+      { workerTlsTrustVerifier },
+    );
+    const request = (
+      method: string,
+      route: string,
+      body?: unknown,
+    ): Promise<{ status: number; json: unknown }> =>
+      new Promise((resolve, reject) => {
+        const req = https.request(
+          `${handle.url}${route}`,
+          { method, headers: daemon.headers, rejectUnauthorized: false },
+          (res) => {
+            let text = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => (text += chunk));
+            res.on('end', () =>
+              resolve({
+                status: res.statusCode ?? 0,
+                json: text ? JSON.parse(text) : undefined,
+              }),
+            );
+          },
+        );
+        req.on('error', reject);
+        if (body !== undefined) req.write(JSON.stringify(body));
+        req.end();
+      });
+
+    try {
+      await handle.runtimeReady;
+      const first = await request('POST', '/workspaces', {
+        cwd: daemon.secondary,
+      });
+      expect(first.status).toBe(201);
+      await vi.waitFor(() => expect(workerTlsTrustVerifier).toHaveBeenCalled());
+      const second = await request('POST', '/workspaces', { cwd: tertiary });
+      expect(second.status).toBe(201);
+      releaseManager?.();
+
+      await vi.waitFor(async () => {
+        const control = await request('GET', '/workspace/channel');
+        const state = control.json as {
+          transition: string;
+          selection: { mode: string; names?: string[] } | null;
+        };
+        expect(state.transition).toBe('idle');
+        expect(state.selection).toEqual({
+          mode: 'names',
+          names: ['feishu', 'telegram'],
+        });
+      });
+    } finally {
+      releaseManager?.();
       await handle.close();
     }
   });

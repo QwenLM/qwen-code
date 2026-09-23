@@ -4080,6 +4080,20 @@ async function runQwenServeImpl(
   // is re-materialized, and repeating the restore there would undo an operator
   // who stopped one of those channels in between.
   const lateRestoredWorkspaces = new Set<string>();
+  // Whether an operator stopped channel hosting through `DELETE
+  // /workspace/channel`. The manager cannot say so on its own: one created by
+  // a read — listing channels creates it — and one whose hosting was stopped
+  // both report `enabled: false, selection: null`, and so does one whose own
+  // late restore failed. So the stop is recorded where it happens, only when
+  // it actually stopped something, and cleared only by a selection that
+  // commits.
+  let channelHostingStoppedByOperator = false;
+  // Late restores run one at a time. Each commit replaces the whole
+  // selection, so two restores that both read it before either commits would
+  // each propose their own names over the same base, and the second would
+  // silently drop the first's — most easily on a daemon that has just booted
+  // with no channels, where no manager exists yet to order them.
+  let lateChannelRestores: Promise<void> = Promise.resolve();
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       redactLogCredentials(
@@ -4708,7 +4722,11 @@ async function runQwenServeImpl(
       await manager.shutdown().catch(() => undefined);
       throw daemonDrainingError();
     }
-    return manager.setSelection(selection);
+    const result = await manager.setSelection(selection);
+    // Cleared after the commit, not before: a selection that fails leaves
+    // hosting exactly as stopped as it was.
+    channelHostingStoppedByOperator = false;
+    return result;
   };
   const stopChannelWorker = async (): Promise<ChannelWorkerStopResult> => {
     if (channelControlDraining) throw daemonDrainingError();
@@ -4721,7 +4739,11 @@ async function runQwenServeImpl(
     if (!manager) {
       return { changed: false, state: getChannelWorkerControl() };
     }
-    return manager.stopSelection();
+    const result = await manager.stopSelection();
+    // Only a stop that stopped something is a decision to remember; an
+    // idempotent `DELETE` against hosting that was never on is not.
+    if (result.changed) channelHostingStoppedByOperator = true;
+    return result;
   };
   const reloadChannelWorker = async (): Promise<ChannelWorkerSnapshot> => {
     if (channelControlDraining) throw daemonDrainingError();
@@ -7556,23 +7578,17 @@ async function runQwenServeImpl(
         ) {
           return;
         }
-        const channelControl = channelWorkerManager?.state();
-        if (channelControl && !channelControl.enabled) {
-          // Channel hosting exists and is off, which only happens because
-          // something turned it off — `DELETE /workspace/channel`, or a
-          // startup that could not be kept. Registering a workspace is not an
-          // instruction to turn hosting back on, so the restore waits for one:
-          // a `PUT /workspace/channel`, or the next boot reading the settings.
-          // A daemon that never hosted channels has no manager at all, and
-          // that is the case this restore exists for.
+        if (channelHostingStoppedByOperator) {
+          // Registering a workspace is not an instruction to turn hosting back
+          // on after an operator stopped it; that waits for a
+          // `PUT /workspace/channel`, or the next boot reading the settings.
           daemonLog.info(
-            'skipping serve.channels for a workspace registered after boot: channel hosting is stopped',
+            'skipping serve.channels for a workspace registered after boot: channel hosting was stopped',
             { workspaceCwd },
           );
           return;
         }
-        const committedSelection = channelControl?.selection;
-        if (committedSelection?.mode === 'all') {
+        if (channelWorkerManager?.state().selection?.mode === 'all') {
           // One flat selection cannot say "everything the primary workspace
           // has, plus these two"; `all` stays what it is.
           return;
@@ -7583,21 +7599,30 @@ async function runQwenServeImpl(
         // every name was already hosted has had its restore, and coming back
         // later must not bring up a name an operator stopped in between.
         lateRestoredWorkspaces.add(workspaceCwd);
-        const committed =
-          committedSelection?.mode === 'names' ? committedSelection.names : [];
-        const pending = requested.filter((name) => !committed.includes(name));
-        if (pending.length === 0) return;
         // Bringing channels up is not part of registering a workspace. This
         // hook runs under the daemon-wide runtime-topology gate, so awaiting a
-        // worker here holds that gate for as long as the worker takes to
-        // become ready — up to the 30s startup budget — and every other
-        // registration and trust reconcile queues behind it, including
-        // workspaces that configure no channels at all. Going through
+        // worker here would hold that gate for as long as the worker takes to
+        // become ready — up to the 30s startup budget. Going through
         // `setChannelWorkerSelection` rather than the manager directly keeps
         // the drain handling the runtime route already has: once the daemon is
         // closing, this refuses instead of starting a worker behind it.
-        void (async () => {
+        //
+        // The committed selection is read when this restore's turn comes, not
+        // here: an earlier restore may still be starting its workers, and the
+        // commit replaces the whole selection.
+        lateChannelRestores = lateChannelRestores.then(async () => {
           try {
+            if (channelHostingStoppedByOperator) return;
+            const committedSelection = channelWorkerManager?.state().selection;
+            if (committedSelection?.mode === 'all') return;
+            const committed =
+              committedSelection?.mode === 'names'
+                ? committedSelection.names
+                : [];
+            const pending = requested.filter(
+              (name) => !committed.includes(name),
+            );
+            if (pending.length === 0) return;
             daemonLog.info(
               'restoring serve.channels for a workspace registered after boot',
               { workspaceCwd, channels: pending },
@@ -7607,17 +7632,20 @@ async function runQwenServeImpl(
               names: [...committed, ...pending],
             });
           } catch (err) {
+            // Redacted the way the boot restore's failures are: this message
+            // can carry an adapter's own error text, and adapters hold tokens.
             daemonLog.error(
               `serve.channels for a workspace registered after boot were not restored: ${sanitizeLogText(
-                err instanceof Error ? err.message : String(err),
+                redactLogCredentials(
+                  err instanceof Error ? err.message : String(err),
+                ),
                 512,
               )}`,
-              err instanceof Error ? err : null,
             );
           } finally {
             writeChannelWorkerPidfile();
           }
-        })();
+        });
       },
       beginDrain(runtimeToDrain: WorkspaceRuntime): void {
         if (runtimeToDrain.primary) {

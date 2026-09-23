@@ -845,21 +845,34 @@ contributed is dropped, with a log identifying it, when it cannot be resolved,
 so one workspace's stale entry does not strand the others; a name the primary
 workspace listed still fails the restore as a whole, whether or not another
 workspace lists it too.
-`all` remains primary-only: it is ignored, and reported, anywhere else. A trusted
-non-primary workspace registered after boot restores its own `serve.channels`
-as well, loading the channel runtime if nothing else has. That restore happens
-**once per daemon run**: activation fires again when a workspace is removed and
-registered again, or when its trust is re-materialized, and repeating it there
-would undo an operator who stopped one of those channels in between. Its names
-join the committed selection in one change, so a name that cannot be attributed
-leaves that workspace's whole list unrestored, with the error logged.
-Registration answers before those channels are up: the restore runs after the
-response, so a worker that never becomes ready cannot hold the
-runtime-topology gate that registrations and trust reconciles share. An
-explicit `--channel` selection bounds what the daemon hosts for its whole life,
-so no workspace registered later adds to it, and a committed `all` selection is
-left as it is. With no
-explicit or configured selection, channel runtime loading stays lazy.
+`all` remains primary-only: it is ignored, and reported, anywhere else.
+
+A trusted non-primary workspace registered after boot restores its own
+`serve.channels` too, loading the channel runtime and reserving the
+channel-service lease if nothing else has. That restore:
+
+- happens **once per daemon run** — recorded as soon as the workspace asks for
+  anything — so a later removal and re-registration, or a trust
+  re-materialization, does not undo an operator who stopped one of those
+  channels in between;
+- does not happen under an explicit `--channel` selection, which no workspace
+  registered later extends;
+- does not happen after `DELETE /workspace/channel` stopped hosting, until a
+  `PUT /workspace/channel` commits a selection again or the daemon restarts;
+- leaves a committed `all` selection as it is;
+- adds that workspace's names to the committed selection in one change, one
+  late restore at a time. Unlike boot, which drops a name it cannot host and
+  keeps the rest, a name that cannot be attributed leaves that workspace's
+  whole list unrestored, with the error logged.
+
+Registration does not wait for those channels: the restore is detached, so the
+response can be written while it is still starting workers. The registration
+still performs its own channel-control bookkeeping on the same serialized lane,
+though, so a worker that never becomes ready can delay _other_ registrations,
+and trust reconciles, for up to the channel startup budget (30 s).
+
+Without an explicit selection, a boot-time `serve.channels` restore, or a
+registration like the one above, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
