@@ -101,7 +101,10 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
-import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import {
+  getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
+} from '../utils/layoutUtils.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -271,13 +274,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
-  // ink renders every popup inside a region of exactly this height, clipped,
-  // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper). A
+  // ink renders every dialog inside a region of exactly this height, clipped,
+  // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
+  // ink's default state: its show-more-lines key lifts `constrainHeight`, which
+  // drops both the height and the clip, while this port keeps the region fixed
+  // in every state (recorded as a divergence in the parity design doc). A
   // content-height region bottom-anchors the popup instead: the transcript
   // keeps the free rows above it, so the box sits lower than ink's and a
-  // dialog ink stretches to fill the viewport stays short. `3` is
-  // AppContainer's `staticExtraHeight`, the other half of ink's budget.
-  const dialogRegionHeight = getDialogMaxHeight(terminalHeight, 3);
+  // dialog ink stretches to fill the viewport stays short.
+  const dialogRegionHeight = getDialogMaxHeight(
+    terminalHeight,
+    STATIC_EXTRA_HEIGHT,
+  );
   const toggleShellMode = useCallback(
     () => setShellModeActive((active) => !active),
     [],

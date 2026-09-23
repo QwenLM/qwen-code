@@ -234,6 +234,7 @@ function mount(
     onClose?: () => void;
     fillInput?: (text: string) => void;
     onSelectSetting?: (name: string, scope: unknown) => void;
+    availableTerminalHeight?: number;
   } = {},
 ) {
   return render(
@@ -247,6 +248,7 @@ function mount(
       notify={overrides.notify ?? (() => {})}
       fillInput={overrides.fillInput}
       onSelectSetting={overrides.onSelectSetting}
+      availableTerminalHeight={overrides.availableTerminalHeight}
     />,
   );
 }
@@ -320,6 +322,18 @@ describe('OpenTuiDialogMount routing', () => {
       expect(screen.getByText(expected)).toBeTruthy();
       unmount();
     }
+  });
+
+  it('hands the region height to the approval-mode dialog, as it does for theme/settings/model', () => {
+    // The approval-mode dialog windows its list from this budget; without the
+    // forwarding its five rows never window and overflow the region.
+    mount(
+      { dialog: 'approval-mode' },
+      { notify: () => {}, availableTerminalHeight: 20 },
+    );
+    expect(
+      mocks.state.dialogProps['approval-mode']?.['availableTerminalHeight'],
+    ).toBe(20);
   });
 
   it.each([true, false])(

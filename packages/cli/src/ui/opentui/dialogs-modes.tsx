@@ -44,6 +44,7 @@ import {
 } from '../utils/approvalModeDisplay.js';
 import { t } from '../../i18n/index.js';
 import {
+  DEFAULT_MAX_ITEMS_TO_SHOW,
   DialogFrame,
   DialogSelect,
   FooterHint,
@@ -51,6 +52,7 @@ import {
   useDialogSelect,
   type UseDialogSelectResult,
 } from './dialogs-shared.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import type { DialogListItem } from './dialogs-core.js';
 import { C } from './theme.js';
 import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
@@ -67,6 +69,8 @@ interface LabeledItem<T> extends DialogListItem<T> {
 function LabeledRows<T>(props: {
   list: UseDialogSelectResult<LabeledItem<T>>;
   focused: boolean;
+  maxItemsToShow?: number;
+  showScrollArrows?: boolean;
 }) {
   const { list, focused } = props;
   return (
@@ -74,6 +78,8 @@ function LabeledRows<T>(props: {
       items={list.items}
       activeIndex={list.activeIndex}
       scrollOffset={list.scrollOffset}
+      maxItemsToShow={props.maxItemsToShow}
+      showScrollArrows={props.showScrollArrows}
       showNumbers={focused}
       focused={focused}
       onHover={list.setActiveIndex}
@@ -90,10 +96,16 @@ function LabeledRows<T>(props: {
   );
 }
 
-/** The `> Title <dim subtitle>` row every ink dialog opens with. */
-function DialogTitle(props: { title: string; subtitle?: string }) {
+/** The `> Title <dim subtitle>` row every ink dialog opens with. The margin
+ * below it is the spacer row ink sheds first when the height budget runs out
+ * (its `showModeSpacer`), so the approval dialog can pass 0 there. */
+function DialogTitle(props: {
+  title: string;
+  subtitle?: string;
+  marginBottom?: number;
+}) {
   return (
-    <box flexDirection="row" marginBottom={1}>
+    <box flexDirection="row" marginBottom={props.marginBottom ?? 1}>
       <text fg={C.text} attributes={1}>
         {'> '}
         {props.title}{' '}
@@ -103,11 +115,95 @@ function DialogTitle(props: { title: string; subtitle?: string }) {
   );
 }
 
+// ink ApprovalModeDialog's budget thresholds: as the region gets shorter it
+// sheds the spacer row, then the footer hint, then windows the list.
+const MIN_HEIGHT_WITH_MODE_SPACER = 9;
+const MIN_HEIGHT_WITH_FOOTER_HINT = 10;
+const MIN_HEIGHT_WITH_WARNING_FOOTER_HINT = 12;
+// Frame border + padding (4) plus the title row (1); the spacer, warning and
+// footer rows are budgeted separately.
+const MODE_LIST_CHROME_ROWS = 5;
+const FOOTER_HINT_ROWS = 2;
+// Warning margin plus up to two wrapped text rows at the normal dialog width.
+const WORKSPACE_PRIORITY_WARNING_ROWS = 3;
+
+/**
+ * ink ApprovalModeDialog's derivation, ported line for line: which chrome
+ * rows the budget still pays for, and how many mode rows fit in what is left.
+ * `constrainedHeight` is the popup region's row budget (undefined when the
+ * caller has none, which ink treats as "show everything").
+ */
+function modeListBudget(
+  constrainedHeight: number | undefined,
+  workspacePriorityWarning: boolean,
+  itemCount: number,
+): {
+  showModeSpacer: boolean;
+  showFooterHint: boolean;
+  showScrollArrows: boolean;
+  maxItemsToShow: number;
+} {
+  if (constrainedHeight === undefined) {
+    return {
+      showModeSpacer: true,
+      showFooterHint: true,
+      showScrollArrows: false,
+      maxItemsToShow: DEFAULT_MAX_ITEMS_TO_SHOW,
+    };
+  }
+  const showModeSpacer = constrainedHeight >= MIN_HEIGHT_WITH_MODE_SPACER;
+  const preferredShowFooterHint =
+    constrainedHeight >=
+    (workspacePriorityWarning
+      ? MIN_HEIGHT_WITH_WARNING_FOOTER_HINT
+      : MIN_HEIGHT_WITH_FOOTER_HINT);
+  const chromeWithoutFooter =
+    MODE_LIST_CHROME_ROWS +
+    (showModeSpacer ? 1 : 0) +
+    (workspacePriorityWarning ? WORKSPACE_PRIORITY_WARNING_ROWS : 0);
+  const rowsWithPreferredFooter = Math.max(
+    1,
+    constrainedHeight -
+      chromeWithoutFooter -
+      (preferredShowFooterHint ? FOOTER_HINT_ROWS : 0),
+  );
+  const rowsWithoutFooter = Math.max(
+    1,
+    constrainedHeight - chromeWithoutFooter,
+  );
+  const footerWouldHideScrollArrows =
+    !workspacePriorityWarning &&
+    preferredShowFooterHint &&
+    rowsWithPreferredFooter <= 2 &&
+    rowsWithoutFooter > 2 &&
+    rowsWithoutFooter < itemCount;
+  const showFooterHint =
+    preferredShowFooterHint && !footerWouldHideScrollArrows;
+  const listRows = Math.max(
+    1,
+    constrainedHeight -
+      chromeWithoutFooter -
+      (showFooterHint ? FOOTER_HINT_ROWS : 0),
+  );
+  const showScrollArrows = listRows > 2 && listRows < itemCount;
+  const maxItemsToShow = Math.max(
+    1,
+    Math.min(
+      DEFAULT_MAX_ITEMS_TO_SHOW,
+      itemCount,
+      listRows - (showScrollArrows ? 2 : 0),
+    ),
+  );
+  return { showModeSpacer, showFooterHint, showScrollArrows, maxItemsToShow };
+}
+
 export function OpenTuiApprovalModeDialog(props: {
   config?: Config;
   settings: LoadedSettings;
   onClose: () => void;
   onApprovalModeChanged: (m: ApprovalMode) => void;
+  /** The popup region's row budget, as ink's DialogManager hands it over. */
+  availableTerminalHeight?: number;
 }) {
   const { config, settings, onClose, onApprovalModeChanged } = props;
   const [view, setView] = useState<'mode' | 'scope'>('mode');
@@ -130,6 +226,24 @@ export function OpenTuiApprovalModeDialog(props: {
       )}`,
     }),
   );
+  const otherScopeModifiedMessage = getScopeMessageForSetting(
+    'tools.approvalMode',
+    selectedScope,
+    settings,
+  );
+  const showWorkspacePriorityWarning =
+    selectedScope === SettingScope.User &&
+    otherScopeModifiedMessage.toLowerCase().includes('workspace');
+
+  // ink derives the window from the height its dialog manager hands over;
+  // without it the list never windows (the default is 10 rows for 5 items)
+  // and on a short terminal the unsized rows shrink to zero and overpaint
+  // each other while the keys still commit a mode the user cannot read.
+  const budget = modeListBudget(
+    clampDialogHeight(props.availableTerminalHeight),
+    showWorkspacePriorityWarning,
+    modeItems.length,
+  );
   const modeList = useDialogSelect<LabeledItem<ApprovalMode>>({
     items: modeItems,
     initialIndex: Math.max(
@@ -138,6 +252,7 @@ export function OpenTuiApprovalModeDialog(props: {
     ),
     focused: view === 'mode',
     numbers: view === 'mode',
+    maxItemsToShow: budget.maxItemsToShow,
     // The scope step's close remounts this list; the highlighted mode is what
     // survives that trip, and the scope is what changes on it.
     resyncKey: selectedScope,
@@ -198,15 +313,6 @@ export function OpenTuiApprovalModeDialog(props: {
     onEscape: onClose,
   });
 
-  const otherScopeModifiedMessage = getScopeMessageForSetting(
-    'tools.approvalMode',
-    selectedScope,
-    settings,
-  );
-  const showWorkspacePriorityWarning =
-    selectedScope === SettingScope.User &&
-    otherScopeModifiedMessage.toLowerCase().includes('workspace');
-
   return (
     <DialogFrame fill>
       {view === 'mode' ? (
@@ -214,8 +320,14 @@ export function OpenTuiApprovalModeDialog(props: {
           <DialogTitle
             title={t('Approval Mode')}
             subtitle={otherScopeModifiedMessage}
+            marginBottom={budget.showModeSpacer ? 1 : 0}
           />
-          <LabeledRows list={modeList} focused={view === 'mode'} />
+          <LabeledRows
+            list={modeList}
+            focused={view === 'mode'}
+            maxItemsToShow={budget.maxItemsToShow}
+            showScrollArrows={budget.showScrollArrows}
+          />
           {showWorkspacePriorityWarning ? (
             <box marginTop={1}>
               <text fg={C.yellow}>
@@ -237,13 +349,15 @@ export function OpenTuiApprovalModeDialog(props: {
           <LabeledRows list={scopeList} focused={view === 'scope'} />
         </box>
       )}
-      <FooterHint
-        text={
-          view === 'mode'
-            ? t('(Use Enter to select, Tab to configure scope)')
-            : t('(Use Enter to apply scope, Tab to go back)')
-        }
-      />
+      {budget.showFooterHint ? (
+        <FooterHint
+          text={
+            view === 'mode'
+              ? t('(Use Enter to select, Tab to configure scope)')
+              : t('(Use Enter to apply scope, Tab to go back)')
+          }
+        />
+      ) : null}
     </DialogFrame>
   );
 }

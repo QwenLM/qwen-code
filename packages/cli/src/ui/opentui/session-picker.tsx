@@ -527,7 +527,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   if (previewSessionId !== null) {
     return (
       <box
-        key="preview"
+        key={`preview-${boxWidth}-${height}`}
         flexDirection="column"
         width={boxWidth}
         height={Math.max(0, height - 1)}
@@ -579,9 +579,13 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     // height press the box down. @opentui resolves flexShrink to 0 whenever a
     // size is set explicitly (ink's Box always defaults to 1), so the shrink
     // has to be asked for: refusing it pushes the composer out of the viewport
-    // instead of clipping the list.
+    // instead of clipping the list. The size is folded into the key because
+    // the renderer's width/height setters clear an explicit flexShrink back
+    // to 0 and its reconciler never re-applies an unchanged prop — a resize
+    // would otherwise disable the shrink until the picker was reopened. The
+    // remount loses nothing: all picker state lives in the hooks above.
     <box
-      key="list"
+      key={`list-${boxWidth}-${height}`}
       flexDirection="column"
       borderStyle="rounded"
       borderColor={C.borderDefault}

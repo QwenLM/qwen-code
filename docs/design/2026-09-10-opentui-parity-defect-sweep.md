@@ -2174,7 +2174,7 @@ seventy-three identical and fifty-eight divergent, two of them the sampled check
 — the spinner's phrase rotation and the mid-stream indicator. Counting those two
 apart, the rest carry 258 rows only ink draws and 288 only this port draws. That split
 is the one Coverage boundary withdraws: it does not reproduce from these frames. The
-census below counts from it, and stands as this pass's own reading of the families
+census below counts from it, and stands as that pass's own reading of the families
 rather than as a live tally.
 
 Those fifty-six fall in eleven families by primary cause, four of them new to this
@@ -2211,7 +2211,7 @@ The dialog drew a title row of its own above the two columns, and its bottom hin
 
 Delete also lacked ink's bulk path. It now mounts the picker with multi-select on and reuses ink's own delete command for both the single and the batch case, so the guard against deleting the live session, the mutex and every outcome message are shared rather than re-worded. Enter commits the checked set ordered by the full list and filtered to the enabled rows, so a search that narrows the view never silently drops a check made before typing; the live session is disabled in place rather than filtered out, matching ink. Resume keeps the single-select picker, with the command's pre-filtered list when `/resume <title>` matched more than one session. The cursor and the checked set both sit behind ref mirrors, so a burst of Space and arrow keys inside one read commits the set the user actually ticked rather than the one the last render drew.
 
-The structure and the batch path are pinned by tests over the rendered rows — the two-line shape, the unknown-count case, the checkbox commit, the disabled live session, the checks hidden while multi-select is off, the window's edge markers and pagination — each shown to fail against the previous hand-drawn rows. The picker's own height is still fixed rather than content-sized; that is recorded under Follow-ups rather than changed here, since it belongs to the spacing family Decision 16 describes.
+The structure and the batch path are pinned by tests over the rendered rows — the two-line shape, the unknown-count case, the checkbox commit, the disabled live session, the checks hidden while multi-select is off, the window's edge markers and pagination — each shown to fail against the previous hand-drawn rows. The picker's own height is fixed rather than content-sized, which Decision 67 establishes is what ink does too: the box asks for `height − 1` and the popup region's fixed height presses it down.
 
 ## Decision 53 — the auth wizard's model step focuses by colour and windows to eight rows, inside ink's square frame
 
@@ -2365,7 +2365,7 @@ One case walks the mode list down a row, takes the scope step to Workspace and c
 
 ## Decision 66 — the popup slot is ink's fixed, clipped region, and only ink's stretching dialogs fill it
 
-ink does not overlay a popup on the composer: it swaps the composer out for a region of exactly `rows − staticExtraHeight − MAIN_CONTENT_HEIGHT_RESERVATION` rows, top-aligned and clipped, and every dialog is laid out inside that. The two constants are ink's — the first is the `3` its container passes for the rows the popup cannot use, the second the `2` its layout reserves for the main content — so the budget a forty-row terminal gives is thirty-five rows.
+ink does not overlay a popup on the composer: it swaps the composer out for a region of exactly `rows − staticExtraHeight − MAIN_CONTENT_HEIGHT_RESERVATION` rows, top-aligned and clipped, and every dialog is laid out inside that. The two constants are ink's — the first is the `3` its container passes for the rows the popup cannot use, the second the `2` its layout reserves for the main content — so the budget a forty-row terminal gives is thirty-five rows. The height and the clip are ink's default state, not its only one: both are gated on its `constrainHeight`, its show-more-lines key lifts them, and its dialog manager then hands the dialogs no height at all. This port has no lift — the region stays fixed in every state — and the difference is recorded under the coverage boundary.
 
 Here the slot was content-height. Two things followed, and they looked unrelated. A dialog ink stretches to fill the region stayed short and sat low, because the transcript kept the free rows above the slot and a content-height box lands after them; the approval-mode dialog drew thirteen rows where ink draws thirty-five, with its footer hint just under the list rather than at the bottom of the viewport. And a picker taller than the region pushed the composer off the screen instead of being clipped by it.
 
@@ -2635,8 +2635,9 @@ What was verified, and how far the verification reaches:
   because no checkpoint in that run differs only in the notice — the smallest
   whole-matrix difference there is twelve rows. The figure is dropped rather than
   carried forward, and the tally above is the only split this document now claims.
-- **The whole matrix was run twice on this tree, once with the change and once
-  without, and every movement this pass claims is on the OpenTUI leg.** Both arms
+- **The whole matrix was run twice on the pre-merge tree, once with the change
+  and once without, and every movement this pass claims is on the OpenTUI leg.**
+  Both arms
   are eighty-eight runs and two hundred sixty-six captures with no errors, and the
   same nine idle timeouts on the same three ink legs in the same counts. Between
   the arms, two hundred fifteen captures are byte-identical and four differ only in
@@ -3036,6 +3037,25 @@ What was verified, and how far the verification reaches:
   the renderer library's native layer, so there is no site here to fix; recorded
   because it is visible garbage on a real terminal, and because a workaround
   would have to force a full repaint whenever the viewport scrolls.
+- ink's popup region is gated on its `constrainHeight`: the show-more-lines
+  key lifts both the fixed height and the clip, and its dialog manager then
+  hands the dialogs no budget at all. This port maps that key only inside the
+  tool-confirmation bodies, so the region stays fixed and clipped in every
+  state, and a tail the clip cuts — an unwindowed list such as `/mcp` on a
+  short terminal, footer hint included — has no reveal path. Recorded rather
+  than matched: this renderer owns the whole viewport and cannot let content
+  grow past it, so the fix is windowing those lists from the region budget,
+  the way the theme, settings and model dialogs already do.
+- The MCP approval, shell gate and action confirmation still render outside
+  the dialog region, sized to their content and unclipped, where ink draws its
+  ShellConfirmationDialog and ConsentPrompt inside the same region, stretched
+  and clipped — capping the command preview and printing "shell commands
+  hidden - resize terminal to review". A custom command that requests more
+  shell commands than the viewport holds still grows the confirmation box past
+  the last row on a short terminal, hiding the outcome rows and the footer
+  hint the user is being asked to act on. Recorded rather than fixed: moving
+  the confirmations into the region is Decision 66's layout decision applied
+  to a slot whose body reads the terminal width to estimate line wrapping.
 - The chip row on a narrow terminal clips each chip's label to an ellipsis under
   ink and prints the labels whole here, which costs the gaps between them. It was
   not compared against ink's truncation site, so whether the budget is a shared
@@ -3065,6 +3085,14 @@ What was verified, and how far the verification reaches:
   Decision 67's judgement on it rests on source reading and structural tests
   alone. Recorded so the empty frame is not re-reported as a porting gap, and not
   taken for a usable control either.
+- The session picker's window is derived from the raw terminal height — seven
+  reserved rows, three rows per item — while its box is sized by the fixed
+  region, so on a short terminal the window's last rows, and the down-scroll
+  marker on them, are clipped and the cursor can reach a session that was never
+  drawn. ink's picker derives the identical window from the same raw rows inside
+  an equally fixed and clipped region, so this is parity with an ink-side
+  limitation, recorded the way Decision 67 records ink's footer wrapping rather
+  than fixed on one leg.
 - The stats dialog carries its own copy of the ref mirror rather than calling the
   shared hook, and rebuilds its writer on every render. Both are cosmetic: the copy
   performs the same double write, and nothing memoises on the writer's identity. It

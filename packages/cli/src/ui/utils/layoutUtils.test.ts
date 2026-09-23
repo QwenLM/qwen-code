@@ -9,6 +9,7 @@ import {
   calculatePromptWidths,
   clampDialogHeight,
   getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
 } from './layoutUtils.js';
 
 describe('layoutUtils', () => {
@@ -22,7 +23,14 @@ describe('layoutUtils', () => {
   });
 
   it('reserves static chrome and a bottom safety margin for dialog height', () => {
-    expect(getDialogMaxHeight(24, 3)).toBe(19);
+    expect(getDialogMaxHeight(24, STATIC_EXTRA_HEIGHT)).toBe(19);
+  });
+
+  it('gives both renderers the same popup budget from one constant', () => {
+    // The OpenTUI shell's dialog region and ink's AppContainer both subtract
+    // this value; a second copy of the literal would let the two legs drift.
+    expect(STATIC_EXTRA_HEIGHT).toBe(3);
+    expect(getDialogMaxHeight(40, STATIC_EXTRA_HEIGHT)).toBe(35);
   });
 
   it('keeps at least one row for dialog height', () => {

@@ -132,7 +132,8 @@ export interface OpenTuiDialogMountProps {
   onSelectSetting?: (name: string, scope: SettingScope) => void;
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
-  /** Row budget for the model/settings/theme dialog bodies. */
+  /** Row budget for the dialog bodies that window themselves (model,
+   * settings, theme, approval mode). */
   availableTerminalHeight?: number;
 }
 
@@ -475,6 +476,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
             props.onApprovalModeChanged?.(mode);
             onClose();
           }}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 

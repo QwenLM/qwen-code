@@ -284,7 +284,10 @@ import {
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
 } from './utils/historyUtils.js';
-import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
+import {
+  MAIN_CONTENT_HEIGHT_RESERVATION,
+  STATIC_EXTRA_HEIGHT,
+} from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 // Startup gate for the goal runtime: under session-writer lease contention
@@ -1090,7 +1093,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [startupWarnings, setStartupWarnings] = useState(
     () => props.startupWarnings || [],
   );
-  const staticExtraHeight = 3;
 
   // Prefetch the lowlight chunk on mount so the dynamic import is already
   // in flight before the first code block needs colorizing. Without this
@@ -4085,7 +4087,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
-  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
+  // `STATIC_EXTRA_HEIGHT` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
   // *inline* streaming/pending message may grow before it commits to <Static>;
   // they do NOT reserve blank rows under the composer. In legacy mode completed
   // history lives in <Static> (terminal scrollback) and the composer flows to
@@ -4096,7 +4098,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // corrects, the same way legacy mode lets the terminal scroll on growth.)
   const mainContentHeightReservation = useTerminalBuffer
     ? 0
-    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
+    : STATIC_EXTRA_HEIGHT + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
@@ -5132,7 +5134,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
-      staticExtraHeight,
+      staticExtraHeight: STATIC_EXTRA_HEIGHT,
       dialogsVisible,
       pendingHistoryItems,
       stickyTodos,
@@ -5279,7 +5281,6 @@ export const AppContainer = (props: AppContainerProps) => {
       showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
-      staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
       stickyTodos,

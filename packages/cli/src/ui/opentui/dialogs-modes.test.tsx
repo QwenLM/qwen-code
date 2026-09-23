@@ -31,9 +31,22 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        // Keep the layout primitives as an attribute so the geometry tests
+        // below can read what the real renderer would receive.
+        const captured = JSON.stringify(
+          Object.fromEntries(
+            Object.entries(config ?? {}).filter(
+              ([k, v]) =>
+                k !== 'children' &&
+                (typeof v === 'string' ||
+                  typeof v === 'number' ||
+                  typeof v === 'boolean'),
+            ),
+          ),
+        );
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          { ...(key === undefined ? {} : { key }), 'data-p': captured },
           children,
         );
       }
@@ -131,6 +144,14 @@ function queryRow(labelPrefix: string): string | null {
     : null;
 }
 
+/** The layout primitives the jsx mock captured on the element. */
+function layoutOf(node: Element | null | undefined): Record<string, unknown> {
+  return JSON.parse(node?.getAttribute('data-p') ?? '{}') as Record<
+    string,
+    unknown
+  >;
+}
+
 function createHarness(
   options: {
     current?: OutputStyleDefinition;
@@ -170,7 +191,9 @@ function createHarness(
 }
 
 describe('OpenTuiApprovalModeDialog', () => {
-  function renderModeDialog(options: { current?: ApprovalMode } = {}) {
+  function renderModeDialog(
+    options: { current?: ApprovalMode; availableTerminalHeight?: number } = {},
+  ) {
     const setValue = vi.fn();
     const onClose = vi.fn();
     const onApprovalModeChanged = vi.fn();
@@ -188,15 +211,16 @@ describe('OpenTuiApprovalModeDialog', () => {
       forScope: () => ({ settings: {} }),
       setValue,
     } as unknown as LoadedSettings;
-    render(
+    const { container } = render(
       <OpenTuiApprovalModeDialog
         config={config}
         settings={settings}
         onClose={onClose}
         onApprovalModeChanged={onApprovalModeChanged}
+        availableTerminalHeight={options.availableTerminalHeight}
       />,
     );
-    return { setValue, onClose, onApprovalModeChanged };
+    return { setValue, onClose, onApprovalModeChanged, container };
   }
 
   beforeEach(() => {
@@ -275,6 +299,46 @@ describe('OpenTuiApprovalModeDialog', () => {
 
     expect(harness.onClose).toHaveBeenCalledTimes(1);
     expect(harness.setValue).not.toHaveBeenCalled();
+  });
+
+  it('stretches to the popup region with the hint pushed to its bottom, like ink', () => {
+    // ink sizes this one dialog with clampDialogHeight(availableTerminalHeight),
+    // so its frame fills the region and the footer hint sits on the region's
+    // last content row. Without both flexGrow values the real renderer draws a
+    // content-height box, or a full-height box with the hint stranded mid-way.
+    const { container } = renderModeDialog();
+    const frame = container.firstElementChild;
+    expect(layoutOf(frame)).toMatchObject({
+      borderStyle: 'rounded',
+      flexGrow: 1,
+    });
+    expect(layoutOf(frame?.firstElementChild)).toMatchObject({
+      flexDirection: 'column',
+      flexGrow: 1,
+    });
+  });
+
+  it('windows the list to the region budget a short terminal hands it, like ink', () => {
+    // ink's dialog manager hands this dialog the region height, and it sheds
+    // chrome as the budget shrinks: at ten rows the list keeps two rows behind
+    // scroll arrows and drops the footer hint. Without the explicit
+    // maxItemsToShow the five rows never window, and the renderer shrinks the
+    // unsized boxes to zero — overpainting neighbours while the keys still
+    // commit a highlighted row the user cannot read.
+    renderModeDialog({ availableTerminalHeight: 10 });
+
+    expect(queryRow('plan mode - ')).not.toBeNull();
+    expect(queryRow('Ask permissions - ')).not.toBeNull();
+    expect(queryRow('auto-accept edits - ')).toBeNull();
+    expect(screen.getByText('▼')).not.toBeNull();
+    expect(
+      screen.queryByText('(Use Enter to select, Tab to configure scope)'),
+    ).toBeNull();
+
+    // The window follows the highlight, so every row stays reachable.
+    press('down');
+    press('down');
+    expect(queryRow('auto-accept edits - ')).not.toBeNull();
   });
 });
 
@@ -868,5 +932,59 @@ describe('OpenTuiEffortDialog', () => {
     expect(harness.notify).toHaveBeenCalledWith(
       'Reasoning effort: high (requested; the effective tier depends on the active provider/model).',
     );
+  });
+});
+
+describe('DialogFrame fill flag (Decision 66)', () => {
+  // ink stretches only the approval-mode dialog to the region it is given;
+  // the effort and output-style dialogs stay content-height, so their frames
+  // must not carry the grow flag. The approval half is pinned by the stretch
+  // case above; reverting either dialog to `fill` fails the matching half.
+
+  it('leaves the effort frame content-height', () => {
+    const config = {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getReasoningEffort: () => undefined,
+      setReasoningEffort: () => {},
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high'],
+            defaultEffort: 'high',
+            disableField: 'thinking',
+          },
+        },
+      }),
+    } as unknown as Config;
+    const { container } = render(
+      <OpenTuiEffortDialog
+        config={config}
+        settings={{ merged: {} } as unknown as LoadedSettings}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      flexGrow: 0,
+    });
+  });
+
+  it('leaves the output-style frame content-height', () => {
+    mocks.loadSessionOutputStyles.mockResolvedValue(BUILT_IN_OUTPUT_STYLES);
+    const harness = createHarness();
+    const { container } = render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      flexGrow: 0,
+    });
   });
 });

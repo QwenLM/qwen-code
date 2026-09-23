@@ -170,7 +170,9 @@ function renderPicker(
   const onSelect = vi.fn();
   const onCancel = vi.fn();
   const onConfirmMulti = vi.fn();
-  const { container } = render(
+  // Built fresh on every call so a rerender is a real re-render, not the same
+  // element object handed back.
+  const build = () => (
     <OpenTuiSessionPicker
       // A null service renders ink's loading notice, so the list needs one.
       sessionService={{ listSessions: vi.fn() } as never}
@@ -179,9 +181,16 @@ function renderPicker(
       onCancel={onCancel}
       onConfirmMulti={onConfirmMulti}
       {...props}
-    />,
+    />
   );
-  return { onSelect, onCancel, onConfirmMulti, container };
+  const view = render(build());
+  return {
+    onSelect,
+    onCancel,
+    onConfirmMulti,
+    container: view.container,
+    rerender: () => view.rerender(build()),
+  };
 }
 
 /** The marker/checkbox line and the dim metadata line of one session row. */
@@ -660,6 +669,9 @@ describe('OpenTuiSessionPicker inside the popup region', () => {
       flexShrink: 1,
       overflow: 'hidden',
     });
+    // ink's picker has no top margin; one row of it would be absorbed out of
+    // the border box, rendering the list one row lower than ink's.
+    expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
   });
 
   it('holds the preview to the region too, with no top margin', async () => {
@@ -674,9 +686,32 @@ describe('OpenTuiSessionPicker inside the popup region', () => {
     await flush();
 
     expect(layoutOf(container.firstElementChild)).toMatchObject({
+      height: 39,
       flexShrink: 1,
       overflow: 'hidden',
     });
     expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('rebuilds the box on a terminal resize so the shrink survives it', () => {
+    // The renderer's width/height setters clear an explicit flexShrink back to
+    // 0 and its reconciler only re-applies props whose value changed, so after
+    // a resize the shrink is lost unless the host node is rebuilt — which is
+    // what folding the size into the branch key forces. A reused node here
+    // means the picker goes back to losing rows to the region's clip until it
+    // is reopened.
+    const { container, rerender } = renderPicker([session(1), session(2)]);
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.height = 37;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      height: 36,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
   });
 });
