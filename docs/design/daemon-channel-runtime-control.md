@@ -90,9 +90,12 @@ boot. The daemon records that stop where it happens: a manager that has never
 hosted anything reports the same state as a stopped one, so the state cannot
 tell them apart. An explicit `--channel` selection is never extended by a
 workspace registered later, and a committed `all` selection is left as it is.
-The registration hook still awaits its own bookkeeping on the channel-control
-lane, so a worker that never becomes ready can delay other registrations for up
-to the channel startup budget. Without an explicit selection, a persisted
+Registration does not wait on the channel-control lane: the restore and the
+reconcile of already-hosted channels are queued there and the hook returns, so
+a worker that never becomes ready delays only channel work, never another
+registration or a trust reconcile, which share a daemon-wide gate. The lane
+orders that work on its own, and the late restore computes its additions
+inside it, so each builds on what the previous one committed. Without an explicit selection, a persisted
 selection, or a registration like the one above, the daemon does not reserve
 the channel service or load the heavy channel runtime until the first runtime
 mutation.

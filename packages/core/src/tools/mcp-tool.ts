@@ -31,6 +31,12 @@ import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  clampInlineMediaPart,
+  getMaxInlineMediaBytes,
+  TOOL_RESULT_MEDIA_REMEDY,
+} from '../core/inlineMediaLimit.js';
+import { boundImageBuffer, ImageViewError } from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   getAllMCPServerStatuses,
@@ -697,13 +703,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, {
-          name: this.serverToolName,
-          args: this.params,
-        });
+        return await this.buildMcpToolError(
+          rawResponseParts,
+          {
+            name: this.serverToolName,
+            args: this.params,
+          },
+          signal,
+        );
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.boundInlineParts(
+        transformMcpContentToParts(rawResponseParts),
+        signal,
+      );
       const truncated = await this.truncateTextParts(transformedParts);
       const fallbackText = getDisplayFromPartsWithPersistedOutput(
         transformedParts,
@@ -863,10 +876,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const rawResponseParts = outcome;
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
+        return await this.buildMcpToolError(
+          rawResponseParts,
+          functionCalls[0],
+          signal,
+        );
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.boundInlineParts(
+        transformMcpContentToParts(rawResponseParts),
+        signal,
+      );
       const truncated = await this.truncateTextParts(transformedParts);
 
       return {
@@ -893,13 +913,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private async buildMcpToolError(
     rawResponseParts: Part[],
     functionCall: FunctionCall,
+    signal: AbortSignal,
   ): Promise<ToolResult> {
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
     let persistedOutputFiles: string[] | undefined;
     if (imageContent) {
-      const truncatedContent = await this.truncateTextParts(imageContent);
+      const truncatedContent = await this.truncateTextParts(
+        await this.boundInlineParts(imageContent, signal),
+      );
       llmContent = truncatedContent.parts;
       persistedOutputFiles = truncatedContent.persistedOutputFiles;
       errorMessage = `MCP tool '${
@@ -925,6 +948,31 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
     };
+  }
+
+  private async boundInlineParts(
+    parts: Part[],
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    return boundInlineImageParts(
+      parts,
+      signal,
+      `${this.serverName}/${this.serverToolName}`,
+      await this.isOmniMediaDeliveryActive(),
+    );
+  }
+
+  /**
+   * Whether the omni funnel (`processToolResultOmniMedia`) takes over this
+   * result's media. It uploads by reference under its own ceilings and bounds
+   * any image it declines to upload, so the inline clamp must not pre-empt it.
+   * `isOmniEnabled()` runs first so non-omni sessions skip the dynamic import,
+   * as in `fileUtils`.
+   */
+  private async isOmniMediaDeliveryActive(): Promise<boolean> {
+    if (!this.cliConfig?.isOmniEnabled?.()) return false;
+    const omni = await this.cliConfig.loadOmniMediaReader();
+    return omni.isOmniDeliveryActive(this.cliConfig);
   }
 
   /**
@@ -1282,6 +1330,75 @@ function transformImageAudioBlock(
       },
     },
   ];
+}
+
+/**
+ * Shrink oversized inline images to the same visual budget `read_file`
+ * applies, so a full-resolution screenshot does not enter the conversation
+ * verbatim. Images that already fit, and any the renderer cannot handle, are
+ * forwarded unchanged; images still over the inline limit become a text
+ * placeholder. `subject` names the server and tool in renderer errors, since
+ * these bytes have no file path.
+ *
+ * Under omni delivery the inline limit is skipped: the funnel uploads the part
+ * by reference or applies the same bound itself before keeping it inline.
+ */
+async function boundInlineImageParts(
+  parts: Part[],
+  signal: AbortSignal,
+  subject: string,
+  omniDeliveryActive: boolean,
+): Promise<Part[]> {
+  // One ceiling read shared by the renderer and the clamp, so its adopt
+  // decision and the clamp cannot disagree within a single result.
+  const inlineByteCeiling = getMaxInlineMediaBytes();
+  const boundedParts: Part[] = [];
+  for (const part of parts) {
+    const inline = part.inlineData;
+    if (!isImagePart(part) || !inline?.mimeType || !inline.data) {
+      boundedParts.push(part);
+      continue;
+    }
+    let boundedPart = part;
+    try {
+      const view = await boundImageBuffer(
+        Buffer.from(inline.data, 'base64'),
+        `${subject} ${inline.mimeType}`,
+        signal,
+        inlineByteCeiling,
+      );
+      if (view) {
+        boundedPart = {
+          inlineData: {
+            ...inline,
+            data: view.bytes.toString('base64'),
+            mimeType: view.mimeType,
+          },
+        };
+      }
+    } catch (error) {
+      if (!(error instanceof ImageViewError)) {
+        throw error;
+      }
+      const message = `Unable to bound MCP image from ${subject} (${inline.mimeType}): ${getErrorMessage(error)}`;
+      // A missing renderer fails every image of every call, so surface it.
+      if (error.code === 'renderer_unavailable') {
+        debugLogger.warn(message);
+      } else {
+        debugLogger.debug(message);
+      }
+    }
+    boundedParts.push(
+      omniDeliveryActive
+        ? boundedPart
+        : clampInlineMediaPart(
+            boundedPart,
+            inlineByteCeiling,
+            TOOL_RESULT_MEDIA_REMEDY,
+          ),
+    );
+  }
+  return boundedParts;
 }
 
 function transformResourceBlock(
