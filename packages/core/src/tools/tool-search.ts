@@ -28,6 +28,7 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import {
+  canonicalToolName,
   resolveRegisteredToolName,
   ToolNames,
   ToolDisplayNames,
@@ -206,10 +207,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
         // collapse (exact match and a lone case variant resolve to the same
         // registered name), and so do repeats that resolve to the same
         // ambiguous candidate list.
-        const resolved = resolveRegisteredToolName(stripped, knownNames);
+        const aliased = canonicalToolName(stripped);
+        const resolved = resolveRegisteredToolName(aliased, knownNames);
         const key = Array.isArray(resolved)
           ? `ambiguous\u0000${resolved.join('\u0000')}`
-          : (resolved ?? `unresolved\u0000${stripped.toLowerCase()}`);
+          : (resolved ?? `unresolved\u0000${aliased.toLowerCase()}`);
         if (seen.has(key)) continue;
         seen.add(key);
         if (names.length >= maxResults) {
@@ -338,7 +340,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const ambiguous: Array<{ requested: string; candidates: string[] }> = [];
 
     for (const requested of names) {
-      const canonical = resolveRegisteredToolName(requested, knownNames);
+      // Canonicalize the legacy alias first, exactly as tool_call does, so the
+      // two halves answer identically for `replace`/`task`/`search_file_content`:
+      // without it `select:replace` reports "Not found" while `tool_call{replace}`
+      // resolves and invokes `edit`, and the invocation then takes the
+      // never-reviewed pass-through. `resolveBuiltinToolName` is deliberately not
+      // used: it also maps display names, which tool_call does not, so discovery
+      // would become broader than invocation instead of identical.
+      const canonical = resolveRegisteredToolName(
+        canonicalToolName(requested),
+        knownNames,
+      );
       if (Array.isArray(canonical)) {
         ambiguous.push({ requested, candidates: canonical });
         continue;

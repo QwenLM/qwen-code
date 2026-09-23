@@ -81,6 +81,23 @@ export function deferredDeclarationFingerprint(
   )}`;
 }
 
+/**
+ * Sentinel recorded for a hidden deferred tool that was removed from the
+ * registry after tool_search returned it (MCP disconnect/disable, discovered
+ * tool refresh). It is not a fingerprint and cannot equal one — the last field
+ * of a real fingerprint is `JSON.stringify(...)` output, which is never empty
+ * and never contains a raw NUL — so tool_call's comparison always refuses and
+ * sends the model back through tool_search instead of taking the
+ * never-reviewed pass-through on a re-registered replacement.
+ *
+ * It replaces the retained declaration text rather than deleting the entry:
+ * the multi-KB serialized `parametersJsonSchema` is reclaimed, while the
+ * fail-closed invariant documented on
+ * {@link ToolRegistry.getReviewedDeclaration} survives the reconnect
+ * (#11321).
+ */
+const REMOVED_DECLARATION_TOMBSTONE = '\u0000\u0000\u0000';
+
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
@@ -248,7 +265,10 @@ export class ToolRegistry {
   private pinnedDeferredReveals: Set<string> = new Set();
   // Fingerprint of each hidden deferred tool as tool_search last returned
   // it. Kept across `/clear`: a stale entry can only make tool_call ask for
-  // a fresh review, never let a changed tool through.
+  // a fresh review, never let a changed tool through. Removal replaces the
+  // declaration with `REMOVED_DECLARATION_TOMBSTONE` for the same reason, so
+  // the retained payload stays bounded by the number of distinct deferred
+  // tool names ever reviewed.
   private reviewedDeferredDeclarations: Map<string, string> = new Map();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
@@ -546,6 +566,7 @@ export class ToolRegistry {
         // this a re-discovered tool of the same name would inherit
         // stale "revealed" state across the disconnect/reconnect.
         this.revealedDeferred.delete(tool.name);
+        this.invalidateReviewedDeclaration(tool.name);
       }
     }
   }
@@ -565,6 +586,7 @@ export class ToolRegistry {
         // checks reveal state) before the model has any way to know
         // the tool exists this session.
         this.revealedDeferred.delete(name);
+        this.invalidateReviewedDeclaration(name);
       }
     }
   }
@@ -992,9 +1014,24 @@ export class ToolRegistry {
   /**
    * The fingerprint recorded by {@link recordReviewedDeclaration}, or
    * `undefined` when tool_search has not returned this tool in the session.
+   * A tool removed after it was reviewed keeps a tombstone entry, which
+   * never equals a live fingerprint and therefore always asks for a fresh
+   * review.
    */
   getReviewedDeclaration(name: string): string | undefined {
     return this.reviewedDeferredDeclarations.get(name);
+  }
+
+  /**
+   * Reclaims the retained declaration of a removed tool without weakening the
+   * gate: the entry becomes a tombstone, so a re-registered tool of the same
+   * name is refused until tool_search returns it again. A tool that was never
+   * reviewed keeps no entry — there is nothing to reclaim, and adding one
+   * would turn "never reviewed" into "reviewed then removed".
+   */
+  private invalidateReviewedDeclaration(name: string): void {
+    if (!this.reviewedDeferredDeclarations.has(name)) return;
+    this.reviewedDeferredDeclarations.set(name, REMOVED_DECLARATION_TOMBSTONE);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */

@@ -432,6 +432,109 @@ describe('ToolSearchTool', () => {
     expect(registry.getReviewedDeclaration('visible_tool')).toBeUndefined();
   });
 
+  it.each([
+    ['replace', ToolNames.EDIT],
+    ['task', ToolNames.AGENT],
+    ['search_file_content', ToolNames.GREP],
+  ])(
+    'select:%s reviews the registered %s, the tool tool_call invokes (#11321)',
+    async (alias, registered) => {
+      const hidden = new MockTool({ name: registered, shouldDefer: true });
+      registry.registerTool(hidden);
+
+      const result = await new ToolSearchTool(config)
+        .build({ query: `select:${alias}` })
+        .execute(new AbortController().signal);
+
+      // The invocation half canonicalizes the legacy alias before resolving, so
+      // the discovery half must present that tool rather than report the alias
+      // as unknown — otherwise the name is invocable but undiscoverable and the
+      // call takes the never-reviewed pass-through.
+      const content = String(result.llmContent);
+      expect(content).toContain(`"name":"${registered}"`);
+      expect(content).not.toContain(`Not found: ${alias}`);
+      expect(result.returnDisplay).toBe('Reviewed 1 tool(s)');
+      expect(registry.getReviewedDeclaration(registered)).toBe(
+        deferredDeclarationFingerprint(hidden),
+      );
+    },
+  );
+
+  it('select: an alias and its registered name review one tool, and tool_call accepts the alias afterwards (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    registry.registerTool(
+      new MockTool({ name: ToolNames.EDIT, shouldDefer: true }),
+    );
+
+    const deduped = await new ToolSearchTool(config)
+      .build({ query: `select:replace,${ToolNames.EDIT}` })
+      .execute(new AbortController().signal);
+    // Both spellings resolve to the same tool, so the second one must not
+    // consume a max_results slot or emit a duplicate schema.
+    expect(deduped.returnDisplay).toBe('Reviewed 1 tool(s)');
+
+    const resolved = await resolveDeferredToolCall(registry, {
+      name: 'replace',
+      arguments: {},
+    });
+    expect(resolved).toMatchObject({
+      tool: expect.objectContaining({ name: ToolNames.EDIT }),
+    });
+  });
+
+  it('a server reconnect forces a fresh review even when the declaration is identical (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    const declaration = {
+      type: 'object',
+      properties: { text: { type: 'string' } },
+    };
+    const makeTool = () =>
+      new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        declaration,
+      );
+    const reviewedTool = makeTool();
+    const name = reviewedTool.name;
+    registry.registerTool(reviewedTool);
+
+    const search = (query: string) =>
+      new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+    await search(`select:${name}`);
+    expect(registry.getReviewedDeclaration(name)).toBe(
+      deferredDeclarationFingerprint(reviewedTool),
+    );
+
+    // Disconnect, then a reconnect that republishes a byte-identical tool.
+    registry.removeMcpToolsByServer('slack');
+    registry.registerTool(makeTool());
+
+    // The record was reclaimed but tombstoned, so the model cannot invoke the
+    // replacement with arguments written against the schema it saw before the
+    // disconnect — which is exactly the path a replacement server would use.
+    const refused = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { text: 'hi' },
+    });
+    expect(refused).toMatchObject({
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    });
+
+    // And the recovery loop still closes with one re-review.
+    await search(`select:${name}`);
+    const resolved = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { text: 'hi' },
+    });
+    expect(resolved).toMatchObject({
+      tool: expect.objectContaining({ name }),
+    });
+  });
+
   describe('media-policy tool hiding', () => {
     class MockMediaPolicyTool extends MockTool {
       override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
