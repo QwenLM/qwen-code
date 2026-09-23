@@ -747,6 +747,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         this.params.file_path,
         this.config.getProjectRoot(),
         editData.isNewFile ? 'create' : 'update',
+        this.config.getMemoryHookDeliveryId(),
       );
 
       return {

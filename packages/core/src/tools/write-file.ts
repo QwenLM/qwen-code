@@ -665,6 +665,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         file_path,
         this.config.getProjectRoot(),
         operation === FileOperation.CREATE ? 'create' : 'update',
+        this.config.getMemoryHookDeliveryId(),
       );
 
       return {

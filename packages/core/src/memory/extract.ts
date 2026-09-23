@@ -25,6 +25,7 @@ import {
 } from './indexer.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { refreshMemoryInstruction } from './refresh.js';
+import { withCoalescedMemoryChanges } from './memory-file-change.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -195,50 +196,57 @@ export async function runAutoMemoryExtract(params: {
   );
   if (lateMismatch) return lateMismatch;
 
-  const agentResult = await runAutoMemoryExtractionByAgent(
-    params.config,
+  const agentResult = await withCoalescedMemoryChanges(
     params.projectRoot,
-  );
+    params.config.getMemoryHookDeliveryId?.(),
+    async () => {
+      const result = await runAutoMemoryExtractionByAgent(
+        params.config,
+        params.projectRoot,
+      );
 
-  if (agentResult.touchedTopics.length > 0) {
-    await bumpMetadata(
-      params.projectRoot,
-      now,
-      params.sessionId,
-      agentResult.touchedTopics,
-    );
-    // Asymmetric failure isolation:
-    //   * project-level rebuild MUST bubble its error up. The cursor advances
-    //     only after rebuilds complete; a project rebuild failure that gets
-    //     silently swallowed would leave the memory file written, the index
-    //     stale, AND the cursor advanced — the memory becomes un-recallable
-    //     until some later session happens to trigger another rebuild. The
-    //     pre-existing `Promise.all` contract (throw → cursor stays → retry
-    //     on next session) is the durability guarantee we must preserve.
-    //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
-    //     (EACCES) must not poison the project-level rebuild or block the
-    //     cursor. Catch + warn, same shape as the user-level scaffold above.
-    const projectRebuild =
-      agentResult.touchedProjectScope || !agentResult.touchedUserScope
-        ? // Either explicitly touched, or the defensive fallback when both
-          // scope flags were unset (e.g. older planner) — both paths must
-          // surface project-level rebuild failures.
-          rebuildManagedAutoMemoryIndex(params.projectRoot)
-        : Promise.resolve();
-    const userRebuild = agentResult.touchedUserScope
-      ? rebuildUserAutoMemoryIndex(params.projectRoot).catch(
-          (error: unknown) => {
-            debugLogger.warn(
-              `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
-            );
-          },
-        )
-      : Promise.resolve();
-    await Promise.all([projectRebuild, userRebuild]);
-    await refreshMemoryInstruction(params.config, {
-      logContext: 'managed auto-memory extraction',
-    });
-  }
+      if (result.touchedTopics.length > 0) {
+        await bumpMetadata(
+          params.projectRoot,
+          now,
+          params.sessionId,
+          result.touchedTopics,
+        );
+        // Asymmetric failure isolation:
+        //   * project-level rebuild MUST bubble its error up. The cursor advances
+        //     only after rebuilds complete; a project rebuild failure that gets
+        //     silently swallowed would leave the memory file written, the index
+        //     stale, AND the cursor advanced — the memory becomes un-recallable
+        //     until some later session happens to trigger another rebuild. The
+        //     pre-existing `Promise.all` contract (throw → cursor stays → retry
+        //     on next session) is the durability guarantee we must preserve.
+        //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
+        //     (EACCES) must not poison the project-level rebuild or block the
+        //     cursor. Catch + warn, same shape as the user-level scaffold above.
+        const projectRebuild =
+          result.touchedProjectScope || !result.touchedUserScope
+            ? // Either explicitly touched, or the defensive fallback when both
+              // scope flags were unset (e.g. older planner) — both paths must
+              // surface project-level rebuild failures.
+              rebuildManagedAutoMemoryIndex(params.projectRoot)
+            : Promise.resolve();
+        const userRebuild = result.touchedUserScope
+          ? rebuildUserAutoMemoryIndex(params.projectRoot).catch(
+              (error: unknown) => {
+                debugLogger.warn(
+                  `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+                );
+              },
+            )
+          : Promise.resolve();
+        await Promise.all([projectRebuild, userRebuild]);
+        await refreshMemoryInstruction(params.config, {
+          logContext: 'managed auto-memory extraction',
+        });
+      }
+      return result;
+    },
+  );
 
   const madeGenuineProgress =
     agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;

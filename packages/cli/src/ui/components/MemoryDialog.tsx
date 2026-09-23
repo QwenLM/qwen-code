@@ -328,7 +328,11 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       newValue,
     );
     setAutoMemoryOn(newValue);
-    void notifyMemoryEnabledChange(config.getProjectRoot(), newValue);
+    void notifyMemoryEnabledChange(
+      config.getProjectRoot(),
+      newValue,
+      config.getMemoryHookDeliveryId(),
+    );
   }, [autoMemoryOn, config, loadedSettings]);
 
   const handleToggleAutoDream = useCallback(() => {

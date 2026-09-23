@@ -9543,7 +9543,6 @@ class QwenAgent implements Agent {
         const settings = this.loadRequestSettings(settingsCwd);
         const previousEnabled =
           settings.merged.memory?.enableManagedAutoMemory ?? true;
-        let enabledChange: boolean | undefined;
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -9552,17 +9551,17 @@ class QwenAgent implements Agent {
               `Invalid memory setting '${key}': expected boolean`,
             );
           }
-          if (
-            key === 'enableManagedAutoMemory' &&
-            updates[key] !== previousEnabled
-          ) {
-            enabledChange = updates[key];
-          }
           settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
         this.adoptRequestSettings(settings, settingsCwd);
-        if (enabledChange !== undefined) {
-          await notifyMemoryEnabledChange(settingsCwd, enabledChange);
+        const effectiveEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        if (effectiveEnabled !== previousEnabled) {
+          await notifyMemoryEnabledChange(
+            settingsCwd,
+            effectiveEnabled,
+            this.config.getMemoryHookDeliveryId(),
+          );
         }
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),

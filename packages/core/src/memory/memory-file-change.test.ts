@@ -14,6 +14,7 @@ import {
   notifyMemoryEnabledChange,
   notifyMemoryFileChange,
   registerMemoryChangedListener,
+  withCoalescedMemoryChanges,
   type MemoryChangedNotice,
 } from './memory-file-change.js';
 import {
@@ -318,5 +319,75 @@ describe('memory file change hook', () => {
     expect(
       memoryChangedNoticeFromHookInput({ operation: 'nope' }),
     ).toBeUndefined();
+  });
+
+  it('delivers a write to the named registration when several share a workspace', async () => {
+    const projectRoot = await setup();
+    const first: MemoryChangedNotice[] = [];
+    const second: MemoryChangedNotice[] = [];
+    const firstRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        first.push(change);
+      },
+    );
+    const secondRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        second.push(change);
+      },
+    );
+    const file = path.join(tempDir!, 'memories', 'MEMORY.md');
+    try {
+      await notifyMemoryFileChange(file, projectRoot, 'update');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        'update',
+        firstRegistration.id,
+      );
+    } finally {
+      firstRegistration();
+      secondRegistration();
+    }
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+  });
+
+  it('reports a file removed inside a coalesced window once', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'gone.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'old\n');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await withCoalescedMemoryChanges(
+        projectRoot,
+        registration.id,
+        async () => {
+          await notifyMemoryFileChange(
+            file,
+            projectRoot,
+            'delete',
+            registration.id,
+          );
+          await fs.rm(file);
+        },
+      );
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'delete',
+        relativePaths: ['user/gone.md'],
+      }),
+    ]);
   });
 });

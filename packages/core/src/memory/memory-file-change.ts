@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   getAutoMemoryRoot,
   getTeamAutoMemoryRoot,
@@ -51,26 +53,34 @@ type MemoryChangedListener = (
 ) => void | Promise<void>;
 
 interface MemoryChangedRegistration {
+  id: symbol;
   workspace: string;
   listener: MemoryChangedListener;
 }
 
 const listeners = new Set<MemoryChangedRegistration>();
+const suppressDelivery = new AsyncLocalStorage<true>();
 
 /**
- * Register a listener for one workspace. A write is delivered only to
- * listeners registered for that workspace, so another workspace in the same
- * process does not see it. Returns an unregister function.
+ * Register a listener for one workspace. A write is delivered to the
+ * registration named by `deliveryId` when the caller has one, and otherwise
+ * to the newest registration for that workspace. Returns an unregister
+ * function tagged with that id.
  */
 export function registerMemoryChangedListener(
   workspace: string,
   listener: MemoryChangedListener,
-): () => void {
-  const registration = { workspace: path.resolve(workspace), listener };
+): (() => void) & { id: symbol } {
+  const registration: MemoryChangedRegistration = {
+    id: Symbol('memory-hook-delivery'),
+    workspace: path.resolve(workspace),
+    listener,
+  };
   listeners.add(registration);
-  return () => {
+  const unregister = () => {
     listeners.delete(registration);
   };
+  return Object.assign(unregister, { id: registration.id });
 }
 
 function relativeInside(root: string, filePath: string): string | undefined {
@@ -127,15 +137,28 @@ export function describeMemoryFileChange(
 
 const SCOPE_ORDER: readonly MemoryChangedScope[] = ['user', 'project', 'team'];
 
-async function emit(
-  sourceWorkspace: string,
-  changes: readonly MemoryChangedNotice[],
-): Promise<void> {
-  if (changes.length === 0 || listeners.size === 0) return;
-  const workspace = path.resolve(sourceWorkspace);
+function recipientsFor(
+  workspace: string,
+  deliveryId: symbol | undefined,
+): MemoryChangedRegistration[] {
   const matched = [...listeners].filter(
     (registration) => registration.workspace === workspace,
   );
+  if (deliveryId) {
+    return matched.filter((registration) => registration.id === deliveryId);
+  }
+  const newest = matched.at(-1);
+  return newest ? [newest] : [];
+}
+
+async function emit(
+  sourceWorkspace: string,
+  changes: readonly MemoryChangedNotice[],
+  deliveryId?: symbol,
+): Promise<void> {
+  if (changes.length === 0 || listeners.size === 0) return;
+  const workspace = path.resolve(sourceWorkspace);
+  const matched = recipientsFor(workspace, deliveryId);
   await Promise.all(
     matched.map(async (registration) => {
       for (const change of changes) {
@@ -158,7 +181,9 @@ export async function notifyMemoryFileChange(
   filePath: string | readonly string[],
   projectRoot: string,
   operation: MemoryChangedOperation,
+  deliveryId?: symbol,
 ): Promise<void> {
+  if (suppressDelivery.getStore()) return;
   if (listeners.size === 0) return;
   const filePaths = typeof filePath === 'string' ? [filePath] : filePath;
   const workspace = path.resolve(projectRoot);
@@ -191,7 +216,7 @@ export async function notifyMemoryFileChange(
       ...(scope === 'user' ? {} : { workspace }),
     });
   }
-  await emit(projectRoot, changes);
+  await emit(projectRoot, changes, deliveryId);
 }
 
 /**
@@ -264,6 +289,7 @@ export function memoryChangedNoticeFromHookInput(
 export async function notifyMemoryEnabledChange(
   workspace: string,
   enabled: boolean,
+  deliveryId?: symbol,
 ): Promise<void> {
   const change: MemoryEnabledChange = {
     paths: [],
@@ -271,5 +297,76 @@ export async function notifyMemoryEnabledChange(
     workspace: path.resolve(workspace),
     enabled,
   };
-  await emit(workspace, [change]);
+  await emit(workspace, [change], deliveryId);
+}
+
+async function readMemoryTree(
+  root: string,
+  into: Map<string, string>,
+): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      await readMemoryTree(full, into);
+    } else if (entry.isFile()) {
+      into.set(path.resolve(full), await fs.readFile(full, 'utf-8'));
+    }
+  }
+}
+
+async function readMemoryDocuments(
+  projectRoot: string,
+): Promise<Map<string, string>> {
+  const documents = new Map<string, string>();
+  await Promise.all(
+    [
+      getUserAutoMemoryRoot(),
+      getAutoMemoryRoot(projectRoot),
+      getTeamAutoMemoryRoot(projectRoot),
+    ].map((root) => readMemoryTree(root, documents)),
+  );
+  return documents;
+}
+
+/**
+ * Run a memory agent, then emit one create, update, or delete per scope for
+ * documents that actually differ. Tool writes inside `fn` are not emitted on
+ * their own, so a shell `rm` is still reported and a rewritten index is one
+ * event.
+ */
+export async function withCoalescedMemoryChanges<T>(
+  projectRoot: string,
+  deliveryId: symbol | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const before = await readMemoryDocuments(projectRoot);
+  try {
+    return await suppressDelivery.run(true, fn);
+  } finally {
+    const after = await readMemoryDocuments(projectRoot);
+    const created: string[] = [];
+    const updated: string[] = [];
+    const deleted: string[] = [];
+    for (const [filePath, content] of after) {
+      if (!before.has(filePath)) {
+        created.push(filePath);
+      } else if (before.get(filePath) !== content) {
+        updated.push(filePath);
+      }
+    }
+    for (const filePath of before.keys()) {
+      if (!after.has(filePath)) {
+        deleted.push(filePath);
+      }
+    }
+    await notifyMemoryFileChange(deleted, projectRoot, 'delete', deliveryId);
+    await notifyMemoryFileChange(updated, projectRoot, 'update', deliveryId);
+    await notifyMemoryFileChange(created, projectRoot, 'create', deliveryId);
+  }
 }

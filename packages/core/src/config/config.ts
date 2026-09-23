@@ -3056,6 +3056,7 @@ export class Config {
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private unregisterMemoryChanged?: () => void;
+  private memoryHookDeliveryId?: symbol;
   private messageBus?: MessageBus;
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
@@ -3893,7 +3894,7 @@ export class Config {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.unregisterMemoryChanged?.();
-      this.unregisterMemoryChanged = registerMemoryChangedListener(
+      const memoryHookRegistration = registerMemoryChangedListener(
         this.getProjectRoot(),
         async (change) => {
           const hookSystem = this.hookSystem;
@@ -3903,6 +3904,8 @@ export class Config {
           await hookSystem.fireMemoryChangedEvent(change);
         },
       );
+      this.memoryHookDeliveryId = memoryHookRegistration.id;
+      this.unregisterMemoryChanged = memoryHookRegistration;
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
@@ -9813,6 +9816,15 @@ export class Config {
   getHookSystem(): HookSystem | undefined {
     if (this.shellExecutionSandbox) return undefined;
     return this.hookSystem;
+  }
+
+  /**
+   * Id of this config's memory-change registration. Derived configs inherit
+   * the config that initialized hooks, so a forked memory agent still
+   * attributes the event to that session.
+   */
+  getMemoryHookDeliveryId(): symbol | undefined {
+    return this.memoryHookDeliveryId;
   }
 
   /**

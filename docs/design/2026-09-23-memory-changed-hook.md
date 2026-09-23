@@ -41,7 +41,7 @@ Add a post-write, non-blocking hook event, `MemoryChanged`. The change is alread
 - `operation`: `create`, `update`, or `delete`.
 - `workspace`: absolute workspace directory. Present for project and team memory. Omitted for user memory.
 
-`write_file` and `edit` notify when the target is inside a managed memory root. `/forget` notifies after a delete or rewrite. `MEMORY.md` rebuilds notify after the index write, and skip a byte-identical rewrite. Scheduling files are classified out.
+`write_file` and `edit` notify when the target is inside a managed memory root. `/forget` notifies after a delete or rewrite. `MEMORY.md` rebuilds notify after the index write, and skip a byte-identical rewrite. Dream and extract compare the memory trees before and after the agent, including its index rebuild, and emit the difference once. A shell delete inside that agent is a `delete` event. Scheduling files are classified out.
 
 ### On/off toggle
 
@@ -60,15 +60,15 @@ The base hook input still carries `session_id` and `cwd`. `cwd` is the working d
 
 ## Decisions
 
-| Decision                                                                  | Why                                                                                                                                                    |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Emit after the write, from the memory write sites, not from `PostToolUse` | Index rebuilds and `/forget` are not tool calls. The file is readable, or already deleted, when the hook runs.                                         |
-| Do not put file bodies in the payload                                     | The hook reads `paths`. A delete has no body. A large document does not have to fit in the hook stdin JSON.                                            |
-| Add `relative_paths` and `memory_scope`                                   | A later uploader can name the remote object without reimplementing Qwen's memory directories, and can skip `team` if that layer is already git-synced. |
-| One event per scope                                                       | User memory must omit `workspace`. Project and team memory in the same call stay separate.                                                             |
-| Hook failure is ignored                                                   | The local write has landed. A failed upload must not undo it.                                                                                          |
-| Deliver only to the workspace that wrote                                  | A process can host more than one workspace. Another workspace's hooks do not see the change.                                                           |
-| Matcher uses `relative_paths`                                             | `MEMORY.md` and `user/role.md` can be selected without matching an absolute sandbox path.                                                              |
+| Decision                                                                  | Why                                                                                                                                                                                   |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Emit after the write, from the memory write sites, not from `PostToolUse` | Index rebuilds and `/forget` are not tool calls. The file is readable, or already deleted, when the hook runs.                                                                        |
+| Do not put file bodies in the payload                                     | The hook reads `paths`. A delete has no body. A large document does not have to fit in the hook stdin JSON.                                                                           |
+| Add `relative_paths` and `memory_scope`                                   | A later uploader can name the remote object without reimplementing Qwen's memory directories, and can skip `team` if that layer is already git-synced.                                |
+| One event per scope                                                       | User memory must omit `workspace`. Project and team memory in the same call stay separate.                                                                                            |
+| Hook failure is ignored                                                   | The local write has landed. A failed upload must not undo it.                                                                                                                         |
+| Deliver only to the workspace that wrote                                  | A process can host more than one workspace. Another workspace's hooks do not see the change. When several sessions share that workspace, the event goes to the session that wrote it. |
+| Matcher uses `relative_paths`                                             | `MEMORY.md` and `user/role.md` can be selected without matching an absolute sandbox path.                                                                                             |
 
 ## Scope
 
