@@ -159,6 +159,7 @@ import {
   resetDenialState,
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
+import { clearSessionCommits } from '../permissions/destructive-commands.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -2664,9 +2665,7 @@ export interface ManagedRuntimeWaitInspection {
 
 function recoverableSettledRuntimeItems<
   T extends { readonly state: string; readonly consumed?: boolean },
->(
-  items: readonly T[],
-): { items: T[]; continuationAdmitted: boolean } | null {
+>(items: readonly T[]): { items: T[]; continuationAdmitted: boolean } | null {
   const settled = items.filter((item) => item.state === 'settled');
   if (settled.length === 0) return null;
   const pending = settled.filter((item) => item.consumed !== true);
@@ -9688,6 +9687,31 @@ export class Config {
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
+      // ...and the session-commit registry behind the AUTO-mode
+      // `git commit --amend` exemption, per its contract ("cleared on session
+      // end or mode switch"): exemptions must not carry across a boundary
+      // where the user re-decides how much the agent may do unattended.
+      // Clearing is fail-closed. Gated on a real transition so a no-op re-set,
+      // which several callers do, cannot drop registrations still in use.
+      // Root Config only, like the workflow-revision stamp above: a derived
+      // overlay's `setApprovalMode` delegates here, and a subagent flipping
+      // its own mode is child-local, not a decision about the root session's
+      // autonomy. Clearing there cost the root a false "not made by the agent
+      // in this session" block on its own commit.
+      //
+      // PLAN is excluded on both legs for the same reason. `enter_plan_mode`
+      // is model-callable from AUTO and `exit_plan_mode` restores it, so the
+      // round trip is two real transitions that end in the posture it started
+      // in — and PLAN cannot execute a commit, so the excursion cannot add an
+      // exemption either. Clearing on it bought nothing and cost the agent a
+      // false block on its own commit, with no escape from inside AUTO.
+      if (
+        !isDerivedConfig(this) &&
+        mode !== ApprovalMode.PLAN &&
+        fromMode !== ApprovalMode.PLAN
+      ) {
+        clearSessionCommits();
+      }
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;

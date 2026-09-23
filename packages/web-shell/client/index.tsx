@@ -1,4 +1,6 @@
 import { type ReactNode } from 'react';
+import type { WebShellUrlNavigationOptions } from './navigation';
+export type { WebShellUrlNavigationOptions, WebShellPage } from './navigation';
 import {
   DaemonWorkspaceProvider,
   type DaemonProductSessionContext,
@@ -50,6 +52,12 @@ export {
 } from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
+  /**
+   * Opt in to URL routing. Explicit initial session target props override the
+   * URL; later target prop changes replace it. Stop host history writes when
+   * enabled. Omit to keep host-owned navigation. basePath defaults to root.
+   */
+  urlNavigation?: WebShellUrlNavigationOptions;
   /** Connect browser notifications with optional branding and an initial preference (off by default). */
   browserNotifications?: WebShellBrowserNotificationsOptions;
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -136,6 +144,7 @@ export function WebShell(props: WebShellProps) {
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
   const {
     browserNotifications,
+    urlNavigation,
     baseUrl,
     token,
     sessionId,
@@ -152,6 +161,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
   const shell = (
     <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
       <WorkspaceSessionProvider
+        urlNavigation={urlNavigation}
         sessionId={sessionId}
         workspaceId={workspaceId}
         workspaceCwd={workspaceCwd}

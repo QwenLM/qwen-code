@@ -9736,6 +9736,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([false, true])(
+    'classifies an unconfirmed source write with recording available=%s',
+    async (available) => {
+      const sessionId = 'session-A';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getChatRecordingService = vi
+        .fn()
+        .mockReturnValue(
+          available
+            ? { recordSessionSource: vi.fn().mockResolvedValue(false) }
+            : undefined,
+        );
+      const { agent, agentPromise } = await bootAcpAgent();
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+          sessionId,
+          sourceType: 'scheduled_task',
+        }),
+      ).resolves.toEqual({
+        sessionId,
+        sourceType: 'scheduled_task',
+        persisted: false,
+        reason: available ? 'write_not_confirmed' : 'recording_unavailable',
+      });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
   it('enables the dedicated screen tool for a compatible Live source', async () => {
     const sessionId = 'session-A';
     const recording = {

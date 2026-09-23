@@ -4516,6 +4516,87 @@ describe('createServeApp', () => {
       expect(res.text).not.toContain('<div id="root">');
     });
 
+    it.each([
+      '/plugins',
+      '/channels',
+      '/scheduled-tasks',
+      '/goals',
+      '/settings',
+    ])(
+      'serves page document %s without bypassing API authentication',
+      async (pagePath) => {
+        const app = createServeApp(
+          { ...baseOpts, token: 'secret' },
+          undefined,
+          { webShellDir },
+        );
+        for (const path of [pagePath, `${pagePath}/`, pagePath.toUpperCase()]) {
+          const document = await request(app)
+            .get(path)
+            .set('Host', host)
+            .set('Accept', 'text/html');
+          expect(document.status).toBe(200);
+          expect(document.text).toContain('<div id="root">');
+        }
+        await request(app)
+          .head(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(200)
+          .expect('Content-Type', /text\/html/);
+        await request(app)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', '*/*')
+          .set('Sec-Fetch-Mode', 'navigate')
+          .expect(200);
+        for (const path of [
+          pagePath,
+          `${pagePath}/data`,
+          `${pagePath}%2fdata`,
+        ]) {
+          await request(app)
+            .get(path)
+            .set('Host', host)
+            .set('Accept', 'application/json')
+            .expect(401);
+        }
+        await request(app)
+          .post(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(401);
+        const api = await request(app)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'application/json')
+          .set('Authorization', 'Bearer secret');
+        expect(api.text).not.toContain('<div id="root">');
+        if (pagePath === '/goals') {
+          expect(api.status).toBe(200);
+          expect(api.headers['content-type']).toContain('application/json');
+          expect(api.body.goals).toEqual([]);
+        }
+        const apiOnly = createServeApp(
+          { ...baseOpts, token: 'secret', serveWebShell: false },
+          undefined,
+          { webShellDir },
+        );
+        const apiWithoutShell = await request(apiOnly)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'application/json')
+          .set('Authorization', 'Bearer secret');
+        expect(api.status).toBe(apiWithoutShell.status);
+        expect(api.body).toEqual(apiWithoutShell.body);
+        await request(apiOnly)
+          .get(pagePath)
+          .set('Host', host)
+          .set('Accept', 'text/html')
+          .expect(401);
+      },
+    );
+
     it('serves the shell for /session/:id document navigations (pre-auth route)', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
