@@ -101,6 +101,9 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.OMNI_OCR_IMAGE]: 'deny',
   [ToolNames.OMNI_UNDERSTAND_VIDEO_SEGMENTS]: 'deny',
   [ToolNames.OMNI_RECALL_MEDIA_MEMORY]: 'deny',
+  // The deferred-tool bridge can invoke any registered tool, so it is denied
+  // for the same reason as exec.
+  [ToolNames.TOOL_CALL]: 'deny',
   [ToolNames.THREAD_POST]: 'thread',
   [ToolNames.THREAD_WAIT]: 'thread',
   [ToolNames.THREAD_BLOCK]: 'thread',
