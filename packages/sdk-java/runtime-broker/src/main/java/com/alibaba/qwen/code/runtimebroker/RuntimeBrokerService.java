@@ -486,8 +486,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (finishing != null) {
                 return finishing;
             }
-            return CompletableFuture.completedFuture(
-                    requireLiveBinding(record));
+            BindingContext live = requireLiveBinding(record);
+            return safeStage(() -> provisioner.confirm(request, live.lease()))
+                    .thenApply(ignored -> live);
         }
         if (record.getState()
                 != RuntimeBindingRecord.State.PROVISIONING) {
