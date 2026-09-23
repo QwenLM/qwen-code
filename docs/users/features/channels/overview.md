@@ -33,13 +33,12 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
     "my-channel": {
       "type": "telegram",
       "token": "$MY_BOT_TOKEN",
-      "senderPolicy": "allowlist",
+      "privatePolicy": "allowlist",
       "allowedUsers": ["123456789"],
       "sessionScope": "user",
       "cwd": "/path/to/working/directory",
       "instructions": "Optional system instructions for the agent.",
       "groupPolicy": "disabled",
-      "dmPolicy": "open",
       "groups": {
         "*": { "requireMention": true }
       }
@@ -50,50 +49,50 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option              | Required         | Description                                                                                                                                                                                                             |
-| ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `feishu`, `github`, `gitlab`, or a custom type from an extension (see [Plugins](./plugins))                                                       |
-| `token`             | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                                             |
-| `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                            |
-| `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                     |
-| `botId`             | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
-| `secret`            | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
-| `model`             | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                                |
-| `senderPolicy`      | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
-| `allowedUsers`      | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
-| `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
-| `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
-| `sessionRotation`   | No               | Bounds after which a route starts a fresh session: `{ "maxTurns": N, "maxAgeHours": N }`. Unset means a session is reused forever. See [Session Rotation](#session-rotation)                                            |
-| `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
-| `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
-| `instructions`      | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
-| `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                               |
-| `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                             |
-| `dmPolicy`          | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
-| `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset derives it. See [Shared-Session Operators](#shared-session-operators)                                                                      |
-| `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
-| `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
-| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
+| Option              | Required         | Description                                                                                                                                                                                                 |
+| ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `feishu`, `github`, `gitlab`, or a custom type from an extension (see [Plugins](./plugins))                                           |
+| `token`             | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                                 |
+| `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                |
+| `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                         |
+| `botId`             | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                            |
+| `secret`            | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                            |
+| `model`             | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                    |
+| `privatePolicy`     | No               | Private access: `disabled`, `allowlist`, `pairing`, or `open`; new managed channels default to `pairing`                                                                                                    |
+| `allowedUsers`      | No               | Private user IDs allowed without pairing (used by private `allowlist` and `pairing` policies)                                                                                                               |
+| `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                       |
+| `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                          |
+| `sessionRotation`   | No               | Bounds after which a route starts a fresh session: `{ "maxTurns": N, "maxAgeHours": N }`. Unset means a session is reused forever. See [Session Rotation](#session-rotation)                                |
+| `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                          |
+| `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                       |
+| `instructions`      | No               | Custom instructions prepended to the first message of each session                                                                                                                                          |
+| `webhooks`          | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                   |
+| `groupPolicy`       | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                 |
+| `senderPolicy`      | No               | Deprecated: `allowlist`, `pairing`, or `open`; used only when `privatePolicy` is absent and DM access is enabled                                                                                            |
+| `dmPolicy`          | No               | Deprecated: `open` or `disabled`; used only when `privatePolicy` is absent                                                                                                                                  |
+| `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset or empty grants no shared-session operator permissions. See [Shared-Session Operators](#shared-session-operators)              |
+| `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from senders admitted by the group member policy for the next bot mention/reply. |
+| `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                          |
+| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                              |
 
-### Sender Policy
+### Private Policy
 
-Controls who can interact with the bot:
+`privatePolicy` controls private conversations independently of groups:
 
-- **`allowlist`** (default) — Only users listed in `allowedUsers` can send messages. Others are silently ignored.
-- **`pairing`** — Unknown senders receive a pairing code. The bot operator approves them via CLI, and they're added to a persistent allowlist. Users in `allowedUsers` skip pairing entirely. See [DM Pairing](#dm-pairing) below.
-- **`open`** — Anyone can send messages. Use with caution.
+- **`disabled`** — Ignore private messages without creating pairing requests.
+- **`allowlist`** — Only users listed in the top-level `allowedUsers` may send private messages.
+- **`pairing`** — Users in `allowedUsers` are admitted directly. Other users need a locally approved user pairing. See [DM Pairing](#dm-pairing).
+- **`open`** — Anyone can send private messages.
+
+New managed channels default to `pairing`. The deprecated `senderPolicy` and `dmPolicy` keys remain supported: an explicit `privatePolicy` takes precedence; otherwise `dmPolicy: "disabled"` disables private access, and otherwise `senderPolicy` supplies the policy (default `allowlist`). These old keys do not restrict group members. Saving from the editor uses `privatePolicy` and preserves existing deprecated keys.
 
 ### Shared-Session Operators
 
 In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
 
-The operators are, in order:
+Set `operators` to the user IDs allowed to manage shared sessions. Omitted or empty `operators` grants nobody this role. Private allowlists, user pairing, group pairing, and group member lists never imply operator permissions. Operators must still pass normal conversation admission.
 
-1. `operators`, when set. It is authoritative even when empty: `"operators": []` means nobody may operate a shared session.
-2. Otherwise `allowedUsers`, when it is not empty.
-3. Otherwise anyone who may speak in the conversation — with one exception. A group with `senders: "open"` admits members nobody vouched for by name, so there the direct-message axis decides instead: everyone under `senderPolicy: "open"`, paired users under `"pairing"`. In a group with `senders: "allowlist"` the members of that group's `allowedUsers` are operators. An approved group under `groupPolicy: "pairing"` admits all of its members by default, and all of them may operate its sessions.
-
-For example, `senderPolicy: "pairing"` with `groups: { "*": { "senders": "open" } }` lets every group member start a turn, while only the users you approved through pairing may answer its permission prompts. Set `operators` when you want a different list.
+For example, `groups: { "*": { "senders": "open" } }` with `operators: ["alice"]` lets every admitted group member start a turn, but only Alice can manage its shared session.
 
 A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
@@ -198,11 +197,10 @@ The legacy slash aliases `/remember-channel`, `/channel-memory`, and
 commands.
 
 Channel memory follows the channel access gates. Any message accepted by
-`senderPolicy`, `dmPolicy`, `groupPolicy`, group settings (including `senders`),
+private access, group admission, group member settings,
 pairing, and mention requirements can read, write, update, or clear memory for
 that chat or thread. Accepted members of the same group share that group's
-target store. Use `allowlist` or `pairing` on `senderPolicy`, or a group's
-`senders: "allowlist"` with its `allowedUsers`, when group memory should be
+target store. Use a group's `senders: "allowlist"` with its `allowedUsers` when group memory should be
 limited to trusted senders — under `senders: "open"` every member of an
 admitted group shares that group's memory store.
 
@@ -238,7 +236,7 @@ Set the actual token in your shell environment or in a `.env` file that gets loa
 
 ## DM Pairing
 
-When `senderPolicy` is set to `"pairing"`, unknown senders go through an approval flow:
+When `privatePolicy` is set to `"pairing"`, unknown senders go through an approval flow:
 
 1. An unknown user sends a message to the bot
 2. The bot replies with an 8-character pairing code (e.g., `VEQDDWXJ`)
@@ -281,7 +279,7 @@ Controls whether the bot participates in group chats at all:
 
 - **`disabled`** (default) — The bot ignores all group messages. Safest option.
 - **`allowlist`** — The bot only responds in groups explicitly listed in `groups` by chat ID. The `"*"` key provides default settings but does **not** act as a wildcard allow.
-- **`pairing`** — A deliberate mention or reply from an unknown group creates one pairing request for the group. Once approved, every member can use the bot in that group; `senderPolicy` continues to control direct messages.
+- **`pairing`** — A deliberate mention or reply from an unknown group creates one pairing request for the group. Once approved, members can use the bot subject to the group's `senders` setting (default `open`); `privatePolicy` continues to control direct messages.
 - **`open`** — The bot responds in all groups it's added to. Use with caution.
 
 Approve a group with the same CLI command used for user pairing. The pending
@@ -322,11 +320,11 @@ Configure per-group with the `groups` setting:
 
 ### Group Senders
 
-By default a group follows `senderPolicy`, so a group that `groupPolicy` admits still drops messages from users outside the direct-message allowlist. Set `senders` in `groups` to decide who may speak in groups on their own:
+Admitted groups allow all members by default. Set `senders` in `groups` to restrict members independently of private access:
 
 ```json
 {
-  "senderPolicy": "pairing",
+  "privatePolicy": "pairing",
   "groupPolicy": "open",
   "groups": {
     "*": { "senders": "open" },
@@ -335,15 +333,14 @@ By default a group follows `senderPolicy`, so a group that `groupPolicy` admits 
 }
 ```
 
-- **`inherit`** — follow `senderPolicy`, like a direct message. This is the default, except in an approved group under `groupPolicy: "pairing"`, which defaults to `open` because the approval admits all of its members.
-- **`open`** — any member of the group may use the bot, while `senderPolicy` keeps governing direct messages. This is the usual choice for a team bot that answers in groups but only for a few people in private chat.
+- **`open`** (default) — Any member of an admitted group may use the bot. Private policy and user pairing have no effect on group members.
 - **`allowlist`** — only the group's `allowedUsers` may speak. This list is separate from the channel-level `allowedUsers`.
 
-Each group's entry is read first, then `"*"`, field by field: a group that sets only `senders: "allowlist"` uses the `allowedUsers` from `"*"`. Under `groupPolicy: "allowlist"` a group ID key also admits the group, so a per-group entry there both admits the group and sets its senders.
+All group settings use field-by-field inheritance: the specific group, then `"*"`, then the channel default where applicable, then the built-in default. Empty objects inherit defaults; arrays replace rather than merge, including `allowedUsers: []`. For example, a group that sets only `senders: "allowlist"` uses the `allowedUsers` from `"*"`. Under `groupPolicy: "allowlist"` a group ID key also admits the group, so a per-group entry there both admits the group and sets its senders.
 
 `pairing` is deliberately not a `senders` value: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
 
-On the `github` and `gitlab` channels all inbound traffic is group traffic, so `senders: "open"` there is equivalent to `senderPolicy: "open"` — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
+On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
 In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. Per-group overrides and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
@@ -374,7 +371,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 - Omitted or `0` disables backfill.
 - Group-level `groupHistoryLimit` overrides the channel-level value.
-- Only messages from senders the group's `senders` setting admits are persisted (`senderPolicy` when it inherits; every member of an approved paired group by default) — so `senders: "open"` also widens whose messages `groupHistoryLimit` records.
+- Only messages from senders the group's `senders` setting admits are persisted (all admitted group members by default) — so `senders: "open"` also widens whose messages `groupHistoryLimit` records.
 - Messages rejected by `groupPolicy` or group allowlist are not persisted.
 - Pending group history is stored as local JSONL under `~/.qwen/channels/<channel-name>-group-history.jsonl` or `$QWEN_HOME/channels/<channel-name>-group-history.jsonl`.
 - Cached messages are injected as untrusted context on the next real trigger and are not written as standalone session turns.
@@ -383,10 +380,9 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 ```
 1. groupPolicy — is this group disabled, listed, paired, or open? (no → ignore/pairing flow)
-2. dmPolicy — is this DM allowed?                      (disabled → ignore)
-3. requireMention — was the bot mentioned/replied to? (no → ignore)
-4. senders — may this sender speak here?              (the group's `senders`, else senderPolicy; a senderPolicy no → user pairing flow)
-5. Route to session
+2. requireMention — was the bot mentioned/replied to? (no → no task; eligible history may be cached)
+3. senders — is this member allowed?                  (open, or group member allowlist)
+4. Route to session
 ```
 
 ### Telegram Setup for Groups
@@ -627,7 +623,7 @@ Example channel config:
       "clientId": "$DINGTALK_CLIENT_ID",
       "clientSecret": "$DINGTALK_CLIENT_SECRET",
       "cwd": "/repo",
-      "senderPolicy": "allowlist",
+      "privatePolicy": "allowlist",
       "allowedUsers": ["12345"],
       "approvalMode": "yolo",
       "sessionScope": "user",

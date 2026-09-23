@@ -58,6 +58,29 @@
 .plot {
   position: relative;
   margin: 0 6px;
+  /* A drag on a touch screen selects time rather than scrolling the page. */
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/*
+ * The selected stretch. A wash of the text colour rather than a hue of its
+ * own: the three hues already mean request, tool and subagent, and a fourth
+ * would read as a fourth kind of record.
+ */
+.selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--left);
+  width: var(--width);
+  min-width: 1px;
+  box-sizing: border-box;
+  border-left: 1px solid var(--foreground);
+  border-right: 1px solid var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .turnMark {
@@ -114,6 +137,10 @@
 
 .span[data-error='true'] {
   background: var(--destructive);
+}
+
+.span[data-dimmed='true'] {
+  opacity: 0.25;
 }
 
 .span[data-current='true'] {
