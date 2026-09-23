@@ -489,6 +489,11 @@ export interface WebShellAtItem {
   iconTooltip?: string;
   insertText?: string;
   composerTag?: WebShellComposerTag;
+  /**
+   * Makes the item an action instead of a reference: choosing it removes the
+   * typed `@query` and calls this, inserting nothing.
+   */
+  onSelect?: () => void;
 }
 
 export type WebShellBuiltinAtProviderId =

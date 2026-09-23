@@ -12,9 +12,16 @@ import {
   type AgentShareSummary,
 } from './share-agent-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
-import { PlusIcon } from 'lucide-react';
+import { MoreHorizontalIcon, PlusIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import {
   Dialog,
   DialogContent,
@@ -65,7 +72,6 @@ export interface ThreadsPageProps {
     provider: 'qwen' | 'codex';
     allowHttp: boolean;
   }) => Promise<boolean>;
-  hideNavigation?: boolean;
   createError?: string;
   agents: readonly WorkspaceAgentSummaryView[];
   threads: readonly ThreadSummaryView[];
@@ -76,7 +82,7 @@ export interface ThreadsPageProps {
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
-  onOpenAgentBuilder?: () => void;
+  onOpenAgentBuilder?: (hostId?: string) => void;
   onOpenDefinitions?: () => void;
   /** Issues a single-use join token for the Add runtime dialog. */
   onCreateJoinToken?: () => Promise<JoinToken>;
@@ -245,7 +251,6 @@ export function ThreadsPage({
   runtimes,
   view,
   onViewChange,
-  hideNavigation = false,
   onOpenThread,
   onDeleteAgent,
   onSetAgentEnabled,
@@ -287,7 +292,15 @@ export function ThreadsPage({
   };
   const statusLabel = (status: string) => statusLabels[status] ?? status;
   const hostLabel = (entry: WorkspaceAgentRuntimeView) =>
-    entry.kind === 'local' ? '本机 Qwen Code' : entry.label;
+    entry.kind === 'local' ? t('collab.agent.thisComputer') : entry.label;
+  // "Program · Runtime": what the agent runs as, then where.
+  const agentPlace = (agent: WorkspaceAgentSummaryView) =>
+    `${
+      agent.execution?.mode === 'managed-host' &&
+      agent.execution.provider === 'codex'
+        ? 'Codex'
+        : 'Qwen Code'
+    } · ${hostLabel(agent.runtime)}`;
 
   const submitConfig =
     (agentId: string) => (event: FormEvent<HTMLFormElement>) => {
@@ -323,7 +336,15 @@ export function ThreadsPage({
           ? {
               execution:
                 hostIds.length > 0
-                  ? ({ mode: 'managed-host', hostIds } as const)
+                  ? ({
+                      mode: 'managed-host',
+                      hostIds,
+                      // Moving an agent keeps the program it is bound to.
+                      ...(current?.execution?.mode === 'managed-host' &&
+                      current.execution.provider
+                        ? { provider: current.execution.provider }
+                        : {}),
+                    } as const)
                   : ({ mode: 'local' } as const),
             }
           : {}),
@@ -366,21 +387,19 @@ export function ThreadsPage({
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
-        {!hideNavigation && (
-          <nav className={styles.viewTabs} aria-label={t('agents.title')}>
-            {(['agents', 'tasks', 'runtime'] as const).map((item) => (
-              <Button
-                key={item}
-                variant={view === item ? 'secondary' : 'ghost'}
-                size="sm"
-                aria-pressed={view === item}
-                onClick={() => openView(item)}
-              >
-                {t(`collab.tabs.${item}`)}
-              </Button>
-            ))}
-          </nav>
-        )}
+        <nav className={styles.viewTabs} aria-label={t('agents.title')}>
+          {(['agents', 'tasks', 'runtime'] as const).map((item) => (
+            <Button
+              key={item}
+              variant={view === item ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-pressed={view === item}
+              onClick={() => openView(item)}
+            >
+              {t(`collab.tabs.${item}`)}
+            </Button>
+          ))}
+        </nav>
         <div className={styles.headerActions}>
           {view === 'agents' && onOpenDefinitions ? (
             <Button variant="ghost" size="sm" onClick={onOpenDefinitions}>
@@ -388,7 +407,11 @@ export function ThreadsPage({
             </Button>
           ) : null}
           {view === 'agents' && onOpenAgentBuilder ? (
-            <Button variant="outline" size="sm" onClick={onOpenAgentBuilder}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onOpenAgentBuilder()}
+            >
               <PlusIcon data-icon="inline-start" />
               {t('collab.agent.new')}
             </Button>
@@ -431,9 +454,9 @@ export function ThreadsPage({
         >
           <DialogContent className="sm:max-w-2xl">
             <DialogHeader>
-              <DialogTitle>新建协作任务</DialogTitle>
+              <DialogTitle>{t('collab.thread.new')}</DialogTitle>
               <DialogDescription>
-                描述任务并选择负责人，创建后在共享对话中协作。
+                {t('collab.thread.newHint')}
               </DialogDescription>
             </DialogHeader>
             <form
@@ -527,8 +550,7 @@ export function ThreadsPage({
                   .filter((agent) => agent.enabled && !agent.retiredAt)
                   .map((agent) => (
                     <option key={agent.id} value={agent.name}>
-                      {agent.name} · {hostLabel(agent.runtime)} ·{' '}
-                      {agent.runtime.provider}
+                      {agent.name} · {agentPlace(agent)}
                     </option>
                   ))}
               </select>
@@ -589,11 +611,9 @@ export function ThreadsPage({
         </Dialog>
 
         <section className={styles.roster} hidden={view !== 'agents'}>
-          <h2 className={styles.sectionTitle}>工作区智能体</h2>
+          <h2 className={styles.sectionTitle}>{t('collab.tabs.agents')}</h2>
           {agents.length === 0 ? (
-            <p className={styles.emptyRoster}>
-              还没有智能体。创建一个身份并为它分配任务，即可开始协作。
-            </p>
+            <p className={styles.emptyRoster}>{t('collab.agent.empty')}</p>
           ) : (
             agents.map((agent) => (
               <div
@@ -626,9 +646,9 @@ export function ThreadsPage({
                   {agent.name}
                 </button>
                 <span className={styles.agentDescription}>
-                  {agent.description || '尚未填写职责'}
+                  {agent.description}
                   <span className="block text-xs text-muted-foreground">
-                    {hostLabel(agent.runtime)} · {agent.runtime.provider}
+                    {agentPlace(agent)}
                   </span>
                 </span>
                 {agent.workingOn ? (
@@ -661,64 +681,67 @@ export function ThreadsPage({
                         onPreviewThread?.(agent.name);
                       }}
                     >
-                      分配任务
+                      {t('collab.agent.mentionIt')}
                     </button>
-                    {onUpdateAgent ? (
-                      <button
-                        type="button"
-                        className={styles.agentAction}
-                        onClick={() =>
-                          setConfiguring(
-                            configuring === agent.id ? undefined : agent.id,
-                          )
-                        }
-                      >
-                        {configuring === agent.id ? '收起' : '配置'}
-                      </button>
-                    ) : null}
-                    {shares ? (
-                      <button
-                        type="button"
-                        className={styles.agentAction}
-                        onClick={() =>
-                          setSharing({ id: agent.id, name: agent.name })
-                        }
-                      >
-                        {t('collab.agent.share')}
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      className={styles.agentAction}
-                      title={
-                        agent.enabled
-                          ? '暂停接收新任务，之后可重新启用'
-                          : '恢复接收新任务'
-                      }
-                      disabled={pending}
-                      onClick={() =>
-                        onSetAgentEnabled(agent.id, !agent.enabled)
-                      }
-                    >
-                      {agent.enabled ? '停用' : '启用'}
-                    </button>
-                    <button
-                      type="button"
-                      className={`${styles.agentAction} ${styles.agentRemove}`}
-                      title="永久停止接单，保留身份名称和已有消息；不同于可恢复的停用"
-                      disabled={Boolean(agent.workingOn || agent.waiting)}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `退役智能体「${agent.name}」？它将不再接单。已有消息保留，名称也会保留，避免其他身份冒用。`,
-                          )
-                        ) {
-                          onDeleteAgent(agent.id);
-                        }
-                      }}
-                    >
-                      退役
-                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          className={styles.agentAction}
+                          aria-label={t('collab.agent.more', {
+                            name: agent.name,
+                          })}
+                        >
+                          <MoreHorizontalIcon size={16} aria-hidden="true" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="min-w-40">
+                        {onUpdateAgent ? (
+                          <DropdownMenuItem
+                            onSelect={() => setConfiguring(agent.id)}
+                          >
+                            {t('collab.agent.configure')}
+                          </DropdownMenuItem>
+                        ) : null}
+                        {shares ? (
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              setSharing({ id: agent.id, name: agent.name })
+                            }
+                          >
+                            {t('collab.agent.share')}
+                          </DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuItem
+                          disabled={pending}
+                          onSelect={() =>
+                            onSetAgentEnabled(agent.id, !agent.enabled)
+                          }
+                        >
+                          {agent.enabled
+                            ? t('collab.agent.pause')
+                            : t('collab.agent.resume')}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          disabled={Boolean(agent.workingOn || agent.waiting)}
+                          onSelect={() => {
+                            if (
+                              window.confirm(
+                                t('collab.agent.retireConfirm', {
+                                  name: agent.name,
+                                }),
+                              )
+                            ) {
+                              onDeleteAgent(agent.id);
+                            }
+                          }}
+                        >
+                          {t('collab.agent.retire')}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </>
                 )}
                 {configuring === agent.id && onUpdateAgent ? (
@@ -980,9 +1003,9 @@ export function ThreadsPage({
             : {})}
           {...(onOpenAgentBuilder
             ? {
-                onCreateAgentOn: () => {
+                onCreateAgentOn: (runtimeId: string) => {
                   setAddingRuntime(false);
-                  onOpenAgentBuilder();
+                  onOpenAgentBuilder(runtimeId);
                 },
               }
             : {})}

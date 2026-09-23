@@ -12,12 +12,7 @@ import { ChatEditor } from '../ChatEditor';
 import { Button } from '../ui/button';
 import type { Message } from '../../adapters/types';
 import { RunRowView, type ThreadDetailView } from './ThreadView';
-import {
-  summarizePreview,
-  explainSkip,
-  buildRunRows,
-  type RoutingPreviewTarget,
-} from './agents-view-logic';
+import { buildRunRows, type RoutingPreviewTarget } from './agents-view-logic';
 import {
   useWebShellCustomization,
   WebShellCustomizationProvider,
@@ -120,6 +115,37 @@ interface TeamMember {
   lead: boolean;
   /** The live run if there is one, otherwise the latest. */
   run?: RunView;
+}
+
+const SKIP_REASONS = new Set([
+  'agent_unknown',
+  'agent_disabled',
+  'agent_retired',
+  'no_target',
+  'queue_full',
+  'turn_budget_exhausted',
+  'token_budget_exhausted',
+  'thread_done',
+  'self_trigger',
+]);
+
+/**
+ * Who a reply will reach, said before it is sent. Naming who is left out
+ * matters as much: an @ to one member must not read like a broadcast.
+ */
+function describePreview(
+  targets: readonly RoutingPreviewTarget[],
+  members: readonly TeamMember[],
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  const names = targets
+    .filter((target) => target.willWake)
+    .map((target) => target.agentName);
+  if (names.length === 0) return t('collab.preview.nobody');
+  const others = members.filter((member) => !names.includes(member.name));
+  return others.length > 0
+    ? t('collab.preview.only', { names: names.join(', ') })
+    : t('collab.preview.to', { names: names.join(', ') });
 }
 
 /** Everyone who has worked on or been handed this thread, lead first. */
@@ -685,12 +711,17 @@ export function ThreadChat({
             ))}
             {preview && (
               <div role="status" className="mb-2 text-xs text-muted-foreground">
-                {summarizePreview(preview)}
+                {describePreview(preview, teamMembers(thread, agents), t)}
                 {preview
                   .filter((target) => !target.willWake)
                   .map((target) => (
                     <p key={`${target.agentName}:${target.reason}`}>
-                      {explainSkip(target.reason ?? '', target.agentName).what}
+                      {t(
+                        SKIP_REASONS.has(target.reason ?? '')
+                          ? `collab.skip.${target.reason}`
+                          : 'collab.skip.other',
+                        { name: target.agentName },
+                      )}
                     </p>
                   ))}
               </div>
@@ -702,7 +733,7 @@ export function ThreadChat({
               atProviders={[
                 {
                   id: 'agents',
-                  label: 'Agents',
+                  label: t('collab.mention.provider'),
                   search: async ({ query }) =>
                     agents
                       .filter(

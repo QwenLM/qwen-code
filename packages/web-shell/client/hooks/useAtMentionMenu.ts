@@ -1343,6 +1343,15 @@ export function useAtMentionMenu({
         close();
         return true;
       }
+      if (item.onSelect) {
+        view.dispatch({
+          changes: { from: current.from, to: current.to, insert: '' },
+          selection: { anchor: current.from },
+        });
+        close();
+        item.onSelect();
+        return true;
+      }
       if (
         current.selectedProviderId === FILE_PROVIDER_ID &&
         item.kind === 'directory' &&

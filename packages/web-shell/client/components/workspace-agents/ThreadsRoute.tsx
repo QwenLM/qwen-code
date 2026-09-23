@@ -23,6 +23,7 @@ import {
 import { ThreadView, type ThreadDetailView } from './ThreadView';
 import { ThreadChat } from './ThreadChat';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
+import { useI18n } from '../../i18n';
 import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
@@ -226,7 +227,8 @@ const REFRESH_MS = 1_000;
 const CHANGE_REFETCH_MS = 150;
 
 export interface ThreadsRouteProps {
-  initialView?: AgentWorkspaceView;
+  /** `new-agent` opens straight into the New agent page. */
+  initialView?: AgentWorkspaceView | 'new-agent';
   initialThreadId?: string;
   workspaceCwd?: string;
   chat?: boolean;
@@ -234,7 +236,6 @@ export interface ThreadsRouteProps {
   onOpenActivity?: (threadId: string, workspaceCwd: string) => void;
   headerActionsContainer?: HTMLElement | null;
   onTitleChange?: (threadId: string, title: string) => void;
-  hideNavigation?: boolean;
   onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
   /** Switches the shell to an agent's own session. Absent when embedded
    * somewhere with no session view to switch to. */
@@ -251,7 +252,6 @@ export function ThreadsRoute({
   onOpenActivity,
   headerActionsContainer,
   onTitleChange,
-  hideNavigation = false,
   onOpenThreadChat,
   onOpenAgentSession,
   onOpenDefinitions,
@@ -271,9 +271,14 @@ export function ThreadsRoute({
         : undefined,
     [workspace.baseUrl, workspace.token, workspaceCwd],
   );
+  const { t } = useI18n();
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
   const [runtimes, setRuntimes] = useState<WorkspaceAgentRuntimeView[]>([]);
-  const [view, setView] = useState<AgentWorkspaceView>(initialView ?? 'agents');
+  const [view, setView] = useState<AgentWorkspaceView>(
+    initialView === undefined || initialView === 'new-agent'
+      ? 'agents'
+      : initialView,
+  );
   const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [threads, setThreads] = useState<ThreadSummaryView[]>([]);
   const [openId, setOpenId] = useState<string | undefined>(initialThreadId);
@@ -289,7 +294,10 @@ export function ThreadsRoute({
     RoutingPreviewTarget[] | undefined
   >();
   const [pending, setPending] = useState(false);
-  const [creatingAgent, setCreatingAgent] = useState(false);
+  // Set while the New agent page is open; may name the runtime to preselect.
+  const [creatingAgent, setCreatingAgent] = useState<
+    { hostId?: string } | undefined
+  >(initialView === 'new-agent' ? {} : undefined);
   const [refreshError, setRefreshError] = useState<string | undefined>();
   const [actionError, setActionError] = useState<string | undefined>();
   const error = actionError ?? refreshError;
@@ -303,7 +311,7 @@ export function ThreadsRoute({
   const appliedRefresh = useRef(0);
 
   useEffect(() => {
-    if (initialView) setView(initialView);
+    if (initialView && initialView !== 'new-agent') setView(initialView);
   }, [initialView]);
 
   const openThread = (id?: string) => {
@@ -464,7 +472,7 @@ export function ThreadsRoute({
   );
 
   if (!client) {
-    return <p role="alert">Open a workspace before using shared threads.</p>;
+    return <p role="alert">{t('collab.noWorkspace')}</p>;
   }
 
   if (creatingAgent) {
@@ -473,8 +481,11 @@ export function ThreadsRoute({
         initialScope="workspace"
         workspaceCwd={workspaceCwd}
         executionHosts={runtimes.filter((entry) => entry.kind === 'external')}
-        onCancel={() => setCreatingAgent(false)}
-        onCreated={() => setCreatingAgent(false)}
+        {...(creatingAgent.hostId
+          ? { initialHostId: creatingAgent.hostId }
+          : {})}
+        onCancel={() => setCreatingAgent(undefined)}
+        onCreated={() => setCreatingAgent(undefined)}
         onSaveWorkspaceAgent={async (input) => {
           await client.createAgent(input);
           await refresh();
@@ -487,9 +498,9 @@ export function ThreadsRoute({
     return (
       <div>
         <button type="button" onClick={() => openThread()}>
-          Back to tasks
+          {t('collab.thread.back')}
         </button>
-        <p role="status">{error ?? 'Loading task…'}</p>
+        <p role="status">{error ?? t('collab.thread.loading')}</p>
       </div>
     );
   }
@@ -625,7 +636,6 @@ export function ThreadsRoute({
         threads={threads}
         view={view}
         onViewChange={setView}
-        hideNavigation={hideNavigation}
         runtimes={runtimes}
         onConnectRemoteHost={
           client.connectRemoteHost
@@ -642,7 +652,7 @@ export function ThreadsRoute({
         onUpdateAgent={(id, patch) =>
           void mutate(() => client.updateAgent(id, patch))
         }
-        onOpenAgentBuilder={() => setCreatingAgent(true)}
+        onOpenAgentBuilder={(hostId) => setCreatingAgent({ hostId })}
         {...(client.createJoinToken
           ? { onCreateJoinToken: client.createJoinToken }
           : {})}

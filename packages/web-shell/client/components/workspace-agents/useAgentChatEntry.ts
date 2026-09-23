@@ -50,6 +50,7 @@ export function useAgentChatEntry({
   onOpen,
   onError,
   getContext,
+  onCreateAgent,
 }: {
   enabled: boolean;
   cwd?: string;
@@ -60,8 +61,14 @@ export function useAgentChatEntry({
   onError: (message: string) => void;
   /** The conversation so far, when mentioning from a chat that has one. */
   getContext?: () => string;
+  /** Offered as the picker's last item: open the New agent page. */
+  onCreateAgent?: () => void;
 }) {
   const { t } = useI18n();
+  // Read through a ref so a new handler each render keeps `providers` stable.
+  const createAgentRef = useRef(onCreateAgent);
+  createAgentRef.current = onCreateAgent;
+  const canCreateAgent = onCreateAgent !== undefined;
   const roster = useRef<
     | { api: unknown; at: number; agents: Promise<WorkspaceAgentSummaryView[]> }
     | undefined
@@ -98,8 +105,8 @@ export function useAgentChatEntry({
             {
               id: 'workspace-collaborators',
               label: t('collab.mention.provider'),
-              search: async ({ query }) =>
-                (await listAgents())
+              search: async ({ query }) => [
+                ...(await listAgents())
                   .filter(
                     (agent) =>
                       agent.enabled &&
@@ -109,18 +116,35 @@ export function useAgentChatEntry({
                   .map((agent) => ({
                     id: agent.id,
                     label: agent.name,
-                    subtitle:
+                    // "Program · Runtime", as on the Agents page.
+                    subtitle: `${
+                      agent.execution?.mode === 'managed-host' &&
+                      agent.execution.provider === 'codex'
+                        ? 'Codex'
+                        : 'Qwen Code'
+                    } · ${
                       agent.runtime.kind === 'local'
-                        ? agent.runtime.provider
-                        : `${agent.runtime.provider} · ${agent.runtime.label}`,
+                        ? t('collab.agent.thisComputer')
+                        : agent.runtime.label
+                    }`,
                     description: t(`collab.agentStatus.${agent.status}`),
                     ...(agent.color ? { iconColor: agent.color } : {}),
                     insertText: `@${agent.name} `,
                   })),
+                ...(canCreateAgent
+                  ? [
+                      {
+                        id: 'collab:new-agent',
+                        label: t('collab.mention.newAgent'),
+                        onSelect: () => createAgentRef.current?.(),
+                      },
+                    ]
+                  : []),
+              ],
             },
           ]
         : [],
-    [api, listAgents, t],
+    [api, listAgents, canCreateAgent, t],
   );
   const submit = useCallback<Submit>(
     (text, images, files, commit, metadata) => {

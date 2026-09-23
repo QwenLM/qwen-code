@@ -58,10 +58,13 @@ interface AgentCreatePageProps {
     provider?: string;
     workspaceCwd?: string;
   }[];
+  /** Preselects the runtime, e.g. right after it joined. */
+  initialHostId?: string;
   onSaveWorkspaceAgent?: (input: {
     name: string;
-    description: string;
-    instructions: string;
+    description?: string;
+    instructions?: string;
+    agentType?: string;
     model?: string;
     maxConcurrentRuns: number;
     execution?:
@@ -108,6 +111,7 @@ function toggleSelection(
 }
 
 const approvalModes = ['inherit', ...DAEMON_APPROVAL_MODES];
+const NO_ROLE = '__none__';
 const MCP_DISCOVERY_POLL_MS = 1_500;
 const MCP_DISCOVERY_MAX_ATTEMPTS = 40;
 
@@ -118,12 +122,19 @@ export function AgentCreatePage({
   onCreated,
   executionHosts = [],
   workspaceCwd,
+  initialHostId,
   onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
   const workspaceAgentMode = onSaveWorkspaceAgent !== undefined;
-  const { createAgent, updateAgent, generateContent } = useAgents({
-    autoLoad: false,
+  const {
+    createAgent,
+    updateAgent,
+    generateContent,
+    agents: roles,
+  } = useAgents({
+    // The role list is only offered when creating a workspace Agent.
+    autoLoad: workspaceAgentMode,
   });
   const toolsResource = useTools({ autoLoad: false });
   const mcpResource = useMcp({ autoLoad: false });
@@ -161,8 +172,9 @@ export function AgentCreatePage({
     'qwen',
   );
   const [executionHostIds, setExecutionHostIds] = useState(
-    () => new Set<string>(),
+    () => new Set<string>(initialHostId ? [initialHostId] : []),
   );
+  const [role, setRole] = useState('');
   const [color, setColor] = useState(agent?.color ?? 'inherit');
   const [selectedMcpServers, setSelectedMcpServers] = useState(
     () => new Set(Object.keys(agent?.mcpServers ?? {})),
@@ -225,8 +237,10 @@ export function AgentCreatePage({
   );
   const activeMcpServerKey = activeMcpServerNames.join('\0');
 
+  // A workspace Agent needs only a name: a role or the defaults cover the rest.
   const canSave = Boolean(
-    name.trim() && description.trim() && systemPrompt.trim(),
+    name.trim() &&
+      (workspaceAgentMode || (description.trim() && systemPrompt.trim())),
   );
 
   useEffect(
@@ -499,13 +513,14 @@ export function AgentCreatePage({
           concurrency < 1 ||
           concurrency > 8
         ) {
-          throw new Error('同时执行的任务数必须在 1 到 8 之间');
+          throw new Error(t('collab.agent.concurrencyInvalid'));
         }
         const trimmedName = name.trim();
         await onSaveWorkspaceAgent({
           name: trimmedName,
-          description: description.trim(),
-          instructions: systemPrompt.trim(),
+          ...(description.trim() ? { description: description.trim() } : {}),
+          ...(systemPrompt.trim() ? { instructions: systemPrompt.trim() } : {}),
+          ...(role ? { agentType: role } : {}),
           ...(model.trim() ? { model: model.trim() } : {}),
           maxConcurrentRuns: concurrency,
           ...(executionHostIds.size > 0
@@ -589,7 +604,7 @@ export function AgentCreatePage({
       <div className="flex items-start justify-between gap-4">
         <h1 className="text-xl font-semibold text-balance">
           {workspaceAgentMode
-            ? '新建协作智能体'
+            ? t('collab.agent.new')
             : agent
               ? t('agent.edit')
               : t('agent.create')}
@@ -612,21 +627,11 @@ export function AgentCreatePage({
       ) : null}
 
       {workspaceAgentMode && (
-        <div className="rounded-lg border border-border p-4 text-sm">
-          <p>
-            所属项目 ·{' '}
-            <strong>
-              {workspaceCwd?.split(/[\\/]/).filter(Boolean).at(-1) ??
-                '当前项目'}
-            </strong>
-          </p>
-          <p className="break-all text-xs text-muted-foreground">
-            {workspaceCwd}
-          </p>
-          <p className="mt-2 text-muted-foreground">
-            与侧边栏的项目工作区相同。此智能体加入该项目的协作名单；运行位置在下方单独选择。
-          </p>
-        </div>
+        <p className="text-sm text-muted-foreground">
+          {t('collab.agent.joins', {
+            project: workspaceCwd?.split(/[\\/]/).filter(Boolean).at(-1) ?? '',
+          })}
+        </p>
       )}
       <Tabs defaultValue="overview">
         {!workspaceAgentMode && (
@@ -685,32 +690,59 @@ export function AgentCreatePage({
               />
               <FieldDescription>
                 {workspaceAgentMode
-                  ? '这个名字会显示在共享对话中，之后可以通过 @名字 分配任务。'
+                  ? t('collab.agent.nameHelp')
                   : t('agent.create.nameHelp')}
               </FieldDescription>
             </Field>
 
             {workspaceAgentMode && (
+              <Field>
+                <FieldLabel htmlFor="agent-role">
+                  {t('collab.agent.role')}
+                </FieldLabel>
+                <Select
+                  value={role || NO_ROLE}
+                  onValueChange={(value) =>
+                    setRole(value === NO_ROLE ? '' : value)
+                  }
+                >
+                  <SelectTrigger id="agent-role" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_ROLE}>
+                      {t('collab.agent.roleNone')}
+                    </SelectItem>
+                    {roles.map((entry) => (
+                      <SelectItem key={entry.name} value={entry.name}>
+                        {entry.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FieldDescription>
+                  {t('collab.agent.roleHint')}
+                </FieldDescription>
+              </Field>
+            )}
+            {workspaceAgentMode && (
               <Field className="lg:col-span-2">
                 <FieldLabel htmlFor="agent-workspace-prompt">
-                  系统提示词 · 职责与协作方式
+                  {t('collab.agent.instructions')}
                 </FieldLabel>
                 <Textarea
                   id="agent-workspace-prompt"
                   value={systemPrompt}
                   onChange={(event) => setSystemPrompt(event.target.value)}
-                  rows={8}
-                  placeholder="定义它负责什么、如何与其他智能体协作，以及结果应该如何交付。"
+                  rows={6}
+                  placeholder={t('collab.agent.instructionsHint')}
                 />
-                <FieldDescription>
-                  这是智能体的核心工作指令。下方职责简介用于同伴发现，不能代替系统提示词。
-                </FieldDescription>
               </Field>
             )}
             <Field className="lg:col-span-2">
               <FieldLabel htmlFor="agent-description">
                 {workspaceAgentMode
-                  ? '职责简介 · 同伴什么时候应该找你'
+                  ? t('collab.agent.description')
                   : t('agent.create.description')}
               </FieldLabel>
               <Textarea
@@ -738,7 +770,7 @@ export function AgentCreatePage({
               <>
                 <Field>
                   <FieldLabel htmlFor="agent-concurrency">
-                    同时执行的任务数
+                    {t('collab.agent.concurrency')}
                   </FieldLabel>
                   <Input
                     id="agent-concurrency"
@@ -752,93 +784,112 @@ export function AgentCreatePage({
                     }
                   />
                 </Field>
-                {
-                  <Field className="lg:col-span-2">
-                    <FieldLabel>在哪里运行</FieldLabel>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <label className="flex items-start gap-2 rounded-md border border-border p-3 text-sm">
+                <Field className="lg:col-span-2">
+                  <FieldLabel>{t('collab.agent.runsOn')}</FieldLabel>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="flex items-start gap-2 rounded-md border border-border p-3 text-sm">
+                      <input
+                        type="radio"
+                        name="agent-execution-location"
+                        checked={executionHostIds.size === 0}
+                        onChange={() => {
+                          setExecutionHostIds(new Set());
+                          setExecutionProvider('qwen');
+                        }}
+                      />
+                      <span>
+                        {t('collab.agent.thisComputer')}
+                        <span className="block break-all text-xs text-muted-foreground">
+                          {workspaceCwd}
+                        </span>
+                      </span>
+                    </label>
+                    {executionHosts.map((host) => (
+                      <label
+                        key={host.id}
+                        className="flex items-start gap-2 rounded-md border border-border p-3 text-sm"
+                      >
                         <input
                           type="radio"
                           name="agent-execution-location"
-                          checked={executionHostIds.size === 0}
-                          onChange={() => setExecutionHostIds(new Set())}
+                          checked={executionHostIds.has(host.id)}
+                          onChange={() => {
+                            setExecutionHostIds(new Set([host.id]));
+                            setExecutionProvider('qwen');
+                          }}
                         />
                         <span>
-                          本机 · Qwen Code
+                          {host.label}
+                          {host.status === 'offline' && (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              {t('collab.agentStatus.offline')}
+                            </span>
+                          )}
                           <span className="block break-all text-xs text-muted-foreground">
-                            {workspaceCwd}
+                            {host.workspaceCwd ?? t('collab.agent.cwdUnknown')}
                           </span>
                         </span>
                       </label>
-                      {executionHosts.map((host) => (
-                        <div
-                          key={host.id}
-                          className="flex items-start gap-2 rounded-md border border-border p-3 text-sm"
-                        >
-                          <input
-                            type="radio"
-                            name="agent-execution-location"
-                            id={`agent-host-${host.id}`}
-                            checked={executionHostIds.has(host.id)}
-                            onChange={() => {
-                              setExecutionHostIds(new Set([host.id]));
-                              setExecutionProvider('qwen');
-                            }}
-                          />
-                          <label htmlFor={`agent-host-${host.id}`}>
-                            {host.label} ·{' '}
-                            {host.status === 'online' ? '在线' : '离线'}
-                            <span className="block text-xs text-muted-foreground">
-                              {host.provider}
-                            </span>
-                            <span className="block break-all text-xs text-muted-foreground">
-                              执行目录：{host.workspaceCwd ?? '尚未上报'}
-                            </span>
-                          </label>
-                        </div>
-                      ))}
-                    </div>
-                    {(() => {
-                      // A runtime lists what it can run ("Qwen Code ACP,
-                      // Codex CLI"); offer a choice only when there is one.
-                      const host = executionHosts.find((entry) =>
-                        executionHostIds.has(entry.id),
-                      );
-                      const offersCodex = /codex/i.test(host?.provider ?? '');
-                      if (!host || !offersCodex) return null;
-                      return (
-                        <div
-                          role="radiogroup"
-                          aria-label={t('collab.runtime.program')}
-                          className="mt-2 flex gap-2"
-                        >
-                          {(['qwen', 'codex'] as const).map((provider) => (
+                    ))}
+                  </div>
+                  <FieldDescription>
+                    {t('collab.agent.runsOnHint')}
+                  </FieldDescription>
+                </Field>
+                {(() => {
+                  // Only what the chosen runtime reported it can run is
+                  // selectable; the rest say why not.
+                  const host = executionHosts.find((entry) =>
+                    executionHostIds.has(entry.id),
+                  );
+                  const missing = (provider: 'qwen' | 'codex') =>
+                    provider === 'qwen'
+                      ? undefined
+                      : !host
+                        ? t('collab.agent.programLocal')
+                        : /codex/i.test(host.provider ?? '')
+                          ? undefined
+                          : t('collab.agent.programMissing');
+                  return (
+                    <Field className="lg:col-span-2">
+                      <FieldLabel>{t('collab.runtime.program')}</FieldLabel>
+                      <div
+                        role="radiogroup"
+                        aria-label={t('collab.runtime.program')}
+                        className="grid gap-2 sm:grid-cols-2"
+                      >
+                        {(['qwen', 'codex'] as const).map((provider) => {
+                          const reason = missing(provider);
+                          return (
                             <label
                               key={provider}
-                              className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
+                              className="flex items-start gap-2 rounded-md border border-border p-3 text-sm has-[:disabled]:opacity-60"
                             >
                               <input
                                 type="radio"
                                 name="agent-execution-provider"
+                                disabled={reason !== undefined}
                                 checked={executionProvider === provider}
                                 onChange={() => setExecutionProvider(provider)}
                               />
-                              {provider === 'qwen' ? 'Qwen Code' : 'Codex'}
+                              <span>
+                                {provider === 'qwen' ? 'Qwen Code' : 'Codex'}
+                                {reason && (
+                                  <span className="block text-xs text-muted-foreground">
+                                    {reason}
+                                  </span>
+                                )}
+                              </span>
                             </label>
-                          ))}
-                        </div>
-                      );
-                    })()}
-                    <FieldDescription>
-                      选择实际执行任务的机器和程序，不改变所属项目。远程机器使用上面显示的执行目录，不会自动同步本地文件。多个智能体可以共用同一台机器。
-                    </FieldDescription>
-                  </Field>
-                }
+                          );
+                        })}
+                      </div>
+                    </Field>
+                  );
+                })()}
                 <Field className="lg:col-span-2">
                   <FieldDescription>
-                    当前 demo
-                    以只读任务为主。创建后不会立即执行；请分配任务或在共享对话中
-                    @它。
+                    {t('collab.agent.afterCreate')}
                   </FieldDescription>
                 </Field>
               </>

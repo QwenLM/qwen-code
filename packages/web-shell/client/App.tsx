@@ -8998,7 +8998,7 @@ export function App({
     );
   }, []);
   const [agentsNav, setAgentsNav] = useState<{
-    view: 'agents' | 'tasks' | 'runtime';
+    view: 'agents' | 'tasks' | 'runtime' | 'new-agent';
     request: number;
   }>({ view: 'agents', request: 0 });
   useEffect(() => {
@@ -18114,6 +18114,14 @@ export function App({
     onSubmit: handleEditorSubmit,
     onOpen: handleCollaborationThreadOpen,
     onError: handleCollaborationThreadError,
+    onCreateAgent: () => {
+      setAgentsNav((current) => ({
+        view: 'new-agent',
+        request: current.request + 1,
+      }));
+      setAgentsCreateScope(null);
+      openPanel('agents');
+    },
   });
   const composerAtProviders = useMemo(
     () => [...(atProviders ?? []), ...agentChatEntry.providers],

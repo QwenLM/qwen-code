@@ -571,7 +571,46 @@ const EN: Messages = {
     'Runtimes are the computers agents run on: this one, and any that joined with a link.',
   'collab.agent.new': 'New agent',
   'collab.agent.roles': 'Role templates',
+  'collab.agent.mentionIt': '@ Mention',
+  'collab.agent.more': (v) => `More actions for ${v?.name}`,
+  'collab.agent.configure': 'Configure',
+  'collab.agent.pause': 'Pause',
+  'collab.agent.resume': 'Resume',
+  'collab.agent.retire': 'Retire',
+  'collab.agent.retireConfirm': (v) =>
+    `Retire ${v?.name}? It takes no more work. Its messages stay, and its name stays reserved so no one else can post as it.`,
+  'collab.agent.joins': (v) => `Joins the team for ${v?.project}.`,
+  'collab.agent.nameHelp':
+    'Shown in conversations. Mention it with @name to bring it in.',
+  'collab.agent.role': 'Start from a role',
+  'collab.agent.roleNone': 'No role',
+  'collab.agent.roleHint':
+    'A role from .qwen/agents supplies base instructions and tools; what you write below adds to it.',
+  'collab.agent.instructions': 'Working instructions (optional)',
+  'collab.agent.instructionsHint':
+    'What it is responsible for and how it should hand back results.',
+  'collab.agent.description':
+    'When should other agents bring it in? (optional)',
+  'collab.agent.concurrency': 'Conversations at once',
+  'collab.agent.concurrencyInvalid':
+    'Conversations at once must be between 1 and 8.',
+  'collab.agent.runsOn': 'Runs on',
+  'collab.agent.thisComputer': 'This computer',
+  'collab.agent.cwdUnknown': 'Folder not reported yet',
+  'collab.agent.runsOnHint':
+    'A joined runtime works in its own folder, shown under its name. Files here are not copied to it.',
+  'collab.agent.programLocal': 'Runs only on a joined runtime',
+  'collab.agent.programMissing': 'Not found on this runtime',
+  'collab.agent.afterCreate':
+    'It starts working when you mention it in a conversation.',
   'collab.thread.new': 'New conversation',
+  'collab.noWorkspace': 'Open a workspace to work with agents.',
+  'collab.thread.back': 'Back',
+  'collab.thread.loading': 'Loading conversation…',
+  'collab.thread.newHint':
+    'Say what you need and who should take it. The conversation opens once it is created.',
+  'collab.agent.empty':
+    'No agents yet. Create one, then @ it in any conversation.',
   'collab.runtime.localNote':
     'This computer. Its agents run in this workspace with Qwen Code.',
   'collab.runtime.remoteNote':
@@ -588,6 +627,29 @@ const EN: Messages = {
   'collab.run.retry': 'Retry',
   'collab.run.retryPrompt': 'please continue from where you stopped.',
   'collab.mention.provider': 'Agents',
+  'collab.mention.newAgent': 'New agent…',
+  'collab.preview.nobody': 'This message will not reach any agent.',
+  'collab.preview.to': (v) => `Goes to ${v?.names}.`,
+  'collab.preview.only': (v) =>
+    `Only ${v?.names} will get this. Other members are not interrupted.`,
+  'collab.skip.agent_unknown': (v) =>
+    `No agent is named ${v?.name}. Check the spelling, or create it.`,
+  'collab.skip.agent_disabled': (v) =>
+    `${v?.name} is paused. Resume it on the Agents page.`,
+  'collab.skip.agent_retired': (v) =>
+    `${v?.name} is retired. Hand this to another agent.`,
+  'collab.skip.no_target':
+    'This reaches nobody. Mention an agent to send it to them.',
+  'collab.skip.queue_full': (v) =>
+    `${v?.name} has a full backlog. Wait, or ask another agent.`,
+  'collab.skip.turn_budget_exhausted':
+    'The agents have used their unattended turns. Your reply lets them continue.',
+  'collab.skip.token_budget_exhausted':
+    'This conversation has used its token budget. Start a new conversation to continue.',
+  'collab.skip.thread_done':
+    'This conversation is done. Start a new one to continue.',
+  'collab.skip.self_trigger': (v) => `${v?.name} cannot wake itself.`,
+  'collab.skip.other': (v) => `${v?.name} will not be woken.`,
   'collab.mention.noAttachments':
     'Attachments cannot be sent to an agent yet. Send text to start.',
   'collab.agentStatus.idle': 'Idle',
@@ -4728,7 +4790,39 @@ const ZH: Messages = {
     'Runtime 是运行 Agent 的电脑：这台电脑，以及用链接加入的其他电脑。',
   'collab.agent.new': '新建 Agent',
   'collab.agent.roles': '角色模板',
+  'collab.agent.mentionIt': '@ 它',
+  'collab.agent.more': (v) => `${v?.name} 的更多操作`,
+  'collab.agent.configure': '配置',
+  'collab.agent.pause': '停用',
+  'collab.agent.resume': '启用',
+  'collab.agent.retire': '退役',
+  'collab.agent.retireConfirm': (v) =>
+    `退役 ${v?.name}？它不会再接任务。已有消息保留，名字也会保留，别人不能冒用。`,
+  'collab.agent.joins': (v) => `加入 ${v?.project} 的团队。`,
+  'collab.agent.nameHelp': '显示在对话里，用 @名字 把它叫进来。',
+  'collab.agent.role': '从角色开始',
+  'collab.agent.roleNone': '不使用角色',
+  'collab.agent.roleHint':
+    '.qwen/agents 里的角色提供基础指令和工具，下面写的内容在它之上补充。',
+  'collab.agent.instructions': '工作说明（可选）',
+  'collab.agent.instructionsHint': '它负责什么，结果怎么交回来。',
+  'collab.agent.description': '其他 Agent 什么时候该找它（可选）',
+  'collab.agent.concurrency': '同时处理的对话数',
+  'collab.agent.concurrencyInvalid': '同时处理的对话数必须在 1 到 8 之间。',
+  'collab.agent.runsOn': '运行在',
+  'collab.agent.thisComputer': '这台电脑',
+  'collab.agent.cwdUnknown': '尚未上报目录',
+  'collab.agent.runsOnHint':
+    '加入的 Runtime 在它自己的目录里工作（显示在名字下方），这里的文件不会复制过去。',
+  'collab.agent.programLocal': '只能在加入的 Runtime 上运行',
+  'collab.agent.programMissing': '这个 Runtime 上没有检测到',
+  'collab.agent.afterCreate': '在对话里 @ 它，它就开始工作。',
   'collab.thread.new': '新建协作对话',
+  'collab.noWorkspace': '先打开一个工作区，才能和 Agent 协作。',
+  'collab.thread.back': '返回',
+  'collab.thread.loading': '正在加载对话…',
+  'collab.thread.newHint': '写下要做什么、交给谁。创建后会打开这个对话。',
+  'collab.agent.empty': '还没有 Agent。新建一个，然后在任意对话里 @ 它。',
   'collab.runtime.localNote':
     '这台电脑。它上面的 Agent 用 Qwen Code 在这个工作区里运行。',
   'collab.runtime.remoteNote':
@@ -4744,6 +4838,25 @@ const ZH: Messages = {
   'collab.run.retry': '重试',
   'collab.run.retryPrompt': '请从中断的地方继续。',
   'collab.mention.provider': 'Agent',
+  'collab.mention.newAgent': '新建 Agent…',
+  'collab.preview.nobody': '这条消息不会发给任何 Agent。',
+  'collab.preview.to': (v) => `发给 ${v?.names}。`,
+  'collab.preview.only': (v) => `只发给 ${v?.names}，其他成员不会被打断。`,
+  'collab.skip.agent_unknown': (v) =>
+    `没有名为 ${v?.name} 的 Agent。检查拼写，或者先新建它。`,
+  'collab.skip.agent_disabled': (v) =>
+    `${v?.name} 已停用。在 Agent 页启用后才能接任务。`,
+  'collab.skip.agent_retired': (v) => `${v?.name} 已退役，请交给别的 Agent。`,
+  'collab.skip.no_target': '这条消息没有发给任何人。@ 一个 Agent 就能发给它。',
+  'collab.skip.queue_full': (v) =>
+    `${v?.name} 手上的任务已满。稍等，或者交给别的 Agent。`,
+  'collab.skip.turn_budget_exhausted':
+    'Agent 已用完无人值守的轮数。你回复一句，它们就能继续。',
+  'collab.skip.token_budget_exhausted':
+    '这个对话的 token 预算已用完，请新开一个对话继续。',
+  'collab.skip.thread_done': '这个对话已经结束，请新开一个继续。',
+  'collab.skip.self_trigger': (v) => `${v?.name} 不能唤醒自己。`,
+  'collab.skip.other': (v) => `${v?.name} 这次不会被唤醒。`,
   'collab.mention.noAttachments': '暂时不能把附件发给 Agent，请先用文字发起。',
   'collab.agentStatus.idle': '空闲',
   'collab.agentStatus.working': '正在工作',
