@@ -755,12 +755,46 @@ describe('buildClassifierContents', () => {
       { toolName: 'read_file', toolParams: { path: '/tmp/a.ts' } },
     );
     const priorText = (result[0].parts?.[0] as { text: string }).text;
-    // Case-insensitive last-match resolution mirrors invocation, but the
-    // projection must carry the canonical registered name and no payload.
+    // Case-insensitive resolution mirrors invocation, but the projection
+    // must carry the canonical registered name and no payload.
     expect(priorText).toContain(`Prior action: ${ToolNames.TOOL_CALL}(`);
     expect(priorText).not.toContain('Tool_Call');
     expect(priorText).not.toContain('run_shell_command');
     expect(priorText).not.toContain('secret-cmd');
+  });
+
+  it('projects a bridged name that matches several tools only by case as name-only (#11321)', () => {
+    // tool_call refuses such a name, so the transcript must not pick one of
+    // the two by registration order and project its arguments.
+    const registry = makeRegistry({
+      deferred_target: new StubTool('deferred_target', { shape: 'lower' }),
+      Deferred_Target: new StubTool('Deferred_Target', { shape: 'upper' }),
+    });
+    const result = buildClassifierContents(
+      [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  name: 'DEFERRED_TARGET',
+                  arguments: { secretKey: 'x' },
+                },
+              },
+            },
+          ],
+        },
+      ],
+      registry,
+      { toolName: 'read_file', toolParams: { path: '/tmp/a.ts' } },
+    );
+    const priorText = (result[0].parts?.[0] as { text: string }).text;
+    expect(priorText).toContain('DEFERRED_TARGET');
+    expect(priorText).not.toContain('lower');
+    expect(priorText).not.toContain('upper');
+    expect(priorText).not.toContain('secretKey');
   });
 
   it('falls back to raw args when tool declines to project (returns undefined)', () => {
