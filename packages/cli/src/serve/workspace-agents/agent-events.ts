@@ -35,6 +35,12 @@ export interface AgentPermissionPrompt {
   options: Array<{ optionId: string; name: string; kind?: string }>;
 }
 
+export interface AgentRunStep {
+  id: string;
+  title: string;
+  status: 'running' | 'done' | 'failed';
+}
+
 export interface AgentRunProgressEvent {
   type: 'progress';
   threadId: string;
@@ -48,6 +54,7 @@ export interface AgentRunProgressEvent {
   /** Last time the agent did anything; the client derives "stalled" from it. */
   activityAt: number;
   permission?: AgentPermissionPrompt;
+  steps?: AgentRunStep[];
 }
 
 export type AgentLiveEvent =

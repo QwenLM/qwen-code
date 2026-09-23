@@ -39,6 +39,17 @@ export interface AgentShareSummary {
   expiresAt?: number;
 }
 
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** The daemon builds the endpoint from the address this page was opened on. */
+function isLoopback(endpoint: string): boolean {
+  try {
+    return LOOPBACK.has(new URL(endpoint).hostname);
+  } catch {
+    return false;
+  }
+}
+
 function curlFor(share: AgentShare): string {
   const body = JSON.stringify({
     jsonrpc: '2.0',
@@ -164,6 +175,11 @@ export function ShareAgentDialog({
             <p className="text-xs text-muted-foreground">
               {t('collab.share.once')}
             </p>
+            {isLoopback(share.endpoint) && (
+              <p role="alert" className="text-xs text-destructive">
+                {t('collab.share.loopback')}
+              </p>
+            )}
           </div>
         ) : (
           <div

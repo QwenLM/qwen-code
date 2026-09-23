@@ -328,6 +328,12 @@ export interface ThreadRun {
       title: string;
       options: Array<{ optionId: string; name: string; kind?: string }>;
     };
+    /** The turn's latest tool calls, oldest first. */
+    steps?: Array<{
+      id: string;
+      title: string;
+      status: 'running' | 'done' | 'failed';
+    }>;
   };
   id: string;
   agentId: string;

@@ -381,7 +381,15 @@ async function executeAssignment(
         sessionId,
         promptId,
         AbortSignal.any([updates.signal, execution.signal]),
-        report,
+        // ponytail: remote runs report stage and text only; forward `steps`
+        // through the lease update when remote step lists are wanted.
+        (update) =>
+          report(
+            update.stage,
+            update.detail ?? '',
+            update.outputText,
+            update.thoughtText,
+          ),
       ).catch((error: unknown) => {
         if (!updates.signal.aborted) execution.abort(error);
       });

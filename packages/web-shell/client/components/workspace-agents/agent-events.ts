@@ -17,6 +17,12 @@ export interface AgentPermissionPromptView {
   options: Array<{ optionId: string; name: string; kind?: string }>;
 }
 
+export interface AgentRunStepView {
+  id: string;
+  title: string;
+  status: 'running' | 'done' | 'failed';
+}
+
 export interface AgentRunProgressEvent {
   type: 'progress';
   threadId: string;
@@ -29,6 +35,7 @@ export interface AgentRunProgressEvent {
   thoughtText: string;
   activityAt: number;
   permission?: AgentPermissionPromptView;
+  steps?: AgentRunStepView[];
 }
 
 export type AgentLiveEvent =

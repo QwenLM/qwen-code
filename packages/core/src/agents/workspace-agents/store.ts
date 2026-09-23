@@ -54,7 +54,7 @@ const WORKSPACE_FILENAME = 'workspace.json';
 const AGENTS_FILENAME = 'agents.json';
 const HOSTS_FILENAME = 'hosts.json';
 const THREADS_DIRNAME = 'threads';
-const HOST_ENROLLMENT_TTL_MS = 10 * 60 * 1_000;
+const HOST_ENROLLMENT_TTL_MS = 15 * 60 * 1_000;
 
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,

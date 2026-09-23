@@ -5,6 +5,7 @@ import {
   ListTodo,
   LoaderCircle,
   ShieldQuestion,
+  X,
 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { MessageList } from '../MessageList';
@@ -451,7 +452,9 @@ export function ThreadChat({
                   >
                     <span className="block truncate">{child.title}</span>
                     <span className="block truncate text-xs text-muted-foreground">
-                      {child.reason}
+                      {[child.assigneeName, child.reason]
+                        .filter(Boolean)
+                        .join(' · ')}
                     </span>
                   </button>
                 </li>
@@ -640,45 +643,84 @@ export function ThreadChat({
                       elapsed: formatElapsed(now - (run.startedAt ?? now), t),
                     })
                   : described.text;
+              const steps = run.progress?.steps ?? [];
               return (
-                <div
-                  key={run.id}
-                  role="status"
-                  className={`mb-2 flex items-center gap-2 text-sm ${
-                    stalled
-                      ? 'text-[var(--status-attention-fg)]'
-                      : 'text-muted-foreground'
-                  }`}
-                >
-                  <LoaderCircle
-                    aria-hidden="true"
-                    className={`size-4 shrink-0 ${
-                      stalled ? '' : 'animate-spin motion-reduce:animate-none'
+                <div key={run.id} className="mb-2">
+                  <div
+                    role="status"
+                    className={`flex items-center gap-2 text-sm ${
+                      stalled
+                        ? 'text-[var(--status-attention-fg)]'
+                        : 'text-muted-foreground'
                     }`}
-                  />
-                  <span className="min-w-0 flex-1 truncate">{text}</span>
-                  {stalled && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        setSnoozedUntil((current) => ({
-                          ...current,
-                          [run.id]: now + STALL_NOTICE_MS,
-                        }))
-                      }
+                  >
+                    <LoaderCircle
+                      aria-hidden="true"
+                      className={`size-4 shrink-0 ${
+                        stalled ? '' : 'animate-spin motion-reduce:animate-none'
+                      }`}
+                    />
+                    <span className="min-w-0 flex-1 truncate">{text}</span>
+                    {stalled && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setSnoozedUntil((current) => ({
+                            ...current,
+                            [run.id]: now + STALL_NOTICE_MS,
+                          }))
+                        }
+                      >
+                        {t('collab.run.keepWaiting')}
+                      </Button>
+                    )}
+                    {(stalled || run.status === 'queued') && !pending && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onCancelRun(run.id)}
+                      >
+                        {t('collab.run.stop')}
+                      </Button>
+                    )}
+                  </div>
+                  {steps.length > 0 && (
+                    // One line per tool call, like a CI job's step list.
+                    <ol
+                      aria-label={t('collab.run.steps', {
+                        agent: run.agentName,
+                      })}
+                      className="mt-1 ml-6 flex flex-col gap-0.5 text-xs text-muted-foreground"
                     >
-                      {t('collab.run.keepWaiting')}
-                    </Button>
-                  )}
-                  {(stalled || run.status === 'queued') && !pending && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onCancelRun(run.id)}
-                    >
-                      {t('collab.run.stop')}
-                    </Button>
+                      {steps.map((step) => (
+                        <li key={step.id} className="flex items-center gap-1.5">
+                          {step.status === 'running' ? (
+                            <LoaderCircle
+                              aria-label={t('collab.step.running')}
+                              className="size-3 shrink-0 animate-spin motion-reduce:animate-none"
+                            />
+                          ) : step.status === 'done' ? (
+                            <Check
+                              aria-label={t('collab.step.done')}
+                              className="size-3 shrink-0"
+                            />
+                          ) : (
+                            <X
+                              aria-label={t('collab.step.failed')}
+                              className="size-3 shrink-0 text-destructive"
+                            />
+                          )}
+                          <span
+                            className={`min-w-0 truncate ${
+                              step.status === 'running' ? 'text-foreground' : ''
+                            }`}
+                          >
+                            {step.title || t('collab.step.untitled')}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
                   )}
                 </div>
               );

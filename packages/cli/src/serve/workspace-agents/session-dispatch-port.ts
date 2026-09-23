@@ -35,6 +35,7 @@ import { streamAgentTurn } from './stream-agent-turn.js';
 import {
   publishAgentEvent,
   type AgentPermissionPrompt,
+  type AgentRunStep,
 } from './agent-events.js';
 import {
   AGENT_SESSION_SOURCE_TYPE,
@@ -174,6 +175,7 @@ export function createSessionDispatchPort(
       outputText: string;
       thoughtText: string;
       permission?: AgentPermissionPrompt;
+      steps?: AgentRunStep[];
     } = {
       attempt: agentRun.attempt,
       sequence: 1,
@@ -202,6 +204,7 @@ export function createSessionDispatchPort(
           thoughtText: progress.thoughtText,
           activityAt,
           ...(progress.permission ? { permission: progress.permission } : {}),
+          ...(progress.steps ? { steps: progress.steps } : {}),
         });
       }, PROGRESS_PUBLISH_MS);
     };
@@ -240,13 +243,14 @@ export function createSessionDispatchPort(
           sessionId,
           deliveryId,
           controller.signal,
-          (
+          ({
             stage,
-            detail,
+            detail = '',
             outputText = progress.outputText,
             thoughtText = progress.thoughtText,
             permission,
-          ) => {
+            steps = progress.steps,
+          }) => {
             activityAt = Date.now();
             const { permission: previousPermission, ...rest } = progress;
             const nextPermission =
@@ -264,6 +268,7 @@ export function createSessionDispatchPort(
               outputText: outputText.slice(0, 262144),
               thoughtText: thoughtText.slice(0, 65536),
               ...(nextPermission ? { permission: nextPermission } : {}),
+              ...(steps ? { steps } : {}),
             };
             publish();
             // An approval is the one update a person is waiting to act on.

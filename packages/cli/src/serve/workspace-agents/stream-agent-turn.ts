@@ -1,30 +1,47 @@
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import type { AgentPermissionPrompt } from './agent-events.js';
+import type { AgentPermissionPrompt, AgentRunStep } from './agent-events.js';
+
+/** Enough to see where an agent is heading without scrolling a log. */
+const MAX_STEPS = 8;
 
 /**
- * Follows one agent turn on its session and reports what the agent is doing.
- *
- * `stage` is a code the client localizes (`thinking`, `responding`, `tool`,
- * `awaiting_approval`); `detail` is raw text such as a tool title, never UI
- * copy. `permission` is set while a tool call waits for a person and cleared
- * (`null`) once it is answered.
+ * One change in what the agent is doing. Fields left out keep their previous
+ * value; `permission: null` clears an answered approval.
  */
+export interface AgentTurnUpdate {
+  /** A code the client localizes: thinking, responding, tool, awaiting_approval. */
+  stage: string;
+  /** Raw text such as a tool title, never UI copy. */
+  detail?: string;
+  outputText?: string;
+  thoughtText?: string;
+  permission?: AgentPermissionPrompt | null;
+  /** This turn's latest tool calls, oldest first. */
+  steps?: AgentRunStep[];
+}
+
+function stepStatus(
+  status: string | undefined,
+  previous: AgentRunStep['status'] | undefined,
+): AgentRunStep['status'] {
+  if (status === 'completed') return 'done';
+  if (status === 'failed') return 'failed';
+  if (status === 'pending' || status === 'in_progress') return 'running';
+  return previous ?? 'running';
+}
+
+/** Follows one agent turn on its session and reports what the agent is doing. */
 export async function streamAgentTurn(
   bridge: Pick<AcpSessionBridge, 'subscribeEvents'>,
   sessionId: string,
   promptId: string,
   signal: AbortSignal,
-  report: (
-    stage: string,
-    detail: string,
-    outputText?: string,
-    thoughtText?: string,
-    permission?: AgentPermissionPrompt | null,
-  ) => void,
+  report: (update: AgentTurnUpdate) => void,
 ): Promise<void> {
   let text = '';
   let thought = '';
   let pendingRequestId: string | undefined;
+  const steps = new Map<string, AgentRunStep>();
   for await (const event of bridge.subscribeEvents(sessionId, { signal })) {
     if (event.promptId !== promptId) continue;
     if (event.type === 'permission_request') {
@@ -36,10 +53,14 @@ export async function streamAgentTurn(
       if (!data.requestId) continue;
       const title = data.toolCall?.title ?? '';
       pendingRequestId = data.requestId;
-      report('awaiting_approval', title, undefined, undefined, {
-        requestId: data.requestId,
-        title,
-        options: data.options ?? [],
+      report({
+        stage: 'awaiting_approval',
+        detail: title,
+        permission: {
+          requestId: data.requestId,
+          title,
+          options: data.options ?? [],
+        },
       });
       continue;
     }
@@ -49,7 +70,7 @@ export async function streamAgentTurn(
       const requestId = (event.data as { requestId?: string }).requestId;
       if (requestId !== pendingRequestId) continue;
       pendingRequestId = undefined;
-      report('tool', '', undefined, undefined, null);
+      report({ stage: 'tool', permission: null });
       continue;
     }
     if (event.type !== 'session_update') continue;
@@ -58,10 +79,14 @@ export async function streamAgentTurn(
         sessionUpdate?: string;
         content?: { type?: string; text?: string };
         title?: string;
+        toolCallId?: string;
+        status?: string;
       };
       sessionUpdate?: string;
       content?: { type?: string; text?: string };
       title?: string;
+      toolCallId?: string;
+      status?: string;
     };
     const update = data.update ?? data;
     if (
@@ -69,15 +94,27 @@ export async function streamAgentTurn(
       update.content?.type === 'text'
     ) {
       text += update.content.text ?? '';
-      report('responding', '', text);
+      report({ stage: 'responding', outputText: text });
     } else if (update.sessionUpdate === 'agent_thought_chunk') {
       if (update.content?.type === 'text') thought += update.content.text ?? '';
-      report('thinking', '', undefined, thought);
+      report({ stage: 'thinking', thoughtText: thought });
     } else if (
       update.sessionUpdate === 'tool_call' ||
       update.sessionUpdate === 'tool_call_update'
     ) {
-      report('tool', update.title ?? '');
+      if (update.toolCallId) {
+        const previous = steps.get(update.toolCallId);
+        steps.set(update.toolCallId, {
+          id: update.toolCallId,
+          title: (update.title || previous?.title || '').slice(0, 200),
+          status: stepStatus(update.status, previous?.status),
+        });
+      }
+      report({
+        stage: 'tool',
+        detail: update.title ?? '',
+        steps: [...steps.values()].slice(-MAX_STEPS),
+      });
     }
   }
 }

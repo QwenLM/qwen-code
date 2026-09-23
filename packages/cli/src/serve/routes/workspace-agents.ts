@@ -890,6 +890,11 @@ export function registerWorkspaceAgentRoutes(
               title: candidate.title,
               status: childResolution.status,
               reason: childResolution.reason,
+              ...(candidate.assigneeAgentId
+                ? {
+                    assigneeName: agentName(agents, candidate.assigneeAgentId),
+                  }
+                : {}),
             };
           }),
         budget: {

@@ -27,8 +27,8 @@ it('accumulates only this turn’s reply without rendering thoughts as text', as
     'session',
     'turn',
     new AbortController().signal,
-    (stage, _detail, text, thought) => {
-      updates.push([stage, text, thought]);
+    ({ stage, outputText, thoughtText }) => {
+      updates.push([stage, outputText, thoughtText]);
     },
   );
   expect(updates).toEqual([
@@ -71,7 +71,7 @@ it('reports a pending approval for this turn and clears it once answered', async
     'session',
     'turn',
     new AbortController().signal,
-    (stage, _detail, _text, _thought, permission) => {
+    ({ stage, permission }) => {
       updates.push([stage, permission]);
     },
   );
@@ -85,5 +85,42 @@ it('reports a pending approval for this turn and clears it once answered', async
       },
     ],
     ['tool', null],
+  ]);
+});
+
+it('keeps a step per tool call and updates it in place as it finishes', async () => {
+  const steps: unknown[] = [];
+  await streamAgentTurn(
+    {
+      async *subscribeEvents() {
+        for (const update of [
+          { toolCallId: 'a', title: 'Read src/a.ts', status: 'in_progress' },
+          { toolCallId: 'b', title: 'Shell: npm test', status: 'pending' },
+          // An update without a title or status keeps what the call had.
+          { toolCallId: 'a' },
+          { toolCallId: 'a', status: 'completed' },
+          { toolCallId: 'b', status: 'failed' },
+        ]) {
+          yield {
+            v: 1 as const,
+            type: 'session_update',
+            promptId: 'turn',
+            data: { update: { sessionUpdate: 'tool_call_update', ...update } },
+          };
+        }
+      },
+    },
+    'session',
+    'turn',
+    new AbortController().signal,
+    (update) => steps.push(update.steps),
+  );
+  expect(steps.at(2)).toEqual([
+    { id: 'a', title: 'Read src/a.ts', status: 'running' },
+    { id: 'b', title: 'Shell: npm test', status: 'running' },
+  ]);
+  expect(steps.at(-1)).toEqual([
+    { id: 'a', title: 'Read src/a.ts', status: 'done' },
+    { id: 'b', title: 'Shell: npm test', status: 'failed' },
   ]);
 });

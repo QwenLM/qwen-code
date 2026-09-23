@@ -71,6 +71,7 @@ export interface ThreadChildView {
   title: string;
   status: ThreadDetailView['status'];
   reason: string;
+  assigneeName?: string;
 }
 
 export interface ThreadViewProps {

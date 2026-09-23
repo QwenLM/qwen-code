@@ -21,7 +21,10 @@
  *    machine that was already connected. Each refusal below names its own fix.
  */
 
-import type { AgentPermissionPromptView } from './agent-events';
+import type {
+  AgentPermissionPromptView,
+  AgentRunStepView,
+} from './agent-events';
 
 /** Wire shape of a thread row, as the REST layer returns it. */
 export interface ThreadSummaryView {
@@ -125,6 +128,8 @@ export interface RunView {
     outputText?: string;
     thoughtText?: string;
     permission?: AgentPermissionPromptView;
+    /** The turn's latest tool calls, oldest first. */
+    steps?: AgentRunStepView[];
   };
   id: string;
   agentId: string;

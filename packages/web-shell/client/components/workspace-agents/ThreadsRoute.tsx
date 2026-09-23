@@ -214,6 +214,7 @@ function applyProgress(
         outputText: event.outputText,
         thoughtText: event.thoughtText,
         ...(event.permission ? { permission: event.permission } : {}),
+        ...(event.steps ? { steps: event.steps } : {}),
       },
     };
   });
