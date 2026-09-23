@@ -932,7 +932,7 @@ class ManagedAgentServerIntegrationTest {
                                             event.sourceKey()))
                             .singleElement()
                             .satisfies(event -> assertThat(event.data())
-                                    .containsEntry("text", "kept"));
+                                    .containsEntry("text", ""));
                 });
     }
 

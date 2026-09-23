@@ -1275,6 +1275,110 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('rebuilds a consumed Runtime receipt from the Broker when the outcome body is unreadable', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      const recorder = first.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run a remote tool');
+      await recorder.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-broker-receipt',
+        toolName: 'remote_tool',
+        executionCallId: 'ex-broker-receipt',
+        invocationBindingId: 'runtime-session-broker',
+        modelMessageId: 'msg-broker-receipt',
+      });
+      await first.config.resolveManagedAwaitRuntime({
+        functionCallId: 'fc-broker-receipt',
+        executionCallId: 'ex-broker-receipt',
+        outcome: 'completed',
+        body: { output: 'broker receipt' },
+        functionResponse: {
+          id: 'fc-broker-receipt',
+          name: 'remote_tool',
+          response: { output: 'broker receipt' },
+        },
+      });
+      await first.config.consumeManagedRuntimeResults();
+      await first.config.closeSessionWriter();
+
+      const reconcileExecution = vi.fn().mockResolvedValue({
+        outcome: 'known' as const,
+        status: {
+          state: 'settled' as const,
+          cancelRequested: false,
+          lastSeq: 1,
+          firstAvailableSeq: 1,
+          progressGap: false,
+          progress: [],
+          result: {
+            executionStatus: 'success' as const,
+            result: {
+              llmContent: 'broker receipt',
+              returnDisplay: 'broker receipt',
+            },
+          },
+        },
+      });
+      const second = await activate({
+        managedSessionLog: true,
+        managedToolSessionFactory: () => ({
+          sessionId: 'broker-receipt',
+          shellConfiguration: {
+            shell: 'bash',
+            executable: 'bash',
+            argsPrefix: ['-c'],
+          },
+          platform: 'darwin',
+          getClient: async () => {
+            throw new Error('receipt rebuild must not acquire a Runtime');
+          },
+          reconcileExecution,
+          close: async () => {},
+        }),
+      });
+      const managedSession = (
+        second.config as unknown as { managedSession?: ManagedSession }
+      ).managedSession!;
+      const readResource = managedSession.resources.read.bind(
+        managedSession.resources,
+      );
+      vi.spyOn(managedSession.resources, 'read').mockImplementation(
+        async (ref) => {
+          if (ref.kind === 'managed-tool-outcome') {
+            throw new Error('outcome body unavailable');
+          }
+          return readResource(ref);
+        },
+      );
+
+      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
+        {
+          outcomes: [
+            {
+              functionCallId: 'fc-broker-receipt',
+              executionCallId: 'ex-broker-receipt',
+              part: {
+                functionResponse: {
+                  id: 'fc-broker-receipt',
+                  name: 'remote_tool',
+                  response: { output: 'broker receipt' },
+                },
+              },
+            },
+          ],
+          preserveCallIds: ['fc-broker-receipt'],
+        },
+      );
+      expect(reconcileExecution).toHaveBeenCalledExactlyOnceWith({
+        runtimeSessionId: 'runtime-session-broker',
+        executionCallId: 'ex-broker-receipt',
+      });
+      await second.config.closeSessionWriter();
+    });
+  });
+
   it('sends the original Runtime receipt on the next model request instead of a synthesized failure', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

@@ -6399,8 +6399,9 @@ export class Config {
   }
 
   /**
-   * Reads unconsumed settled Runtime receipts for the next model request.
-   * Missing or unreadable outcome bodies are not synthesized.
+   * Reads settled Runtime receipts for the next model request. An unreadable
+   * outcome body is rebuilt from the Broker's settled result. A missing
+   * Broker result is not synthesized.
    */
   async readManagedRuntimeOutcomes(): Promise<ManagedRuntimeOutcomeRead> {
     const empty: ManagedRuntimeOutcomeRead = {
@@ -6421,20 +6422,33 @@ export class Config {
       authorization.checkpoint.tools.items,
     );
     if (recoverable === null) return empty;
+    const bindings = new Map(
+      (authorization.checkpoint.runtime?.bindings ?? []).map((binding) => [
+        binding.executionCallId,
+        binding,
+      ]),
+    );
     const preserveCallIds: string[] = [];
     const outcomes: ManagedRuntimeOutcome[] = [];
     for (const item of recoverable.items) {
       preserveCallIds.push(item.functionCallId);
-      if (item.outcomeRef === null) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(
-          (await session.resources.read(item.outcomeRef)).toString('utf8'),
-        ) as unknown;
-      } catch {
-        continue;
+      let part: ManagedRuntimeOutcome['part'] | null = null;
+      if (item.outcomeRef !== null) {
+        try {
+          part = parseManagedRuntimeOutcomePart(
+            item.functionCallId,
+            JSON.parse(
+              (await session.resources.read(item.outcomeRef)).toString('utf8'),
+            ) as unknown,
+          );
+        } catch {
+          part = null;
+        }
       }
-      const part = parseManagedRuntimeOutcomePart(item.functionCallId, parsed);
+      part ??= await this.readSettledRuntimeReceipt(
+        item,
+        bindings.get(item.executionCallId),
+      );
       if (part === null) continue;
       outcomes.push({
         functionCallId: item.functionCallId,
@@ -6443,6 +6457,49 @@ export class Config {
       });
     }
     return { outcomes, preserveCallIds };
+  }
+
+  private async readSettledRuntimeReceipt(
+    item: {
+      readonly functionCallId: string;
+      readonly toolName: string;
+      readonly executionCallId: string;
+    },
+    binding:
+      | {
+          readonly invocationBindingId: string;
+          readonly progressCursor: string | null;
+        }
+      | undefined,
+  ): Promise<ManagedRuntimeOutcome['part'] | null> {
+    if (binding === undefined) return null;
+    const managedToolSession = this.getManagedToolSession();
+    const reconcile =
+      managedToolSession?.reconcileExecution ??
+      managedToolSession?.inspectExecution;
+    if (reconcile === undefined) return null;
+    const inspected = await reconcile({
+      runtimeSessionId: binding.invocationBindingId,
+      executionCallId: item.executionCallId,
+    });
+    if (
+      inspected.outcome !== 'known' ||
+      inspected.status.state !== 'settled' ||
+      inspected.status.result === undefined
+    ) {
+      return null;
+    }
+    const recovered = recoveredRuntimeOutcome(
+      {
+        functionCallId: item.functionCallId,
+        toolName: item.toolName,
+        executionCallId: item.executionCallId,
+        runtimeSessionId: binding.invocationBindingId,
+        progressCursor: binding.progressCursor,
+      },
+      inspected.status.result,
+    );
+    return { functionResponse: recovered.functionResponse };
   }
 
   /**

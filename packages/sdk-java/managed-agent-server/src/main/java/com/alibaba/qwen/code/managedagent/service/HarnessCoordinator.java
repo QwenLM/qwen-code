@@ -225,8 +225,7 @@ public class HarnessCoordinator {
                         "Hosted Harness recovery did not return an event"
                                 + " watermark.");
             }
-            if (runtimeRecovery.isContinuationAdmitted()
-                    && session.harnessBootId() != null
+            if (session.harnessBootId() != null
                     && claimed.harnessEventEpoch() != null) {
                 store.retractContinuationOutput(session.tenantId(),
                         session.sessionId(), claimed.turnId(), owner,

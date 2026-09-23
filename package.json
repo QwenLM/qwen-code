@@ -58,6 +58,7 @@
     "test:e2e:managed-agent-server": "tsx scripts/run-managed-agent-server-e2e.ts",
     "test:e2e:managed-session-failover": "tsx scripts/run-managed-agent-server-e2e.ts --session-failover",
     "test:e2e:managed-inflight-failover": "tsx scripts/run-managed-agent-server-e2e.ts --inflight-failover",
+    "test:e2e:managed-continuation-failover": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover",
     "test:e2e:managed-runtime-worker-env": "tsx scripts/run-managed-runtime-worker-env-e2e.ts",
     "test:chrome-extension:e2e": "npm -w packages/chrome-extension run test:e2e:chrome",
     "test:chrome-extension:release": "npm run build && cross-env DEV=true npm run bundle && npm -w packages/chrome-extension run test:release",

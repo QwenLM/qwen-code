@@ -24,6 +24,7 @@ let runtimeDelayMs = 0;
 let settingsPath = path.join(homedir(), '.qwen', 'settings.json');
 let sessionFailover = false;
 let inflightFailover = false;
+let continuationFailover = false;
 
 for (let index = 0; index < argumentsList.length; index += 1) {
   const argument = argumentsList[index];
@@ -41,18 +42,26 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     sessionFailover = true;
   } else if (argument === '--inflight-failover') {
     inflightFailover = true;
+  } else if (argument === '--continuation-failover') {
+    continuationFailover = true;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover]',
     );
   }
 }
 
-if (sessionFailover && inflightFailover) {
-  throw new Error('--session-failover and --inflight-failover are exclusive');
+if (
+  [sessionFailover, inflightFailover, continuationFailover].filter(Boolean)
+    .length > 1
+) {
+  throw new Error(
+    '--session-failover, --inflight-failover, and --continuation-failover are exclusive',
+  );
 }
 
-const durableFailover = sessionFailover || inflightFailover;
+const durableFailover =
+  sessionFailover || inflightFailover || continuationFailover;
 
 if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
   throw new Error('--runtime-delay-ms must be a non-negative integer');
@@ -563,6 +572,19 @@ interface PublicEvent {
   data?: unknown;
 }
 
+function eventText(event: PublicEvent): string {
+  const data = event.data;
+  if (
+    typeof data === 'object' &&
+    data !== null &&
+    'text' in data &&
+    typeof data.text === 'string'
+  ) {
+    return data.text;
+  }
+  return '';
+}
+
 interface PublicList<T> {
   data: T[];
 }
@@ -603,6 +625,15 @@ const failoverSecondResponse = 'SECOND_TURN_RESTORED_CONTEXT';
 const failoverMissingResponse = 'SECOND_TURN_CONTEXT_MISSING';
 const inflightMarker = 'MANAGED_SESSION_INFLIGHT_FAILOVER';
 const inflightResponse = 'INFLIGHT_TURN_RECOVERED';
+const continuationMarker = 'MANAGED_SESSION_CONTINUATION_FAILOVER';
+const continuationPartial = 'CONTINUATION_PARTIAL';
+const continuationResponse = 'CONTINUATION_TURN_RECOVERED';
+let continuationModelRequests = 0;
+let acceptReplacementContinuation = false;
+let releaseContinuationHold = () => {};
+const continuationHold = new Promise<void>((resolve) => {
+  releaseContinuationHold = resolve;
+});
 
 let fake: Awaited<ReturnType<typeof startFakeOpenAIServer>> | undefined;
 let heldStartProxy: HeldExecutionStartProxy | undefined;
@@ -622,6 +653,31 @@ try {
     fake = await startFakeOpenAIServer(({ body }) => {
       const messages = Array.isArray(body['messages']) ? body['messages'] : [];
       const serialized = JSON.stringify(messages);
+      if (continuationFailover && serialized.includes(continuationMarker)) {
+        if (!serialized.includes('"role":"tool"')) {
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'run_shell_command',
+                {
+                  command: `${shellQuote(process.execPath)} ${shellQuote(inflightSideEffectScript)} ${shellQuote(inflightSideEffect)}`,
+                  is_background: false,
+                },
+                'call_managed_continuation_failover',
+              ),
+            ],
+          };
+        }
+        continuationModelRequests += 1;
+        if (!acceptReplacementContinuation) {
+          return {
+            contentChunks: [continuationPartial],
+            holdAfterChunks: 1,
+            holdUntil: continuationHold,
+          };
+        }
+        return { content: continuationResponse };
+      }
       if (inflightFailover && serialized.includes(inflightMarker)) {
         if (!serialized.includes('"role":"tool"')) {
           return {
@@ -833,9 +889,11 @@ try {
   );
 
   if (durableFailover) {
-    const tenant = inflightFailover
-      ? 'managed-inflight-failover-e2e'
-      : 'managed-session-failover-e2e';
+    const tenant = continuationFailover
+      ? 'managed-continuation-failover-e2e'
+      : inflightFailover
+        ? 'managed-inflight-failover-e2e'
+        : 'managed-session-failover-e2e';
     const createResponse = await fetch(`${springUrl}/v1/agents/sessions`, {
       method: 'POST',
       headers: {
@@ -848,15 +906,19 @@ try {
         input: [
           {
             type: 'text',
-            text: inflightFailover
-              ? `${inflightMarker}. Execute the requested tool once and reply exactly ${inflightResponse}.`
-              : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
+            text: continuationFailover
+              ? `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
+              : inflightFailover
+                ? `${inflightMarker}. Execute the requested tool once and reply exactly ${inflightResponse}.`
+                : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
           },
         ],
         metadata: {
-          title: inflightFailover
-            ? 'Managed in-flight owner failover E2E'
-            : 'Managed Session owner failover E2E',
+          title: continuationFailover
+            ? 'Managed continuation owner failover E2E'
+            : inflightFailover
+              ? 'Managed in-flight owner failover E2E'
+              : 'Managed Session owner failover E2E',
         },
       }),
     });
@@ -868,6 +930,7 @@ try {
     const session = (await createResponse.json()) as PublicSession;
     let firstTurnLastSequence = 0;
     let heldExecutionStartPath: string | undefined;
+    let originalExecutionCallId: string | undefined;
     if (inflightFailover) {
       if (heldStartProxy === undefined) {
         throw new Error('In-flight failover did not start its Broker proxy');
@@ -899,6 +962,42 @@ try {
           `Runtime execution start boundary failed; proxy=${heldStartProxy.observations().join(' | ') || 'no requests'}`,
         );
       }
+    } else if (continuationFailover) {
+      await waitUntil(
+        'Continuation partial text',
+        async () => {
+          const page = await fetchJson<PublicList<PublicEvent>>(
+            `${springUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
+            { headers: { 'x-qwen-tenant-id': tenant } },
+          );
+          return page.data.some(
+            (event) =>
+              event.type === 'item.output_text.delta' &&
+              eventText(event).includes(continuationPartial),
+          );
+        },
+        120_000,
+        harness,
+      );
+      const execution = runMysql(
+        mysqlPort,
+        'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.qwen_tool_execution',
+      ).split('\t');
+      const sideEffectBytes = existsSync(inflightSideEffect)
+        ? readFileSync(inflightSideEffect, 'utf8')
+        : '';
+      if (
+        execution.length !== 3 ||
+        execution[0]?.length === 0 ||
+        execution[1] !== 'SETTLED' ||
+        execution[2] !== '1' ||
+        sideEffectBytes !== inflightSideEffectContent
+      ) {
+        throw new Error(
+          `Continuation boundary was not durable: execution=${execution.join(',')} sideEffect=${JSON.stringify(sideEffectBytes)}`,
+        );
+      }
+      originalExecutionCallId = execution[0];
     } else {
       const firstTurn = await waitForTerminal(
         springUrl,
@@ -940,7 +1039,6 @@ try {
         `First owner did not commit a durable private Session: boot=${firstBootId} head=${firstHead.join(',')}`,
       );
     }
-    let originalExecutionCallId: string | undefined;
     if (inflightFailover) {
       const execution = runMysql(
         mysqlPort,
@@ -971,10 +1069,12 @@ try {
 
     await Promise.all([
       crashChild(harness.child, 'Hosted Harness A'),
-      inflightFailover
+      inflightFailover || continuationFailover
         ? crashProcess(spring.child, 'Spring Managed Agent Server A')
         : crashChild(spring.child, 'Spring Managed Agent Server A'),
     ]);
+    acceptReplacementContinuation = true;
+    releaseContinuationHold();
     await heldStartProxy?.close();
     heldStartProxy = undefined;
     rmSync(harnessHome, { recursive: true, force: true });
@@ -988,7 +1088,7 @@ try {
         ) === '1',
       10_000,
     );
-    if (inflightFailover) {
+    if (inflightFailover || continuationFailover) {
       await waitUntil(
         'Managed Turn dispatch lease expiry',
         () =>
@@ -1205,6 +1305,98 @@ try {
             committedSequence: `${firstHead[2]} -> ${replacementHead[2]}`,
             promptReplayed: false,
             physicalToolExecutions: 1,
+            terminalTurns: terminalCount,
+            oldHarnessDiskDeleted: !existsSync(harnessHome),
+          },
+          null,
+          2,
+        ),
+      );
+    } else if (continuationFailover) {
+      await waitForTerminal(
+        replacementSpringUrl,
+        tenant,
+        session.id,
+        0,
+        replacementSpring,
+        120_000,
+      );
+      const finalEvents = await fetchJson<PublicList<PublicEvent>>(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
+        { headers: { 'x-qwen-tenant-id': tenant } },
+      );
+      const recoveredTerminal = finalEvents.data.find(
+        (event) => event.terminal,
+      );
+      const textDeltas = finalEvents.data.filter(
+        (event) => event.type === 'item.output_text.delta',
+      );
+      const visibleText = textDeltas.map((event) => eventText(event)).join('');
+      const recoveredExecution = runMysql(
+        mysqlPort,
+        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.qwen_tool_execution',
+      ).split('\t');
+      const executionCount = Number(
+        runMysql(
+          mysqlPort,
+          'SELECT COUNT(*) FROM qwen_managed_agent.qwen_tool_execution',
+        ),
+      );
+      const replacementBootId = runMysql(
+        mysqlPort,
+        `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+      );
+      const terminalCount = Number(
+        runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_agent.managed_agent_event WHERE ${sessionFilter} AND terminal=TRUE`,
+        ),
+      );
+      const requests = (fake?.requests ?? []).filter(({ body }) =>
+        JSON.stringify(body['messages']).includes(continuationMarker),
+      );
+      const initialModelRequests = requests.filter(
+        ({ body }) =>
+          !JSON.stringify(body['messages']).includes('"role":"tool"'),
+      );
+      const continuationRequests = requests.filter(({ body }) =>
+        JSON.stringify(body['messages']).includes('"role":"tool"'),
+      );
+      const sideEffectBytes = existsSync(inflightSideEffect)
+        ? readFileSync(inflightSideEffect, 'utf8')
+        : '';
+      if (
+        recoveredTerminal?.type !== 'turn.completed' ||
+        visibleText !== continuationResponse ||
+        visibleText.includes(continuationPartial) ||
+        recoveredExecution.length !== 4 ||
+        recoveredExecution[0] !== originalExecutionCallId ||
+        recoveredExecution[1] !== 'SETTLED' ||
+        Number(recoveredExecution[2]) !== 1 ||
+        recoveredExecution[3] !== '1' ||
+        executionCount !== 1 ||
+        replacementBootId.length === 0 ||
+        replacementBootId === firstBootId ||
+        terminalCount !== 1 ||
+        initialModelRequests.length !== 1 ||
+        continuationRequests.length < 2 ||
+        sideEffectBytes !== inflightSideEffectContent
+      ) {
+        throw new Error(
+          `Continuation failover audit failed: terminal=${recoveredTerminal?.type ?? 'missing'} text=${JSON.stringify(visibleText)} deltas=${JSON.stringify(textDeltas)} execution=${recoveredExecution.join(',')} rows=${executionCount} boot=${firstBootId}->${replacementBootId} terminals=${terminalCount} model=${initialModelRequests.length}+${continuationRequests.length} sideEffect=${JSON.stringify(sideEffectBytes)}`,
+        );
+      }
+      console.log(
+        JSON.stringify(
+          {
+            sessionId: session.id,
+            executionCallId: originalExecutionCallId,
+            firstHarnessBootId: firstBootId,
+            replacementHarnessBootId: replacementBootId,
+            promptReplayed: false,
+            physicalToolExecutions: 1,
+            continuationModelRequests: continuationRequests.length,
+            visibleText,
             terminalTurns: terminalCount,
             oldHarnessDiskDeleted: !existsSync(harnessHome),
           },
@@ -1487,6 +1679,7 @@ try {
   }
   await heldStartProxy?.close();
   await replacementBrokerProxy?.close();
+  releaseContinuationHold();
   await fake?.close();
   rmSync(temporary, { recursive: true, force: true });
   process.removeListener('SIGINT', handleSignal);

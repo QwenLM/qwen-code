@@ -97,9 +97,8 @@ class HarnessCoordinatorTest {
                 eq(turnId), anyString(), eq("epoch-new"), any());
         verify(store, never()).releaseTurnLease(eq(tenantId), eq(sessionId),
                 eq(turnId), anyString());
-        verify(store, never()).retractContinuationOutput(anyString(),
-                anyString(), anyString(), anyString(), anyString(),
-                anyString());
+        verify(store).retractContinuationOutput(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("boot-old"), eq("epoch-old"));
     }
 
     @Test
