@@ -68,7 +68,9 @@ describe('Agent Plugins v1 skills', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(pluginRoot, { recursive: true, force: true });
+    fs.rmSync(`${pluginRoot}-outside-skill.md`, { force: true });
   });
 
   it('loads only valid direct-child Agent Skills', async () => {
@@ -95,6 +97,36 @@ describe('Agent Plugins v1 skills', () => {
       level: 'extension',
     });
     expect(skills[0]?.allowedTools).toBeUndefined();
+  });
+
+  it.each(['EACCES', 'ENOENT'] as const)(
+    'reports directory %s without treating removal as an incomplete scan',
+    async (code) => {
+      writeSkill(
+        'direct',
+        '---\nname: direct\ndescription: Direct skill\n---\nBody.',
+      );
+      const error = Object.assign(new Error(code), { code });
+      vi.spyOn(fs.promises, 'readdir').mockRejectedValueOnce(error);
+      const onError = vi.fn();
+      expect(await loadAgentPluginSkills(pluginRoot, onError)).toEqual([]);
+      expect(onError).toHaveBeenCalledTimes(code === 'ENOENT' ? 0 : 1);
+    },
+  );
+
+  it('reports a parse failure while keeping valid Agent Skills', async () => {
+    writeSkill(
+      'direct',
+      '---\nname: direct\ndescription: Direct skill\n---\nBody.',
+    );
+    writeSkill('broken', 'invalid frontmatter');
+    const onError = vi.fn();
+    expect(
+      (await loadAgentPluginSkills(pluginRoot, onError)).map(
+        (skill) => skill.name,
+      ),
+    ).toEqual(['direct']);
+    expect(onError).toHaveBeenCalledOnce();
   });
 
   it('validates standard metadata fields', () => {
@@ -126,7 +158,9 @@ describe('Agent Plugins v1 skills', () => {
       fs.mkdirSync(skillDir, { recursive: true });
       fs.symlinkSync(outside, path.join(skillDir, 'SKILL.md'));
 
-      expect(await loadAgentPluginSkills(pluginRoot)).toEqual([]);
+      const onError = vi.fn();
+      expect(await loadAgentPluginSkills(pluginRoot, onError)).toEqual([]);
+      expect(onError).toHaveBeenCalledOnce();
       fs.rmSync(outside, { force: true });
     },
   );

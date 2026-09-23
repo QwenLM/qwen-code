@@ -451,7 +451,7 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('serves an unmocked catalog whose identity fields match a full refresh', async () => {
+  it('serves an unmocked catalog and selected-workspace activation projection', async () => {
     // No manager mocks: real fixture files on disk, real manifest-head load.
     // Pins the response mapping against entries built by the head-only path,
     // including a linked install's extension id and install type.
@@ -518,6 +518,52 @@ describe('extension management v2 REST', () => {
       expect(expected.find((e) => e.name === 'linked')?.installType).toBe(
         'link',
       );
+
+      const linked = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'linked')!;
+      const activation = await manager.setExtensionWorkspaceActivation(
+        linked.id,
+        h.secondary.workspaceCwd,
+        'disabled',
+      );
+      const fullRefresh = vi.spyOn(
+        ExtensionManager.prototype,
+        'refreshCacheWithSnapshot',
+      );
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.status).toBe(200);
+      expect(projection.body).toMatchObject({
+        workspaceId: h.secondary.workspaceId,
+        workspaceCwd: h.secondary.workspaceCwd,
+        desiredGeneration: activation.generation,
+        appliedGeneration: 0,
+      });
+      expect(projection.body.extensions).toHaveLength(2);
+      expect(projection.body.extensions).toEqual(
+        expect.arrayContaining([
+          {
+            extensionId: linked.id,
+            name: 'linked',
+            version: '2.0.0',
+            defaultActivation: 'enabled',
+            workspaceActivation: 'disabled',
+            effectiveActivation: 'disabled',
+            activationSource: 'workspace_override',
+          },
+          expect.objectContaining({
+            name: 'plain',
+            workspaceActivation: null,
+            effectiveActivation: 'enabled',
+            activationSource: 'default',
+          }),
+        ]),
+      );
+      expect(fullRefresh).not.toHaveBeenCalled();
     } finally {
       if (previousQwenHome === undefined) {
         delete process.env['QWEN_HOME'];
@@ -1177,14 +1223,27 @@ describe('extension management v2 REST', () => {
         ],
       });
       expect(
-        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
       ).toHaveBeenCalledWith(
-        extensionId,
+        { id: extensionId, name: 'demo' },
         expect.objectContaining({ generation: 7 }),
         h.secondary.workspaceCwd,
       );
       expect(
         ExtensionManager.prototype.getExtensionActivation,
+      ).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.getLoadedExtensions,
+      ).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
       ).not.toHaveBeenCalled();
       const state = await auth(
         request(h.app).get(
@@ -1790,6 +1849,12 @@ describe('extension management v2 REST', () => {
       vi.mocked(
         ExtensionManager.prototype.refreshCacheWithSnapshot,
       ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).mockResolvedValue({
+        snapshot: rolledBackSnapshot,
+        extensions: ExtensionManager.prototype.getLoadedExtensions(),
+      });
       await vi.advanceTimersByTimeAsync(30_000);
 
       expect(
@@ -1938,6 +2003,12 @@ describe('extension management v2 REST', () => {
     vi.mocked(
       ExtensionManager.prototype.refreshCacheWithSnapshot,
     ).mockResolvedValue(snapshot(9));
+    vi.mocked(
+      ExtensionManager.prototype.refreshCatalogSnapshot,
+    ).mockResolvedValue({
+      snapshot: snapshot(9),
+      extensions: ExtensionManager.prototype.getLoadedExtensions(),
+    });
     vi.mocked(
       h.secondary.bridge.refreshExtensionsForAllSessions,
     ).mockResolvedValue({ refreshed: 1, failed: 0 });
@@ -2592,6 +2663,17 @@ describe('extension management v2 REST', () => {
         legacyProjectionHash: 'hash',
         extensions: {},
       });
+      vi.mocked(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).mockResolvedValue({
+        snapshot: {
+          version: 2,
+          generation: 8,
+          legacyProjectionHash: 'hash',
+          extensions: {},
+        },
+        extensions: ExtensionManager.prototype.getLoadedExtensions(),
+      });
       const disable = await auth(
         request(h.app)
           .post('/workspace/extensions/demo/disable')
@@ -2611,6 +2693,7 @@ describe('extension management v2 REST', () => {
           `/workspaces/${encodeURIComponent(h.primary.workspaceId)}/extensions`,
         ),
       );
+      expect(disabledProjection.status).toBe(200);
       expect(disabledProjection.body).toMatchObject({
         desiredGeneration: 8,
         appliedGeneration: 0,
