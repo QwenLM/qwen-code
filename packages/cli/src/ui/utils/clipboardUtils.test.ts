@@ -11,7 +11,14 @@ import { EventEmitter } from 'node:events';
 const { mockSpawn, mockExecSync, clipboardMockState } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockExecSync: vi.fn(),
-  clipboardMockState: { failLoad: false, loadDelayMs: 0 },
+  clipboardMockState: {
+    failLoad: false,
+    loadDelayMs: 0,
+    // The module resolves, but using it still throws - the shape of a native
+    // addon built against a different Node ABI.
+    throwOnConstruct: false,
+    throwOnHasFormat: false,
+  },
 }));
 
 // Mock @teddyzhu/clipboard
@@ -24,17 +31,26 @@ vi.mock('@teddyzhu/clipboard', async () => {
   if (clipboardMockState.failLoad) {
     throw new Error('native clipboard module missing');
   }
-  return {
-    default: {
-      ClipboardManager: vi.fn().mockImplementation(() => ({
-        hasFormat: vi.fn().mockReturnValue(false),
-        getImageData: vi.fn().mockReturnValue({ data: null }),
-      })),
-    },
-    ClipboardManager: vi.fn().mockImplementation(() => ({
-      hasFormat: vi.fn().mockReturnValue(false),
+  // Both exports share one implementation so the throw flags apply no matter
+  // which shape the caller destructures. The flags are read per call, not per
+  // factory evaluation.
+  const ClipboardManager = vi.fn().mockImplementation(() => {
+    if (clipboardMockState.throwOnConstruct) {
+      throw new Error('native clipboard addon ABI mismatch');
+    }
+    return {
+      hasFormat: vi.fn().mockImplementation(() => {
+        if (clipboardMockState.throwOnHasFormat) {
+          throw new Error('native clipboard addon ABI mismatch');
+        }
+        return false;
+      }),
       getImageData: vi.fn().mockReturnValue({ data: null }),
-    })),
+    };
+  });
+  return {
+    default: { ClipboardManager },
+    ClipboardManager,
   };
 });
 
@@ -175,6 +191,8 @@ describe('clipboardUtils', () => {
 
     clipboardMockState.failLoad = false;
     clipboardMockState.loadDelayMs = 0;
+    clipboardMockState.throwOnConstruct = false;
+    clipboardMockState.throwOnHasFormat = false;
     vi.resetModules();
     vi.clearAllMocks();
 
@@ -591,6 +609,50 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the native module loads but constructing it throws', async () => {
+      clipboardMockState.throwOnConstruct = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('notifies when the native module loads but hasFormat throws', async () => {
+      clipboardMockState.throwOnHasFormat = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('does not notify when the clipboard read succeeds but holds no image', async () => {
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
     });
 
     it('shares an in-flight native module load without false errors', async () => {
