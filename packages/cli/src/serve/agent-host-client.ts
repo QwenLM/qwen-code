@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isCommandAvailable } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
@@ -34,6 +35,24 @@ const PROVIDER_LABELS = {
   qwen: 'Qwen Code ACP',
   codex: 'Codex CLI',
 } as const;
+type AgentHostProvider = keyof typeof PROVIDER_LABELS;
+
+let detectedProviders: AgentHostProvider[] | undefined;
+
+/**
+ * What this host can run: Qwen Code always (it is this process), Codex when
+ * its CLI is installed or was asked for. Advertised as a list so one machine
+ * shows up as one runtime offering several programs.
+ */
+function hostProviders(preferred: AgentHostProvider): string[] {
+  detectedProviders ??= [
+    'qwen',
+    ...(preferred === 'codex' || isCommandAvailable('codex').available
+      ? (['codex'] as const)
+      : []),
+  ];
+  return detectedProviders.map((provider) => PROVIDER_LABELS[provider]);
+}
 
 interface AgentHostCredential {
   schemaVersion: 1;
@@ -193,7 +212,7 @@ async function executeAssignment(
           },
           body: JSON.stringify({
             workspaceCwd: options.workspaceCwd,
-            providers: [PROVIDER_LABELS[options.provider]],
+            providers: hostProviders(options.provider),
             run: {
               threadId: assignment.threadId,
               runId: assignment.runId,
@@ -474,7 +493,7 @@ export async function startAgentHostConnection(
 async function connectAgentHost(
   options: AgentHostConnectionOptions,
 ): Promise<void> {
-  const providers = [PROVIDER_LABELS[options.provider]];
+  const providers = hostProviders(options.provider);
   const serverUrl = normalizeServerUrl(options.serverUrl, options.allowHttp);
   if (
     new URL(serverUrl).protocol === 'http:' &&

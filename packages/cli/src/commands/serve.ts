@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseJoinLink } from '../serve/agent-host-join.js';
 import type { Argv, CommandModule } from 'yargs';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -218,6 +219,7 @@ interface ServeArgs {
   'local-control-address'?: string;
   'agent-host-server'?: string;
   'agent-host-workspace-id'?: string;
+  join?: string;
   'agent-host-name'?: string;
   'agent-host-provider': 'qwen' | 'codex';
   'agent-host-allow-http'?: boolean;
@@ -414,6 +416,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
+      .option('join', {
+        type: 'string',
+        description:
+          'Join another Qwen Code as a runtime, with the one-line link it shows under Agent → Runtime → Add runtime.',
+      })
       .option('agent-host-server', {
         type: 'string',
         description:
@@ -473,6 +480,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         }
         if (argv['agent-host-name'] === '') {
           throw new Error('--agent-host-name must not be empty.');
+        }
+        if (argv['join'] !== undefined) {
+          if (argv['agent-host-server'] || argv['agent-host-workspace-id']) {
+            throw new Error(
+              '--join already names the coordinator and workspace; drop --agent-host-server and --agent-host-workspace-id.',
+            );
+          }
+          parseJoinLink(argv['join']);
         }
         return true;
       })
@@ -1022,21 +1037,29 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         applyOpenWithAuth(serveOptions);
       }
       const handle = await runQwenServe(serveOptions);
-      if (argv['agent-host-server'] && argv['agent-host-workspace-id']) {
+      const joined = argv['join'] ? parseJoinLink(argv['join']) : undefined;
+      const hostTarget = joined
+        ? joined
+        : argv['agent-host-server'] && argv['agent-host-workspace-id']
+          ? {
+              serverUrl: argv['agent-host-server'],
+              workspaceId: argv['agent-host-workspace-id'],
+              token: agentHostEnrollmentToken,
+            }
+          : undefined;
+      if (hostTarget) {
         try {
           const { startAgentHostConnection } = await import(
             '../serve/agent-host-client.js'
           );
           await startAgentHostConnection({
             bridge: handle.bridge,
-            serverUrl: argv['agent-host-server'],
-            workspaceId: argv['agent-host-workspace-id'],
+            serverUrl: hostTarget.serverUrl,
+            workspaceId: hostTarget.workspaceId,
             workspaceCwd: primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
             provider: argv['agent-host-provider'],
             allowHttp: argv['agent-host-allow-http'] === true,
-            ...(agentHostEnrollmentToken
-              ? { enrollmentToken: agentHostEnrollmentToken }
-              : {}),
+            ...(hostTarget.token ? { enrollmentToken: hostTarget.token } : {}),
             ...(argv['agent-host-name']
               ? { name: argv['agent-host-name'] }
               : {}),
