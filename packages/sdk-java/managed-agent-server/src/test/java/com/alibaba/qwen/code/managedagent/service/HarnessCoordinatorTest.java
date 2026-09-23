@@ -97,6 +97,69 @@ class HarnessCoordinatorTest {
                 eq(turnId), anyString(), eq("epoch-new"), any());
         verify(store, never()).releaseTurnLease(eq(tenantId), eq(sessionId),
                 eq(turnId), anyString());
+        verify(store, never()).retractContinuationOutput(anyString(),
+                anyString(), anyString(), anyString(), anyString(),
+                anyString());
+    }
+
+    @Test
+    void retractsAdmittedContinuationTextBeforeReplacingTheStream() {
+        String tenantId = "tenant-recovery";
+        String sessionId = "session-recovery";
+        String turnId = "turn-recovery";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-old", "epoch-old", 7,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-old", 7);
+        TurnRecord recovered = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-new", 0);
+
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        ExecutorService executor = directExecutor();
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.hasUnknownOutcome()).thenReturn(false);
+        when(recovery.isContinuationReady()).thenReturn(true);
+        when(recovery.isContinuationAdmitted()).thenReturn(true);
+        when(recovery.getCheckpointId()).thenReturn("checkpoint-1");
+        when(recovery.getActivationId()).thenReturn("activation-1");
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.createOrLoad(tenantId, sessionId, true))
+                .thenReturn(new Attachment("boot-new", recovery, 0L,
+                        "epoch-new"));
+        when(store.bindRecoveredHarness(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("boot-old"), eq("boot-new")))
+                .thenReturn(true);
+        when(store.findTurn(tenantId, sessionId, turnId))
+                .thenReturn(Optional.of(claimed), Optional.of(recovered));
+        when(harness.continueManagedRuntime(tenantId, sessionId, promptId,
+                "checkpoint-1", "activation-1"))
+                .thenReturn(new Admission(0, "epoch-new"));
+        when(harness.stream(tenantId, sessionId, 0, "epoch-new"))
+                .thenReturn(terminalStream(promptId));
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        InOrder recoveryOrder = inOrder(store, harness);
+        recoveryOrder.verify(store).retractContinuationOutput(eq(tenantId),
+                eq(sessionId), eq(turnId), anyString(), eq("boot-old"),
+                eq("epoch-old"));
+        recoveryOrder.verify(harness).continueManagedRuntime(tenantId,
+                sessionId, promptId, "checkpoint-1", "activation-1");
     }
 
     @Test

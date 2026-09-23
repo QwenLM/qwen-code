@@ -2655,6 +2655,26 @@ export interface ManagedRuntimeWaitInspection {
   readonly checkpointId: string;
   readonly activationId: string;
   readonly executions: readonly ManagedInspectedRuntimeExecution[];
+  /**
+   * True when every settled receipt was already attached to a model
+   * continuation that has not committed `turn_settled`.
+   */
+  readonly continuationAdmitted?: boolean;
+}
+
+function recoverableSettledRuntimeItems<
+  T extends { readonly state: string; readonly consumed?: boolean },
+>(
+  items: readonly T[],
+): { items: T[]; continuationAdmitted: boolean } | null {
+  const settled = items.filter((item) => item.state === 'settled');
+  if (settled.length === 0) return null;
+  const pending = settled.filter((item) => item.consumed !== true);
+  if (pending.length > 0) {
+    return { items: pending, continuationAdmitted: false };
+  }
+  if (settled.length !== items.length) return null;
+  return { items: settled, continuationAdmitted: true };
 }
 
 function recoveredRuntimeOutcome(
@@ -6239,10 +6259,9 @@ export class Config {
     if (checkpoint.continuation.phase !== 'results_ready' || tools === null) {
       return null;
     }
-    const items = tools.items.filter(
-      (item) => item.state === 'settled' && !item.consumed,
-    );
-    if (items.length === 0) return null;
+    const recoverable = recoverableSettledRuntimeItems(tools.items);
+    if (recoverable === null) return null;
+    const items = recoverable.items;
     const outcomes = await this.readManagedRuntimeOutcomes();
     const outcomeCallIds = new Set(
       outcomes.outcomes.map((outcome) => outcome.functionCallId),
@@ -6285,6 +6304,7 @@ export class Config {
       phase: 'results_ready',
       checkpointId: checkpoint.identity.checkpointId,
       activationId: checkpoint.identity.activationId,
+      continuationAdmitted: recoverable.continuationAdmitted,
       executions,
     };
   }
@@ -6397,10 +6417,13 @@ export class Config {
     ) {
       return empty;
     }
+    const recoverable = recoverableSettledRuntimeItems(
+      authorization.checkpoint.tools.items,
+    );
+    if (recoverable === null) return empty;
     const preserveCallIds: string[] = [];
     const outcomes: ManagedRuntimeOutcome[] = [];
-    for (const item of authorization.checkpoint.tools.items) {
-      if (item.state !== 'settled' || item.consumed) continue;
+    for (const item of recoverable.items) {
       preserveCallIds.push(item.functionCallId);
       if (item.outcomeRef === null) continue;
       let parsed: unknown;
@@ -6432,6 +6455,18 @@ export class Config {
     const handle = this.liveManagedHarness();
     if (handle === undefined) return;
     await handle.consumeRuntimeResults();
+  }
+
+  /**
+   * Closes a consumed Runtime continuation after its model request finishes.
+   * Until then a successor can still read the original receipts.
+   */
+  async settleConsumedManagedRuntimeContinuation(): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    await handle.settleConsumedRuntimeContinuation();
   }
 
   /**

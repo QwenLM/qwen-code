@@ -104,6 +104,14 @@ public interface AgentStateStore {
             String turnId, String owner, String expectedEventEpoch,
             String eventEpoch, long lastEventId);
 
+    /**
+     * Clears non-terminal text from a continuation epoch that did not reach
+     * a public terminal event, so the replacement stream is the only copy.
+     */
+    void retractContinuationOutput(String tenantId, String sessionId,
+            String turnId, String owner, String harnessBootId,
+            String eventEpoch);
+
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             List<HarnessEvent> events);

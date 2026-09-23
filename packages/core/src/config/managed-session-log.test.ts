@@ -1206,6 +1206,75 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('reopens a consumed Runtime continuation and closes it after the model request', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      const recorder = first.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run a remote tool');
+      await recorder.flush();
+      await first.config.ensureManagedHarnessRunnable();
+      await first.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-admitted',
+        toolName: 'remote_tool',
+        executionCallId: 'ex-admitted',
+        invocationBindingId: 'runtime-session-admitted',
+        modelMessageId: 'msg-admitted',
+      });
+      await first.config.resolveManagedAwaitRuntime({
+        functionCallId: 'fc-admitted',
+        executionCallId: 'ex-admitted',
+        outcome: 'completed',
+        body: { output: 'original runtime receipt' },
+        functionResponse: {
+          id: 'fc-admitted',
+          name: 'remote_tool',
+          response: { output: 'original runtime receipt' },
+        },
+      });
+      await first.config.consumeManagedRuntimeResults();
+      await first.config.closeSessionWriter();
+
+      const second = await activate({ managedSessionLog: true });
+      await expect(
+        second.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toMatchObject({
+        phase: 'results_ready',
+        continuationAdmitted: true,
+        executions: [{ executionCallId: 'ex-admitted', outcome: 'known' }],
+      });
+      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
+        {
+          outcomes: [
+            {
+              functionCallId: 'fc-admitted',
+              executionCallId: 'ex-admitted',
+              part: {
+                functionResponse: {
+                  id: 'fc-admitted',
+                  name: 'remote_tool',
+                  response: { output: 'original runtime receipt' },
+                },
+              },
+            },
+          ],
+          preserveCallIds: ['fc-admitted'],
+        },
+      );
+      await second.config.settleConsumedManagedRuntimeContinuation();
+      await second.config.closeSessionWriter();
+
+      const third = await activate({ managedSessionLog: true });
+      await expect(
+        third.config.inspectPendingManagedRuntimeWait(),
+      ).resolves.toBeNull();
+      await expect(third.config.readManagedRuntimeOutcomes()).resolves.toEqual({
+        outcomes: [],
+        preserveCallIds: [],
+      });
+      await third.config.closeSessionWriter();
+    });
+  });
+
   it('sends the original Runtime receipt on the next model request instead of a synthesized failure', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

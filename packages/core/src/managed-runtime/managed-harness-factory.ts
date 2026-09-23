@@ -12,6 +12,7 @@ import {
   createInitialHarnessCheckpoint,
   createModelOutputCommittedHarnessCheckpoint,
   createResultsReadyHarnessCheckpoint,
+  createTurnSettledHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   HARNESS_DURABLE_WAIT_BOUNDARY,
   HARNESS_MODEL_START_PHASES,
@@ -202,6 +203,11 @@ export interface ManagedHarnessHandle {
    * `results_ready`.
    */
   consumeRuntimeResults(): Promise<HarnessCheckpointV1 | null>;
+  /**
+   * Closes a consumed `results_ready` continuation after the model request
+   * finishes. No-op until every settled receipt is consumed.
+   */
+  settleConsumedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null>;
 }
 
 /**
@@ -607,6 +613,31 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     });
     await this.commitHarnessCheckpoint(
       `harness:results_consumed:${this.activation.activationId}:${identity.coveredSequence}`,
+      checkpoint,
+      null,
+    );
+    return checkpoint;
+  }
+
+  async settleConsumedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null> {
+    this.assertNotDetached();
+    this.assertCurrentActivation();
+    const previous = (await this.requireRunnableAuthorization()).checkpoint;
+    const items = previous.tools?.items ?? [];
+    if (
+      previous.continuation.phase !== 'results_ready' ||
+      items.length === 0 ||
+      items.some((item) => item.state !== 'settled' || !item.consumed)
+    ) {
+      return null;
+    }
+    const identity = this.nextCheckpointIdentity();
+    const checkpoint = createTurnSettledHarnessCheckpoint({
+      previous,
+      ...identity,
+    });
+    await this.commitHarnessCheckpoint(
+      `harness:turn_settled:${this.activation.activationId}:${identity.coveredSequence}`,
       checkpoint,
       null,
     );

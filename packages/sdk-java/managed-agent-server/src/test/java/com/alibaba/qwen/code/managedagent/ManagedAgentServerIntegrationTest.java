@@ -877,6 +877,66 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void retractsOnlyTheIncompleteContinuationEpoch() {
+        String tenant = "tenant-retract-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "retract-create",
+                "sha256:" + "4".repeat(64), "qwen-code", null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "retract-turn", "sha256:" + "5".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "6".repeat(64));
+        String owner = "retract-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot_old")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_old", 1);
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_old", List.of(
+                        new HarnessEvent(2, "boot_old:epoch_old:2",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "partial"), false,
+                                        null, null, null)),
+                        new HarnessEvent(3, "boot_old:epoch_old:3",
+                                new ProjectedEvent("item.tool_call.updated",
+                                        Map.of(), false, null, null, null)),
+                        new HarnessEvent(4, "boot_kept:epoch_old:4",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "kept"), false, null,
+                                        null, null))));
+
+        store.retractContinuationOutput(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot_old", "epoch_old");
+
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .satisfies(events -> {
+                    assertThat(events).extracting(event -> event.type()
+                                    + ":" + event.sourceKey())
+                            .contains(
+                                    "item.output_text.delta:boot_old:epoch_old:2",
+                                    "item.tool_call.updated:boot_old:epoch_old:3",
+                                    "item.output_text.delta:boot_kept:epoch_old:4");
+                    assertThat(events).filteredOn(event ->
+                                    "boot_old:epoch_old:2".equals(
+                                            event.sourceKey()))
+                            .singleElement()
+                            .satisfies(event -> assertThat(event.data())
+                                    .containsEntry("text", ""));
+                    assertThat(events).filteredOn(event ->
+                                    "boot_kept:epoch_old:4".equals(
+                                            event.sourceKey()))
+                            .singleElement()
+                            .satisfies(event -> assertThat(event.data())
+                                    .containsEntry("text", "kept"));
+                });
+    }
+
+    @Test
     void doesNotPublishRolledBackEvents() throws Exception {
         String tenant = "tenant-rollback-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,

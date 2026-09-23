@@ -1490,6 +1490,55 @@ export function createResultsReadyHarnessCheckpoint(input: {
 }
 
 /**
+ * After a consumed Runtime continuation finishes without another tool
+ * call, close the recovery window. Until this checkpoint exists, a
+ * successor may re-read the original receipts and must not dispatch again.
+ */
+export function createTurnSettledHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+}): HarnessCheckpointV1 {
+  if (input.previous.continuation.phase !== 'results_ready') {
+    throw new ManagedSessionRecordError(
+      'turn_settled resume requires a results_ready checkpoint.',
+    );
+  }
+  const items = input.previous.tools?.items ?? [];
+  if (
+    items.length === 0 ||
+    items.some((item) => item.state !== 'settled' || item.consumed !== true)
+  ) {
+    throw new ManagedSessionRecordError(
+      'turn_settled requires every Runtime receipt to be consumed.',
+    );
+  }
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'turn_settled',
+      pendingEventIds: [],
+    },
+    attempt: input.previous.attempt,
+    tools: input.previous.tools,
+    runtime: input.previous.runtime,
+    approval: null,
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
  * After the original Runtime receipts are present on the next model
  * request, mark those settled items consumed. Phase stays
  * `results_ready` so the same turn may still start the model.

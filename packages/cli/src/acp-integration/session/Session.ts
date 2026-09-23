@@ -5479,6 +5479,7 @@ export class Session implements SessionContext {
       // interactive path, which captures on every main turn in
       // `LlmClient.sendMessageStream`.
       if (completedResult.stopReason === 'end_turn') {
+        await this.config.settleConsumedManagedRuntimeContinuation?.();
         this.config.getLlmClient().captureCacheSafeParams();
       }
       this.#maybeEmitFollowupSuggestion(completedResult);

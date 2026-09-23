@@ -627,6 +627,10 @@ describe('managed harness factory', () => {
     expect(() => managedRuntimeDispatchGate(sessionKey).claim('ex-1')).toThrow(
       /already dispatched/,
     );
+    const settled = await handle.settleConsumedRuntimeContinuation();
+    expect(settled?.continuation.phase).toBe('turn_settled');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    expect(await handle.settleConsumedRuntimeContinuation()).toBeNull();
     expect(
       parseManagedRuntimeOutcomePart('fc-1', {
         functionResponse: {

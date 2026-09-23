@@ -809,6 +809,74 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
+    public void retractContinuationOutput(String tenantId, String sessionId,
+            String turnId, String owner, String harnessBootId,
+            String eventEpoch) {
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
+        long now = clock.millis();
+        if (!owner.equals(turn.dispatchOwner())
+                || turn.dispatchLeaseUntil() == null
+                || turn.dispatchLeaseUntil() < now
+                || !ACTIVE_TURN_STATES.contains(turn.status())) {
+            throw new IllegalStateException("Turn dispatch lease was lost");
+        }
+        String prefix = harnessBootId + ":" + eventEpoch + ":";
+        List<EventRecord> deltas = jdbc.query("SELECT * FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND event_type"
+                        + " IN ('item.output_text.delta',"
+                        + " 'item.reasoning.delta') ORDER BY sequence_id"
+                        + " ASC",
+                eventMapper, tenantId, sessionId, turnId);
+        Map<String, StringBuilder> retained = new LinkedHashMap<>();
+        List<String> clearedParts = new ArrayList<>();
+        for (EventRecord event : deltas) {
+            String partId = continuationPartId(turnId, event);
+            boolean retract = event.sourceKey() != null
+                    && event.sourceKey().startsWith(prefix);
+            if (retract) {
+                if (!clearedParts.contains(partId)) {
+                    clearedParts.add(partId);
+                }
+                Map<String, Object> data = new LinkedHashMap<>(event.data());
+                data.put("text", "");
+                jdbc.update("UPDATE managed_agent_event SET data_json = ?"
+                                + " WHERE tenant_id = ? AND session_id = ?"
+                                + " AND sequence_id = ?",
+                        writeJson(data), tenantId, sessionId,
+                        event.sequence());
+                continue;
+            }
+            String text = string(event.data().get("text"));
+            if (text == null || text.isEmpty()) {
+                continue;
+            }
+            retained.computeIfAbsent(partId, ignored -> new StringBuilder())
+                    .append(text);
+        }
+        for (String partId : clearedParts) {
+            String text = retained.getOrDefault(partId, new StringBuilder())
+                    .toString();
+            jdbc.update("UPDATE managed_agent_item_part SET part_text = ?,"
+                            + " updated_at = ?, revision = revision + 1"
+                            + " WHERE tenant_id = ? AND session_id = ?"
+                            + " AND part_id = ?",
+                    text, now, tenantId, sessionId, partId);
+        }
+    }
+
+    private static String continuationPartId(String turnId,
+            EventRecord event) {
+        String partId = string(event.data().get("contentPartId"));
+        if (partId != null) {
+            return partId;
+        }
+        String partType = "item.reasoning.delta".equals(event.type())
+                ? "reasoning" : "output_text";
+        return "part_" + turnId + "_" + partType;
+    }
+
+    @Transactional
     public void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             List<HarnessEvent> events) {
