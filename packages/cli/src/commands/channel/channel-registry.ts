@@ -34,13 +34,14 @@ const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
 
 const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
   {
-    key: 'senderPolicy',
-    label: 'Sender Policy',
+    key: 'privatePolicy',
+    label: 'Private Policy',
     kind: 'enum',
     required: true,
     default: 'pairing',
     description: 'Controls who can start direct conversations',
     options: [
+      { value: 'disabled', label: 'Disabled' },
       { value: 'pairing', label: 'Pairing' },
       { value: 'allowlist', label: 'Allowlist' },
       { value: 'open', label: 'Open' },
@@ -71,7 +72,7 @@ const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
     label: 'Session Operators',
     kind: 'string-list',
     description:
-      'User IDs who may approve tool use and run /cancel, /clear or /loop in shared sessions; empty derives them from allowed users and the sender policy',
+      'User IDs who may approve tool use and run /cancel, /clear or /loop in shared sessions; empty grants no shared-session operator permissions',
   },
 ];
 
