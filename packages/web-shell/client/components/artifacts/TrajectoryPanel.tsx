@@ -32,6 +32,11 @@ import type {
   TrajectoryToolRow,
   TrajectoryTurn,
 } from '../../trajectory/types';
+import {
+  buildTimeline,
+  type TimelineSpan,
+} from '../../trajectory/buildTimeline';
+import { TrajectoryOverview } from './TrajectoryOverview';
 import styles from './TrajectoryPanel.module.css';
 
 /** Every row is one line and every row is this tall, turn headers included. */
@@ -114,9 +119,8 @@ function metricsOf(
   }
   if (row.kind === 'tool') {
     const parts: string[] = [];
-    // A tool frame carries only a duration — the tool logger stamps a whole
-    // batch at the batch's end, so there is no honest per-tool start time and
-    // nothing to derive one from.
+    // Only the duration: where a call started is what the overview above
+    // the table shows, and a clock time per row would crowd the column.
     if (row.timing) parts.push(formatDuration(row.timing.durationMs));
     if (row.subagentSummary) {
       const { requests, tools, requestMs } = row.subagentSummary;
@@ -263,8 +267,15 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
 
 export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const { t } = useI18n();
-  const { trajectory, status, error, truncated, refresh } =
-    useTrajectoryWindow(loadPage);
+  const {
+    trajectory,
+    status,
+    error,
+    loadedPages,
+    truncated,
+    olderFailure,
+    refresh,
+  } = useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -423,6 +434,47 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     visualRows.length > 0 &&
     !hasAnyTiming(trajectory);
 
+  const olderFailureText =
+    olderFailure === undefined
+      ? undefined
+      : olderFailure.kind === 'partial'
+        ? t('trajectory.olderPartial')
+        : t('trajectory.olderFailed', { message: olderFailure.message });
+
+  const timeline = useMemo(
+    () => (trajectory ? buildTimeline(trajectory) : undefined),
+    [trajectory],
+  );
+
+  /** A span stands for one row: select it and bring it into view. */
+  const selectSpan = useCallback(
+    (rowKey: string) => {
+      const index = visualRows.findIndex((row) => row.key === rowKey);
+      if (index < 0) return;
+      selectRow(rowKey);
+      virtualizer.scrollToIndex(index, { align: 'auto' });
+    },
+    [selectRow, virtualizer, visualRows],
+  );
+
+  // Named the way the row reads, which already says a failed request failed
+  // in words — the red of the span is never the only signal.
+  const describeSpan = useCallback(
+    (span: TimelineSpan) => {
+      const parts = [labelOf(span.row, t).text];
+      parts.push(formatDuration(span.end - span.start));
+      if (span.ttftEnd !== undefined) {
+        parts.push(
+          t('trajectory.ttft', {
+            duration: formatDuration(span.ttftEnd - span.start),
+          }),
+        );
+      }
+      return parts.filter(Boolean).join(' · ');
+    },
+    [t],
+  );
+
   return (
     <div className={styles.panel} data-testid="trajectory-panel">
       <div className={styles.header}>
@@ -457,6 +509,18 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         </div>
       </div>
 
+      {/* Mounted from the start at a fixed height, whatever it holds: it is a
+          flex sibling of the scrolled rows, so a box that appeared or grew
+          would move every row under the reader. The no-timing notice lives
+          inside it for the same reason. */}
+      <TrajectoryOverview
+        model={timeline}
+        {...(timingAbsent ? { notice: t('trajectory.noTiming') } : {})}
+        selectedKey={selectedKey}
+        onSelect={selectSpan}
+        describe={describeSpan}
+      />
+
       {error !== undefined && (
         <div className={styles.error} role="alert">
           <span>
@@ -474,11 +538,6 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           </button>
         </div>
       )}
-      {timingAbsent && (
-        <div className={styles.notice} role="status">
-          {t('trajectory.noTiming')}
-        </div>
-      )}
 
       <div className={styles.tableWrap}>
         {visualRows.length === 0 ? (
@@ -486,24 +545,59 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           // repeating it here as a placeholder would say it twice.
           status === 'error' ? null : (
             <div className={styles.placeholder} role="status">
-              {t(empty ? 'trajectory.empty' : 'common.loading')}
+              {empty
+                ? t('trajectory.empty')
+                : loadedPages > 0
+                  ? t('trajectory.loadingPages', { pages: loadedPages })
+                  : t('common.loading')}
             </div>
           )
         ) : (
           <>
             {/* Outside the scrolled box on purpose: inside it, its height
                 would offset every virtual row from the coordinates the
-                virtualizer computes. */}
-            {truncated && (
-              <div className={styles.olderBar}>
+                virtualizer computes. And always here, at one fixed height,
+                whatever it says: it is a flex sibling of the scrolled box, so
+                a bar that came and went with `truncated` would move every row
+                the moment a refresh changed its answer. */}
+            <div
+              className={styles.olderBar}
+              role="status"
+              data-testid="trajectory-older-bar"
+            >
+              {olderFailure !== undefined ? (
+                <>
+                  <span
+                    className={`${styles.olderNotice} ${styles.toneError}`}
+                    data-testid="trajectory-older-failed"
+                    title={olderFailureText}
+                  >
+                    {olderFailureText}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.headerButton}
+                    onClick={() => {
+                      if (status !== 'loading') refresh();
+                    }}
+                    // Not `disabled`: a disabled button drops the focus of a
+                    // reader who just pressed it, and this one is pressed
+                    // exactly when it is about to go busy.
+                    aria-disabled={status === 'loading' ? true : undefined}
+                    data-testid="trajectory-older-retry"
+                  >
+                    {t('common.retry')}
+                  </button>
+                </>
+              ) : truncated ? (
                 <span
                   className={styles.olderNotice}
                   data-testid="trajectory-truncated"
                 >
                   {t('trajectory.truncated')}
                 </span>
-              </div>
-            )}
+              ) : null}
+            </div>
             <div
               ref={scrollRef}
               className={styles.scroll}

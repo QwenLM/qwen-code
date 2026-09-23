@@ -2865,14 +2865,46 @@ describe('ui_telemetry timing frames', () => {
     });
   });
 
-  it('gives a tool frame no start time, because none was recorded', () => {
+  it('derives no tool start time when the record carries none', () => {
     // logToolCall runs in one loop after the whole batch settles, so the
     // recorded timestamp is the batch's end for every tool in it. Subtracting
     // a fast tool's own duration from that would place it just before the
-    // batch ended rather than when it ran.
+    // batch ended rather than when it ran — so a record written before
+    // `started_at_ms` existed gets no start at all.
     const [toolTiming] = timings(
       timingMachine(),
       telemetry('tel-1', TOOL_CALL_EVENT),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });
+    expect(toolTiming).not.toHaveProperty('startedAt');
+  });
+
+  it('carries the start time a tool record measured', () => {
+    // The shape a scheduled batch leaves behind: this call started at :01 and
+    // took 16 ms, but was only logged at :06.560 when its batch settled. The
+    // start must be the recorded one, not the log time minus the duration.
+    const startedAtMs = Date.parse('2026-07-14T00:00:01.000Z');
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, started_at_ms: startedAtMs }),
+    );
+
+    expect(toolTiming).toMatchObject({
+      kind: 'tool',
+      durationMs: 16,
+      startedAt: startedAtMs,
+    });
+  });
+
+  it.each([
+    ['negative', -1],
+    ['not a number', Number.NaN],
+    ['a string', '2026-07-14T00:00:01.000Z'],
+  ])('drops a recorded tool start that is %s', (_label, value) => {
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, started_at_ms: value }),
     );
 
     expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });

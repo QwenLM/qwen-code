@@ -98,6 +98,7 @@ fn def() -> &'static ToolDef {
                     "description": "Pixel-wheel path: number of wheel notches. Keystroke path: number of keystroke repetitions. Default: 3."
                 },
                 "window_id": { "type": "integer" },
+                "app_context": { "type": "boolean", "description": "App-managed target context." },
                 "element_index": cua_driver_core::tool_schema::element_index_schema(),
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
                 "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),

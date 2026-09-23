@@ -203,10 +203,11 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
 export interface DaemonTranscriptTimingMeta {
   kind: 'request' | 'tool';
   /**
-   * Epoch ms, and `kind === 'request'` only. A request is logged when its own
-   * stream ends, so its start follows from its duration. Tool calls can be
-   * logged in one loop after their whole batch settles, so no honest per-tool
-   * start is derivable and a tool frame never carries this.
+   * Epoch ms. A request frame has one whenever its end was recorded: a request
+   * is logged when its own stream ends, so its start follows from its
+   * duration. A tool frame has one only when the session recorded the call's
+   * start — tool calls can be logged after their whole batch settles, so no
+   * start is derived for them, and older sessions carry none.
    */
   startedAt?: number;
   durationMs: number;

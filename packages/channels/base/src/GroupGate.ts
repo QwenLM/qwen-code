@@ -104,3 +104,17 @@ export class GroupGate {
     return this.pairingStore?.isGroupApproved(groupId) ?? false;
   }
 }
+
+/**
+ * Lowercase every per-group `allowedUsers` list in place, for platforms whose
+ * user IDs are case-insensitive logins.
+ */
+export function lowercaseGroupAllowedUsers(
+  groups: Record<string, GroupConfig>,
+): void {
+  for (const group of Object.values(groups)) {
+    if (group.allowedUsers) {
+      group.allowedUsers = group.allowedUsers.map((u) => u.toLowerCase());
+    }
+  }
+}

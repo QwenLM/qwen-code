@@ -7,6 +7,13 @@ export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+/**
+ * Who may speak inside a group the channel already admitted (`GroupConfig.senders`).
+ * `inherit` follows `senderPolicy`, like a direct message. `pairing` is
+ * deliberately absent: pairing approvals are stored per user and would also
+ * unlock direct messages. Admitting a whole group is `groupPolicy: "pairing"`.
+ */
+export type GroupSenderPolicy = 'inherit' | 'open' | 'allowlist';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
@@ -39,6 +46,13 @@ export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
   groupHistoryLimit?: number;
+  /**
+   * Who may speak in the group. Default: `open` in an approved group under
+   * `groupPolicy: "pairing"`, `inherit` otherwise.
+   */
+  senders?: GroupSenderPolicy;
+  /** Members allowed to speak when `senders` is `allowlist`. */
+  allowedUsers?: string[];
 }
 
 export interface ChannelConfig {
@@ -63,6 +77,12 @@ export interface ChannelConfig {
   outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
   dmPolicy: DmPolicy; // default: "open"
+  /**
+   * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
+   * Authoritative when set, even when empty. Unset derives the operators from
+   * `allowedUsers` and the sender axes.
+   */
+  operators?: string[];
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
