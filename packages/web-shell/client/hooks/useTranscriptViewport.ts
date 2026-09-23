@@ -77,11 +77,7 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
     [range?.pageIds, state.pages],
   );
   const messages = useMemo(
-    () =>
-      transcriptBlocksToLocalizedMessages(blocks, t).map((message) => {
-        if ('isStreaming' in message) return { ...message, isStreaming: false };
-        return message;
-      }),
+    () => transcriptBlocksToLocalizedMessages(blocks, t),
     [blocks, t],
   );
   const toolSources = useMemo(() => {

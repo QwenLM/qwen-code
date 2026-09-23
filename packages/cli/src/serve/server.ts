@@ -1805,6 +1805,7 @@ export function createServeApp(
       ),
     );
     standaloneSessionService = new StandaloneSessionService({
+      daemonLog,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);

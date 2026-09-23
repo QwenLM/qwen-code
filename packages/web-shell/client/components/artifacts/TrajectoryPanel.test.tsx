@@ -255,9 +255,11 @@ describe('TrajectoryPanel', () => {
   it('says so when the window holds no recorded timing', async () => {
     const container = await render(async () => page([userText('go', 'rec-1')]));
 
-    expect(container.textContent).toContain(
-      'No request or tool durations are recorded',
-    );
+    // Inside the overview's fixed box: a notice of its own above the table
+    // would be one more thing that moves the rows when it comes and goes.
+    expect(
+      text(container.querySelector('[data-testid="trajectory-overview"]')),
+    ).toContain('No request or tool durations are recorded');
   });
 
   it('counts a tool duration as recorded timing', async () => {
@@ -409,6 +411,121 @@ describe('TrajectoryPanel', () => {
     expect(container.querySelectorAll('[data-selected="true"]')).toHaveLength(
       1,
     );
+  });
+
+  describe('overview', () => {
+    const START = 1_760_000_000_000;
+    /** Two timed turns: a request with its first token, then a tool. */
+    const timedTurns = () => [
+      userText('first', 'rec-1'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          ttftMs: 400,
+          startedAt: START,
+          status: 'ok',
+          model: 'qwen3.8-max',
+        },
+        'rec-2',
+      ),
+      toolCall('call-1', 'read_file', 'ReadFile: note.txt', 'rec-3'),
+      timingFrame(
+        {
+          kind: 'tool',
+          durationMs: 250,
+          startedAt: START + 1000,
+          callId: 'call-1',
+          toolName: 'read_file',
+          toolStatus: 'success',
+        },
+        'rec-4',
+      ),
+      userText('second', 'rec-5'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 500,
+          startedAt: START + 60_000,
+          status: 'error',
+          model: 'qwen3.8-max',
+        },
+        'rec-6',
+      ),
+    ];
+    const spansIn = (container: HTMLElement) =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="trajectory-span"]',
+        ),
+      );
+    const activeRow = (container: HTMLElement) => {
+      const grid = container.querySelector('[role="grid"]') as HTMLElement;
+      const id = grid.getAttribute('aria-activedescendant');
+      return id ? document.getElementById(id) : null;
+    };
+
+    it('sits above the table, outside the scrolled rows', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const overview = container.querySelector(
+        '[data-testid="trajectory-overview"]',
+      )!;
+      const scroll = container.querySelector('[role="grid"]') as HTMLElement;
+
+      expect(scroll.contains(overview)).toBe(false);
+      expect(
+        overview.compareDocumentPosition(scroll) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(scroll.children).toHaveLength(1);
+    });
+
+    it('draws the timed records of a real page', async () => {
+      const container = await render(async () => page(REAL_EVENTS));
+      expect(spansIn(container).length).toBeGreaterThan(0);
+    });
+
+    it('selects the row a clicked span stands for', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const tool = spansIn(container).find((el) => el.dataset['lane'] === '1')!;
+
+      await act(async () => tool.click());
+
+      expect(text(activeRow(container))).toContain('ReadFile: note.txt');
+    });
+
+    it('lights the span of the row the keyboard selected', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const grid = container.querySelector('[role="grid"]') as HTMLElement;
+      const press = async (key: string) => {
+        await act(async () => {
+          grid.dispatchEvent(
+            new KeyboardEvent('keydown', { key, bubbles: true }),
+          );
+        });
+      };
+
+      // Turn header, prompt, then the first request.
+      await press('ArrowDown');
+      await press('ArrowDown');
+      await press('ArrowDown');
+
+      const current = spansIn(container).filter(
+        (el) => el.dataset['current'] === 'true',
+      );
+      expect(current).toHaveLength(1);
+      expect(current[0]!.dataset['lane']).toBe('0');
+      expect(current[0]!.dataset['ttft']).toBe('true');
+    });
+
+    it('names a span the way its row reads, with the failure in words', async () => {
+      const container = await render(async () => page(timedTurns()));
+      const [first, , failed] = spansIn(container);
+
+      expect(first!.title).toBe('qwen3.8-max · 1.0s · TTFT 400ms');
+      expect(failed!.dataset['error']).toBe('true');
+      expect(failed!.title).toBe('qwen3.8-max · Request failed · 500ms');
+    });
   });
 
   it('names a subagent whose spawning call is outside the window', async () => {
@@ -589,6 +706,159 @@ describe('TrajectoryPanel', () => {
     expect(
       container.querySelector('[data-testid="trajectory-truncated"]'),
     ).toBeNull();
+    // The bar is still there, empty: it holds its height so a refresh that
+    // changes what it says cannot move the grid under it.
+    const bar = container.querySelector('[data-testid="trajectory-older-bar"]');
+    expect(bar).not.toBeNull();
+    expect(text(bar)).toBe('');
+  });
+
+  describe('walking back through pages', () => {
+    const prompts = (label: string, count: number) =>
+      Array.from({ length: count }, (_unused, index) =>
+        userText(`${label} prompt ${index + 1}`, `rec-${label}-${index + 1}`),
+      );
+
+    it('folds every page it walked back through into one table', async () => {
+      const loadPage: TrajectoryPageLoader = vi.fn(async ({ cursor }) =>
+        cursor === 'c1'
+          ? page(prompts('older', 2))
+          : page(prompts('newer', 3), { hasMore: true, nextCursor: 'c1' }),
+      );
+      const container = await render(loadPage);
+      await act(async () => {});
+
+      const grid = container.querySelector('[role="grid"]') as HTMLElement;
+      // Five prompts, each a turn header and a user row.
+      expect(grid.getAttribute('aria-rowcount')).toBe('10');
+      expect(
+        text(container.querySelector('[data-testid="trajectory-totals"]')),
+      ).toContain('5 turns');
+      expect(
+        container.querySelector('[data-testid="trajectory-truncated"]'),
+      ).toBeNull();
+    });
+
+    it('counts the pages read while it walks back', async () => {
+      let releaseOlder!: (value: TrajectoryPageResult) => void;
+      const older = new Promise<TrajectoryPageResult>((resolve) => {
+        releaseOlder = resolve;
+      });
+      const container = await render(async ({ cursor }) =>
+        cursor
+          ? older
+          : page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' }),
+      );
+      await act(async () => {});
+
+      expect(container.querySelector('[role="grid"]')).toBeNull();
+      expect(text(container.querySelector('[role="status"]'))).toContain(
+        '1 page so far',
+      );
+
+      await act(async () => {
+        releaseOlder(page(prompts('older', 1)));
+      });
+      expect(
+        (container.querySelector('[role="grid"]') as HTMLElement).getAttribute(
+          'aria-rowcount',
+        ),
+      ).toBe('4');
+    });
+
+    it('draws the newer pages and offers a retry when an older one fails', async () => {
+      let olderFails = true;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          return page(prompts('newer', 2), { hasMore: true, nextCursor: 'c1' });
+        }
+        if (olderFails) throw new Error('socket hang up');
+        return page(prompts('older', 1));
+      });
+      const container = await render(loadPage);
+      await act(async () => {});
+
+      const grid = () =>
+        container.querySelector('[role="grid"]') as HTMLElement;
+      expect(grid().getAttribute('aria-rowcount')).toBe('4');
+      const failed = container.querySelector(
+        '[data-testid="trajectory-older-failed"]',
+      );
+      expect(text(failed)).toBe(
+        'Earlier records could not be read: socket hang up',
+      );
+      // The newest page read fine, so nothing is raised as an alert.
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(grid().children).toHaveLength(1);
+      expect(grid().contains(failed)).toBe(false);
+
+      olderFails = false;
+      const retry = container.querySelector(
+        '[data-testid="trajectory-older-retry"]',
+      ) as HTMLButtonElement;
+      expect(retry.disabled).toBe(false);
+      await act(async () => {
+        retry.click();
+      });
+      await act(async () => {});
+
+      expect(grid().getAttribute('aria-rowcount')).toBe('6');
+      expect(
+        container.querySelector('[data-testid="trajectory-older-failed"]'),
+      ).toBeNull();
+    });
+
+    it('names an older page read only in part without quoting the flag', async () => {
+      const container = await render(async ({ cursor }) =>
+        cursor
+          ? page(prompts('older', 1), { partial: true as const })
+          : page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' }),
+      );
+      await act(async () => {});
+
+      expect(
+        text(
+          container.querySelector('[data-testid="trajectory-older-failed"]'),
+        ),
+      ).toBe(
+        'Earlier records could only be read in part, so they are left out.',
+      );
+    });
+
+    it('does not start a second walk while one is under way', async () => {
+      let releaseNewest: ((value: TrajectoryPageResult) => void) | undefined;
+      let reads = 0;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        reads += 1;
+        if (cursor) throw new Error('down');
+        if (reads === 1) {
+          return page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' });
+        }
+        return new Promise<TrajectoryPageResult>((resolve) => {
+          releaseNewest = resolve;
+        });
+      });
+      const container = await render(loadPage);
+      await act(async () => {});
+      const retry = () =>
+        container.querySelector(
+          '[data-testid="trajectory-older-retry"]',
+        ) as HTMLButtonElement;
+
+      await act(async () => {
+        retry().click();
+      });
+      const during = loadPage.mock.calls.length;
+      expect(retry().getAttribute('aria-disabled')).toBe('true');
+      await act(async () => {
+        retry().click();
+      });
+      expect(loadPage.mock.calls.length).toBe(during);
+
+      await act(async () => {
+        releaseNewest?.(page(prompts('newer', 1)));
+      });
+    });
   });
 
   it('numbers rows by their place in the whole table, not in the DOM', async () => {

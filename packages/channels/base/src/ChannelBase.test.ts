@@ -3532,6 +3532,27 @@ describe('ChannelBase', () => {
         }
       });
 
+      it('keeps a personal group-shaped conversation on the direct-message axis', async () => {
+        const ch = createChannel({
+          senderPolicy: 'open',
+          groupPolicy: 'open',
+          groups: {
+            '*': { senders: 'allowlist', allowedUsers: ['someone-else'] },
+          },
+          sessionScope: 'chat_thread',
+        });
+        (
+          ch as unknown as { isPersonalConversation(): boolean }
+        ).isPersonalConversation = () => true;
+        const sessionId = await startSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        emitPermission(sessionId, 'req-1');
+
+        expect(await approveAs(ch, 'alice', 'req-1')).toBe(true);
+      });
+
       it('lets an explicit operators list override allowedUsers', async () => {
         const ch = createChannel({
           allowedUsers: ['boss', 'carol'],
