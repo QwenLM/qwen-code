@@ -2,7 +2,7 @@
 
 [English](web-shell-turn-calls-panel.md) | [简体中文](web-shell-turn-calls-panel.zh-CN.md)
 
-Status: implemented; fresh live backend verification pending restart.
+Status: implemented; sender identity verified against a real local daemon.
 
 ## Problem
 
@@ -141,8 +141,9 @@ contains only the version-1 output (including an authoritative empty output).
 Remaining invocation arguments and execution metadata are grouped under an
 initially collapsed Other disclosure. Live output uses the existing segment
 parser; legacy strings remain text unless they are valid JSON, in which case the shared Markdown renderer highlights their original JSON text. Unknown result versions use their text fallback rather than interpreting their fields. Existing display bounds
-still apply. This integration is verified with unit tests/build/typecheck only;
-fresh live backend verification remains pending.
+still apply. Field-level formatting is covered by unit tests/build/typecheck.
+The real-daemon sender check executes shell/glob calls and verifies their
+history/restoration flow, not every structured output field.
 
 **Identity, errors and rendering.** The turn index reads `daemonPromptId` from the user record immediately; terminal records remain a fallback for older sessions. This lets the selector merge a persisted prompt with its live admission before completion. An unresolved prompt and a failed prompt-index refresh show distinct retryable notices outside the listbox; neither is reported as an empty turn. The prompt picker shares the left navigation store, its bounded page cache, snapshot validation and error state. A keyboard-accessible window renders at most twelve options and fetches only missing visible pages. Switching prompts does not recreate the cache; Refresh reloads its head. The response envelope includes `v: 1`; incomplete replay returns `tool_calls_replay_incomplete`. The scan budget includes later records needed to pair results across scheduled/realtime boundaries, and its limit error names that scan rather than a single page.
 
@@ -175,12 +176,19 @@ Scheduler, replay and SDK tests cover independent starts, delayed batch logging,
 legacy records and invalid timestamps. Tests also cover filtering and JSON
 versus plain-text arguments/results. Browser checks of the reported 14-call session
 confirm reload restoration and the MCP badge with its 515ms duration; old
-records still lack real start timestamps. Check actual reported
-session turns against persisted call IDs and durations, including 57 calls in
-the final turn and 139 in the previous turn. Mock daemon browser checks cover
+records still lack real start timestamps. Verification of the originally
+reported 57-call and 139-call turns remains outstanding. Mock daemon browser checks cover
 layout, keyboard expansion and live timers; they do not prove real history
 correctness. Results are recorded in
 `.qwen/e2e-tests/web-shell-turn-calls-redesign.md`.
+
+The sender path is also verified in macOS Chromium against a real local daemon
+and bundled Web Shell, using a scripted local model and real shell/glob tools.
+Running selection persists its prompt ID without history reads; settlement reads
+history once; reopening the original sender message adopts its record ID; reload
+restores both calls. An empty session can show a pre-admission index 404 notice,
+which clears on a successful index refresh. This is not claimed fixed here.
+Evidence: `.qwen/e2e-tests/turn-calls-redesign/pr12466-round2-reproduction.md`.
 
 ## Risks and limits
 
