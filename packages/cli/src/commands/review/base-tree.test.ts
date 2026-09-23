@@ -3993,3 +3993,19 @@ describe('runBaseTree', () => {
     }
   });
 });
+
+// Pins the yield at the top of this file: without it the loop never reaches
+// the check phase between these two tests, so the flag never flips. Armed
+// with the same captured setImmediate the yield uses — immediates run FIFO,
+// so the armed one fires before the yield's own.
+let yieldObserved = false;
+
+it('arms a flag from a real macrotask callback', () => {
+  realSetImmediate(() => {
+    yieldObserved = true;
+  });
+});
+
+it('observes the event loop turned between tests', () => {
+  expect(yieldObserved).toBe(true);
+});
