@@ -286,7 +286,7 @@ To hit a breakpoint inside the sandbox container run:
 DEBUG=1 qwen
 ```
 
-**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect qwen-code due to automatic exclusion. Use `.qwen-code/.env` files for qwen-code specific debug settings.
+**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect qwen-code due to automatic exclusion. Use `.qwen/.env` files for qwen-code specific debug settings.
 
 ### React DevTools
 
