@@ -214,15 +214,25 @@ describe('qwen sessions ps', () => {
   });
 
   it('installs the output error guard before reading the managed store', async () => {
+    // Both mocks only record that they ran; every expectation is raised
+    // afterwards, in the test body. An expectation thrown from inside a
+    // mock implementation rides out on the rejection that
+    // `readManagedSessions` deliberately catches, so it is swallowed
+    // along with the error and the case passes with the guard deleted.
     const rec = record();
+    const order: string[] = [];
+    ignoreBrokenPipe.mockImplementation(() => {
+      order.push('guard');
+    });
     listLiveSessions.mockResolvedValue([rec]);
     listAgentViewSessionStates.mockImplementation(() => {
-      expect(ignoreBrokenPipe).toHaveBeenCalledOnce();
+      order.push('store');
       return Promise.reject(new Error('broken store'));
     });
 
     await run({ json: true });
 
+    expect(order).toEqual(['guard', 'store']);
     expect(stdout).toEqual([JSON.stringify(rec)]);
   });
 
