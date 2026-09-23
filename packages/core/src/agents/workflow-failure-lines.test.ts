@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildFailureLines,
+  reportedFailureLines,
   MAX_FAILURE_LINE_CHARS,
   MAX_FAILURE_LINES,
 } from './workflow-failure-lines.js';
@@ -40,5 +41,29 @@ describe('buildFailureLines', () => {
         ],
       }),
     ).toEqual(['[bad] boom']);
+  });
+});
+
+describe('reportedFailureLines', () => {
+  it('bounds script-reported failures inside the shared formatter', () => {
+    const lines = reportedFailureLines({
+      failed: Array(5_000).fill('x'.repeat(200)),
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('Reported failed:');
+    expect(lines[0]).toContain('… (truncated)');
+    expect(lines[0].length).toBeLessThanOrEqual(MAX_FAILURE_LINE_CHARS);
+  });
+
+  it('preserves the other fields when a getter throws and escapes terminal controls', () => {
+    expect(
+      reportedFailureLines({
+        failed: ['fr'],
+        get errors() {
+          throw new Error('unreadable');
+        },
+        error: '\u001b[31mboom\u001b[0m\u0007',
+      }),
+    ).toEqual(['Reported failed: ["fr"]', 'Reported error: boom']);
   });
 });

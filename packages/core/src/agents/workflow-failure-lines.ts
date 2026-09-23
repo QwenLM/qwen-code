@@ -20,6 +20,13 @@
  */
 
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  stringifyWorkflowResult,
+  truncateWorkflowText,
+} from './workflow-result-format.js';
+
+const debugLogger = createDebugLogger('WORKFLOW_FAILURES');
 
 /** Failure lines printed in full before the rest is named. */
 export const MAX_FAILURE_LINES = 10;
@@ -58,4 +65,27 @@ export function buildFailureLines(source: WorkflowFailureSource): string[] {
     lines.push(`… and ${remaining} more failures omitted`);
   }
   return lines;
+}
+
+/** Script-reported failures are data, independent of runtime dispatch status. */
+export function reportedFailureLines(result: unknown): string[] {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
+  return ['failed', 'errors', 'error'].flatMap((key) => {
+    try {
+      const failure = (result as Record<string, unknown>)[key];
+      if (!failure || (Array.isArray(failure) && failure.length === 0))
+        return [];
+      return [
+        truncateWorkflowText(
+          stripAnsiAndControl(
+            `Reported ${key}: ${stringifyWorkflowResult(failure)}`,
+          ),
+          MAX_FAILURE_LINE_CHARS,
+        ),
+      ];
+    } catch (error) {
+      debugLogger.debug('Failed to read workflow result field:', key, error);
+      return [];
+    }
+  });
 }

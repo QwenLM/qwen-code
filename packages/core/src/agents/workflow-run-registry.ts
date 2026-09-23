@@ -45,7 +45,14 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
-import { buildFailureLines } from './workflow-failure-lines.js';
+import {
+  buildFailureLines,
+  reportedFailureLines,
+} from './workflow-failure-lines.js';
+import {
+  stringifyWorkflowResult,
+  truncateWorkflowText,
+} from './workflow-result-format.js';
 import {
   formatWorkflowSizeWarningLog,
   type WorkflowSizeWarning,
@@ -57,7 +64,11 @@ import {
   NO_JOURNAL_NO_RESUME_NOTE,
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from './workflow-resume-call.js';
-import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
+import {
+  escapeXml,
+  escapeXmlElementText,
+  escapeXmlWithinBudget,
+} from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
@@ -417,6 +428,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * reconstructing the path from a storage handle it does not have.
    */
   journalPath?: string;
+  /** Snapshot destination; the runner persists it after emitting completion. */
+  snapshotPath?: string;
   /**
    * Failure hint naming where the authoring reference is in this session, for
    * a script the model authored. The foreground tool result carries it in the
@@ -676,9 +689,14 @@ export class WorkflowRunRegistry {
     const summary = `${prefix} "${label}" ${statusText}.`;
     const resultText =
       entry.status === 'completed'
-        ? stringifyCompletionResult(entry.result)
+        ? stringifyWorkflowResult(entry.result)
+            .replace(/\t/g, '  ')
+            .split('\n')
+            .map((line) => stripAnsiAndControl(line))
+            .join('\n')
         : '';
     const failures = buildFailureLines(entry);
+    const reported = reportedFailureLines(entry.result);
     const displayText = entry.isBackgrounded
       ? summary
       : [
@@ -687,14 +705,9 @@ export class WorkflowRunRegistry {
             ? `Error: ${entry.error ?? ''}`
             : `Result: ${resultText}`,
           ...failures,
-          ...reportedFailureLines(entry.result),
+          ...reported,
         ]
-          .map((line) => {
-            const text = stripAnsiAndControl(line);
-            return text.length > 4_096
-              ? `${text.slice(0, 4_096)}… (truncated)`
-              : text;
-          })
+          .map((block) => truncateWorkflowText(block, 4_096))
           .join('\n');
     const modelParts = [
       '<task-notification>',
@@ -704,19 +717,17 @@ export class WorkflowRunRegistry {
       `<summary>${prefix} "${escapeXml(label)}" ${statusText}.</summary>`,
     ];
     if (entry.status === 'completed' && entry.result !== undefined) {
-      const preview = resultText.slice(0, MAX_COMPLETION_RESULT_CHARS);
-      const escaped = escapeXml(preview);
-      const truncated =
-        preview.length < resultText.length ||
-        escaped.length > MAX_COMPLETION_RESULT_CHARS;
-      // A cut inside &quot; or another entity must not leave malformed XML.
-      const modelResult = escaped
-        .slice(0, MAX_COMPLETION_RESULT_CHARS)
-        .replace(/&[^;]*$/, '');
+      const { text: modelResult, truncated } = escapeXmlWithinBudget(
+        resultText,
+        MAX_COMPLETION_RESULT_CHARS,
+      );
       modelParts.push(`<result>${modelResult}</result>`);
       if (truncated) {
+        const snapshotHint = entry.snapshotPath
+          ? `Full result snapshot after finalization (if persistence succeeds): ${stripAnsiAndControl(entry.snapshotPath)}.`
+          : `Inspect workflow run ${entry.runId} after it settles for the full result.`;
         modelParts.push(
-          `<result-truncated>Preview truncated. Consult the run snapshot (${escapeXml(entry.runId)}.json) for the full result.</result-truncated>`,
+          `<result-truncated>Preview truncated. ${escapeXml(snapshotHint)}</result-truncated>`,
         );
       }
     }
@@ -737,6 +748,11 @@ export class WorkflowRunRegistry {
     if (failures.length > 0) {
       modelParts.push(
         `<failures>${escapeXmlElementText(failures.join('\n'))}</failures>`,
+      );
+    }
+    if (reported.length > 0) {
+      modelParts.push(
+        `<reported-failures>${escapeXmlElementText(reported.join('\n'))}</reported-failures>`,
       );
     }
     // The two recovery routes a backgrounded run needs and cannot reconstruct:
@@ -1910,31 +1926,6 @@ export class WorkflowRunRegistry {
     } catch (error) {
       debugLogger.error('Failed to emit workflow approval change:', error);
     }
-  }
-}
-
-function stringifyCompletionResult(result: unknown): string {
-  if (result === undefined) return '(workflow returned no value)';
-  if (typeof result === 'string') return result;
-  try {
-    return JSON.stringify(result) ?? String(result);
-  } catch {
-    return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
-  }
-}
-
-function reportedFailureLines(result: unknown): string[] {
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
-  try {
-    return ['failed', 'errors', 'error'].flatMap((key) => {
-      const failure = (result as Record<string, unknown>)[key];
-      if (!failure || (Array.isArray(failure) && failure.length === 0))
-        return [];
-      return [`Reported ${key}: ${stringifyCompletionResult(failure)}`];
-    });
-  } catch (error) {
-    debugLogger.debug('Failed to read workflow result fields:', error);
-    return [];
   }
 }
 

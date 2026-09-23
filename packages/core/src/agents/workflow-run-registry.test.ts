@@ -2018,18 +2018,26 @@ describe('WorkflowRunRegistry', () => {
     const r = new WorkflowRunRegistry();
     const completion = vi.fn();
     r.setCompletionCallback(completion);
-    r.register(reg('wf_large', { notifyOnCompletion: true }));
+    r.register(
+      reg('wf_large', {
+        notifyOnCompletion: true,
+        snapshotPath: '/tmp/workflows/wf_large.json',
+      }),
+    );
     r.complete('wf_large', { rows: 'x'.repeat(50_000), failed: ['fr'] }, 1_000);
     const [display, model] = completion.mock.calls[0];
     expect(display).toContain('… (truncated)');
     expect(display).toContain('Reported failed: ["fr"]');
     expect(display.length).toBeLessThan(4_300);
+    expect(model).toContain(
+      '<reported-failures>Reported failed: ["fr"]</reported-failures>',
+    );
     expect(model).toContain('x'.repeat(10_000));
     expect(
       model.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
     ).toBeLessThanOrEqual(25_000);
     expect(model).toContain('<result-truncated>');
-    expect(model).toContain('wf_large.json');
+    expect(model).toContain('/tmp/workflows/wf_large.json');
     expect(r.get('wf_large')?.result).toEqual({
       rows: 'x'.repeat(50_000),
       failed: ['fr'],
@@ -2047,6 +2055,7 @@ describe('WorkflowRunRegistry', () => {
           notifyOnCompletion: true,
           isBackgrounded,
           journalPath: '/tmp/wf_xml/journal.jsonl',
+          snapshotPath: '/tmp/workflows/wf_xml.json',
         }),
       );
       r.complete('wf_xml', '"<&>'.repeat(25_000), 1_000);

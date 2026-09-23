@@ -83,6 +83,7 @@ import {
   type WorkflowTask,
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
+import { stringifyWorkflowResult } from '../../agents/workflow-result-format.js';
 import {
   buildWorkflowSizeGuidelineParagraph,
   resolveWorkflowSizeGuidelineSetting,
@@ -1432,13 +1433,7 @@ function safeEmitUpdate(
  * successful workflow is not reported as a failure.
  */
 function safeStringifyResult(result: unknown): string {
-  if (result === undefined) return '(workflow returned no value)';
-  if (typeof result === 'string') return result;
-  try {
-    return JSON.stringify(result, null, 2);
-  } catch {
-    return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
-  }
+  return stringifyWorkflowResult(result, true);
 }
 
 /**

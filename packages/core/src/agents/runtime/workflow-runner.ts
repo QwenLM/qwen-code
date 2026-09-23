@@ -552,6 +552,7 @@ export class WorkflowRunner {
         script,
         scriptPath,
         ...(journalPath ? { journalPath } : {}),
+        snapshotPath: storage?.getWorkflowRunSnapshotPath?.(runId),
         // A saved workflow is the user's file, and the recovery advice says to
         // copy it first. The name is resolved here — from the resumed run
         // too, which a caller re-running a saved workflow's inline source

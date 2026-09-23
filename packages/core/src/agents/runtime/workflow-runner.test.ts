@@ -143,6 +143,8 @@ function stubStorage(config: Config, root: string): void {
     storage: {
       getWorkflowRunJournalPath: (runId: string) =>
         path.join(root, runId, 'journal.jsonl'),
+      getWorkflowRunSnapshotPath: (runId: string) =>
+        path.join(root, `${runId}.json`),
       getWorkflowRunsDir: () => root,
       getGeneratedWorkflowsDir: () => path.join(root, 'generated'),
       getInlineWorkflowScriptPath: (runId: string) =>
@@ -1210,6 +1212,26 @@ describe('WorkflowRunner', () => {
     expect(writeWorkflowSnapshotMock).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledWith(handle.runId);
+  });
+
+  it('passes the storage snapshot destination into a truncated completion', async () => {
+    const { config, registry } = configWithRegistry();
+    const root = await makeStorageRoot();
+    stubStorage(config, root);
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return "x".repeat(30_000)',
+      args: undefined,
+      notifyOnCompletion: true,
+    });
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    expect(completion).toHaveBeenCalledOnce();
+    const model = completion.mock.calls[0][1] as string;
+    expect(model).toContain(path.join(root, `${handle.runId}.json`));
+    expect(model).toContain('after finalization (if persistence succeeds)');
   });
 
   it('does not notify when the snapshot write fails', async () => {

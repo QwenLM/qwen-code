@@ -210,7 +210,13 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           messages.match(/<result>([\s\S]*?)<\/result>/)?.[1].length,
         ).toBeLessThanOrEqual(25_000);
         expect(messages).toContain('<result-truncated>');
-        expect(messages).toMatch(/wf_[a-f0-9]+\.json/);
+        expect(messages).toMatch(/[/\\]workflows[/\\]+wf_[a-f0-9]+\.json/);
+        expect(messages).toContain(
+          '<reported-failures>Reported failed: [\\"fr\\"]</reported-failures>',
+        );
+        expect(messages.match(/<result>([\s\S]*?)<\/result>/)?.[1]).not.toMatch(
+          /&[^;]*$/,
+        );
       } else if (isSlash && testCase.status === 'completed') {
         expect(messages).toContain('&quot;failed&quot;:[&quot;fr&quot;]');
       }
@@ -231,8 +237,12 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         followUpRequests.at(-1)!.body['messages'],
       );
       expect(followUp).toContain(testCase.marker);
-      if (testCase.largeResult)
+      if (testCase.largeResult) {
         expect(followUp).toContain('<result-truncated>');
+        expect(followUp).toContain(
+          '<reported-failures>Reported failed: [\\"fr\\"]</reported-failures>',
+        );
+      }
       expect(followUp.match(/<kind>workflow<\/kind>/g) ?? []).toHaveLength(
         isSlash ? 1 : 0,
       );
