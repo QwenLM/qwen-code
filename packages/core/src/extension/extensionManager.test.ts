@@ -149,6 +149,7 @@ const fsProbe = vi.hoisted(() => ({
   failReadFileSyncSkip: 0,
   failReaddirSyncFor: undefined as string | undefined,
   failReaddirFor: undefined as string | undefined,
+  untypedDirentsFor: undefined as string | undefined,
   readdirSyncCalls: 0,
 }));
 const emfileError = (): Error =>
@@ -211,7 +212,26 @@ vi.mock('node:fs', async (importOriginal) => {
         ) {
           throw emfileError();
         }
-        return actual.promises.readdir(...args);
+        const entries = await actual.promises.readdir(...args);
+        if (
+          fsProbe.untypedDirentsFor !== undefined &&
+          String(args[0]).includes(fsProbe.untypedDirentsFor)
+        ) {
+          // DT_UNKNOWN, as on a filesystem whose readdir reports no d_type:
+          // every type predicate reports false and the walk must lstat.
+          return entries.map((entry) => ({
+            name: entry.name,
+            parentPath: entry.parentPath,
+            isDirectory: () => false,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+            isBlockDevice: () => false,
+            isCharacterDevice: () => false,
+            isFIFO: () => false,
+            isSocket: () => false,
+          }));
+        }
+        return entries;
       },
     },
   };
@@ -3772,6 +3792,36 @@ describe('extension tests', () => {
         // visited-set, so the walk terminates instead of recursing until
         // the kernel's ELOOP limit.
         expect(ext?.commands?.slice().sort()).toEqual(['loop:top', 'top']);
+      });
+
+      it('should discover commands when readdir reports no entry types (DT_UNKNOWN)', async () => {
+        // A filesystem whose readdir reports no d_type (FUSE without
+        // readdirplus, XFS without ftype, some NFS servers) yields dirents
+        // whose type predicates are all false. The walk must resolve those
+        // with lstat — the glob it replaced did — or every command the
+        // extension provides disappears while the refresh is stamped up to
+        // date, so it never retries.
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'untyped-dirents-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(path.join(commandsDir, 'sub'), { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'top.md'), 'top');
+        fs.writeFileSync(path.join(commandsDir, 'sub', 'nested.md'), 'nested');
+
+        fsProbe.untypedDirentsFor = `${path.sep}commands`;
+        try {
+          const manager = createExtensionManager();
+          await manager.refreshCache();
+          const ext = manager
+            .getLoadedExtensions()
+            .find((e) => e.config.name === 'untyped-dirents-ext');
+          expect(ext?.commands?.slice().sort()).toEqual(['sub:nested', 'top']);
+        } finally {
+          fsProbe.untypedDirentsFor = undefined;
+        }
       });
 
       it.skipIf(

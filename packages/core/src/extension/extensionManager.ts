@@ -513,12 +513,40 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
     }
     for (const entry of entries) {
       const fullPath = path.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
+      let isDirectory = entry.isDirectory();
+      let isSymbolicLink = entry.isSymbolicLink();
+      let isFile = entry.isFile();
+      if (
+        !isDirectory &&
+        !isSymbolicLink &&
+        !isFile &&
+        !entry.isBlockDevice() &&
+        !entry.isCharacterDevice() &&
+        !entry.isFIFO() &&
+        !entry.isSocket()
+      ) {
+        // DT_UNKNOWN: this filesystem's readdir reported no d_type (FUSE
+        // without readdirplus, XFS without ftype, some NFS servers), so
+        // resolve the type from the filesystem — the glob this walk
+        // replaced lstat'ed unknown entries the same way. lstat, not stat:
+        // a symlink must stay a symlink so the branch below stats its
+        // target under the cycle rules.
+        let resolved: fs.Stats;
+        try {
+          resolved = await fs.promises.lstat(fullPath);
+        } catch (error) {
+          if (isResourceExhaustion(error)) throw error;
+          continue;
+        }
+        isDirectory = resolved.isDirectory();
+        isSymbolicLink = resolved.isSymbolicLink();
+        isFile = resolved.isFile();
+      }
+      if (isDirectory) {
         pending.push(fullPath);
         continue;
       }
-      let isFile = entry.isFile();
-      if (entry.isSymbolicLink()) {
+      if (isSymbolicLink) {
         let target: fs.Stats;
         try {
           target = await fs.promises.stat(fullPath);
