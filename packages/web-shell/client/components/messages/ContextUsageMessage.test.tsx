@@ -75,6 +75,24 @@ function render(
 
 describe('ContextUsageMessage', () => {
   it.each(['en', 'zh-CN'] as const)(
+    'keeps the skill listing row separate from its loaded body cost (%s)',
+    (language) => {
+      const status = makeStatus(60, false);
+      status.usage.showDetails = true;
+      const name = 'agent-reproduce-feature';
+      status.usage.skills = [{ name, tokens: 2, loaded: true, bodyTokens: 3 }];
+      const container = render(status, false, undefined, language);
+      const label = language === 'en' ? 'body loaded' : '已加载正文';
+      const nameElement = container.querySelector(`[title="${name}"]`)!;
+      expect(nameElement.textContent).toBe(name);
+      expect(nameElement.parentElement?.textContent).toContain('2');
+      const skillBlock = nameElement.parentElement!.parentElement!;
+      expect(skillBlock.textContent?.split(label)).toHaveLength(2);
+      expect(skillBlock.textContent).toContain('+3');
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
     'toggles only the snapshot body without requesting context (%s)',
     (language) => {
       const read = vi.fn();

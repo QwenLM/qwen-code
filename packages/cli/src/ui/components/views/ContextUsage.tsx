@@ -567,9 +567,6 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
                       <Text color={theme.text.link}>
                         {truncateName(skill.name, DETAIL_NAME_MAX_LEN)}
                       </Text>
-                      {skill.loaded && (
-                        <Text color={theme.status.success}> {t('active')}</Text>
-                      )}
                     </Box>
                     <Box flexGrow={1} justifyContent="flex-end">
                       <Text color={theme.text.secondary}>

@@ -5,7 +5,10 @@ import type {
   ChannelWebhookTargetConfig,
   GroupSenderPolicy,
 } from '@qwen-code/channel-base';
-import { parseChannelOutputMode } from '@qwen-code/channel-base';
+import {
+  parseChannelOutputMode,
+  resolvePrivatePolicy,
+} from '@qwen-code/channel-base';
 import {
   APPROVAL_MODES,
   isInternalSecretEnvVar,
@@ -15,11 +18,7 @@ import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const CHANNEL_APPROVAL_MODES = new Set<string>(APPROVAL_MODES);
-const GROUP_SENDER_POLICIES = new Set<GroupSenderPolicy>([
-  'inherit',
-  'open',
-  'allowlist',
-]);
+const GROUP_SENDER_POLICIES = new Set<GroupSenderPolicy>(['open', 'allowlist']);
 /** Top-level group speaker keys that moved into `groups`, with their new home. */
 const MOVED_GROUP_SPEAKER_KEYS: Record<string, string> = {
   groupSenderPolicy: 'groups["*"].senders',
@@ -603,6 +602,7 @@ export async function parseChannelConfig(
     token,
     clientId,
     clientSecret,
+    privatePolicy: resolvePrivatePolicy(rawConfig),
     senderPolicy:
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',

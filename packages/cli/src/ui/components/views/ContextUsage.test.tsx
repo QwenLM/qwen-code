@@ -44,6 +44,32 @@ function makeBreakdown(
 }
 
 describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', () => {
+  it('keeps a loaded skill name and listing cost on one line with one body-cost label', () => {
+    const name = 'agent-reproduce-feature';
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe', { skills: 10_000 })}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[{ name, tokens: 5000, loaded: true, bodyTokens: 5000 }]}
+        showDetails={true}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    const skills = frame.slice(frame.lastIndexOf('Skills'));
+    const nameLine = skills.split('\n').find((line) => line.includes(name));
+    expect(nameLine).toBeDefined();
+    expect(nameLine).toContain('5.0k tokens');
+    expect(nameLine).not.toContain('body loaded');
+    expect(nameLine).not.toContain('active');
+    expect(skills.match(/body loaded/g)).toHaveLength(1);
+    expect(skills).toContain('+5.0k tokens');
+  });
+
   it('keeps a positive estimated count in the numeric usage view', () => {
     const { lastFrame } = render(
       <ContextUsage

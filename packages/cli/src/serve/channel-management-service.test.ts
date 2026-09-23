@@ -954,7 +954,12 @@ describe('createChannelManagementService', () => {
       const { service } = setup({
         snapshot: settingsSnapshot({
           channels: {
-            bot: { type: 'dingtalk', senderPolicy: 'pairing' },
+            bot: {
+              type: 'dingtalk',
+              privatePolicy: 'pairing',
+              senderPolicy: 'open',
+              dmPolicy: 'disabled',
+            },
           },
         }),
       });
@@ -971,6 +976,9 @@ describe('createChannelManagementService', () => {
 
   it('rejects pairing operations on a channel without pairing mode', async () => {
     for (const config of [
+      { type: 'dingtalk', privatePolicy: 'open', senderPolicy: 'pairing' },
+      { type: 'dingtalk', privatePolicy: 'disabled', senderPolicy: 'pairing' },
+      { type: 'dingtalk', dmPolicy: 'disabled', senderPolicy: 'pairing' },
       { type: 'dingtalk', senderPolicy: 'open' },
       { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'allowlist' },
       { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'disabled' },
