@@ -3502,6 +3502,36 @@ describe('ChannelBase', () => {
         expect(await approveAs(ch, 'bob', 'req-1')).toBe(true);
       });
 
+      it('lets every member of an approved pairing group operate its session', async () => {
+        const previousQwenHome = process.env['QWEN_HOME'];
+        const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-operators-'));
+        process.env['QWEN_HOME'] = qwenHome;
+        try {
+          const store = new PairingStore('test-chan', '/tmp');
+          store.approve(
+            pairingCodeOf(
+              store.createGroupRequest('group1', 'Team', 'alice', 'Alice'),
+            ),
+          );
+          const ch = createChannel({
+            senderPolicy: 'pairing',
+            groupPolicy: 'pairing',
+            sessionScope: 'chat_thread',
+          });
+          const sessionId = await startSession(ch, {
+            ...group,
+            senderId: 'member',
+          });
+          emitPermission(sessionId, 'req-1');
+
+          expect(await approveAs(ch, 'member', 'req-1')).toBe(true);
+        } finally {
+          if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = previousQwenHome;
+          rmSync(qwenHome, { recursive: true, force: true });
+        }
+      });
+
       it('lets an explicit operators list override allowedUsers', async () => {
         const ch = createChannel({
           allowedUsers: ['boss', 'carol'],
