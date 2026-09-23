@@ -47,7 +47,7 @@ If `node_repl` is unavailable, run:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.9
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.10
 ```
 
 Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,

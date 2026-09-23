@@ -26,7 +26,7 @@ When first used, the skill runs these commands itself:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.9
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.10
 ```
 
 Restart Qwen Code after the MCP server is first added. The skill then resumes
@@ -35,6 +35,12 @@ the desktop task through `node_repl`.
 The SDK installation leaves `package.json` and the lockfile unchanged, but it
 does write to the workspace's `node_modules`. Its postinstall downloads and
 verifies the native payload for the current platform.
+
+On Windows, run the SDK installation from an elevated terminal: the signed
+UIAccess worker must be installed under `Program Files\Qwen\CuaDriver`.
+An unsigned worker cannot enable UIAccess; do not bypass the signature check.
+Older unsigned releases need a new signed driver release, not a reinstall of
+the same version.
 
 Removing the MCP configuration or workspace SDK installation disables the
 execution path; there is no legacy fallback.

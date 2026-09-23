@@ -156,13 +156,20 @@ async function requireValidAuthenticodeSignature(source) {
     `$signature = Get-AuthenticodeSignature -LiteralPath ${quotePowerShell(source)}; ` +
     `if ($signature.Status -ne 'Valid') { ` +
     `throw \"UIAccess worker Authenticode status is $($signature.Status)\" }`
-  await run(
-    "powershell",
-    ["-NoProfile", "-NonInteractive", "-Command", command],
-    {
-      timeout: 30_000,
-    },
-  )
+  const args = ["-NoProfile", "-NonInteractive", "-Command", command]
+  try {
+    await run("powershell", args, { timeout: 30_000 })
+  } catch (error) {
+    // Windows PowerShell 5.1 can fail to autoload the Security module, which
+    // reports the error id below instead of running Get-AuthenticodeSignature.
+    // Observed on the windows-2025 runner during a CUA release dry run. The id
+    // is not localized, unlike the message text, and ordinary failures of the
+    // signature check do not carry it, so the retry cannot mask a real result.
+    if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {
+      throw error
+    }
+    await run("pwsh", args, { timeout: 30_000 })
+  }
 }
 
 async function installUiAccessWorker(source, version, env) {

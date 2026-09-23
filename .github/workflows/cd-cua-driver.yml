@@ -9,9 +9,10 @@ name: 'CD: Qwen CUA Driver'
 #                   (APPLE_NOTARY_API_KEY_P8_BASE64 / _KEY_ID / _ISSUER_ID)
 #     The Developer ID Application identity is auto-discovered from the
 #     imported cert (no DEVELOPER_NAME secret needed).
-# Windows archives carry the unsigned UIAccess worker. Deployments that need
-# UIAccess must sign and trust that worker on the target machine before placing
-# it under the secure Program Files path required by Windows.
+# Windows UIAccess workers require a trusted Authenticode signature. Releases
+# use WINDOWS_CERTIFICATE (base64 PFX) + WINDOWS_CERTIFICATE_PASSWORD, or the
+# legacy WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD pair. Only dry runs may use a
+# runner-local test certificate; those artifacts must never be published.
 #
 # Artifact convention used by the @qwen-code/cua-sdk native installer:
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
@@ -30,7 +31,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.20.9'
+        default: '0.20.10'
       notarize:
         description:
           'Codesign + notarize the macOS artifacts (false to skip during
@@ -286,7 +287,7 @@ jobs:
           path: 'packages/cua-driver/rust/release/cua-driver-rs-*-linux-${{ matrix.arch }}*.tar.gz'
           if-no-files-found: 'error'
 
-  # ── Windows (x86_64 + arm64) — unsigned UIAccess worker ────────────────────
+  # ── Windows (x86_64 + arm64) — signed UIAccess worker ────────────────────
   build-windows:
     name: 'windows-${{ matrix.arch }}'
     needs: ['validate-version']
@@ -348,17 +349,25 @@ jobs:
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
-      - name: 'Verify unsigned UIAccess worker'
+      - name: 'Sign UIAccess worker with test certificate'
+        if: "github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/')"
         shell: 'pwsh'
-        run: |
-          $worker = "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
-          if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
-            throw 'Windows build did not produce cua-driver-uia.exe'
-          }
-          $signature = Get-AuthenticodeSignature -LiteralPath $worker
-          if ($signature.Status -ne 'NotSigned') {
-            throw "Release worker must be unsigned for target-machine signing; status is $($signature.Status)"
-          }
+        env:
+          SIGNING_TEST_ONLY: 'true'
+        run: >-
+          ./.github/scripts/sign-cua-windows-worker.ps1
+          -Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
+      - name: 'Sign UIAccess worker'
+        if: "github.event_name != 'workflow_dispatch' || inputs.dry_run != true || startsWith(github.ref, 'refs/tags/')"
+        shell: 'pwsh'
+        env:
+          WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
+          WINDOWS_CERTIFICATE_PASSWORD: '${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}'
+          LEGACY_WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}'
+          LEGACY_WIN_CSC_KEY_PASSWORD: '${{ secrets.WIN_CSC_KEY_PASSWORD }}'
+        run: >-
+          ./.github/scripts/sign-cua-windows-worker.ps1
+          -Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
         shell: 'pwsh'
@@ -377,6 +386,31 @@ jobs:
           Compress-Archive -Path "release/$stage" -DestinationPath "release/$stage.zip" -Force
           Compress-Archive -Path "release/$stage/qwen-cua-driver.exe","release/$stage/cua-cursor-theme.exe","release/$stage/qwen-cua-driver-uia.exe","release/$stage/cua_driver_sdk.dll","release/$stage/cua_driver_node_runtime.node","release/$stage/cua_driver_abi.h" -DestinationPath "release/$stage-binary.zip" -Force
           Get-ChildItem "release/$stage*.zip"
+      - name: 'Clean-install Windows SDK from packaged payload'
+        shell: 'pwsh'
+        run: |
+          $sdk = Join-Path $env:GITHUB_WORKSPACE 'packages/cua-driver/typescript'
+          $stage = "cua-driver-rs-${{ steps.version.outputs.version }}-windows-${{ matrix.arch }}"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "packages/cua-driver/rust/release/$stage-binary.zip"
+          $native = Join-Path $env:RUNNER_TEMP 'cua-sdk-native'
+          Expand-Archive -LiteralPath $archive -DestinationPath $native
+          $env:QWEN_CUA_SDK_NATIVE_DIR = $native
+          Push-Location $sdk
+          try {
+            npm pack --pack-destination $env:RUNNER_TEMP
+            if ($LASTEXITCODE -ne 0) { throw 'SDK packaging failed' }
+          } finally { Pop-Location }
+          $consumer = Join-Path $env:RUNNER_TEMP 'cua-sdk-consumer'
+          New-Item -ItemType Directory -Path $consumer | Out-Null
+          Push-Location $consumer
+          try {
+            npm install (Join-Path $env:RUNNER_TEMP 'qwen-code-cua-sdk-${{ steps.version.outputs.version }}.tgz') --ignore-scripts=false --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw 'Windows SDK postinstall failed' }
+            $worker = Join-Path $env:ProgramFiles 'Qwen/CuaDriver/${{ steps.version.outputs.version }}/qwen-cua-driver-uia.exe'
+            if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'Valid') {
+              throw 'Installed UIAccess worker must have a valid signature'
+            }
+          } finally { Pop-Location }
       - uses: 'actions/upload-artifact@v4'
         with:
           name: 'cua-driver-rs-windows-${{ matrix.arch }}'
@@ -840,9 +874,9 @@ jobs:
 
             - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
-            - **Windows**: unsigned UIAccess worker + native SDK payload
-              (x86_64 + arm64); deployments must sign and trust the worker
-              on the target machine before UIAccess activation
+            - **Windows**: Authenticode-signed UIAccess worker + native SDK
+              payload (x86_64 + arm64); UIAccess installation requires an
+              elevated terminal to write to Program Files
             - **Node.js**: the same workflow publishes `@qwen-code/cua-sdk`
               after a clean install against these release assets and publishes
               the independently versioned `@qwen-code/node-repl-mcp` package
