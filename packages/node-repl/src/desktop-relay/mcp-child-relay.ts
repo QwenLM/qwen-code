@@ -122,11 +122,29 @@ export class McpChildRelay {
       this.initializedForwarded = true;
     } else if (message.method === 'notifications/cancelled') {
       // The reverse channel does not identify which multiplexed MCP client sent
-      // a notification. Different clients reuse request ids, so forwarding a
-      // cancellation could cancel another client's request.
+      // a notification, and clients reuse request ids. Forward only when one
+      // pending request carries the id: stopping a turn must stop the cell
+      // that is driving the screen.
+      const params = message.params as { requestId?: unknown } | undefined;
+      const relayId = this.soleRelayId(params?.requestId);
+      if (relayId === undefined) return;
+      this.child.send({
+        ...message,
+        params: { ...params, requestId: relayId },
+      });
       return;
     }
     this.child.send(message);
+  }
+
+  private soleRelayId(originalId: unknown): number | undefined {
+    let found: number | undefined;
+    for (const [relayId, entry] of this.pending) {
+      if (entry.originalId !== originalId) continue;
+      if (found !== undefined) return undefined;
+      found = relayId;
+    }
+    return found;
   }
 
   private forward(
