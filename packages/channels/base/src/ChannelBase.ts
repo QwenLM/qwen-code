@@ -22,6 +22,8 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  GroupConfig,
+  GroupSenderPolicy,
   ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
@@ -4261,7 +4263,7 @@ export abstract class ChannelBase {
     };
 
     // For a shared session, clearing it affects everyone who shares it: restrict
-    // it to authorized senders (config.allowedUsers, when set) and require an
+    // it to the session's operators (see isSharedSessionOperator) and require an
     // explicit "confirm". DMs on per-user/thread scope and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
@@ -4940,9 +4942,7 @@ export abstract class ChannelBase {
     return (
       this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
-        ? true
-        : this.gate.isAllowed(normalizedTarget.senderId)) &&
+      this.senderGateFor(envelope).isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -5821,34 +5821,56 @@ export abstract class ChannelBase {
   }
 
   /**
-   * Whether `envelope.senderId` may act on the resolved session's destructive or
-   * workspace-leaking commands (/clear, /who). A SHARED session with a non-empty
-   * allowedUsers list is restricted to those members; a per-user session, or one
-   * with no allowlist, is unrestricted. Shared verbatim by /clear and /who so the
-   * gate can't drift; each caller sends its own rejection wording.
+   * Whether `envelope.senderId` may operate the resolved session: answer its
+   * permission prompts, steer it, or run /cancel, /clear, /who, /status, /loop
+   * and /btw. Shared verbatim by every such command so the gate can't drift;
+   * each caller sends its own rejection wording.
    */
   private isAuthorizedForSharedSession(envelope: Envelope): boolean {
-    return this.isAuthorizedForSharedSessionTarget(envelope);
-  }
-
-  private isAuthorizedForSharedSessionTarget(target: {
-    isGroup?: boolean;
-    senderId: string;
-  }): boolean {
-    if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    return authorized.length === 0 || authorized.includes(target.senderId);
+    return this.isSharedSessionOperator(envelope, envelope.senderId);
   }
 
   private isAuthorizedForSharedSessionToolCall(
     target: SessionTarget,
     sessionId: string,
   ): boolean {
+    return this.isSharedSessionOperator(
+      target,
+      this.activePrompts.get(sessionId)?.senderId,
+    );
+  }
+
+  /**
+   * A session that is not shared only touches its own sender, so anyone may
+   * operate it. In a shared session an explicit `operators` list decides, and
+   * a non-empty `allowedUsers` stands in for it. Otherwise whoever may speak in
+   * the conversation may operate it — except that a group with `senders:
+   * "open"` admits members nobody vouched for by name, so there the
+   * direct-message axis decides: everyone under `senderPolicy: "open"`, paired
+   * users under `"pairing"`. An approved pairing group is the exception to the
+   * exception: its approval vouches for every member.
+   */
+  private isSharedSessionOperator(
+    target: { isGroup?: boolean; chatId: string },
+    senderId: string | undefined,
+  ): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    if (authorized.length === 0) return true;
-    const senderId = this.activePrompts.get(sessionId)?.senderId;
-    return senderId !== undefined && authorized.includes(senderId);
+    const listed =
+      this.config.operators ??
+      (this.config.allowedUsers.length > 0
+        ? this.config.allowedUsers
+        : undefined);
+    if (listed) return senderId !== undefined && listed.includes(senderId);
+    const senders = this.groupSendersFor(target);
+    if (senders === 'inherit') return true;
+    if (senderId === undefined) return false;
+    if (senders === 'allowlist') {
+      return this.groupAllowedUsersFor(target.chatId).includes(senderId);
+    }
+    return (
+      this.isApprovedPairingGroup(target.chatId) ||
+      this.gate.isAllowed(senderId)
+    );
   }
 
   private toolCallerName(sessionId: string, target: SessionTarget): string {
@@ -6049,10 +6071,7 @@ export abstract class ChannelBase {
     // text.
     if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (
-      this.config.groupPolicy !== 'pairing' &&
-      !this.gate.isAllowed(senderId)
-    ) {
+    if (!this.senderGateFor(envelope).isAllowed(senderId)) {
       return;
     }
 
@@ -6134,6 +6153,7 @@ export abstract class ChannelBase {
   }
 
   private prependGroupHistoryContext(
+    envelope: Envelope,
     promptText: string,
     entries: GroupHistoryEntry[],
   ): string {
@@ -6141,10 +6161,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines =
-      this.config.groupPolicy === 'pairing'
-        ? entries
-        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+    const senderGate = this.senderGateFor(envelope);
+    const lines = entries.filter((entry) =>
+      senderGate.isAllowed(entry.senderId),
+    );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6159,6 +6179,61 @@ export abstract class ChannelBase {
     });
 
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
+  }
+
+  /**
+   * Sender gate for one conversation. Direct messages, and groups whose
+   * `senders` is `inherit`, use `senderPolicy`. Any other group uses its own
+   * `senders` setting, which never pairs: an approval would also unlock
+   * direct messages.
+   */
+  protected senderGateFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): SenderGate {
+    const senders = this.groupSendersFor(target);
+    if (senders === 'inherit') return this.gate;
+    return new SenderGate(
+      senders,
+      senders === 'allowlist' ? this.groupAllowedUsersFor(target.chatId) : [],
+    );
+  }
+
+  /**
+   * Resolved `senders` for a conversation: the group's own entry, then
+   * `groups["*"]`. Unset, an approved pairing group admits all of its members
+   * and any other group follows `senderPolicy`.
+   */
+  private groupSendersFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): GroupSenderPolicy {
+    if (target.isGroup !== true) return 'inherit';
+    const configured =
+      this.groupConfigFor(target.chatId)?.senders ??
+      this.groupConfigFor('*')?.senders;
+    if (configured) return configured;
+    return this.isApprovedPairingGroup(target.chatId) ? 'open' : 'inherit';
+  }
+
+  private groupAllowedUsersFor(chatId: string): string[] {
+    return (
+      this.groupConfigFor(chatId)?.allowedUsers ??
+      this.groupConfigFor('*')?.allowedUsers ??
+      []
+    );
+  }
+
+  private groupConfigFor(key: string): GroupConfig | undefined {
+    const groups = this.config.groups;
+    return Object.hasOwn(groups, key) ? groups[key] : undefined;
+  }
+
+  private isApprovedPairingGroup(chatId: string): boolean {
+    return (
+      this.config.groupPolicy === 'pairing' &&
+      this.groupGate.isGroupApproved(chatId)
+    );
   }
 
   protected preflightInbound(
@@ -6208,21 +6283,19 @@ export abstract class ChannelBase {
       return false;
     }
 
-    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
-      this.markPreflighted(envelope);
-      return true;
-    }
+    const senderGate = this.senderGateFor(envelope);
 
     if (
       options.deferPairingRequests === true &&
+      senderGate === this.gate &&
       this.config.senderPolicy === 'pairing' &&
-      !this.gate.isAllowed(envelope.senderId)
+      !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
       return true;
     }
 
-    const result = this.gate.check(envelope.senderId, envelope.senderName);
+    const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
@@ -6242,7 +6315,9 @@ export abstract class ChannelBase {
             return false;
           });
       }
-      this.logPreflightRejected('sender_denied');
+      this.logPreflightRejected(
+        senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+      );
       return false;
     }
 
@@ -7136,6 +7211,7 @@ export abstract class ChannelBase {
         ? []
         : this.drainPendingGroupHistory(envelope);
       let promptToSend = this.prependGroupHistoryContext(
+        envelope,
         promptText,
         groupHistoryEntries,
       );

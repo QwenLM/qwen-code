@@ -365,13 +365,13 @@ vi.mock('../../services/review-worktree-lease.js', () => {
       return lease
         ? {
             lease,
-            path: `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+            path: `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
           }
         : null;
     },
     reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
-    reviewLeasePath: (repositoryRoot: string, target: string) =>
-      `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+    reviewLeasePath: (_repositoryRoot: string, target: string) =>
+      `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
   };
 });
 
@@ -2260,6 +2260,17 @@ describe('fetch-pr report assembly', () => {
     // diffPath leak this PR shipped and fixed.
     expect(writtenDiff()).toBe(NARROWED);
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
+    // …and the recorded identity is over that payload. `fullText` is in scope
+    // at the same call site and is a `string` too: recorded over it, the
+    // coverage reader reports drift on every incremental round of a plan
+    // nothing touched.
+    const narrowedSha = createHash('sha256')
+      .update(NARROWED, 'utf8')
+      .digest('hex');
+    expect(
+      (report.selection as { sourceArtifactSha256: string })
+        .sourceArtifactSha256,
+    ).toBe(narrowedSha);
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(NARROWED.trimEnd().split('\n').length);
@@ -3176,6 +3187,15 @@ describe('fetch-pr report assembly', () => {
     // The rescue republished the FULL range — the file agents read must be
     // the range the report now describes.
     expect(writtenDiff()).toBe(FULL_DIFF);
+    // …and so must the recorded identity. This is the one branch where the
+    // diff text is reassigned AFTER a plan was already built, which is where
+    // a digest of the wrong text hides: recorded over the delta, the
+    // coverage reader would report drift on every rescued round.
+    const sha = (text: string): string =>
+      createHash('sha256').update(text, 'utf8').digest('hex');
+    const selection = report.selection as { sourceArtifactSha256: string };
+    expect(selection.sourceArtifactSha256).toBe(sha(FULL_DIFF));
+    expect(selection.sourceArtifactSha256).not.toBe(sha(NARROWED));
     // The anchor cannot stay effective over a full-range plan — one round,
     // two scopes is what that would mean for Agent 7's welded --base — and
     // the reason names what actually happened, not a capture that worked.
@@ -4455,6 +4475,32 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     );
   });
 
+  it('records the selection identity over the text it planned from', async () => {
+    // A different question from `diffSha256` above (see lib/selection.ts):
+    // this one is re-checked by the coverage reader against the diff on disk,
+    // so it must digest the decoded text the chunks were cut from.
+    // Not ASCII: the reader decodes the file as utf8, and a writer that
+    // decoded its bytes any other way would agree with it on an ASCII diff
+    // and report drift on every real one.
+    const diff =
+      'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+const s = "变更 é";\n';
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: 'base123',
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('diff') ? Buffer.from(diff) : Buffer.from(''),
+    );
+
+    const report = await reportFor();
+    const selection = report.selection as { sourceArtifactSha256: string };
+    expect(selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(diff, 'utf8').digest('hex'),
+    );
+  });
+
   it('hashes the BYTES, not a utf8 decode of them', async () => {
     // A pure-ASCII fixture cannot see the difference: digests of the Buffer
     // and of its utf8-decoded string coincide for every valid-UTF-8 diff and
@@ -4595,10 +4641,17 @@ describe('fetch-pr run-session ledger wiring', () => {
 // count the gitRaw mock answers every `git show` with (the diff's own five
 // lines).
 function resumePlanFields(diffBytes: string): Record<string, unknown> {
-  return buildPlanReport(buildDiffPlan(diffBytes, 400), () => 5, {
-    operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-    hasDeadline: hasReviewDeadline(process.env),
-  }) as unknown as Record<string, unknown>;
+  return buildPlanReport(
+    buildDiffPlan(diffBytes, 400),
+    () => 5,
+    {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    },
+    // The same bytes the plan was built from — the fixture stands in for what
+    // a real `fetch-pr` wrote, and a real one records its own diff text here.
+    diffBytes,
+  ) as unknown as Record<string, unknown>;
 }
 
 describe('fetch-pr --resume', () => {

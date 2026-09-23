@@ -8,8 +8,8 @@ Add runtime desired-state control for daemon-managed channel workers. A daemon
 may start without `--channel`, then enable, replace, inspect, reload, and stop
 its channel selection without restarting the daemon. Runtime changes are not
 persisted. The next daemon boot follows an explicit `--channel`, otherwise it
-restores the trusted primary workspace's `serve.channels`; without either it
-remains disabled.
+restores each trusted registered workspace's own `serve.channels`; without
+either it remains disabled.
 
 The control layer sits above the workspace-grouped worker implementation. It
 owns the committed selection, serializes lifecycle mutations, preserves the
@@ -67,12 +67,35 @@ daemon status continues to emit `channel_worker_partial_connect`.
 
 Boot-time `--channel` uses the same manager while retaining pre-listen lease
 reservation and ready-before-success behavior. On a flagless boot, the daemon
-restores `serve.channels` from the trusted primary workspace. The startup
+restores `serve.channels` from every trusted registered workspace, each
+contributing the list in its own workspace-scope settings. The startup
 selection uses persisted folder-trust settings; workspace ownership and trust
-are checked again before workers start. Secondary workspaces do not
-independently restore their own setting. Without an explicit or persisted
-selection, the daemon does not reserve the channel service or load the heavy
-channel runtime until the first runtime mutation.
+are checked again before workers start. The workspace that listed a name breaks
+an otherwise ambiguous ownership tie, and keeps breaking it for as long as the
+daemon runs, so re-enabling a name the daemon stopped resolves as boot did. A
+name contributed only by non-primary workspaces is dropped with a log rather
+than failing the whole restore; a name the primary workspace listed keeps
+failing it. `all` stays primary-only and is reported when configured
+elsewhere. A trusted non-primary workspace registered after boot restores
+its own names too, without holding the registration open, and only the first
+time this daemon sees it — recorded as soon as it asks for anything — because a
+later removal and re-registration, or a trust re-materialization, must not undo
+an operator who stopped one of those channels in between. Late restores run one
+at a time, each adding its names to the committed selection in one change, so
+one name it cannot attribute costs that workspace its whole list, unlike boot.
+After `DELETE /workspace/channel` has stopped hosting, a registration restores
+nothing, because registering a workspace is not an instruction to turn hosting
+back on; that waits for a `PUT /workspace/channel` that commits, or the next
+boot. The daemon records that stop where it happens: a manager that has never
+hosted anything reports the same state as a stopped one, so the state cannot
+tell them apart. An explicit `--channel` selection is never extended by a
+workspace registered later, and a committed `all` selection is left as it is.
+The registration hook still awaits its own bookkeeping on the channel-control
+lane, so a worker that never becomes ready can delay other registrations for up
+to the channel startup budget. Without an explicit selection, a persisted
+selection, or a registration like the one above, the daemon does not reserve
+the channel service or load the heavy channel runtime until the first runtime
+mutation.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
