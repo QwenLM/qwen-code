@@ -3851,3 +3851,86 @@ it('does not submit a deferred /plan prompt after the runtime stops', async () =
   await act(async () => prepared.resolve({ mode: 'plan' }));
   expect(sendPrompt).not.toHaveBeenCalled();
 });
+
+it.each(['/auth', '/login', '/connect'])(
+  'blocks rewritten /plan %s before changing mode',
+  (command) => {
+    const notice = vi.fn();
+    connectionState.commands = [
+      {
+        name: 'auth',
+        source: 'builtin-command',
+        altNames: ['login', 'connect'],
+      },
+    ];
+    render({
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice: notice,
+    });
+    act(() => {
+      expect(latestOnSubmit!(`/plan ${command}`)).toBe(true);
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledWith(
+      'warning',
+      'Adding models is disabled by the host.',
+    );
+  },
+);
+it('rechecks model policy after asynchronous plan preparation', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  act(() => {
+    latestOnSubmit!('/plan /auth');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  rerender({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  await act(async () => {
+    prepared.resolve({ mode: 'yolo' });
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'Adding models is disabled by the host.',
+  );
+});
+it('preserves a stopped pane draft even when model setup is disabled', () => {
+  connectionState.runtimeStopped = true;
+  const notice = vi.fn();
+  render({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  act(() => {
+    expect(latestOnSubmit!('/auth')).toBe(false);
+  });
+  expect(notice).toHaveBeenCalledExactlyOnceWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+it.each(['builtin-command', 'project'])(
+  'uses loaded %s identity for the auth menu and dispatch',
+  async (source) => {
+    connectionState.commands = [
+      { name: 'clear', source: 'builtin-command' },
+      { name: 'auth', source },
+    ];
+    render({ modelManagement: { allowAdd: false } });
+    const names = latestChatEditorProps.commands.map(
+      (command: { name: string }) => command.name,
+    );
+    expect(names.includes('auth')).toBe(source === 'project');
+    await act(async () => {
+      latestOnSubmit!('/auth');
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(source === 'project' ? 1 : 0);
+  },
+);

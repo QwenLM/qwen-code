@@ -9582,7 +9582,7 @@ export function App({
   const showAuthDialogRef = useRef(showAuthDialog);
   useEffect(() => {
     if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
-  }, [modelManagementPolicy.allowAdd]);
+  }, [modelManagementPolicy.allowAdd, showAuthDialog]);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
@@ -10247,6 +10247,18 @@ export function App({
     },
     [pushToast, t],
   );
+  const refuseModelSetup = useCallback(
+    (text: string) => {
+      if (
+        modelManagementRef.current.allowAdd ||
+        !isModelSetupCommand(text, connectionRef.current.commands)
+      )
+        return false;
+      pushToast('info', t('settings.models.addDisabled'));
+      return true;
+    },
+    [pushToast, t],
+  );
   const sendPrompt = useCallback(
     async (
       text: string,
@@ -10399,6 +10411,10 @@ export function App({
         restoreCancelledSubmitState();
         return;
       }
+      if (refuseModelSetup(preparedPrompt)) {
+        restoreCancelledSubmitState();
+        return;
+      }
       opts?.onPreparedSubmit?.({
         prompt: preparedPrompt,
         inputAnnotations: preparedInputAnnotations,
@@ -10427,6 +10443,10 @@ export function App({
       }
       if (!appMountedRef.current) return;
       if (!admissionSourceIsCurrent(allocatedSessionId)) {
+        restoreCancelledSubmitState();
+        return;
+      }
+      if (refuseModelSetup(preparedPrompt)) {
         restoreCancelledSubmitState();
         return;
       }
@@ -10579,6 +10599,7 @@ export function App({
       finishPromptPreparation,
       getComposerWorkspaceCwd,
       reportError,
+      refuseModelSetup,
       sessionCatalogController,
       sessionActions,
       sessionOwnerGuard,
@@ -10775,7 +10796,7 @@ export function App({
     // mcpDialogMessage survives closing the Plugins panel; MCP surfaces are
     // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
-    showAuthDialog ||
+    (modelManagementPolicy.allowAdd && showAuthDialog) ||
     showAddWorkspaceDialog ||
     scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
@@ -10862,6 +10883,10 @@ export function App({
     }
     let failed = failedPromptRef.current;
     if (!failed || failed.sessionId !== connectionRef.current.sessionId) {
+      updateFailedPrompt(null);
+      return;
+    }
+    if (refuseModelSetup(failed.text)) {
       updateFailedPrompt(null);
       return;
     }
@@ -10989,6 +11014,7 @@ export function App({
     reportError,
     restoreOrDeferCancelledRetry,
     retryOwnerIsCurrent,
+    refuseModelSetup,
     sendPrompt,
     store,
     t,
@@ -15850,6 +15876,10 @@ export function App({
             return true;
           }
           if (cmd === 'auth') {
+            if (!modelManagementRef.current.allowAdd) {
+              pushToast('info', t('settings.models.addDisabled'));
+              return true;
+            }
             // Take over only the surface this command owns: clearing an
             // unrelated settings-launched key would disarm its exclusion
             // force-close.
@@ -15958,6 +15988,7 @@ export function App({
               currentModeRef.current === 'plan',
             );
             const { prompt } = operation;
+            if (prompt && refuseModelSetup(prompt)) return true;
             if (prompt && commandBlocked) return blockCommand();
             if (!connectionRef.current.sessionId) {
               void setComposerMode(executionModeRef.current, operation.enabled);
@@ -16636,6 +16667,7 @@ export function App({
     [
       offerCapacityRecovery,
       beginPromptPreparation,
+      refuseModelSetup,
       sendPrompt,
       sessionActions,
       sessionOwnerGuard,
@@ -16846,6 +16878,11 @@ export function App({
       const retryErrorIdentity = { block: currentRetryError };
       const retrySessionId = connectionRef.current.sessionId;
       const retryText = lastSubmittedPromptRef.current;
+      if (refuseModelSetup(retryText)) {
+        disarmSubmittedPromptRetry();
+        setShowRetryHint(false);
+        return;
+      }
       const retryImages = lastSubmittedImagesRef.current;
       const retryFiles = lastSubmittedFilesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
@@ -16995,11 +17032,13 @@ export function App({
     }
   }, [
     connected,
+    disarmSubmittedPromptRetry,
     pushToast,
     reportError,
     rearmFailedTurnErrorRetry,
     restoreOrDeferCancelledRetry,
     retryOwnerIsCurrent,
+    refuseModelSetup,
     sendPrompt,
     store,
     t,
@@ -17813,7 +17852,12 @@ export function App({
         (command) =>
           !hiddenCommands.has(normalizeHiddenCommand(command.name)) &&
           (modelManagementPolicy.allowAdd ||
-            !isModelSetupCommand(`/${command.name}`, connection.commands)),
+            !(
+              command.name === 'auth' && command.source === 'builtin-command'
+            ) ||
+            additionalSlashCommands.some(
+              (entry) => entry.name === command.name,
+            )),
       )
       .map((command) => {
         const skillKey = skillDescriptionKey(command.name);

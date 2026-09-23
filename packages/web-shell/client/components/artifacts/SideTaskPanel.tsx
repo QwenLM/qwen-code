@@ -16,6 +16,7 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import {
   isModelSetupCommand,
+  isModelCommandSnapshotReady,
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from '../../modelManagement';
@@ -309,9 +310,35 @@ function SideTaskSession({
     ],
   );
   const initialPromptSentRef = useRef(false);
+  const waitingForCommandSnapshot = Boolean(
+    initialPrompt?.trim() &&
+      restoredEmptySession &&
+      !initialPromptSentRef.current &&
+      !resolveModelManagement(modelManagement).allowAdd &&
+      !isModelCommandSnapshotReady(connection.commands) &&
+      isModelSetupCommand(initialPrompt),
+  );
+  const commandWaitNoticeRef = useRef(onImageIngestionNotice);
+  commandWaitNoticeRef.current = onImageIngestionNotice;
+  useEffect(() => {
+    if (!waitingForCommandSnapshot) return;
+    const timer = setTimeout(() => {
+      commandWaitNoticeRef.current?.(
+        'warning',
+        t('sideTask.commandsLoadingTimedOut'),
+      );
+    }, 5_000);
+    return () => clearTimeout(timer);
+  }, [waitingForCommandSnapshot, initialPrompt, connection.sessionId, t]);
+
   useEffect(() => {
     const prompt = initialPrompt?.trim();
-    if (!prompt || !restoredEmptySession || initialPromptSentRef.current)
+    if (
+      !prompt ||
+      !restoredEmptySession ||
+      initialPromptSentRef.current ||
+      waitingForCommandSnapshot
+    )
       return;
     initialPromptSentRef.current = true;
     if (
@@ -350,6 +377,7 @@ function SideTaskSession({
     nameFromFirstPrompt,
     onError,
     restoredEmptySession,
+    waitingForCommandSnapshot,
     sessionCatalogController,
     t,
     tabId,

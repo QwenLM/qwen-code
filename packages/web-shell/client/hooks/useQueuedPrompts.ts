@@ -2910,7 +2910,10 @@ export function useQueuedPrompts({
           );
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
-          if (!admissionStarted) {
+          if (
+            !admissionStarted &&
+            !(error instanceof PromptDispatchBlockedError)
+          ) {
             restoreQueuedPromptsToEditor([prompt], targetSessionId);
           }
           // A message now visible in the transcript was admitted and started,
@@ -3159,11 +3162,15 @@ export function useQueuedPrompts({
           // Every sibling report in this chain is gated on still owning the
           // work; a toast about a session the user already left is noise.
           if (failedRemoval && targetIsCurrent()) {
+            const message = t('queue.attachmentCleanupFailed');
             reportError(
-              failedRemoval.status === 'rejected'
-                ? failedRemoval.reason
-                : new Error('removeAttachment returned false'),
-              t('queue.attachmentCleanupFailed'),
+              new Error(message, {
+                cause:
+                  failedRemoval.status === 'rejected'
+                    ? failedRemoval.reason
+                    : 'removeAttachment returned false',
+              }),
+              message,
             );
           }
         };
@@ -3372,7 +3379,9 @@ export function useQueuedPrompts({
                 // return: restore it to the current editor instead of
                 // leaking it across the session switch.
                 if (pendingAdmissionStillOwned) {
-                  restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  if (!(error instanceof PromptDispatchBlockedError)) {
+                    restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  }
                   reportError(error, t('queue.queueFailed'));
                 }
               }
@@ -3393,7 +3402,12 @@ export function useQueuedPrompts({
               );
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
-              restoreQueuedPromptsToEditor([restoreAdmission], targetSessionId);
+              if (!(error instanceof PromptDispatchBlockedError)) {
+                restoreQueuedPromptsToEditor(
+                  [restoreAdmission],
+                  targetSessionId,
+                );
+              }
               reportError(error, t('queue.queueFailed'));
               return;
             }

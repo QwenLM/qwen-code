@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { isModelSetupCommand, resolveModelManagement } from './modelManagement';
+import {
+  isModelCommandSnapshotReady,
+  isModelSetupCommand,
+  resolveModelManagement,
+} from './modelManagement';
 
 describe('model management policy', () => {
   it('defaults omitted and empty options to allowing both actions', () => {
@@ -78,4 +82,18 @@ describe('model management policy', () => {
     ).toBe(true);
     expect(isModelSetupCommand('/auth', [])).toBe(true);
   });
+});
+
+it('recognizes only builtin-marked command snapshots as ready', () => {
+  expect(isModelCommandSnapshotReady()).toBe(false);
+  expect(isModelCommandSnapshotReady([])).toBe(false);
+  expect(
+    isModelCommandSnapshotReady([{ name: 'auth', source: 'project' }]),
+  ).toBe(false);
+  expect(
+    isModelCommandSnapshotReady([
+      { name: 'clear', source: 'builtin-command' },
+      { name: 'auth', source: 'project' },
+    ]),
+  ).toBe(true);
 });

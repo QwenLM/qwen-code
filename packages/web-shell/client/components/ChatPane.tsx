@@ -983,6 +983,13 @@ export function ChatPane({
         )
           return false;
         trimmed = planOperation.prompt;
+        if (
+          !modelManagementRef.current.allowAdd &&
+          isModelSetupCommand(trimmed, connectionRef.current.commands)
+        ) {
+          onImageIngestionNotice?.('warning', t('settings.models.addDisabled'));
+          return true;
+        }
       }
       if (!planOperation && /^\/goal(?:\s|$)/i.test(trimmed)) {
         // The same guard App.tsx applies before any slash handling: a control
@@ -1071,8 +1078,18 @@ export function ChatPane({
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
         let admitted = false;
-        const submit = () =>
-          actions
+        const submit = () => {
+          if (
+            !modelManagementRef.current.allowAdd &&
+            isModelSetupCommand(trimmed, connectionRef.current.commands)
+          ) {
+            onImageIngestionNotice?.(
+              'warning',
+              t('settings.models.addDisabled'),
+            );
+            return;
+          }
+          return actions
             .sendPrompt(trimmed, {
               submittedPrompt: text,
               ...(images && images.length ? { images } : {}),
@@ -1119,6 +1136,7 @@ export function ChatPane({
                 error,
               );
             });
+        };
         if (planOperation) {
           const owner = sessionOwnerGuard.capture();
           planPreparationRef.current = owner;

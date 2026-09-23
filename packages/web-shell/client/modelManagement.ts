@@ -28,6 +28,14 @@ export interface ModelSetupCommandInfo {
   altNames?: readonly string[];
 }
 
+export function isModelCommandSnapshotReady(
+  commands?: readonly ModelSetupCommandInfo[],
+): boolean {
+  return (
+    commands?.some((command) => command.source === 'builtin-command') ?? false
+  );
+}
+
 export function isModelSetupCommand(
   input: string,
   commands?: readonly ModelSetupCommandInfo[],
@@ -41,7 +49,7 @@ export function isModelSetupCommand(
   // (commands.ts findCommandByName): a project/user command named `auth`,
   // `connect` or `login` replaces the builtin and must stay runnable. Until
   // the snapshot loads, fail closed on the bare names.
-  if (commands?.some((command) => command.source === 'builtin-command')) {
+  if (commands && isModelCommandSnapshotReady(commands)) {
     const resolved =
       commands.find((command) => command.name === firstToken) ??
       commands.find((command) => command.altNames?.includes(firstToken));
