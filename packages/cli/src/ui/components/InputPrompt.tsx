@@ -761,12 +761,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       return;
     }
     clipboardUnavailableShownRef.current = true;
+    const messageKey =
+      process.platform === 'linux'
+        ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+        : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.';
     uiState.historyManager?.addItem(
       {
         type: 'error',
-        text: t(
-          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
-        ),
+        text: t(messageKey),
       },
       Date.now(),
     );

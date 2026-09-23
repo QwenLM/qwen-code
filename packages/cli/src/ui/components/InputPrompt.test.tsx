@@ -1812,6 +1812,50 @@ describe('InputPrompt', () => {
       second.unmount();
     });
 
+    it('uses a Linux-specific unavailable message on Linux (#12504)', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      try {
+        const addItem = vi.fn();
+        const clipboardUnavailableShownRef = { current: false };
+        mockedUseUIState.mockReturnValue({
+          isFeedbackDialogOpen: false,
+          messageQueue: [],
+          pendingLlmHistoryItems: [],
+          historyManager: { addItem },
+        } as unknown as ReturnType<typeof useUIState>);
+        vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+          async (onUnavailable) => {
+            onUnavailable?.();
+            return false;
+          },
+        );
+
+        const view = renderWithProviders(
+          <InputPrompt
+            {...props}
+            clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+          />,
+        );
+        await wait();
+
+        view.stdin.write('\x16');
+        await wait();
+
+        expect(addItem).toHaveBeenCalledTimes(1);
+        expect(addItem).toHaveBeenCalledWith(
+          {
+            type: 'error',
+            text: 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
+          },
+          expect.any(Number),
+        );
+        view.unmount();
+      } finally {
+        Object.defineProperty(process, 'platform', { value: originalPlatform });
+      }
+    });
+
     it('should handle image save failure gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
