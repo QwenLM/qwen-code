@@ -1237,7 +1237,7 @@ describe('bundled review skill', () => {
       '`fix audit: unpinned — assumes <…>; pin with: <…>` for an assumption',
     );
     expect(step).toContain(
-      '`fix audit: unattested — no hunk in the audit input touches <location>`',
+      '`fix audit: unattested — no hunk in the audit input touches <its locations>`',
     );
     expect(step).toContain('`subagent_type: "review-agent"`');
     // Reach, stated exactly: the local/file `--fix` path only.

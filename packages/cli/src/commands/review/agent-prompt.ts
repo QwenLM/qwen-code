@@ -2704,25 +2704,30 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
         'outside the scope `fix-delta --since` printed.',
     );
   }
-  if (!/^diff --git /m.test(hunks)) {
+  if (!hunks.startsWith('diff --git ')) {
     throw new Error(
-      'agent-prompt: --hunks carries no `diff --git` header, so it is not ' +
+      'agent-prompt: --hunks does not open with a `diff --git` header, so it is not ' +
         'the patch `fix-delta --since` wrote. Pass the hunks file that ' +
         'command produced.',
     );
   }
-  // The display copy of a finding path goes through `inertPath`, like every
-  // other prompt sink in this file: git permits a newline in a name, and a
-  // raw render let a path end the heading early and forge a section — the
-  // `applied hunks end` fence included — in the auditor's one input file.
-  const where = (f: Finding): string => {
-    const first = f.locations[0];
-    const loc = first
-      ? `${inertPath(first.file)}${first.line !== undefined ? `:${first.line}` : ''}`
-      : '(no location)';
-    const more = f.locations.length - 1;
-    return more > 0 ? `${loc} (+${more} more location(s))` : loc;
-  };
+  // Every location, not the first: the auditor's unattested check asks
+  // whether any hunk touches one of them, and a fix that lands at a
+  // finding's second location (the caller beside the declaration) would
+  // read as unattested against a heading that named only the first. Each
+  // display copy goes through `inertPath`, like every other prompt sink in
+  // this file: git permits a newline in a name, and a raw render let a path
+  // end the heading early and forge a section — the `applied hunks end`
+  // fence included — in the auditor's one input file.
+  const where = (f: Finding): string =>
+    f.locations.length === 0
+      ? '(no location)'
+      : f.locations
+          .map(
+            (loc) =>
+              `${inertPath(loc.file)}${loc.line !== undefined ? `:${loc.line}` : ''}`,
+          )
+          .join(', ');
   const entries = fixed.map((f) =>
     [
       `### ${f.id} — [${f.severity}] ${where(f)}`,

@@ -40,11 +40,10 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { git, gitOpt, gitRaw, gitWithEnv } from './lib/git.js';
-import { repoRelativeOf } from './lib/paths.js';
+import { git, gitOpt, gitProbe, gitRaw, gitWithEnv } from './lib/git.js';
+import { inertPath, repoRelativeOf } from './lib/paths.js';
 
 /** What `--snapshot` writes and `--since` reads back. */
 export interface FixSnapshot {
@@ -97,6 +96,16 @@ export const FIX_DELTA_SCOPE =
  * command's own side files — `--out`, and the `--since` record — are
  * excluded literally when they fall inside the repository, so a caller that
  * points them outside the families still gets hunks free of them.
+ *
+ * Except when an ignore rule already hides one. `add` refuses outright
+ * (exit 1, "The following paths are ignored") when a pathspec item's literal
+ * prefix names an ignored path, and a negative item counts too: wherever
+ * `.qwen/tmp` is ignored — qwen-code's own `.qwen/*`, the `.qwen/` rule
+ * `/setup-github` writes, a bare `tmp/` — the flow's own `--out` under it
+ * made every capture fail. An
+ * ignored untracked path cannot enter `add -A` in the first place, so that
+ * exclusion has nothing to do. The family globs are immune: their `**`
+ * prefix leaves no literal part for the check to match.
  */
 function excludePathspecs(
   root: string,
@@ -109,7 +118,11 @@ function excludePathspecs(
   for (const file of sideFiles) {
     if (file === undefined) continue;
     const { rel, escapes } = repoRelativeOf(root, file);
-    if (rel !== '' && !escapes) specs.push(`:(exclude,literal)${rel}`);
+    if (rel === '' || escapes) continue;
+    if (gitProbe('-C', root, 'check-ignore', '-q', '--', rel).status === 0) {
+      continue;
+    }
+    specs.push(`:(exclude,literal)${rel}`);
   }
   return specs;
 }
@@ -126,7 +139,12 @@ export function snapshotWorkingTree(
   seed: string | null,
   excludes: readonly string[],
 ): string {
-  const scratch = mkdtempSync(join(tmpdir(), 'qwen-fix-delta-'));
+  // Under the git dir, never the system temp dir: a TMPDIR inside the
+  // working tree (a sandbox that points it there) put the throwaway index
+  // itself into the capture, and an untouched tree read as changed.
+  const scratch = mkdtempSync(
+    join(git('-C', root, 'rev-parse', '--absolute-git-dir'), 'qwen-fix-delta-'),
+  );
   const env = { GIT_INDEX_FILE: join(scratch, 'index') };
   try {
     gitWithEnv(env, [
@@ -135,16 +153,23 @@ export function snapshotWorkingTree(
       'read-tree',
       ...(seed === null ? ['--empty'] : [seed]),
     ]);
-    // A nested repository is captured as its gitlink (the scope line names
-    // that); git's multi-line advice about it would bury the one-line
-    // warning in the stderr the orchestrator reads.
     gitWithEnv(env, [
+      // Stderr the orchestrator reads, kept to what it must relay: a fresh
+      // index re-hashes every file, and under `core.autocrlf` each LF file
+      // prints its own conversion warning (the stored blob is the same
+      // either way), and a nested repository's multi-line advice buries
+      // the one-line warning beside it.
+      '-c',
+      'core.safecrlf=false',
       '-c',
       'advice.addEmbeddedRepo=false',
       '-C',
       root,
       'add',
       '-A',
+      // A sparse checkout's cone does not bound what the audit covers: an
+      // untracked file outside it made `add` refuse the whole capture.
+      '--sparse',
       '--',
       '.',
       ...excludes,
@@ -153,15 +178,6 @@ export function snapshotWorkingTree(
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-/** A name fit for one stderr line: a control byte cannot start a line of its own. */
-function displayName(name: string): string {
-  return name.replace(
-    // eslint-disable-next-line no-control-regex
-    /[\u0000-\u001f\u007f]/g,
-    (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`,
-  );
 }
 
 /** HEAD as a commit sha, or null when it is unborn. */
@@ -208,7 +224,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     const tree = snapshotWorkingTree(root, head, excludes);
     const snapshot: FixSnapshot = { root, tree, head };
     writeFileSync(resolve(args.out), `${JSON.stringify(snapshot, null, 2)}\n`);
-    writeStderrLine(`fix-delta: snapshot ${tree} of ${displayName(root)}`);
+    writeStderrLine(`fix-delta: snapshot ${tree} of ${inertPath(root)}`);
     return;
   }
 
@@ -296,7 +312,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
       .toString('utf8')
       .split('\0')
       .filter((name) => name !== '')
-      .map(displayName);
+      .map(inertPath);
     const shown = names.slice(0, 8).join(', ');
     writeStderrLine(
       `fix-delta: ${names.length} file(s) changed since the snapshot — ${shown}` +

@@ -15,6 +15,16 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+// The scratch-index witness needs os.tmpdir() to answer inside the fixture
+// repository, the way a sandbox that points TMPDIR at the workspace does.
+const tmpdirOverride = vi.hoisted(() => ({
+  value: undefined as string | undefined,
+}));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const tmpdir = () => tmpdirOverride.value ?? actual.tmpdir();
+  return { ...actual, default: { ...actual, tmpdir }, tmpdir };
+});
 // The seed witness below is a property of the ARGUMENTS the capture hands
 // git, which no fixture can observe from outside a single run — record the
 // execFileSync calls instead, delegating every call to the real thing.
@@ -33,10 +43,13 @@ vi.mock('node:child_process', async (importOriginal) => {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -50,6 +63,7 @@ import {
   runFixDelta,
   type FixSnapshot,
 } from './fix-delta.js';
+import { gitWithEnv } from './lib/git.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 
 describe('fix-delta', () => {
@@ -99,7 +113,25 @@ describe('fix-delta', () => {
     rmSync(repo, { recursive: true, force: true });
     rmSync(out, { recursive: true, force: true });
     gitIsolation.dispose();
+    tmpdirOverride.value = undefined;
+    vi.restoreAllMocks();
   });
+  /** What git children printed to this process's stderr during `fn`. */
+  const childStderr = (fn: () => void): string => {
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      written.push(chunk.toString());
+      return true;
+    }) as typeof process.stderr.write);
+    try {
+      fn();
+    } finally {
+      vi.restoreAllMocks();
+    }
+    return written.join('');
+  };
 
   it('diffs exactly the edits made between the snapshot and now — on top of the reviewed change', () => {
     // The local review's own uncommitted change: present at snapshot time, so
@@ -109,7 +141,8 @@ describe('fix-delta', () => {
     runSnapshot();
 
     writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
-    writeFileSync(join(repo, 'a.test.ts'), 'it("pins x", () => {});\n');
+    mkdirSync(join(repo, 'test'));
+    writeFileSync(join(repo, 'test', 'a.test.ts'), 'it("pins x", () => {});\n');
     rmSync(join(repo, 'gone.ts'));
     runSince();
 
@@ -117,12 +150,12 @@ describe('fix-delta', () => {
     expect(diff).toContain('-export const x = 2;');
     expect(diff).toContain('+export const x = 3;');
     expect(diff).not.toContain('export const x = 1;');
-    expect(diff).toContain('diff --git a/a.test.ts b/a.test.ts');
+    expect(diff).toContain('diff --git a/test/a.test.ts b/test/a.test.ts');
     expect(diff).toContain('diff --git a/gone.ts b/gone.ts');
     expect(diff).toContain('deleted file mode');
     expect(diff).not.toContain('reviewed-new.ts');
     expect(stderr()).toContain(
-      'fix-delta: 3 file(s) changed since the snapshot — a.test.ts, a.ts, gone.ts',
+      'fix-delta: 3 file(s) changed since the snapshot — a.ts, gone.ts, test/a.test.ts',
     );
   });
 
@@ -206,6 +239,188 @@ describe('fix-delta', () => {
     expect(diff).toContain('+export const x = 3;');
     expect(diff).not.toContain('snap.json');
     expect(diff).not.toContain('hunks.diff');
+  });
+
+  it.each([
+    ['`.qwen/`, the rule /setup-github writes', '.qwen/\n'],
+    [
+      "`.qwen/*` with a re-include, qwen-code's own shape",
+      '.qwen/*\n!.qwen/settings.json\n',
+    ],
+    ['a bare `tmp/`', 'tmp/\n'],
+    ['`.qwen/tmp/` itself', '.qwen/tmp/\n'],
+  ])(
+    "captures when an ignore rule hides the flow's own side files — %s",
+    (_name, rule) => {
+      // A literal exclude naming a path under an ignored directory makes
+      // `add` refuse the whole capture ("The following paths are ignored").
+      writeFileSync(join(repo, '.gitignore'), `node_modules\n*.diff\n${rule}`);
+      git('commit', '-qam', 'ignore rules');
+      const snap = join(
+        repo,
+        '.qwen',
+        'tmp',
+        'qwen-review-local-fix-snapshot.json',
+      );
+      const hunksAt = join(
+        repo,
+        '.qwen',
+        'tmp',
+        'qwen-review-local-fix-hunks.diff',
+      );
+      // …and an in-repo --out outside the families, under an ignore rule,
+      // with a leftover from an earlier run already on disk.
+      const stale = join(repo, 'leftover.diff');
+      writeFileSync(stale, 'stale\n');
+      runSnapshot(snap);
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
+      runFixDelta({ snapshot: false, since: snap, out: hunksAt });
+      expect(readFileSync(hunksAt, 'utf8')).toContain('+export const x = 3;');
+      runFixDelta({ snapshot: false, since: snap, out: stale });
+      expect(readFileSync(stale, 'utf8')).toContain('+export const x = 3;');
+    },
+  );
+
+  it("runs from a subdirectory with the skill's relative paths, which land under that subdirectory", () => {
+    // The skill's paths are relative to wherever the review started, and
+    // the scratch index must not be: a relative git dir resolved against
+    // the cwd names a directory that does not exist there.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.qwen/\n');
+    mkdirSync(join(repo, 'pkg'));
+    writeFileSync(join(repo, 'pkg', 'b.ts'), 'b1\n');
+    git('add', '-A');
+    git('commit', '-qm', 'pkg');
+    process.chdir(join(repo, 'pkg'));
+    const snap = '.qwen/tmp/qwen-review-local-fix-snapshot.json';
+    const hunksAt = '.qwen/tmp/qwen-review-local-fix-hunks.diff';
+    runSnapshot(snap);
+    writeFileSync(join(repo, 'pkg', 'b.ts'), 'b2\n');
+    runFixDelta({ snapshot: false, since: snap, out: hunksAt });
+    const diff = readFileSync(join(repo, 'pkg', hunksAt), 'utf8');
+    expect(diff).toContain('diff --git a/pkg/b.ts b/pkg/b.ts');
+    expect(diff).not.toContain('qwen-review-local');
+  });
+
+  it('runs in a linked worktree, whose .git is a file', () => {
+    const linked = join(out, 'linked');
+    git('worktree', 'add', '-q', '--detach', linked);
+    process.chdir(linked);
+    const snap = join(out, 'linked-snap.json');
+    runSnapshot(snap);
+    writeFileSync(join(linked, 'a.ts'), 'export const x = 9;\n');
+    runFixDelta({ snapshot: false, since: snap, out: hunksFile() });
+    expect(hunks()).toContain('+export const x = 9;');
+  });
+
+  it('lists a rename once, as a rename', () => {
+    runSnapshot();
+    renameSync(join(repo, 'gone.ts'), join(repo, 'kept.ts'));
+    runSince();
+    expect(hunks()).toContain('rename from gone.ts');
+    expect(hunks()).toContain('rename to kept.ts');
+    expect(stderr()).toContain(
+      'fix-delta: 1 file(s) changed since the snapshot — kept.ts',
+    );
+  });
+
+  it('names the first eight changed files and counts the rest', () => {
+    runSnapshot();
+    for (let i = 0; i < 10; i++)
+      writeFileSync(join(repo, `f${i}.ts`), `${i}\n`);
+    runSince();
+    expect(stderr()).toContain(
+      'fix-delta: 10 file(s) changed since the snapshot — f0.ts, f1.ts, f2.ts, f3.ts, f4.ts, f5.ts, f6.ts, f7.ts, and 2 more',
+    );
+  });
+
+  it('keeps the throwaway index out of the capture when TMPDIR is inside the working tree, and leaves nothing behind', () => {
+    const inside = join(repo, '.tmp');
+    mkdirSync(inside);
+    tmpdirOverride.value = inside;
+    runSnapshot();
+    runSince();
+    expect(hunks()).toBe('');
+    expect(
+      stderr().some((l) =>
+        l.includes('the tree is unchanged since the snapshot'),
+      ),
+    ).toBe(true);
+    expect(
+      readdirSync(join(repo, '.git')).filter((n) =>
+        n.startsWith('qwen-fix-delta-'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('writes --out into a directory that does not exist yet', () => {
+    const nested = join(out, 'deeper', 'still');
+    runSnapshot(join(nested, 'snap.json'));
+    expect(existsSync(join(nested, 'snap.json'))).toBe(true);
+  });
+
+  it('keeps git noise out of the stderr the orchestrator relays: no per-file CRLF warnings, no embedded-repository advice', () => {
+    git('config', 'core.autocrlf', 'true');
+    for (let i = 0; i < 5; i++) writeFileSync(join(repo, `lf${i}.txt`), 'x\n');
+    const nested = join(repo, 'vendor');
+    mkdirSync(nested);
+    gitAt(nested, 'init', '-q', '-b', 'main');
+    gitAt(
+      nested,
+      '-c',
+      'user.email=t@t.t',
+      '-c',
+      'user.name=t',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'init',
+    );
+    const printed = childStderr(() => {
+      runSnapshot();
+      runSince();
+    });
+    // Premise: this git does warn about the conversion without the pin.
+    const scratchIndex = join(out, 'probe-index');
+    const warned = childStderr(() =>
+      gitWithEnv({ GIT_INDEX_FILE: scratchIndex }, [
+        '-C',
+        repo,
+        'add',
+        '-A',
+        '--',
+        '.',
+      ]),
+    );
+    expect(warned).toMatch(/LF will be replaced by CRLF/);
+    expect(printed).not.toMatch(/CRLF/);
+    expect(printed).not.toMatch(/^hint:/m);
+  });
+
+  it('captures in a cone-mode sparse checkout with an untracked file outside the cone', () => {
+    mkdirSync(join(repo, 'in'));
+    mkdirSync(join(repo, 'out'));
+    writeFileSync(join(repo, 'in', 'a.ts'), 'a\n');
+    writeFileSync(join(repo, 'out', 'b.ts'), 'b\n');
+    git('add', '-A');
+    git('commit', '-qm', 'two dirs');
+    git('sparse-checkout', 'set', '--cone', 'in');
+    runSnapshot();
+    mkdirSync(join(repo, 'elsewhere'));
+    writeFileSync(join(repo, 'elsewhere', 'new.ts'), 'n\n');
+    runSince();
+    expect(hunks()).toContain('diff --git a/elsewhere/new.ts');
+    expect(hunks()).not.toContain('out/b.ts');
+  });
+
+  it("raises gitWithEnv's output ceiling past Node's 1 MiB default", () => {
+    // The capture's `add` is the caller that needs it; the ceiling is a
+    // property of the wrapper, measured here through a large stdout.
+    writeFileSync(join(repo, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 97));
+    const blob = git('hash-object', '-w', 'big.bin');
+    expect(gitWithEnv({}, ['-C', repo, 'cat-file', 'blob', blob])).toHaveLength(
+      2 * 1024 * 1024,
+    );
   });
 
   it('writes an empty hunks file on an unchanged tree, says so, and states the scope', () => {
@@ -344,7 +559,7 @@ describe('fix-delta', () => {
       writeFileSync(join(repo, 'evil\nfix-delta: forged.ts'), 'x\n');
       runSince();
       const summary = stderr().find((l) => l.includes('file(s) changed'));
-      expect(summary).toContain('evil\\x0afix-delta: forged.ts');
+      expect(summary).toContain('evil fix-delta: forged.ts');
       expect(stderr().every((l) => !l.includes('\n'))).toBe(true);
     },
   );
@@ -378,6 +593,7 @@ describe('fix-delta', () => {
       runSnapshot();
       const snap = record();
       for (const bad of [
+        { ...snap, root: 42 },
         { ...snap, tree: 'HEAD' },
         { ...snap, head: 'HEAD' },
         { root: snap.root, tree: snap.tree },

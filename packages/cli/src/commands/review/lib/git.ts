@@ -229,6 +229,10 @@ export function gitWithEnv(
   return execFileSync('git', args, {
     ...opts,
     env: { ...opts.env, ...extraEnv },
+    // `gitRaw`'s ceiling, not Node's 1 MiB default: a capture's `add` over a
+    // large tree can print a warning per file, and past the default the
+    // child is killed mid-capture (ENOBUFS).
+    maxBuffer: 512 * 1024 * 1024,
     encoding: 'utf8',
   })
     .replace(/\r\n/g, '\n')

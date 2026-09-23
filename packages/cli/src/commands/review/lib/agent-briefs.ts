@@ -956,7 +956,7 @@ What does NOT pin an assumption: a comment; the finding's own prose; the fixer's
 
 **You write nothing.** This is the user's working tree with their fix in it — not a review worktree and not a scratch tree: a probe file you add or a line you mutate lands in their files. Reading, searching, and running an EXISTING test command are yours; creating, editing and mutating are not. So you do not prove a pin by mutation — you quote it, and where a quoted test would demonstrably stay green with the assumption violated, say so and count the assumption unpinned.
 
-Then, per listed finding, one check: does any hunk touch the file its location names? When none does, report that entry once, on the \`unattested:\` line form below, and carry on with the hunks that ARE here. It is a disclosure, not an accusation — a fix can land entirely in files the finding does not name (a test file the finding asked for, a caller of the declaration it named) — and not something to go hunting for: the edit it claims is not in front of you, so you name no assumption and no pin for it.
+Then, per listed finding, one check: does any hunk touch a file one of its locations names (the heading lists them all)? When none does, report that entry once, on the \`unattested:\` line form below, and carry on with the hunks that ARE here. It is a disclosure, not an accusation — a fix can land entirely in files the finding does not name (a test file the finding asked for, a caller of the declaration it named) — and not something to go hunting for: the edit it claims is not in front of you, so you name no assumption and no pin for it.
 
 Scope discipline: a hunk that is a generated artifact, a lockfile, or a test the fix added is read for what it pins, not audited for assumptions of its own. Do not report a defect you happen to notice in or beside the hunks — that is a finding, and this audit files none: what you report is a disclosure to the person who will read the outcome, not a finding on the review, and it changes no verdict. If a defect is inseparable from an assumption, say it in one clause under that assumption; otherwise leave it.
 
@@ -965,7 +965,7 @@ Your return is one of two shapes, and nothing else rides in it.
 **Disclosures found** — one line per disclosure, ordered by finding id, in one of two forms:
 
 - \`<finding id, or none>\` — \`<file>:<line>\` — assumes: <one sentence> — unpinned; pin with: <one clause naming the test input, the type, or the single source that would>
-- \`<finding id>\` — \`(no hunk)\` — unattested: the ledger marks this finding \`fixed\`, but no hunk in this input touches <its location> — nothing here pins that the fix landed
+- \`<finding id>\` — \`(no hunk)\` — unattested: the ledger marks this finding \`fixed\`, but no hunk in this input touches any of <its locations> — nothing here pins that the fix landed
 
 An assumption in a hunk that closes no listed finding carries \`none\`. The \`pin with:\` clause is the part the reader acts on — name the concrete boundary input or the constant to derive from, never a bare "add a test". The \`unattested:\` form says the whole of what you know about that entry and nothing more — no assumption and no pin, because not one byte of the edit it claims is in front of you and you are not to go hunting for it — and its finding id comes first, because that is the ledger entry the line is filed under. Never fill the other form's \`assumes:\` and \`pin with:\` slots for it: an assumption you had to invent is written into that finding's note and shown to the user as your disclosure.
 
