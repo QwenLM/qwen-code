@@ -9,6 +9,7 @@ import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
+  type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 
 /**
@@ -45,9 +46,9 @@ function recordMeta(recordId: string): Record<string, unknown> {
  * a request timing frame, an answer, and a tool call whose own frame carries
  * its duration.
  */
-function transcriptEvents(turns: number): DaemonEvent[] {
+function transcriptEvents(turns: number, firstTurn = 1): DaemonEvent[] {
   const events: DaemonEvent[] = [];
-  for (let turn = 1; turn <= turns; turn += 1) {
+  for (let turn = firstTurn; turn < firstTurn + turns; turn += 1) {
     const callId = `call_${String(turn).padStart(4, '0')}`;
     events.push(
       sessionUpdate({
@@ -115,11 +116,14 @@ function transcriptEvents(turns: number): DaemonEvent[] {
 async function openTrajectory(
   page: Page,
   baseURL: string,
-  options: { hasMore?: boolean } = {},
+  options: {
+    hasMore?: boolean;
+    transcriptPage?: WebShellDaemonScenario['transcriptPage'];
+  } = {},
 ): Promise<Locator> {
   const scenario = createWebShellDaemonScenario({
     workspaceCwd: '/tmp/qwen-web-shell-e2e',
-    transcriptPage: {
+    transcriptPage: options.transcriptPage ?? {
       events: transcriptEvents(TURNS),
       ...(options.hasMore ? { hasMore: true } : {}),
     },
@@ -372,5 +376,206 @@ test.describe('trajectory panel', () => {
     expect(before[0]!.height).toBe(64);
     expect(after[0]!.height).toBe(64);
     expect(after[1]!.y).toBe(before[1]!.y);
+  });
+
+  test.describe('walking back through pages', () => {
+    /** Turns per served page; each page is a different run of records. */
+    const PAGE_TURNS = 20;
+
+    /**
+     * Pages newest first, each older one reached by the cursor the one before
+     * it handed out. Turn numbers, record ids and call ids never repeat across
+     * pages: two pages of the same records would fold into one another by call
+     * id and the row counts below would be measuring that instead.
+     */
+    function pageChain(
+      count: number,
+      overrides: Record<string, { status: number; withPage?: boolean }> = {},
+    ): NonNullable<WebShellDaemonScenario['transcriptPage']> {
+      const pageAt = (index: number) => {
+        const firstTurn = (count - 1 - index) * PAGE_TURNS + 1;
+        return {
+          events: transcriptEvents(PAGE_TURNS, firstTurn),
+          ...(index < count - 1
+            ? { hasMore: true, nextCursor: `c${index + 1}` }
+            : {}),
+        };
+      };
+      const older: NonNullable<
+        NonNullable<WebShellDaemonScenario['transcriptPage']>['older']
+      > = {};
+      for (let index = 1; index < count; index += 1) {
+        const cursor = `c${index}`;
+        const override = overrides[cursor];
+        older[cursor] = override
+          ? {
+              status: override.status,
+              ...(override.withPage ? { then: pageAt(index) } : {}),
+            }
+          : pageAt(index);
+      }
+      return { ...pageAt(0), older };
+    }
+
+    /** Cursors of the transcript reads the page has made so far. */
+    function trackTranscriptCursors(page: Page): string[] {
+      const cursors: string[] = [];
+      page.on('request', (request) => {
+        const url = new URL(request.url());
+        if (/\/session\/[^/]+\/transcript\/?$/.test(url.pathname)) {
+          cursors.push(url.searchParams.get('cursor') ?? '');
+        }
+      });
+      return cursors;
+    }
+
+    test('folds every page it walked back through @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        { transcriptPage: pageChain(3) },
+      );
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(3 * PAGE_TURNS * ROWS_PER_TURN),
+      );
+      await expect(page.getByTestId('trajectory-totals')).toContainText(
+        `${3 * PAGE_TURNS} turns`,
+      );
+      await expect(page.getByTestId('trajectory-truncated')).toHaveCount(0);
+      // The oldest page's first turn is in the table, not only the newest's.
+      await grid.click();
+      await page.keyboard.press('Home');
+      await page.keyboard.press('ArrowDown');
+      await expect(await activeRowOf(page, grid)).toContainText(
+        'Prompt number 1',
+      );
+    });
+
+    test('stops at the page cap and says so @smoke', async ({
+      page,
+    }, testInfo) => {
+      const cursors = trackTranscriptCursors(page);
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        { transcriptPage: pageChain(6) },
+      );
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(4 * PAGE_TURNS * ROWS_PER_TURN),
+      );
+      await expect(page.getByTestId('trajectory-truncated')).toBeVisible();
+      // Three older pages were read and the fourth cursor never asked for.
+      expect(cursors).toContain('c3');
+      expect(cursors).not.toContain('c4');
+    });
+
+    test('keeps the newer pages when an earlier one fails, and fills in on retry @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        {
+          transcriptPage: pageChain(2, { c1: { status: 500, withPage: true } }),
+        },
+      );
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(PAGE_TURNS * ROWS_PER_TURN),
+      );
+      const failed = page.getByTestId('trajectory-older-failed');
+      await expect(failed).toBeVisible();
+      // The newest page read fine: nothing is raised as an alert.
+      await expect(
+        page.getByTestId('trajectory-panel').getByRole('alert'),
+      ).toHaveCount(0);
+
+      await page.getByTestId('trajectory-older-retry').click();
+
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(2 * PAGE_TURNS * ROWS_PER_TURN),
+      );
+      await expect(failed).toHaveCount(0);
+    });
+
+    test('opens whole, at the newest turn, after walking back @smoke', async ({
+      page,
+    }, testInfo) => {
+      // Record every row count the grid ever shows, from before it exists.
+      await page.addInitScript(() => {
+        const seen: string[] = [];
+        (
+          window as unknown as { __trajectoryRowCounts: string[] }
+        ).__trajectoryRowCounts = seen;
+        new MutationObserver(() => {
+          const grid = document.querySelector(
+            '[data-testid="trajectory-rows"]',
+          );
+          const count = grid?.getAttribute('aria-rowcount');
+          if (count && seen[seen.length - 1] !== count) seen.push(count);
+        }).observe(document, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ['aria-rowcount'],
+        });
+      });
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        { transcriptPage: pageChain(3) },
+      );
+      const total = String(3 * PAGE_TURNS * ROWS_PER_TURN);
+      await expect(grid).toHaveAttribute('aria-rowcount', total);
+
+      // No smaller table ever showed first: the walk lands once, whole.
+      const counts = await page.evaluate(
+        () =>
+          (window as unknown as { __trajectoryRowCounts: string[] })
+            .__trajectoryRowCounts,
+      );
+      expect(counts).toEqual([total]);
+      const lastRow = mountedRows(page).last();
+      await expect(lastRow).toHaveAttribute('aria-rowindex', total);
+      await expect(lastRow).toBeInViewport();
+    });
+
+    test('holds the grid still when a refresh changes what the bar says @smoke', async ({
+      page,
+    }, testInfo) => {
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        {
+          transcriptPage: pageChain(2, { c1: { status: 500, withPage: true } }),
+        },
+      );
+      const bar = page.getByTestId('trajectory-older-bar');
+      await expect(page.getByTestId('trajectory-older-failed')).toBeVisible();
+      const before = await Promise.all([bar.boundingBox(), grid.boundingBox()]);
+
+      await page
+        .getByTestId('trajectory-panel')
+        .getByRole('button', { name: 'Refresh' })
+        .click();
+      await expect(grid).toHaveAttribute(
+        'aria-rowcount',
+        String(2 * PAGE_TURNS * ROWS_PER_TURN),
+      );
+      await expect(bar).toHaveText('');
+
+      const after = await Promise.all([bar.boundingBox(), grid.boundingBox()]);
+      expect(before[0]!.height).toBe(26);
+      expect(after[0]!.height).toBe(26);
+      expect(after[1]!.y).toBe(before[1]!.y);
+    });
   });
 });

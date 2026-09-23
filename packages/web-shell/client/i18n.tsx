@@ -3009,7 +3009,14 @@ const EN: Messages = {
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated': 'Showing the most recent records of this session.',
+  'trajectory.truncated':
+    'Showing the most recent records; earlier history is not loaded.',
+  'trajectory.loadingPages': (v) =>
+    `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
+  'trajectory.olderFailed': (v) =>
+    `Earlier records could not be read: ${v?.message ?? ''}`,
+  'trajectory.olderPartial':
+    'Earlier records could only be read in part, so they are left out.',
   'trajectory.loadFailed': (v) =>
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
@@ -3758,6 +3765,22 @@ const EN: Messages = {
     'Comma-separated stable chat or repository IDs allowed to use this Channel.',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
+  'channels.editor.field.shared.groupSenders': 'Who can talk in groups',
+  'channels.editor.field.shared.groupSenders.description':
+    'Applies to every admitted group. Set a single group differently in settings.json.',
+  'channels.editor.field.shared.groupSenders.option.inherit':
+    'Same as direct messages',
+  'channels.editor.field.shared.groupSenders.option.open': 'Any group member',
+  'channels.editor.field.shared.groupSenders.option.allowlist':
+    'Listed members only',
+  'channels.editor.field.shared.groupAllowedUsers': 'Allowed group member IDs',
+  'channels.editor.field.shared.groupAllowedUsers.description':
+    'Comma-separated stable user IDs who can talk in groups. Separate from the allowed user IDs for direct messages.',
+  'channels.editor.field.shared.groupAllowedUsers.placeholder':
+    'user-a, user-b',
+  'channels.editor.field.shared.operators': 'Session operators',
+  'channels.editor.field.shared.operators.description':
+    'Comma-separated user IDs who can approve tool use and run /cancel, /clear or /loop in shared sessions. Leave empty to derive them from the allowed user IDs and sender settings.',
   'channels.editor.field.shared.sessionScope': 'Conversation isolation',
   'channels.editor.field.shared.sessionScope.description':
     'Choose how conversations share persistent agent context.',
@@ -6819,7 +6842,10 @@ const ZH: Messages = {
   'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示这个会话最近的记录。',
+  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
+  'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
+  'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
+  'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.totals': (v) =>
@@ -7513,6 +7539,20 @@ const ZH: Messages = {
     '用英文逗号分隔允许使用此频道的稳定群聊或代码仓库 ID。',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
+  'channels.editor.field.shared.groupSenders': '群内谁能发言',
+  'channels.editor.field.shared.groupSenders.description':
+    '对所有已放行的群生效。如需单独设置某个群，请在 settings.json 中配置。',
+  'channels.editor.field.shared.groupSenders.option.inherit': '与私聊相同',
+  'channels.editor.field.shared.groupSenders.option.open': '任何群成员',
+  'channels.editor.field.shared.groupSenders.option.allowlist': '仅名单内成员',
+  'channels.editor.field.shared.groupAllowedUsers': '允许发言的群成员 ID',
+  'channels.editor.field.shared.groupAllowedUsers.description':
+    '用英文逗号分隔可以在群内发言的稳定用户 ID；与私聊的允许用户 ID 相互独立。',
+  'channels.editor.field.shared.groupAllowedUsers.placeholder':
+    'user-a, user-b',
+  'channels.editor.field.shared.operators': '会话管理者',
+  'channels.editor.field.shared.operators.description':
+    '用英文逗号分隔可以在共享会话中批准工具调用、执行 /cancel、/clear 或 /loop 的用户 ID。留空则按允许的用户 ID 与发送者设置推导。',
   'channels.editor.field.shared.sessionScope': '会话隔离方式',
   'channels.editor.field.shared.sessionScope.description':
     '选择不同对话如何共享持久化的智能体上下文。',

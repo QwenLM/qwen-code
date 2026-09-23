@@ -267,8 +267,15 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
 
 export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const { t } = useI18n();
-  const { trajectory, status, error, truncated, refresh } =
-    useTrajectoryWindow(loadPage);
+  const {
+    trajectory,
+    status,
+    error,
+    loadedPages,
+    truncated,
+    olderFailure,
+    refresh,
+  } = useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -427,6 +434,13 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     visualRows.length > 0 &&
     !hasAnyTiming(trajectory);
 
+  const olderFailureText =
+    olderFailure === undefined
+      ? undefined
+      : olderFailure.kind === 'partial'
+        ? t('trajectory.olderPartial')
+        : t('trajectory.olderFailed', { message: olderFailure.message });
+
   const timeline = useMemo(
     () => (trajectory ? buildTimeline(trajectory) : undefined),
     [trajectory],
@@ -531,24 +545,59 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           // repeating it here as a placeholder would say it twice.
           status === 'error' ? null : (
             <div className={styles.placeholder} role="status">
-              {t(empty ? 'trajectory.empty' : 'common.loading')}
+              {empty
+                ? t('trajectory.empty')
+                : loadedPages > 0
+                  ? t('trajectory.loadingPages', { pages: loadedPages })
+                  : t('common.loading')}
             </div>
           )
         ) : (
           <>
             {/* Outside the scrolled box on purpose: inside it, its height
                 would offset every virtual row from the coordinates the
-                virtualizer computes. */}
-            {truncated && (
-              <div className={styles.olderBar}>
+                virtualizer computes. And always here, at one fixed height,
+                whatever it says: it is a flex sibling of the scrolled box, so
+                a bar that came and went with `truncated` would move every row
+                the moment a refresh changed its answer. */}
+            <div
+              className={styles.olderBar}
+              role="status"
+              data-testid="trajectory-older-bar"
+            >
+              {olderFailure !== undefined ? (
+                <>
+                  <span
+                    className={`${styles.olderNotice} ${styles.toneError}`}
+                    data-testid="trajectory-older-failed"
+                    title={olderFailureText}
+                  >
+                    {olderFailureText}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.headerButton}
+                    onClick={() => {
+                      if (status !== 'loading') refresh();
+                    }}
+                    // Not `disabled`: a disabled button drops the focus of a
+                    // reader who just pressed it, and this one is pressed
+                    // exactly when it is about to go busy.
+                    aria-disabled={status === 'loading' ? true : undefined}
+                    data-testid="trajectory-older-retry"
+                  >
+                    {t('common.retry')}
+                  </button>
+                </>
+              ) : truncated ? (
                 <span
                   className={styles.olderNotice}
                   data-testid="trajectory-truncated"
                 >
                   {t('trajectory.truncated')}
                 </span>
-              </div>
-            )}
+              ) : null}
+            </div>
             <div
               ref={scrollRef}
               className={styles.scroll}
